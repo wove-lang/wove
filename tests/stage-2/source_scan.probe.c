@@ -26,7 +26,8 @@
 #define form_parts wv_seed_fn_57
 #define read_module wv_seed_fn_66
 #define emit_module wv_seed_fn_77
-#define resolve_graph wv_seed_fn_133
+#define resolve_graph wv_seed_fn_134
+#define inspect_callers wv_seed_fn_144
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -37,12 +38,14 @@ typedef wv_seed_record_8 FormParts;
 typedef wv_seed_record_9 SelectedDeclaration;
 typedef wv_seed_record_10 ModuleRead;
 typedef wv_seed_record_12 EmitResult;
-typedef wv_seed_record_21 GraphModule;
-typedef wv_seed_record_22 GraphBinding;
-typedef wv_seed_record_23 GraphUse;
-typedef wv_seed_record_24 GraphSelector;
-typedef wv_seed_record_25 GraphResult;
-typedef wv_seed_record_17 SuppliedFile;
+typedef wv_seed_record_22 GraphModule;
+typedef wv_seed_record_23 GraphBinding;
+typedef wv_seed_record_24 GraphUse;
+typedef wv_seed_record_25 GraphSelector;
+typedef wv_seed_record_26 GraphResult;
+typedef wv_seed_record_17 CallSite;
+typedef wv_seed_record_18 SuppliedFile;
+typedef wv_seed_record_30 CallerInspection;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -557,8 +560,16 @@ static int dump_module(wvrt_slice parent, wvrt_slice input, int32_t start, int32
 	return status;
 }
 
-// Compile a checked module into a guarded C output view and report its result span.
-static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity) {
+typedef struct {
+	wvrt_array *storage;
+	wvrt_array *selected;
+	wvrt_slice nodes;
+	wvrt_slice active;
+	ModuleRead module;
+} CheckedModule;
+
+// Prepare the same checked source and declaration views for compilation and inspection.
+static CheckedModule checked_module(wvrt_slice input) {
 	FormCheck checked;
 	wvrt_array *storage = checked_source_tree(input, &checked);
 	const wvrt_slice nodes = {
@@ -572,6 +583,18 @@ static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t ca
 	const wvrt_mut_slice declarations = {selected->wvrt_items, rows, sizeof(SelectedDeclaration)};
 	const ModuleRead module = read_module(input, nodes, checked, declarations);
 	const wvrt_slice active = {selected->wvrt_items, module.wv_field_1, sizeof(SelectedDeclaration)};
+	return (CheckedModule){storage, selected, nodes, active, module};
+}
+
+// Retire the arrays that own the checked module's borrowed views.
+static void drop_checked_module(CheckedModule source) {
+	wvrt_array_drop(source.selected);
+	wvrt_array_drop(source.storage);
+}
+
+// Compile a checked module into a guarded C output view and report its result span.
+static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity) {
+	const CheckedModule source = checked_module(input);
 	// Allow ordinary local helper modules without a fixture-supplied byte limit.
 	if (capacity < 0) {
 		capacity = 4096;
@@ -581,7 +604,7 @@ static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t ca
 	// Check both guards and the unwritten tail before exposing emitted bytes.
 	if (bytes != NULL) {
 		const wvrt_mut_slice output = {bytes + 1, capacity, sizeof(uint8_t)};
-		const EmitResult result = emit_module(input, nodes, module, active, output);
+		const EmitResult result = emit_module(input, source.nodes, source.module, source.active, 0, start, output);
 		const int32_t count = result.wv_field_0;
 		if (output_intact(bytes, capacity, count)) {
 			write_span(parent, start, (uint32_t)count, result.wv_field_1, result.wv_field_2, result.wv_field_3);
@@ -590,8 +613,76 @@ static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t ca
 		}
 		free(bytes);
 	}
-	wvrt_array_drop(selected);
+	drop_checked_module(source);
+	return status;
+}
+
+// Serialize an original function identity and spelling from its checked declaration row.
+static void write_function_ref(const char *tag, wvrt_slice input, wvrt_slice nodes, int32_t file, int32_t declaration) {
+	const SourceNode *rows = nodes.wvrt_items;
+	const FormParts parts = form_parts(input, nodes, rows[declaration]);
+	const SourceNode name = rows[parts.wv_field_2];
+	const int32_t start = name.wv_field_1;
+	const int width = (int)(name.wv_field_2 - start);
+	printf("(%s %" PRId32 " %" PRId32 " %.*s)", tag, file, declaration,
+		width, (const char *)input.wvrt_items + start);
+}
+
+// Render a checked callers list as a metadata prefix on the inspected declaration.
+static void write_callers(wvrt_slice input, wvrt_slice nodes, CallerInspection result, const CallSite *rows) {
+	fputs("(declaration\n\t(:callers", stdout);
+	// Render every call row in source order, with original declaration identities and offsets.
+	for (int32_t i = 0; i < result.wv_field_1; ++i) {
+		const CallSite site = rows[i];
+		fputs("\n\t\t(call-site ", stdout);
+		write_function_ref("caller", input, nodes, site.wv_field_0, site.wv_field_1);
+		fputc(' ', stdout);
+		write_function_ref("callee", input, nodes, site.wv_field_2, site.wv_field_3);
+		printf(" (span %" PRId32 " %" PRId32 " %" PRId32 "))", site.wv_field_0, site.wv_field_4, site.wv_field_5);
+	}
+	fputs(")\n\t", stdout);
+	write_function_ref("identity", input, nodes, 0, result.wv_field_0);
+	fputs(")\n", stdout);
+}
+
+// Inspect a selected name and check that a short result preserves the supplied rows.
+static int dump_callers(wvrt_slice parent, wvrt_slice input, int32_t start, const char *name, int32_t capacity) {
+	const CheckedModule source = checked_module(input);
+	if (capacity < 0) {
+		capacity = source.nodes.wvrt_length;
+	}
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_array *storage = wvrt_array_new(capacity, sizeof(CallSite), _Alignof(CallSite), site);
+	const size_t size = (size_t)capacity * sizeof(CallSite);
+	unsigned char *bytes = storage->wvrt_items;
+	memset(bytes, 0xa5, size);
+	const wvrt_mut_slice output = {storage->wvrt_items, capacity, sizeof(CallSite)};
+	const wvrt_slice target = {name, (int32_t)strlen(name), sizeof(uint8_t)};
+	const CallerInspection result = inspect_callers(input, source.nodes, source.module, source.active, 0, start,
+		target, output);
+
+	int status = EXIT_FAILURE;
+	const int32_t count = result.wv_field_1;
+	// A failed inspection and every unused result row must retain the sentinel bytes.
+	if (count < 0 || count > capacity) {
+		fputs("caller inspection exceeded the output view\n", stderr);
+	} else {
+		size_t offset = (size_t)count * sizeof(CallSite);
+		while (offset < size && bytes[offset] == 0xa5) {
+			++offset;
+		}
+		if (offset != size) {
+			fputs("caller inspection modified unused output rows\n", stderr);
+		} else {
+			write_span(parent, start, (uint32_t)count, result.wv_field_2, result.wv_field_3, result.wv_field_4);
+			if (result.wv_field_4 == 0) {
+				write_callers(input, source.nodes, result, storage->wvrt_items);
+				status = EXIT_SUCCESS;
+			}
+		}
+	}
 	wvrt_array_drop(storage);
+	drop_checked_module(source);
 	return status;
 }
 
@@ -773,10 +864,14 @@ static int source_mode(int argc, char **argv) {
 	const bool decode = strcmp(argv[1], "--decode") == 0;
 	const bool module = strcmp(argv[1], "--module") == 0;
 	const bool emit = strcmp(argv[1], "--emit-c") == 0;
-	const bool takes_capacity = tree || render || decode || module || emit;
-	if ((argc != 3 && argc != 5 && !(takes_capacity && argc == 6)) || (!tokens && !form && !takes_capacity)) {
+	const bool callers = strcmp(argv[1], "--callers") == 0;
+	const bool takes_capacity = tree || render || decode || module || emit || callers;
+	const int bounds = callers ? 4 : 3;
+	if ((argc != bounds && argc != bounds + 2 && !(takes_capacity && argc == bounds + 3)) ||
+			(!tokens && !form && !takes_capacity)) {
 		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render | --decode | --module | --emit-c]"
-			" FILE [START END [CAPACITY]]\n", stderr);
+			" FILE [START END [CAPACITY]]\n"
+			"       source_scan --callers FILE NAME [START END [CAPACITY]]\n", stderr);
 		return EXIT_FAILURE;
 	}
 
@@ -788,13 +883,14 @@ static int source_mode(int argc, char **argv) {
 	}
 	int32_t start = 0;
 	int32_t end = length;
-	if (argc >= 5 && (!read_offset(argv[3], &start) || !read_offset(argv[4], &end) || start > end || end > length)) {
+	if (argc >= bounds + 2 && (!read_offset(argv[bounds], &start) || !read_offset(argv[bounds + 1], &end) ||
+			start > end || end > length)) {
 		fputs("invalid source view\n", stderr);
 		free(bytes);
 		return EXIT_FAILURE;
 	}
 	int32_t capacity = -1;
-	if (argc == 6 && !read_offset(argv[5], &capacity)) {
+	if (argc == bounds + 3 && !read_offset(argv[bounds + 2], &capacity)) {
 		fputs("invalid view capacity\n", stderr);
 		free(bytes);
 		return EXIT_FAILURE;
@@ -813,6 +909,8 @@ static int source_mode(int argc, char **argv) {
 		status = dump_module(parent, view, start, capacity);
 	} else if (emit) {
 		status = dump_c(parent, view, start, capacity);
+	} else if (callers) {
+		status = dump_callers(parent, view, start, argv[3], capacity);
 	} else {
 		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	}

@@ -207,6 +207,15 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | 34 | Unavailable function or parameter | The requested name or incomplete reference |
 | 35 | Wrong call arity | The call expression |
 
+The [caller inspector](source/callers.wove) uses the checked scalar plan
+from before C emission. Each call records its caller and callee as a
+defining file identity and declaration tree row. Its half-open byte span
+is relative to the original file, including when the module is inspected
+through a subrange. Records follow source order, with one per call site.
+An unchecked module reports its original diagnostic. Code 36 means the
+requested function is unavailable in the selected module. Code 16 reports
+the first incoming call that exceeds the supplied output capacity.
+
 The [graph resolver](source/graph.wove) reads a supplied virtual file table
 and binds active function imports in each file's namespace. The table maps
 normalized absolute paths to defining file identities and source ranges in a
@@ -298,3 +307,14 @@ and raw source files to `--graph ENTRY CAPACITY (IDENTITY PATH FILE)...`.
 The probe prints the reached module rows, local bindings, and their defining
 identities and node indices. A failure gives the code and byte span with
 one-based coordinates in its original file.
+
+Use `--callers FILE NAME [START END [CAPACITY]]` to inspect a function by
+its Wove name. The single-file probe assigns file identity 0 to the input.
+The header gives the caller count, view-relative span, error, line, and
+column. A successful result contains a `declaration` form with computed
+`:callers` metadata and the declaration's identity. Each `call-site` gives
+caller and callee file and node identities, their source names, and the
+original file-relative span. A function with no incoming calls has
+`(:callers)`. The [caller fixtures](../tests/stage-2/source_callers.tsv)
+check repeated sites, an empty result, bootstrap selection, and file offsets
+after layout and module-name changes.

@@ -297,9 +297,27 @@ def check_compilations(executable, directory, manifest, clang):
 			assert result.returncode == int(value) and not result.stdout, (label, result)
 
 
+# Compare structured callers and exact file positions from external fixtures.
+def check_callers(executable, directory, manifest):
+	source = directory / "callers-input.wove"
+	# The fixture supplies the original module bytes, optional parent prefix, and requested callee.
+	for label, filename, query, prefix, capacity, fields, expected in fixture_rows(manifest):
+		view = Path(filename).read_bytes()
+		parent_prefix = b"" if prefix == "-" else bytes.fromhex(prefix)
+		source.write_bytes(parent_prefix + view)
+		arguments = (query, len(parent_prefix), len(parent_prefix) + len(view), int(capacity))
+		output, status = run_probe(executable, "--callers", source, arguments)
+		header, delimiter, payload = output.partition(b"\n")
+		row = tuple(map(int, fields.split()))
+		assert delimiter and tuple(map(int, header.split(b"\t"))) == row, (label, header)
+		assert status == int(row[3] != 0), label
+		actual = b" ".join(payload.split())
+		assert actual == (b"" if expected == "-" else expected.encode()), (label, actual)
+
+
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, modules, compilations, *sources = map(
+	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, modules, compilations, callers, *sources = map(
 		Path, sys.argv[1:])
 	compiler = os.environ.get("WOVE_TEST_CLANG", "clang")
 	flags = os.environ.get("WOVE_TEST_CFLAGS", "")
@@ -318,6 +336,7 @@ def main():
 		check_decodings(executable, directory, decodings)
 		check_modules(executable, directory, modules)
 		check_compilations(executable, directory, compilations, clang)
+		check_callers(executable, directory, callers)
 
 
 if __name__ == "__main__":
