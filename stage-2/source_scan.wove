@@ -2,6 +2,8 @@
 ;; SPDX-License-Identifier: MIT OR Apache-2.0
 
 (module source_scan
+	(struct Token (fields (kind u32) (start i32) (end i32)))
+
 	;; Recognize the four ASCII bytes skipped between serialized forms.
 	(fn is_whitespace
 		(params (byte u8))
@@ -12,26 +14,45 @@
 				(bool.or (u8.eq (local byte) (u8 32)) (u8.eq (local byte) (u8 9)))
 				(bool.or (u8.eq (local byte) (u8 13)) (u8.eq (local byte) (u8 10)))))))
 
+	;; Parentheses are both atom boundaries and one-byte tokens.
+	(fn is_parenthesis
+		(params (byte u8))
+		(returns bool)
+		(body
+			(return (bool.or (u8.eq (local byte) (u8 40)) (u8.eq (local byte) (u8 41))))))
+
+	;; Reserve semicolon and double quote as delimiters for later lexer forms.
+	(fn is_unsupported_delimiter
+		(params (byte u8))
+		(returns bool)
+		(body
+			(return (bool.or (u8.eq (local byte) (u8 59)) (u8.eq (local byte) (u8 34))))))
+
+	;; Resume at the supplied cursor and leave the first non-whitespace byte unconsumed.
+	(fn skip_whitespace
+		(params (source (shared-slice u8)) (start i32))
+		(returns i32)
+		(body
+			(let end (slice.len (local source)))
+			(let-mut cursor (local start))
+			;; The end cursor needs no byte load.
+			(while (i32.lt (local cursor) (local end))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					;; Preserve the offset of the first byte that can start a token.
+					(if (bool.not (call is_whitespace (local byte)))
+						(then (return (local cursor))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (local cursor))))
+
 	;; Find the first significant byte or the end of this view.
 	(fn source_offset
 		(params (source (shared-slice u8)))
 		(returns i32)
 		(body
-			(let end (slice.len (local source)))
-			(let-mut cursor (i32 0))
-			;; Bound every byte load by the length of the source view.
-			(while (i32.lt (local cursor) (local end))
-				(body
-					(let byte (slice.load (local source) (local cursor)))
-					;; Advance past whitespace until the cursor marks a significant byte.
-					(if (call is_whitespace (local byte))
-						(then
-							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1))))
-						(else
-							(return (local cursor))))))
-			(return (local end))))
+			(return (call skip_whitespace (borrow-shared (local source)) (i32 0)))))
 
-	;; Classify the first significant byte for the serialized AST scanner.
+	;; Classify the first significant byte for callers that only need its original byte kind.
 	(fn source_kind
 		(params (source (shared-slice u8)))
 		(returns u32)
@@ -43,13 +64,59 @@
 			(if (i32.eq (local offset) (slice.len (local source)))
 				(then (return (u32 0))))
 			(let byte (slice.load (local source) (local offset)))
-			;; Preserve the opening parenthesis code for the parser.
-			(if (u8.eq (local byte) (u8 40))
-				(then (return (u32 40))))
-			;; Preserve the closing parenthesis code for the parser.
-			(if (u8.eq (local byte) (u8 41))
-				(then (return (u32 41))))
+			;; Preserve either parenthesis byte code as the kind.
+			(if (call is_parenthesis (local byte))
+				(then (return (int.convert u32 (local byte)))))
 			(return (u32 1))))
+
+	;; Find the exclusive end of an atom whose first byte has already been accepted.
+	(fn bare_atom_end
+		(params (source (shared-slice u8)) (next i32))
+		(returns i32)
+		(body
+			(let length (slice.len (local source)))
+			(let-mut cursor (local next))
+			;; The view can end immediately after the last atom byte.
+			(while (i32.lt (local cursor) (local length))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					;; Leave the delimiter for the caller's next scan.
+					(if (bool.or
+							(call is_whitespace (local byte))
+							(bool.or
+								(call is_parenthesis (local byte))
+								(call is_unsupported_delimiter (local byte))))
+						(then (return (local cursor))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (local cursor))))
+
+	;; Scan one token and return its half-open byte span in the supplied view.
+	(fn scan_token
+		(params (source (shared-slice u8)) (cursor i32))
+		(returns Token)
+		(expect lexer.token_span
+			(issue "https://github.com/wove-lang/wove/issues/29"))
+		(body
+			(let start (call skip_whitespace (borrow-shared (local source)) (local cursor)))
+			;; Only the exact end cursor can return EOF without another checked load.
+			(if (i32.eq (local start) (slice.len (local source)))
+				(then
+					(return (record.make Token (kind (u32 0)) (start (local start)) (end (local start))))))
+			(let byte (slice.load (local source) (local start)))
+			(let next (i32.add.wrapping (local start) (i32 1)))
+			;; Parentheses consume one byte and use their byte code as the token kind.
+			(if (call is_parenthesis (local byte))
+				(then
+					(return (record.make Token
+						(kind (int.convert u32 (local byte)))
+						(start (local start))
+						(end (local next))))))
+			;; Consume one unsupported delimiter so the next scan can make progress.
+			(if (call is_unsupported_delimiter (local byte))
+				(then
+					(return (record.make Token (kind (u32 3)) (start (local start)) (end (local next))))))
+			(let end (call bare_atom_end (borrow-shared (local source)) (local next)))
+			(return (record.make Token (kind (u32 1)) (start (local start)) (end (local end))))))
 
 	;; Supply the seed entry point while the fixture provides input slices.
 	(fn main
