@@ -30,6 +30,10 @@ JSON_CASES := $(JSON_FIXTURES)/cases.tsv
 JSON_WRITER_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors)
 JSON_READER_PROGRAMS := $(addprefix $(STAGE2)/json/,reader reader_errors)
 JSON_PROGRAMS := $(JSON_WRITER_PROGRAMS) $(JSON_READER_PROGRAMS) $(STAGE2)/json/utf8
+CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove stage-2/source/paths.wove
+CLI_FIXTURES := tests/stage-2/cli
+CLI_CASES := $(CLI_FIXTURES)/cases.tsv
+CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors)
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -43,7 +47,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
 
-.PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json
+.PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -56,7 +60,7 @@ stage-2: $(BOOTSTRAP_COMPILER) $(SOURCE_SCAN)
 # Preserve quoting in compiler settings until the runner splits them into arguments.
 test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
-test-stage-2: stage-2 $(HASHING_PROGRAMS) test-stage-2-json
+test-stage-2: stage-2 $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -74,6 +78,10 @@ test-stage-2: stage-2 $(HASHING_PROGRAMS) test-stage-2-json
 # Run the standalone JSON utilities with the same manifest runner as the seed.
 test-stage-2-json: $(JSON_PROGRAMS)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/json" "$(JSON_CASES)"
+
+# Run the standalone typed argv fixtures with the seed manifest runner.
+test-stage-2-cli: $(CLI_PROGRAMS)
+	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/cli" "$(CLI_CASES)"
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
@@ -111,6 +119,12 @@ $(JSON_PROGRAMS): $(STAGE2)/json/%: $(JSON_FIXTURES)/%.wove $(SEED) $(STAGE1)/ru
 $(JSON_WRITER_PROGRAMS): $(JSON_WRITER_SOURCES)
 $(JSON_READER_PROGRAMS): $(JSON_READER_SOURCES)
 $(STAGE2)/json/utf8: $(UTF8_MODULE)
+
+# Build each argv fixture with its own test entry and the seed.
+$(CLI_PROGRAMS): $(STAGE2)/cli/%: $(CLI_FIXTURES)/%.wove $(CLI_FIXTURES)/fixture_data.wove $(CLI_SOURCES) $(SEED) $(STAGE1)/runtime.o
+	mkdir -p "$(@D)"
+	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
