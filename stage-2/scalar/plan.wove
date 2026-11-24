@@ -19,7 +19,7 @@
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "./flow.wove" (only block_statement after_block (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar scalar_operator
+		(only entry_keyword entry_at entry_form read_statement scalar_type read_parameter_type decimal_scalar scalar_operator
 			(type ScalarOperator) (type EntryRead) (type StatementRead)))
 
 	(struct ScalarFunction
@@ -31,8 +31,9 @@
 		(:doc `A checked expression at its source row.
 
 		Literals carry significant digit offsets in the arena. Conversions
-		carry the original file identity in target, its half-open byte span
-		in start and end, and the value operand row in first.`)
+		and slice loads carry the original file identity in target and the
+		half-open byte span in start and end. First points at the initial
+		operand to evaluate.`)
 		ScalarExpression
 		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool)))
 	(struct ScalarSignature (fields (params i32) (result u32) (first_statement i32) (start i32) (end i32) (error u32)))
@@ -178,7 +179,7 @@
 			(return (i32 -1))))
 
 	(fn
-		(:doc `Check each parameter's unique spelling, metadata, and exact scalar type.`)
+		(:doc `Check each parameter's unique spelling, metadata, and exact scalar or shared slice type.`)
 		read_parameters
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32)
 			(parameters (mut-slice ScalarParameter)) (start i32))
@@ -207,11 +208,12 @@
 						(then (return (record.make EntryRead (operand (i32 -1))
 							(start (record.get (local selection) start)) (end (record.get (local selection) end))
 							(error (record.get (local selection) error))))))
-					(let type (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+					(let checked (call read_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
 					(if
-						(:doc "Point an unsupported parameter type at the type operand.")
-						(u32.eq (local type) (u32 0))
-						(then (return (call entry_at (slice.load (local nodes) (local operand)) (i32 -1) (u32 23)))))
+						(:doc "Keep unsupported types and malformed type syntax at their original spans.")
+						(u32.lt (u32 0) (record.get (local checked) error))
+						(then (return (local checked))))
+					(let type (int.convert u32 (record.get (local checked) operand)))
 					(let name_node (slice.load (local nodes) (local name)))
 					(let existing (call find_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local name_node) (borrow-shared (local parameters)) (local start) (local written)))
@@ -366,8 +368,9 @@
 	(fn
 		(:doc `Match a checked value to its exact expected type.
 
-		Expectation 1 infers one of the supported integer types from the
-		expression. Zero is reserved for rows outside expression checking.`)
+		Expectation 1 infers an integer type. Expectation 2 is reserved
+		for explicit shared reborrows at call arguments. Zero marks rows
+		outside expression checking.`)
 		value_matches_type
 		(params (expected u32) (actual u32))
 		(returns bool)
@@ -692,7 +695,7 @@
 				(borrow-shared (local functions)) (borrow-shared (local source)) (local start) (local end)))))
 
 	(fn
-		(:doc `Resolve a direct call and seed each argument with its formal scalar type.
+		(:doc `Resolve a direct call and seed each argument from its formal type.
 
 		The verified call row is keyed by the original call node and refers to
 		the defining function row. Its operands retain their original links.`)
@@ -734,8 +737,13 @@
 				(bool.and (i32.lt (local formal) (local limit)) (bool.not (i32.lt (local argument) (i32 0))))
 				(body
 					(let param (slice.load (local parameters) (local formal)))
+					(let-mut argument_type (record.get (local param) type))
+					(if
+						(:doc "A shared slice argument must explicitly reborrow its named parameter.")
+						(u32.eq (local argument_type) (u32 34))
+						(then (set (local argument_type) (u32 2))))
 					(slice.store (local expressions) (local argument)
-						(call expression_row (u32 0) (record.get (local param) type)
+						(call expression_row (u32 0) (local argument_type)
 							(i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
 					(set (local argument) (record.get (slice.load (local nodes) (local argument)) next_sibling))
 					(set (local formal) (i32.add.wrapping (local formal) (i32 1)))))
@@ -773,6 +781,20 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
+		(:doc `Keep the operation's span in its original file, before graph packing or subrange selection.`)
+		runtime_expression
+		(params (kind u32) (type u32) (node SourceNode) (first i32) (caller ScalarFunction) (view_start i32))
+		(returns ScalarExpression)
+		(body
+			(let source_base (record.get (local caller) source_base))
+			(let start (i32.add.wrapping (local view_start)
+				(i32.sub.wrapping (record.get (local node) start) (local source_base))))
+			(let end (i32.add.wrapping (local view_start)
+				(i32.sub.wrapping (record.get (local node) end) (local source_base))))
+			(return (call expression_row (local kind) (local type) (record.get (local caller) file)
+				(local first) (local start) (local end) (bool false)))))
+
+	(fn
 		(:doc `Check a conversion target, seed its integer operand, and retain the original trap site.`)
 		plan_conversion
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
@@ -802,14 +824,82 @@
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(slice.store (local expressions) (local value)
 				(call expression_row (u32 0) (u32 1) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
-			(let source_base (record.get (local caller) source_base))
-			(let start (i32.add.wrapping (local view_start)
-				(i32.sub.wrapping (record.get (local node) start) (local source_base))))
-			(let end (i32.add.wrapping (local view_start)
-				(i32.sub.wrapping (record.get (local node) end) (local source_base))))
 			(slice.store (local expressions) (local index)
-				(call expression_row (u32 33) (local target_type) (record.get (local caller) file)
-					(local value) (local start) (local end) (bool false)))
+				(call runtime_expression (u32 33) (local target_type) (local node) (local value)
+					(local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
+		(:doc `Resolve a named byte view for an access or an explicit shared call reborrow.`)
+		plan_view
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(index i32) (caller ScalarFunction) (statement i32) (expected u32)
+			(parameters (shared-slice ScalarParameter)) (statements (shared-slice ScalarStatement))
+			(expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let-mut reference_index (local index))
+			(if
+				(:doc "Call arguments open a shared loan around one named source.")
+				(u32.eq (local expected) (u32 2))
+				(then
+					(let loan (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (u32 35) (u32 24)))
+					(if
+						(:doc "Report a missing explicit reborrow at the argument.")
+						(u32.lt (u32 0) (record.get (local loan) error))
+						(then (return (local loan))))
+					(let target (record.get (local loan) operand))
+					(if
+						(:doc "Shared reborrows accept a single source expression.")
+						(bool.or (i32.lt (local target) (i32 0))
+							(bool.not (i32.lt (record.get (slice.load (local nodes) (local target)) next_sibling) (i32 0))))
+						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+					(set (local reference_index) (local target))))
+			(let reference (slice.load (local nodes) (local reference_index)))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local reference) (u32 8) (u32 24)))
+			(if
+				(:doc "A shared source is a local reference to a slice parameter.")
+				(u32.lt (u32 0) (record.get (local form) error))
+				(then (return (local form))))
+			(return (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local reference) (record.get (local form) operand) (u32 34) (local index) (local caller) (local statement)
+				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
+
+	(fn
+		(:doc `Check the access arity and give the receiver and index separate exact types.`)
+		plan_slice_access
+		(params (nodes (shared-slice SourceNode)) (node SourceNode) (receiver i32) (index i32)
+			(kind u32) (type u32) (caller ScalarFunction) (view_start i32) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "Every slice access needs a receiver.")
+				(i32.lt (local receiver) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let subscript (record.get (slice.load (local nodes) (local receiver)) next_sibling))
+			(if
+				(:doc "A byte load takes one exact i32 index after its receiver.")
+				(u32.eq (local kind) (u32 37))
+				(then
+					(if
+						(:doc "Require the index and reject extra operands at the load form.")
+						(bool.or (i32.lt (local subscript) (i32 0))
+							(bool.not (i32.lt (record.get (slice.load (local nodes) (local subscript)) next_sibling) (i32 0))))
+						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+					(slice.store (local expressions) (local subscript)
+						(call expression_row (u32 0) (u32 5) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false))))
+				(else
+					(if
+						(:doc "Length accepts only the receiver.")
+						(bool.not (i32.lt (local subscript) (i32 0)))
+						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))))
+			(slice.store (local expressions) (local receiver)
+				(call expression_row (u32 0) (u32 34) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
+			(slice.store (local expressions) (local index)
+				(call runtime_expression (local kind) (local type) (local node) (local receiver)
+					(local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
@@ -822,6 +912,12 @@
 		(returns EntryRead)
 		(body
 			(let node (slice.load (local nodes) (local index)))
+			(if
+				(:doc "Resolve a shared formal argument or access receiver in its own expression context.")
+				(bool.or (u32.eq (local expected) (u32 2)) (u32.eq (local expected) (u32 34)))
+				(then (return (call plan_view (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local caller) (local statement) (local expected)
+					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
 			(let operator (call scalar_operator (local tag)))
@@ -831,6 +927,16 @@
 				(:doc "An operator supplies its result type independently of its keyword.")
 				(u32.lt (u32 0) (local operator_result))
 				(then (set (local actual) (local operator_result))))
+			(let length (u32.eq (local tag) (u32 36)))
+			(let load (u32.eq (local tag) (u32 37)))
+			(if
+				(:doc "The length field is an i32 value.")
+				(local length)
+				(then (set (local actual) (u32 5))))
+			(if
+				(:doc "A byte read produces an exact u8 value.")
+				(local load)
+				(then (set (local actual) (u32 10))))
 			(if
 				(:doc "Check the type named by a literal or operator. Reads and calls resolve their types below.")
 				(bool.not
@@ -862,6 +968,12 @@
 				(u32.eq (local tag) (u32 33))
 				(then (return (call plan_conversion (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local operand) (local index) (local expected) (local caller) (local view_start)
+					(borrow-mut (local expressions))))))
+			(if
+				(:doc "Check the receiver and any subscript of a slice access.")
+				(bool.or (local length) (local load))
+				(then (return (call plan_slice_access (borrow-shared (local nodes)) (local node)
+					(local operand) (local index) (local tag) (local actual) (local caller) (local view_start)
 					(borrow-mut (local expressions))))))
 			(if
 				(:doc "An operator checks its arity and types all operand rows.")

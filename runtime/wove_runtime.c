@@ -15,6 +15,14 @@ static _Noreturn void wvrt_trap(wvrt_location wvrtsite, const char *wvrtmessage)
 	exit(EXIT_FAILURE);
 }
 
+// Report a runtime failure at the original byte span of a Stage 2 operation.
+static _Noreturn void wvrt_trap_at_span(int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend,
+	const char *wvrtmessage) {
+	fprintf(stderr, "file %" PRId32 " bytes [%" PRId32 ",%" PRId32 "): runtime error: %s\n",
+		wvrtfile, wvrtstart, wvrtend, wvrtmessage);
+	exit(EXIT_FAILURE);
+}
+
 // Preserve C object alignment, including native types with extended alignment.
 // The caller owns failure handling, so a newly acquired foreign resource can be closed.
 static void *wvrt_calloc(size_t wvrtcount, size_t wvrtsize, size_t wvrtalignment) {
@@ -94,10 +102,15 @@ wvrt_slice wvrt_slice_range_u8(const void *wvrtitems, int32_t wvrtlength,
 	return (wvrt_slice){wvrt_base, wvrtend - wvrtstart, sizeof(uint8_t)};
 }
 
+// Check an element index in the signed slice length domain.
+static bool wvrt_slice_index_valid(int32_t wvrtlength, int32_t wvrtindex) {
+	return 0 <= wvrtindex && wvrtindex < wvrtlength;
+}
+
 // Validate the signed index before converting it to an element offset.
 size_t wvrt_slice_offset(int32_t wvrtlength, int32_t wvrtindex, wvrt_location wvrtsite) {
 	// Negative indices and the one-past endpoint cannot name a byte.
-	if (wvrtindex < 0 || wvrtindex >= wvrtlength) {
+	if (!wvrt_slice_index_valid(wvrtlength, wvrtindex)) {
 		wvrt_trap(wvrtsite, "slice index out of bounds");
 	}
 	return (size_t)wvrtindex;
@@ -108,6 +121,16 @@ uint8_t wvrt_slice_load_u8(const void *wvrtitems, int32_t wvrtlength, int32_t wv
 	wvrt_location wvrtsite) {
 	size_t wvrt_offset = wvrt_slice_offset(wvrtlength, wvrtindex, wvrtsite);
 	return ((const uint8_t *)wvrtitems)[wvrt_offset];
+}
+
+// Read a byte from a checked Stage 2 view, with a file-relative trap span.
+uint8_t wvrt_slice_load_u8_at_span(wvrt_slice wvrtview, int32_t wvrtindex,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Validate before computing an address in the backing storage.
+	if (!wvrt_slice_index_valid(wvrtview.wvrt_length, wvrtindex)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "slice index out of bounds");
+	}
+	return ((const uint8_t *)wvrtview.wvrt_items)[(size_t)wvrtindex];
 }
 
 // Update the original storage after checking the mutable view's byte index.
@@ -137,9 +160,7 @@ static int64_t wvrt_int_at_span(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrt
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	// Source identity and offsets describe the conversion in its original file.
 	if (!wvrt_int_fits(wvrtvalue, wvrtmin, wvrtmax)) {
-		fprintf(stderr, "file %" PRId32 " bytes [%" PRId32 ",%" PRId32 "): "
-			"runtime error: integer conversion out of range\n", wvrtfile, wvrtstart, wvrtend);
-		exit(EXIT_FAILURE);
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
 	}
 	return wvrtvalue;
 }

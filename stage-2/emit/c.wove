@@ -15,7 +15,8 @@
 	(use wove-file "../scalar/plan.wove"
 		(only read_functions plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
 	(use wove-file "../scalar/syntax.wove" (only scalar_operator (type ScalarOperator)))
-	(use wove-file "./convert.wove" (only write_runtime_header open_conversion close_conversion))
+	(use wove-file "./runtime.wove"
+		(only write_runtime_header open_conversion open_slice_load write_slice_length close_runtime_call))
 	(use wove-file "./text.wove" (only c_byte c_text_fragment c_type_text c_cast c_i32_bias write_c_name c_decimal_digits
 			function_name_role parameter_name_role local_name_role temporary_name_role))
 
@@ -118,13 +119,23 @@
 				(borrow-shared (local source)) (i32 0) (i32 0)))))
 
 	(fn
+		(:doc `Identify the expressions that use the shared runtime ABI.`)
+		(:pragma (inline always))
+		is_runtime_value
+		(params (kind u32))
+		(returns bool)
+		(body
+			(return (bool.or (u32.eq (local kind) (u32 33))
+				(bool.or (u32.eq (local kind) (u32 36)) (u32.eq (local kind) (u32 37)))))))
+
+	(fn
 		(:doc `Identify expressions with their own evaluation step when nested in another expression.`)
 		requires_value_temporary
 		(params (kind u32))
 		(returns bool)
 		(body
 			(return (bool.or (u32.eq (local kind) (u32 3))
-				(bool.or (u32.eq (local kind) (u32 33))
+				(bool.or (call is_runtime_value (local kind))
 					(u32.lt (u32 0) (record.get (call scalar_operator (local kind)) result)))))))
 
 	(fn
@@ -181,6 +192,32 @@
 			(return (local cursor))))
 
 	(fn
+		(:doc `Read the descriptor length or pass both checked operands and the original load span to the runtime.`)
+		write_slice_access
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (expression ScalarExpression)
+			(tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let receiver (record.get (local expression) first))
+			(if
+				(:doc "Length reads the signed field from the evaluated descriptor.")
+				(u32.eq (record.get (local expression) kind) (u32 36))
+				(then
+					(let cursor (call write_temporary_name (borrow-shared (local source)) (local receiver) (local tree_base)
+						(borrow-mut (local output)) (local offset) (local writing)))
+					(return (call write_slice_length (borrow-mut (local output)) (local cursor) (local writing)))))
+			(let index (record.get (slice.load (local nodes) (local receiver)) next_sibling))
+			(let open (call open_slice_load (borrow-mut (local output)) (local offset) (local writing)))
+			(let view (call write_temporary_name (borrow-shared (local source)) (local receiver) (local tree_base)
+				(borrow-mut (local output)) (local open) (local writing)))
+			(let comma (call c_byte (borrow-mut (local output)) (local view) (u8 44) (local writing)))
+			(let subscript (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
+				(borrow-mut (local output)) (local comma) (local writing)))
+			(return (call close_runtime_call (borrow-mut (local output)) (local subscript)
+				(record.get (local expression) target) (record.get (local expression) start)
+				(record.get (local expression) end) (local writing)))))
+
+	(fn
 		(:doc `Write a checked value using the temporaries already evaluated for its operands.`)
 		write_value
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (value_index i32) (tree_base i32)
@@ -199,9 +236,14 @@
 					(let value (call write_temporary_name (borrow-shared (local source))
 						(record.get (local expression) first) (local tree_base)
 						(borrow-mut (local output)) (local open) (local writing)))
-					(return (call close_conversion (borrow-mut (local output)) (local value)
+					(return (call close_runtime_call (borrow-mut (local output)) (local value)
 						(record.get (local expression) target) (record.get (local expression) start)
 						(record.get (local expression) end) (local writing)))))
+			(if
+				(:doc "A slice access uses the evaluated descriptor and, for a load, its evaluated index.")
+				(bool.or (u32.eq (local kind) (u32 36)) (u32.eq (local kind) (u32 37)))
+				(then (return (call write_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local writing)))))
 			(let operator (call scalar_operator (local kind)))
 			(if
 				(:doc "Short-circuit evaluation has already stored the result for this value.")
@@ -340,10 +382,9 @@
 							(if
 								(:doc "Save an eager compound value or checked operand before moving to its sibling.")
 								(bool.and (bool.not (record.get (local operator) short_circuit))
-									(bool.or (bool.or (u32.eq (local kind) (u32 3)) (u32.eq (local kind) (u32 33)))
-										(bool.or (u32.lt (u32 0) (record.get (local operator) result))
-											(bool.or (u32.lt (u32 0) (record.get (local parent_operator) result))
-												(u32.eq (local parent_kind) (u32 33))))))
+									(bool.or (call requires_value_temporary (local kind))
+										(bool.or (u32.lt (u32 0) (record.get (local parent_operator) result))
+											(call is_runtime_value (local parent_kind)))))
 								(then
 									(set (local cursor) (call write_temporary_declaration (borrow-shared (local source))
 										(local index) (local tree_base) (record.get (local expression) type)
@@ -572,19 +613,29 @@
 			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))))
 
 	(fn
-		(:doc `Detect whether the checked translation unit requires the shared conversion runtime.`)
-		uses_conversions
-		(params (expressions (shared-slice ScalarExpression)))
+		(:doc `Detect whether a checked expression or a signature needs the shared C runtime.`)
+		uses_runtime
+		(params (expressions (shared-slice ScalarExpression)) (parameters (shared-slice ScalarParameter)))
 		(returns bool)
 		(body
 			(let-mut index (i32 0))
 			(while
-				(:doc "Only checked conversion rows use the runtime include.")
+				(:doc "Runtime expressions can occur in any selected body or nested operand.")
 				(i32.lt (local index) (slice.len (local expressions)))
 				(body
 					(if
-						(:doc "A conversion can occur in any selected body or nested operand.")
-						(u32.eq (record.get (slice.load (local expressions) (local index)) kind) (u32 33))
+						(:doc "The runtime ABI supplies slice descriptors and checked operations.")
+						(call is_runtime_value (record.get (slice.load (local expressions) (local index)) kind))
+						(then (return (bool true))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(set (local index) (i32 0))
+			(while
+				(:doc "A shared slice signature needs its ABI even when the body ignores the parameter.")
+				(i32.lt (local index) (slice.len (local parameters)))
+				(body
+					(if
+						(:doc "Type 34 is the shared byte slice descriptor.")
+						(u32.eq (record.get (slice.load (local parameters) (local index)) type) (u32 34))
 						(then (return (bool true))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (bool false))))
@@ -603,8 +654,8 @@
 			(let first_statement (slice.load (local statements) (record.get (local first) first_statement)))
 			(let first_value (slice.load (local expressions) (record.get (local first_statement) value)))
 			(if
-				(:doc "The conversion runtime header provides the fixed-width types too.")
-				(call uses_conversions (borrow-shared (local expressions)))
+				(:doc "The shared runtime header provides the fixed-width types too.")
+				(call uses_runtime (borrow-shared (local expressions)) (borrow-shared (local parameters)))
 				(then (set (local cursor) (call write_runtime_header (borrow-mut (local output)) (local cursor) (local writing))))
 				(else
 					(if
@@ -668,6 +719,7 @@
 		(:expect bootstrap.unsigned_comparisons (issue "https://github.com/wove-lang/wove/issues/79"))
 		(:expect bootstrap.short_circuit (issue "https://github.com/wove-lang/wove/issues/83"))
 		(:expect bootstrap.checked_int_conversion (issue "https://github.com/wove-lang/wove/issues/85"))
+		(:expect bootstrap.shared_byte_slices (issue "https://github.com/wove-lang/wove/issues/90"))
 		emit_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))
