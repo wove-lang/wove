@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define main wove_fixture_main
 #include "source_scan.c"
@@ -12,7 +13,7 @@
 // Match the seed's generated names to the scanner declarations.
 #define source_offset wv_seed_fn_4
 #define source_kind wv_seed_fn_5
-#define scan_token wv_seed_fn_7
+#define scan_token wv_seed_fn_9
 
 typedef wv_seed_record_0 Token;
 
@@ -70,6 +71,35 @@ static const TokenSpan delimiter_tokens[] = {
 	{40, 5, 6}, {1, 6, 7}, {41, 7, 8}, {0, 8, 8},
 };
 
+static const uint8_t comments_lf[] = ";; (\" \n(fn;; ) \"\nx)\n;; tail ";
+static const uint8_t comments_crlf[] = ";; (\" \r\n(fn;; ) \"\r\nx)\r\n;; tail ";
+static const uint8_t comments_cr[] = ";; (\" \r(fn;; ) \"\rx)\r;; tail ";
+static const uint8_t without_comments[] = "(fn x)";
+static const uint8_t comment_parent[] = "x;; tail\r\n(";
+
+static const TokenSpan single_line_ending_tokens[] = {
+	{59, 0, 6}, {40, 7, 8}, {1, 8, 10}, {59, 10, 16},
+	{1, 17, 18}, {41, 18, 19}, {59, 20, 28}, {0, 28, 28},
+};
+static const TokenSpan crlf_tokens[] = {
+	{59, 0, 6}, {40, 8, 9}, {1, 9, 11}, {59, 11, 17},
+	{1, 19, 20}, {41, 20, 21}, {59, 23, 31}, {0, 31, 31},
+};
+
+static const struct {
+	const char *label;
+	wvrt_slice input;
+	const TokenSpan *tokens;
+	size_t count;
+} comment_cases[] = {
+	{"LF comments", {comments_lf, sizeof(comments_lf) - 1, sizeof(uint8_t)},
+		single_line_ending_tokens, sizeof(single_line_ending_tokens) / sizeof(single_line_ending_tokens[0])},
+	{"CRLF comments", {comments_crlf, sizeof(comments_crlf) - 1, sizeof(uint8_t)},
+		crlf_tokens, sizeof(crlf_tokens) / sizeof(crlf_tokens[0])},
+	{"CR comments", {comments_cr, sizeof(comments_cr) - 1, sizeof(uint8_t)},
+		single_line_ending_tokens, sizeof(single_line_ending_tokens) / sizeof(single_line_ending_tokens[0])},
+};
+
 // Compare the full offset and kind returned by the compiled Wove scanner.
 static void check(const char *label, wvrt_slice input, int32_t offset, uint32_t kind) {
 	int32_t actual_offset = source_offset(input);
@@ -83,17 +113,22 @@ static void check(const char *label, wvrt_slice input, int32_t offset, uint32_t 
 	}
 }
 
+// Read the scanner record through the fixture's named fields.
+static TokenSpan read_token(wvrt_slice input, int32_t cursor) {
+	const Token token = scan_token(input, cursor);
+	return (TokenSpan){token.wv_field_0, token.wv_field_1, token.wv_field_2};
+}
+
 // Check all three record fields and return the cursor for the next scan.
 static int32_t check_token(const char *label, wvrt_slice input, int32_t cursor, TokenSpan expected) {
-	const Token token = scan_token(input, cursor);
-	if (token.wv_field_0 != expected.kind || token.wv_field_1 != expected.start || token.wv_field_2 != expected.end) {
+	const TokenSpan token = read_token(input, cursor);
+	if (token.kind != expected.kind || token.start != expected.start || token.end != expected.end) {
 		fprintf(stderr, "%s at %" PRId32 ": got token %" PRIu32 " [%" PRId32 ", %" PRId32
 			"), expected %" PRIu32 " [%" PRId32 ", %" PRId32 ")\n",
-			label, cursor, token.wv_field_0, token.wv_field_1, token.wv_field_2,
-			expected.kind, expected.start, expected.end);
+			label, cursor, token.kind, token.start, token.end, expected.kind, expected.start, expected.end);
 		exit(EXIT_FAILURE);
 	}
-	return token.wv_field_2;
+	return token.end;
 }
 
 // Exercise the same cursor progression used by the lexer caller.
@@ -101,6 +136,33 @@ static void check_tokens(const char *label, wvrt_slice input, const TokenSpan *t
 	int32_t cursor = 0;
 	for (size_t i = 0; i < count; ++i) {
 		cursor = check_token(label, input, cursor, tokens[i]);
+	}
+}
+
+// Compare kinds and spellings after omitting the raw comment tokens.
+static void check_significant_tokens(const char *label, wvrt_slice raw, wvrt_slice plain) {
+	const uint8_t *raw_bytes = raw.wvrt_items;
+	const uint8_t *plain_bytes = plain.wvrt_items;
+	int32_t raw_cursor = 0;
+	int32_t plain_cursor = 0;
+	while (true) {
+		const TokenSpan actual = read_token(raw, raw_cursor);
+		raw_cursor = actual.end;
+		if (actual.kind == 59) {
+			continue;
+		}
+
+		const TokenSpan expected = read_token(plain, plain_cursor);
+		plain_cursor = expected.end;
+		int32_t width = actual.end - actual.start;
+		if (actual.kind != expected.kind || width != expected.end - expected.start
+			|| memcmp(raw_bytes + actual.start, plain_bytes + expected.start, (size_t)width) != 0) {
+			fprintf(stderr, "%s: significant token differs at byte %" PRId32 "\n", label, actual.start);
+			exit(EXIT_FAILURE);
+		}
+		if (actual.kind == 0) {
+			return;
+		}
 	}
 }
 
@@ -133,5 +195,19 @@ int main(void) {
 		semicolon_tokens, sizeof(semicolon_tokens) / sizeof(semicolon_tokens[0]));
 	check_tokens("atom delimiters", (wvrt_slice){delimiters, sizeof(delimiters) - 1, sizeof(uint8_t)},
 		delimiter_tokens, sizeof(delimiter_tokens) / sizeof(delimiter_tokens[0]));
+
+	wvrt_slice plain = {without_comments, sizeof(without_comments) - 1, sizeof(uint8_t)};
+	for (size_t i = 0; i < sizeof(comment_cases) / sizeof(comment_cases[0]); ++i) {
+		check_tokens(comment_cases[i].label, comment_cases[i].input, comment_cases[i].tokens, comment_cases[i].count);
+		check_significant_tokens(comment_cases[i].label, comment_cases[i].input, plain);
+	}
+
+	wvrt_slice split_opener = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 2, site);
+	check_tokens("view splits comment opener", split_opener,
+		semicolon_tokens, sizeof(semicolon_tokens) / sizeof(semicolon_tokens[0]));
+	wvrt_slice empty_comment = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 3, site);
+	check_token("comment opener at EOF", empty_comment, 0, (TokenSpan){59, 0, 2});
+	wvrt_slice clipped_comment = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 6, site);
+	check_token("view ends inside comment", clipped_comment, 0, (TokenSpan){59, 0, 5});
 	return wove_fixture_main();
 }
