@@ -11,11 +11,16 @@ from syntax import Atom, Form, Node, SourceError, form, identifier, parse
 
 
 I32 = "i32"
+U8 = "u8"
+VOID = "void"
+SCALARS = (I32, U8)
 OWNED = "owned-array"
 SHARED = "shared-slice"
 MUT = "mut-slice"
 C_TYPE = {
 	I32: "int32_t",
+	U8: "uint8_t",
+	VOID: "void",
 	OWNED: "wvrt_array *",
 	SHARED: "wvrt_slice",
 	MUT: "wvrt_mut_slice",
@@ -39,15 +44,16 @@ class Binding:
 class Function:
 	c_name: str
 	params: tuple[tuple[str, str], ...]
+	result: str
 	expectations: tuple[Form, ...]
 	body: Form
 
 
 # Accept scalar inputs and the two byte slice parameter types.
 def parameter_type(node: Node) -> str:
-	# The scalar type is written as a bare symbol.
-	if isinstance(node, Atom) and not node.quoted and node.text == I32:
-		return I32
+	# Scalar types are written as bare symbols.
+	if isinstance(node, Atom) and not node.quoted and node.text in SCALARS:
+		return node.text
 	view = form(node, arity=1)
 	# Slice parameters specify their loan kind and byte element type.
 	if view.tag not in (SHARED, MUT) or identifier(view.operands[0]) != "u8":
@@ -57,16 +63,21 @@ def parameter_type(node: Node) -> str:
 
 # Keep expectation metadata on its function, including issue and fixture IDs.
 def read_expectation(node: Node) -> Form:
-	expectation = form(node, "expect", 3)
-	name, issue, tests = expectation.operands
+	expectation = form(node, "expect")
+	# The issue link is required and the fixture list is optional.
+	if len(expectation.operands) not in (2, 3):
+		raise SourceError(node.line)
+	name, issue, *fixture_list = expectation.operands
 	identifier(name)
 	url, = form(issue, "issue", 1).operands
 	# Keep the issue URL as a string in the expectation.
 	if not isinstance(url, Atom) or not url.quoted:
 		raise SourceError(url.line)
-	# Read fixture IDs as symbols for the function metadata.
-	for test in form(tests, "tests").operands:
-		identifier(test)
+	# Preserve optional fixture IDs as function metadata.
+	for tests in fixture_list:
+		# Each fixture ID is a symbol in the IR.
+		for test in form(tests, "tests").operands:
+			identifier(test)
 	return expectation
 
 
@@ -87,14 +98,18 @@ def read_function(node: Node, index: int) -> tuple[str, Function]:
 		if field.tag in params:
 			raise SourceError(param.line)
 		params[field.tag] = parameter_type(field.operands[0])
-	result, = form(returns_node, "returns", 1).operands
-	# The seed supports i32 returns and a zero-argument entry point.
-	if identifier(result) != I32 or (name == "main" and params):
+	result_node, = form(returns_node, "returns", 1).operands
+	result = identifier(result_node)
+	# Seed functions return a scalar or complete without a value.
+	if result not in (*SCALARS, VOID):
+		raise SourceError(result_node.line)
+	# Keep the C entry point on its existing zero-argument i32 ABI.
+	if name == "main" and (params or result != I32):
 		raise SourceError(node.line)
 
 	c_name = "main" if name == "main" else f"wv_seed_fn_{index}"
 	expectations = tuple(read_expectation(item) for item in metadata)
-	return name, Function(c_name, tuple(params.items()), expectations, form(body_node, "body"))
+	return name, Function(c_name, tuple(params.items()), result, expectations, form(body_node, "body"))
 
 
 # Encode a source filename as a C literal, including arbitrary path bytes.
@@ -118,7 +133,7 @@ def signature(function: Function) -> str:
 		f"{C_TYPE[kind]} wv_value_{index}"
 		for index, (_, kind) in enumerate(function.params)
 	)
-	result = "int" if function.c_name == "main" else "static int32_t"
+	result = "int" if function.c_name == "main" else f"static {C_TYPE[function.result]}"
 	return f"{result} {function.c_name}({params or 'void'})"
 
 
@@ -152,13 +167,25 @@ class FunctionEmitter:
 			raise SourceError(line)
 		return binding
 
-	# Require a scalar in arithmetic, lengths, arguments, and returns.
-	def i32(self, node: Node) -> Value:
+	# Require the exact result type at the operation that consumes it.
+	def typed(self, node: Node, kind: str) -> Value:
 		value = self.expression(node)
-		# Only scalar values may flow through this expression position.
-		if value.kind != I32:
+		# Scalar arithmetic and calls need an explicit conversion between types.
+		if value.kind != kind:
 			raise SourceError(node.line)
 		return value
+
+	# Resolve a byte slice and grant stores only through an exclusive parameter.
+	def slice(self, node: Node, line: int, writable: bool = False) -> Value:
+		value = self.local(node, line).value
+		# Both view types can read, but only mut-slice carries write permission.
+		if value.kind not in (SHARED, MUT) or (writable and value.kind != MUT):
+			raise SourceError(line)
+		return value
+
+	# Supply the source line to runtime checks emitted for this operation.
+	def site(self, line: int) -> str:
+		return f"(wvrt_location){{{self.source}, {line}, 1}}"
 
 	# Hold this loan through the remaining argument evaluations and the call.
 	def borrow(self, node: Node, kind: str) -> Value:
@@ -195,9 +222,16 @@ class FunctionEmitter:
 		values = []
 		# Each argument may acquire a loan that constrains later arguments.
 		for argument, (_, kind) in zip(args, callee.params):
-			value = self.i32(argument) if kind == I32 else self.borrow(argument, kind)
+			value = self.typed(argument, kind) if kind in SCALARS else self.borrow(argument, kind)
 			values.append(value.c)
-		result = self.temporary(I32, f"{callee.c_name}({', '.join(values)})")
+		expression = f"{callee.c_name}({', '.join(values)})"
+		# A void call is a statement and supplies no C value to a consumer.
+		if callee.result == VOID:
+			self.lines.append(f"    {expression};")
+			result = Value(VOID, "")
+		# Scalar calls capture their result before the next operation.
+		else:
+			result = self.temporary(callee.result, expression)
 		del self.loans[checkpoint:]
 		return result
 
@@ -205,7 +239,7 @@ class FunctionEmitter:
 	def expression(self, node: Node) -> Value:
 		expr = form(node)
 		# Convert the decimal literal to a C-safe spelling.
-		if expr.tag == I32:
+		if expr.tag in SCALARS:
 			literal, = form(expr, arity=1).operands
 			# Restrict the spelling to a signed decimal atom.
 			if not isinstance(literal, Atom) or literal.quoted or not re.fullmatch(r"-?[0-9]+", literal.text):
@@ -216,16 +250,23 @@ class FunctionEmitter:
 			# Treat values beyond Python’s conversion limit as source failures.
 			except ValueError:
 				raise SourceError(node.line) from None
-			# Enforce the signed i32 range before emitting C.
-			if not -(2**31) <= number < 2**31:
+			low, high = (0, 255) if expr.tag == U8 else (-(2**31), 2**31 - 1)
+			# Check the declared type before handing the literal to C.
+			if not low <= number <= high:
 				raise SourceError(node.line)
-			return Value(I32, str(number))
+			return Value(expr.tag, str(number))
+
+		# Widen an unsigned byte so it can be used in an i32 expression or index.
+		if expr.tag == "i32.from-u8":
+			target, = form(expr, arity=1).operands
+			value = self.typed(target, U8)
+			return self.temporary(I32, f"(int32_t){value.c}")
 
 		# An ordinary value use copies a scalar binding.
 		if expr.tag == "local":
 			binding = self.local(expr, node.line)
 			# Array and slice places need an explicit operation.
-			if binding.value.kind != I32:
+			if binding.value.kind not in SCALARS:
 				raise SourceError(node.line)
 			return binding.value
 
@@ -235,8 +276,8 @@ class FunctionEmitter:
 			# This seed uses the C uint8_t layout for every owned array.
 			if identifier(element) != "u8":
 				raise SourceError(node.line)
-			size = self.i32(length)
-			site = f"(wvrt_location){{{self.source}, {node.line}, 1}}"
+			size = self.typed(length, I32)
+			site = self.site(node.line)
 			return self.temporary(
 				OWNED, f"wvrt_array_new({size.c}, sizeof(uint8_t), _Alignof(uint8_t), {site})"
 			)
@@ -256,17 +297,24 @@ class FunctionEmitter:
 		# Read the length from the non-owning slice descriptor.
 		if expr.tag == "slice.len":
 			target, = form(expr, arity=1).operands
-			binding = self.local(target, node.line)
-			# Only slice descriptors support this operation.
-			if binding.value.kind not in (SHARED, MUT):
-				raise SourceError(node.line)
-			return self.temporary(I32, f"{binding.value.c}.wvrt_length")
+			view = self.slice(target, node.line)
+			return self.temporary(I32, f"{view.c}.wvrt_length")
+
+		# Read a byte through either descriptor after checking its index.
+		if expr.tag == "slice.load":
+			target, subscript = form(expr, arity=2).operands
+			view = self.slice(target, node.line)
+			index = self.typed(subscript, I32)
+			return self.temporary(
+				U8, f"wvrt_slice_load_u8({view.c}.wvrt_items, {view.c}.wvrt_length, "
+				f"{index.c}, {self.site(node.line)})"
+			)
 
 		# Evaluate operands in order before adding modulo 2^32.
 		if expr.tag == "i32.add.wrapping":
 			left, right = form(expr, arity=2).operands
-			first = self.i32(left)
-			second = self.i32(right)
+			first = self.typed(left, I32)
+			second = self.typed(right, I32)
 			return self.temporary(I32, f"wvrt_i32_add_wrapping({first.c}, {second.c})")
 
 		# Call lowering manages the lifetime of its argument loans.
@@ -275,37 +323,67 @@ class FunctionEmitter:
 
 		raise SourceError(node.line)
 
-	# Emit straight-line bindings and release live owners at the return.
+	# Lower statements that bind a value, call a void function, or store a byte.
+	def statement(self, node: Node) -> None:
+		statement = form(node)
+		# Store directly into the mutable view's backing storage.
+		if statement.tag == "slice.store":
+			target, subscript, operand = form(statement, arity=3).operands
+			view = self.slice(target, node.line, writable=True)
+			index = self.typed(subscript, I32)
+			value = self.typed(operand, U8)
+			self.lines.append(
+				f"    wvrt_slice_store_u8({view.c}.wvrt_items, {view.c}.wvrt_length, "
+				f"{index.c}, {value.c}, {self.site(node.line)});"
+			)
+			return
+
+		# Calls used as statements complete without a result.
+		if statement.tag == "call":
+			self.typed(statement, VOID)
+			return
+
+		# Every other statement in the seed introduces a binding.
+		if statement.tag not in ("let", "let-mut"):
+			raise SourceError(node.line)
+		name, initializer = form(statement, arity=2).operands
+		symbol = identifier(name)
+		# A duplicate name would hide the original owner or parameter.
+		if symbol in self.bindings:
+			raise SourceError(name.line)
+		value = self.expression(initializer)
+		# A binding needs a value to own or copy.
+		if value.kind == VOID:
+			raise SourceError(initializer.line)
+		self.bindings[symbol] = Binding(value, writable=statement.tag == "let-mut")
+
+	# Emit a straight-line body and release its owners before leaving the function.
 	def emit(self) -> list[str]:
 		body = self.function.body
-		# A straight-line function ends with an explicit return.
-		if not body.operands:
-			raise SourceError(body.line)
+		statements = body.operands
+		result = None
+		# Scalar functions end in a return, while void functions fall through.
+		if self.function.result != VOID:
+			# The body must supply a return operand.
+			if not statements:
+				raise SourceError(body.line)
+			*statements, last = statements
+			result, = form(last, "return", 1).operands
+
 		self.lines.append(signature(self.function) + " {")
-
-		*statements, last = body.operands
-		# Introduce each binding after evaluating its initializer.
+		# Evaluate statements in source order while their locals remain in scope.
 		for node in statements:
-			statement = form(node, arity=2)
-			# Only bindings may precede the return in this subset.
-			if statement.tag not in ("let", "let-mut"):
-				raise SourceError(node.line)
-			name, initializer = statement.operands
-			symbol = identifier(name)
-			# A duplicate name would hide the original owner or parameter.
-			if symbol in self.bindings:
-				raise SourceError(name.line)
-			value = self.expression(initializer)
-			self.bindings[symbol] = Binding(value, writable=statement.tag == "let-mut")
-
-		result, = form(last, "return", 1).operands
-		value = self.i32(result)
+			self.statement(node)
+		value = self.typed(result, self.function.result) if result is not None else None
 		# Release owners in reverse declaration order after evaluating the result.
 		for binding in reversed(self.bindings.values()):
 			# The last owner is responsible for the release.
 			if binding.value.kind == OWNED and not binding.moved:
 				self.lines.append(f"    wvrt_array_drop({binding.value.c});")
-		self.lines.extend([f"    return {value.c};", "}", ""])
+		# A scalar result is ready to return after cleanup.
+		if value is not None:
+			self.lines.append(f"    return {value.c};")
+		self.lines.extend(["}", ""])
 		return self.lines
 
 

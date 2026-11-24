@@ -37,6 +37,22 @@ check_rejected() {
 	diff -u "$build/expected.stderr" "$build/rejected.stderr"
 }
 
+# A bounds failure must report the runtime trap at the specified access.
+check_bounds_trap() {
+	fixture=$1
+	line=$2
+	program=$3
+	status=0
+	"$program" 2> "$build/trap.stderr" || status=$?
+	# A successful exit cannot satisfy a runtime trap expectation.
+	if [ "$status" -eq 0 ]; then
+		printf '%s completed, expected a bounds trap\n' "$program" >&2
+		exit 1
+	fi
+	printf '%s:%s:1: runtime error: slice index out of bounds\n' "$fixture" "$line" > "$build/expected.stderr"
+	diff -u "$build/expected.stderr" "$build/trap.stderr"
+}
+
 # Evaluate the fixture list supplied by Make.
 while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 	# Allow blank lines and comments between cases.
@@ -72,6 +88,10 @@ while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 		# Check that the source fails on the specified line.
 		reject)
 			check_rejected "$fixtures/$source" "$expected"
+			;;
+		# Check the exact diagnostic from a runtime bounds trap.
+		bounds-trap)
+			check_bounds_trap "$fixtures/$source" "$expected" "$program"
 			;;
 		# Reject unknown modes so every listed fixture is exercised.
 		*)
