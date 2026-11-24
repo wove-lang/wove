@@ -260,7 +260,7 @@ def check_modules(executable, directory, manifest):
 				compare_form_parts(view, nodes, parts, form)
 
 
-# Compare emitted C and exercise its executable or full-width return value.
+# Compare emitted C and exercise its executable or a native scalar probe.
 def check_compilations(executable, directory, manifest, clang):
 	source = directory / "compile-input.wove"
 	generated = directory / "emitted.c"
@@ -283,15 +283,18 @@ def check_compilations(executable, directory, manifest, clang):
 
 		generated.write_bytes(emitted)
 		command = [*clang, str(generated), "-o", str(program)]
-		# Keep the exit-status fixture's actual C main and expose full i32 values through the probe.
-		if mode == "value":
+		# Rename the emitted entry when a native probe needs its own main.
+		if mode == "probe":
+			probe, value = value.split(maxsplit=1)
+			command.extend(("-Dmain=wove_emitted_main", probe))
+		elif mode == "value":
 			command.extend(("-Dmain=wove_emitted_main", str(harness)))
 		else:
 			assert mode == "exit", label
 		subprocess.run(command, check=True, timeout=30)
 		result = subprocess.run([program], capture_output=True, check=False, timeout=30)
 		assert not result.stderr, (label, result.stderr)
-		if mode == "value":
+		if mode in ("value", "probe"):
 			assert result.returncode == 0 and result.stdout == (value + "\n").encode(), (label, result)
 		else:
 			assert result.returncode == int(value) and not result.stdout, (label, result)
