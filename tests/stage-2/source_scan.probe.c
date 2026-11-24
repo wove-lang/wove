@@ -8,26 +8,27 @@
 #include <string.h>
 
 #define main wove_fixture_main
-#include "source_scan.c"
+#include "wovec.c"
 #undef main
 
 // Match the seed's generated names to the scanner declarations.
-#define source_offset wv_seed_fn_4
-#define source_kind wv_seed_fn_5
-#define scan_token wv_seed_fn_12
-#define admit_source wv_seed_fn_16
-#define source_diagnostic wv_seed_fn_18
-#define source_position wv_seed_fn_19
-#define check_source_form wv_seed_fn_23
-#define build_source_tree wv_seed_fn_28
-#define check_source_metadata wv_seed_fn_37
-#define render_source_tree wv_seed_fn_39
+#define source_offset wv_seed_fn_5
+#define source_kind wv_seed_fn_6
+#define scan_token wv_seed_fn_13
+#define admit_source wv_seed_fn_17
+#define source_diagnostic wv_seed_fn_19
+#define source_position wv_seed_fn_20
+#define check_source_form wv_seed_fn_24
+#define build_source_tree wv_seed_fn_29
+#define check_source_metadata wv_seed_fn_38
+#define render_source_tree wv_seed_fn_40
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
 typedef wv_seed_record_4 SourceNode;
 typedef wv_seed_record_5 RenderResult;
 
+_Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
 _Static_assert(_Generic(&source_kind, uint32_t (*)(wvrt_slice): 1, default: 0), "source kind type");
 _Static_assert(_Generic(&scan_token, Token (*)(wvrt_slice, int32_t): 1, default: 0), "scan token type");
@@ -563,5 +564,5 @@ int main(int argc, char **argv) {
 	wvrt_slice contiguous_atom = {nonseparators, sizeof(nonseparators), sizeof(uint8_t)};
 	check_tokens("BOM and adjacent non-whitespace", contiguous_atom,
 		nonseparator_tokens, sizeof(nonseparator_tokens) / sizeof(nonseparator_tokens[0]));
-	return wove_fixture_main();
+	return EXIT_SUCCESS;
 }
