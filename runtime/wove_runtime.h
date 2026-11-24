@@ -28,6 +28,11 @@ typedef struct WvrtArray {
 typedef struct { const void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size; } wvrt_slice;
 typedef struct { void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size; } wvrt_mut_slice;
 
+// Reborrow the same byte range with read-only access.
+static inline wvrt_slice wvrt_share_mut_slice(wvrt_mut_slice wvrtview) {
+	return (wvrt_slice){wvrtview.wvrt_items, wvrtview.wvrt_length, wvrtview.wvrt_element_size};
+}
+
 wvrt_array *wvrt_array_new(int32_t wvrt_length, size_t wvrt_element_size,
 	size_t wvrt_element_alignment, wvrt_location wvrt_site);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
@@ -40,6 +45,8 @@ uint8_t wvrt_slice_load_u8_at_span(wvrt_slice wvrt_view, int32_t wvrt_index,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_slice_store_u8(void *wvrt_items, int32_t wvrt_length, int32_t wvrt_index,
 	uint8_t wvrt_value, wvrt_location wvrt_site);
+void wvrt_slice_store_u8_at_span(wvrt_mut_slice wvrt_view, int32_t wvrt_index, uint8_t wvrt_value,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int64_t wvrt_int_convert(int64_t wvrt_value, int64_t wvrt_min, int64_t wvrt_max,
 	wvrt_location wvrt_site);
 uint8_t wvrt_int_to_u8(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
