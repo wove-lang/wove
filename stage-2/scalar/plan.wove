@@ -4,8 +4,10 @@
 	(:doc `Resolve selected scalar functions and calls before C emission.
 
 	Collect signatures first, then check each body in source order against
-	the function signatures and bindings visible at each statement. Function rows keep original declaration
-	and name nodes. Checked call rows keep the callee row independently of
+	the function signatures and bindings visible at each statement. Track
+	whether statements can reach their next sibling across scoped branches.
+	Function rows retain their original declaration and name nodes. Checked
+	call rows keep the callee row independently of
 	the name that will be used in C, and are indexed by original call node.
 	Retain source-level call sites before either inspection or lowering.`)
 	scalar_plan
@@ -15,6 +17,7 @@
 	(use wove-file "../source/paths.wove" (only same_bytes))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
+	(use wove-file "./flow.wove" (only arm_statement after_arm (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar binary_result_type
 			(type EntryRead) (type StatementRead)))
@@ -26,13 +29,6 @@
 	(struct ScalarParameter (fields (name i32) (type u32) (position i32)))
 	(struct ScalarExpression
 		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool)))
-	(struct
-		(:doc `A checked statement and its value type, indexed by the original statement row.
-
-		The target is the defining name node for a declaration or assignment.
-		A return has no target.`)
-		ScalarStatement
-		(fields (kind u32) (target i32) (value i32) (type u32)))
 	(struct ScalarSignature (fields (params i32) (result u32) (first_statement i32) (start i32) (end i32) (error u32)))
 
 	(struct
@@ -423,29 +419,50 @@
 				(borrow-shared (local parameters)) (local start) (i32.add.wrapping (local start) (record.get (local caller) arity))))))
 
 	(fn
-		(:doc `Find a local declaration among the already checked statements in this function.`)
+		(:doc `Find the nearest declaration visible before a statement.
+
+		Search earlier siblings in the current block. At an arm boundary,
+		resume before the enclosing if in its parent block. Every source
+		statement appears after its previous siblings in the node table.`)
 		find_local
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (statements (shared-slice ScalarStatement))
-			(first i32) (limit i32) (name SourceNode))
+			(first i32) (statement i32) (name SourceNode))
 		(returns i32)
 		(body
-			(let-mut index (local first))
+			(let outer (record.get (slice.load (local nodes) (local first)) parent))
+			(let-mut limit (local statement))
 			(while
-				(:doc "Stop before the current statement so its initializer cannot see its own binding.")
-				(i32.lt (local index) (local limit))
+				(:doc "One search interval covers the visible declarations of one scope.")
+				(bool.not (i32.lt (local limit) (i32 0)))
 				(body
-					(let statement (slice.load (local statements) (local index)))
-					(let kind (record.get (local statement) kind))
+					(let block (record.get (slice.load (local nodes) (local limit)) parent))
+					(let top (i32.eq (local block) (local outer)))
+					(let-mut index (local first))
 					(if
-						(:doc "Let and let-mut introduce names. Assignments only use them.")
-						(bool.or (u32.eq (local kind) (u32 15)) (u32.eq (local kind) (u32 16)))
-						(then
-							(let declaration (slice.load (local nodes) (record.get (local statement) target)))
+						(:doc "A nested arm starts after its head and metadata.")
+						(bool.not (local top))
+						(then (set (local index) (record.get (slice.load (local statements) (local block)) first))))
+					(while
+						(:doc "Stop before the current statement or the if that enters the inner scope.")
+						(i32.lt (local index) (local limit))
+						(body
+							(let checked (slice.load (local statements) (local index)))
+							(let kind (record.get (local checked) kind))
 							(if
-								(:doc "Compare the original identifier bytes in the local namespace.")
-								(call same_name (borrow-shared (local source)) (local declaration) (local name))
-								(then (return (local index))))))
-					(set (local index) (record.get (slice.load (local nodes) (local index)) next_sibling))))
+								(:doc "Only let and let-mut introduce names.")
+								(bool.or (u32.eq (local kind) (u32 15)) (u32.eq (local kind) (u32 16)))
+								(then
+									(let declaration (slice.load (local nodes) (record.get (local checked) target)))
+									(if
+										(:doc "Compare the original identifier bytes in this scope.")
+										(call same_name (borrow-shared (local source)) (local declaration) (local name))
+										(then (return (local index))))))
+							(set (local index) (record.get (slice.load (local nodes) (local index)) next_sibling))))
+					(if
+						(:doc "Parameters are resolved separately once all statement scopes have been searched.")
+						(local top)
+						(then (return (i32 -1))))
+					(set (local limit) (record.get (slice.load (local nodes) (local block)) parent))))
 			(return (i32 -1))))
 
 	(fn
@@ -514,7 +531,7 @@
 		(:doc `Check a declaration name or identify the binding written by an assignment.
 
 		Return the declaration's name node for let or let-mut and the checked
-		statement row for set. Return has no binding.`)
+		statement row for set. Return and if have no binding.`)
 		check_statement_binding
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(parameters (shared-slice ScalarParameter)) (statements (shared-slice ScalarStatement))
@@ -524,7 +541,7 @@
 			(let kind (record.get (local statement) kind))
 			(let operand (record.get (local statement) binding))
 			(if
-				(:doc "Return has no binding operand or target.")
+				(:doc "A return or if has no binding operand or target.")
 				(i32.lt (local operand) (i32 0))
 				(then (return (call entry_at (slice.load (local nodes) (local index)) (i32 -1) (u32 0)))))
 			(let assigning (u32.eq (local kind) (u32 17)))
@@ -558,9 +575,16 @@
 				(bool.not (i32.lt (local binding) (i32 0)))
 				(then
 					(if
-						(:doc "The seed rejects shadowing in a single function scope.")
+						(:doc "A declaration can shadow an outer binding. Two declarations in the same block conflict.")
 						(bool.not (local assigning))
-						(then (return (call entry_at (local name) (i32 -1) (u32 33)))))
+						(then
+							(let prior (slice.load (local nodes) (local binding)))
+							(let here (slice.load (local nodes) (local index)))
+							(if
+								(:doc "Preserve the later declaration's name span when their scopes coincide.")
+								(i32.eq (record.get (local prior) parent) (record.get (local here) parent))
+								(then (return (call entry_at (local name) (i32 -1) (u32 33)))))
+							(return (call entry_at (local name) (local name_index) (u32 0)))))
 					(let target (slice.load (local statements) (local binding)))
 					(if
 						(:doc "Only a let-mut binding accepts a write.")
@@ -570,14 +594,19 @@
 			(let parameter (call find_function_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (borrow-shared (local parameters)) (local name)))
 			(if
-				(:doc "Parameters participate in the same namespace and are immutable.")
+				(:doc "A parameter is immutable and shares the outermost scope with the function body.")
 				(bool.not (i32.lt (local parameter) (i32 0)))
 				(then
 					(if
 						(:doc "Report an attempted parameter write at the reference name.")
 						(local assigning)
 						(then (return (call entry_at (local name) (i32 -1) (u32 37)))))
-					(return (call entry_at (local name) (i32 -1) (u32 33)))))
+					(let first (slice.load (local nodes) (record.get (local caller) first_statement)))
+					(let here (slice.load (local nodes) (local index)))
+					(if
+						(:doc "Only a declaration directly in the function body conflicts with its parameter.")
+						(i32.eq (record.get (local first) parent) (record.get (local here) parent))
+						(then (return (call entry_at (local name) (i32 -1) (u32 33)))))))
 			(if
 				(:doc "A write cannot introduce a binding.")
 				(local assigning)
@@ -847,10 +876,200 @@
 			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
 
 	(fn
-		(:doc `Check the statements of every selected function and collect their resolved calls.
+		(:doc `Check the required then arm and optional else arm before typing the condition.`)
+		plan_if_arms
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (statements (mut-slice ScalarStatement))
+			(node SourceNode) (condition i32))
+		(returns EntryRead)
+		(body
+			(let consequent (record.get (slice.load (local nodes) (local condition)) next_sibling))
+			(if
+				(:doc "An if needs a then arm after its condition.")
+				(i32.lt (local consequent) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let then_node (slice.load (local nodes) (local consequent)))
+			(let then_arm (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local then_node) (u32 23) (u32 24)))
+			(if
+				(:doc "Keep the original then-arm form or metadata diagnostic.")
+				(u32.lt (u32 0) (record.get (local then_arm) error))
+				(then (return (local then_arm))))
+			(slice.store (local statements) (local consequent)
+				(call arm_statement (record.get (local then_arm) operand) (bool true)))
+			(let alternate (record.get (local then_node) next_sibling))
+			(if
+				(:doc "An explicit else must be the final arm and supplies its own first statement.")
+				(bool.not (i32.lt (local alternate) (i32 0)))
+				(then
+					(let else_node (slice.load (local nodes) (local alternate)))
+					(let else_arm (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local else_node) (u32 24) (u32 24)))
+					(if
+						(:doc "Keep the original else-arm form or metadata diagnostic.")
+						(u32.lt (u32 0) (record.get (local else_arm) error))
+						(then (return (local else_arm))))
+					(let extra (record.get (local else_node) next_sibling))
+					(if
+						(:doc "Point at the first operand beyond the optional else.")
+						(bool.not (i32.lt (local extra) (i32 0)))
+						(then (return (call entry_at (slice.load (local nodes) (local extra)) (i32 -1) (u32 24)))))
+					(slice.store (local statements) (local alternate)
+						(call arm_statement (record.get (local else_arm) operand) (bool true)))))
+			(return (call entry_at (local node) (local consequent) (u32 0)))))
 
-		Start with zeroed plan storage. A new binding becomes visible after
-		its initializer has been checked. Read the returned call-site count
+	(fn
+		(:doc `Check a statement and its value, then publish its row and append any calls.`)
+		plan_statement
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction) (index i32)
+			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
+			(bindings (shared-slice GraphBinding)) (statements (mut-slice ScalarStatement))
+			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (site_count i32) (view_start i32))
+		(returns BodyPlan)
+		(body
+			(let node (slice.load (local nodes) (local index)))
+			(let statement (call read_statement (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(if
+				(:doc "Keep the originating form or operand span for malformed statements.")
+				(u32.lt (u32 0) (record.get (local statement) error))
+				(then (return (call body_error (local caller) (record.get (local statement) start)
+					(record.get (local statement) end) (record.get (local statement) error)))))
+			(let binding (call check_statement_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local caller) (borrow-shared (local parameters)) (borrow-shared (local statements))
+				(local index) (local statement)))
+			(if
+				(:doc "Preserve the original declaration or assignment target diagnostic.")
+				(u32.lt (u32 0) (record.get (local binding) error))
+				(then (return (call body_error (local caller) (record.get (local binding) start)
+					(record.get (local binding) end) (record.get (local binding) error)))))
+			(let kind (record.get (local statement) kind))
+			(let value (record.get (local statement) value))
+			(let-mut first (i32 -1))
+			(let-mut target (record.get (local binding) operand))
+			(let-mut type (u32 5))
+			(if
+				(:doc "An assignment uses the exact type and name of the binding checked earlier.")
+				(u32.eq (local kind) (u32 17))
+				(then
+					(let declaration (slice.load (local statements) (local target)))
+					(set (local type) (record.get (local declaration) type))
+					(set (local target) (record.get (local declaration) target))))
+			(if
+				(:doc "A return uses the function's exact declared type.")
+				(u32.eq (local kind) (u32 7))
+				(then (set (local type) (record.get (local caller) result))))
+			(if
+				(:doc "Confirm the two arm positions and check the condition as bool.")
+				(u32.eq (local kind) (u32 22))
+				(then
+					(let arms (call plan_if_arms (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-mut (local statements)) (local node) (local value)))
+					(if
+						(:doc "Keep the branch syntax diagnostic at its originating form.")
+						(u32.lt (u32 0) (record.get (local arms) error))
+						(then (return (call body_error (local caller) (record.get (local arms) start)
+							(record.get (local arms) end) (record.get (local arms) error)))))
+					(set (local first) (record.get (local arms) operand))
+					(set (local type) (u32 12))))
+			(let checked (call plan_value (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local caller) (local value) (local type) (local index) (borrow-shared (local functions))
+				(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local statements))
+				(borrow-mut (local expressions)) (borrow-mut (local sites)) (local site_count) (local view_start)))
+			(if
+				(:doc "Abort before publishing a binding whose value fails checking.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (local checked))))
+			(slice.store (local statements) (local index)
+				(record.make ScalarStatement (kind (local kind)) (target (local target)) (value (local value))
+					(type (record.get (slice.load (local expressions) (local value)) type))
+					(first (local first)) (falls_through (bool.not (u32.eq (local kind) (u32 7))))))
+			(return (local checked))))
+
+	(fn
+		(:doc `Check one function in source order and merge each if's return paths after its arms.
+
+		The source links identify which block owns each declaration.
+		Remember the then result while checking an explicit else. An
+		omitted else always reaches the join.`)
+		plan_function_body
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
+			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
+			(bindings (shared-slice GraphBinding)) (statements (mut-slice ScalarStatement))
+			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (site_start i32) (view_start i32))
+		(returns BodyPlan)
+		(body
+			(let-mut site_count (local site_start))
+			(let-mut index (record.get (local caller) first_statement))
+			(let outer (record.get (slice.load (local nodes) (local index)) parent))
+			(let-mut block (local outer))
+			(let-mut falls_through (bool true))
+			(while
+				(:doc "Visit remaining statements or leave nested arms until the function body is complete.")
+				(bool.or (bool.not (i32.lt (local index) (i32 0))) (bool.not (i32.eq (local block) (local outer))))
+				(body
+					(if
+						(:doc "At the end of an arm, either enter the else or join and resume in the parent.")
+						(i32.lt (local index) (i32 0))
+						(then
+							(let exit (call after_arm (borrow-shared (local nodes)) (local block)))
+							(let next_arm (record.get (local exit) next_arm))
+							(if
+								(:doc "Retain the then result while checking the else in its own scope.")
+								(bool.not (i32.lt (local next_arm) (i32 0)))
+								(then
+									(let arm (slice.load (local statements) (local block)))
+									(slice.store (local statements) (local block)
+										(call arm_statement (record.get (local arm) first) (local falls_through)))
+									(set (local block) (local next_arm))
+									(set (local index) (record.get (slice.load (local statements) (local block)) first))
+									(set (local falls_through) (bool true)))
+								(else
+									(let branch (slice.load (local statements) (record.get (local exit) branch)))
+									(let consequent (record.get (local branch) first))
+									(set (local falls_through)
+										(bool.or (local falls_through)
+											(bool.or (i32.eq (local block) (local consequent))
+												(record.get (slice.load (local statements) (local consequent)) falls_through))))
+									(set (local block) (record.get (local exit) block))
+									(set (local index) (record.get (local exit) statement)))))
+						(else
+							(let node (slice.load (local nodes) (local index)))
+							(if
+								(:doc "An exhaustive return leaves the following statement unreachable.")
+								(bool.not (local falls_through))
+								(then (return (call body_error (local caller) (record.get (local node) start)
+									(record.get (local node) end) (u32 24)))))
+							(let checked (call plan_statement (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local caller) (local index) (borrow-shared (local functions)) (borrow-shared (local parameters))
+								(borrow-shared (local bindings)) (borrow-mut (local statements)) (borrow-mut (local expressions))
+								(borrow-mut (local sites)) (local site_count) (local view_start)))
+							(if
+								(:doc "Stop before planning any statements past the originating error.")
+								(u32.lt (u32 0) (record.get (local checked) error))
+								(then (return (local checked))))
+							(set (local site_count) (record.get (local checked) count))
+							(let statement (slice.load (local statements) (local index)))
+							(set (local falls_through) (record.get (local statement) falls_through))
+							(let first (record.get (local statement) first))
+							(if
+								(:doc "A branch starts at its then arm. Scalar statements continue at their sibling.")
+								(i32.lt (local first) (i32 0))
+								(then (set (local index) (record.get (local node) next_sibling)))
+								(else
+									(set (local block) (local first))
+									(set (local index) (record.get (slice.load (local statements) (local block)) first))))))))
+			(if
+				(:doc "Every path through a value-returning body must return.")
+				(local falls_through)
+				(then
+					(let node (slice.load (local nodes) (local outer)))
+					(return (call body_error (local caller) (record.get (local node) start)
+						(record.get (local node) end) (u32 24)))))
+			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+
+	(fn
+		(:doc `Check each selected function and retain the resolved calls in source order.
+
+		Start with zeroed plan storage. Read the returned call-site count
 		only on success. Use zero view start for an arena of whole source files.`)
 		plan_bodies
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
@@ -862,66 +1081,17 @@
 			(let-mut site_count (i32 0))
 			(let-mut function (i32 0))
 			(while
-				(:doc "Each function owns one straight-line body with a terminal return.")
+				(:doc "Each function has its own block scopes and a checked path to return.")
 				(i32.lt (local function) (slice.len (local functions)))
 				(body
-					(let caller (slice.load (local functions) (local function)))
-					(let-mut index (record.get (local caller) first_statement))
-					(let body_node (slice.load (local nodes) (record.get (slice.load (local nodes) (local index)) parent)))
-					(let-mut returned (bool false))
-					(while
-						(:doc "Check statement operands against the bindings established by earlier statements.")
-						(bool.not (i32.lt (local index) (i32 0)))
-						(body
-							(let node (slice.load (local nodes) (local index)))
-							(let statement (call read_statement (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-							(if
-								(:doc "Keep the originating form or operand span for malformed statements.")
-								(u32.lt (u32 0) (record.get (local statement) error))
-								(then (return (call body_error (local caller) (record.get (local statement) start)
-									(record.get (local statement) end) (record.get (local statement) error)))))
-							(let binding (call check_statement_binding (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local caller) (borrow-shared (local parameters)) (borrow-shared (local statements))
-								(local index) (local statement)))
-							(if
-								(:doc "Preserve the original declaration or assignment target diagnostic.")
-								(u32.lt (u32 0) (record.get (local binding) error))
-								(then (return (call body_error (local caller) (record.get (local binding) start)
-									(record.get (local binding) end) (record.get (local binding) error)))))
-							(let kind (record.get (local statement) kind))
-							(let value (record.get (local statement) value))
-							(let-mut target (record.get (local binding) operand))
-							(let-mut type (u32 5))
-							(if
-								(:doc "An assignment uses the exact type and name of the binding checked earlier.")
-								(u32.eq (local kind) (u32 17))
-								(then
-									(let declaration (slice.load (local statements) (local target)))
-									(set (local type) (record.get (local declaration) type))
-									(set (local target) (record.get (local declaration) target))))
-							(if
-								(:doc "The return uses the function's exact declared type.")
-								(u32.eq (local kind) (u32 7))
-								(then
-									(set (local type) (record.get (local caller) result))
-									(set (local returned) (bool true))))
-							(let checked (call plan_value (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local caller) (local value) (local type) (local index) (borrow-shared (local functions))
-								(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local statements))
-								(borrow-mut (local expressions)) (borrow-mut (local sites)) (local site_count) (local view_start)))
-							(if
-								(:doc "Abort before publishing a binding whose value fails checking.")
-								(u32.lt (u32 0) (record.get (local checked) error))
-								(then (return (local checked))))
-							(set (local site_count) (record.get (local checked) count))
-							(slice.store (local statements) (local index)
-								(record.make ScalarStatement (kind (local kind)) (target (local target)) (value (local value))
-									(type (record.get (slice.load (local expressions) (local value)) type))))
-							(set (local index) (record.get (local node) next_sibling))))
+					(let checked (call plan_function_body (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local functions) (local function)) (borrow-shared (local functions))
+						(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-mut (local statements))
+						(borrow-mut (local expressions)) (borrow-mut (local sites)) (local site_count) (local view_start)))
 					(if
-						(:doc "A body that falls through has no value for its declared result.")
-						(bool.not (local returned))
-						(then (return (call body_error (local caller) (record.get (local body_node) start)
-							(record.get (local body_node) end) (u32 24)))))
+						(:doc "Report the earliest rejected body with the original file and span.")
+						(u32.lt (u32 0) (record.get (local checked) error))
+						(then (return (local checked))))
+					(set (local site_count) (record.get (local checked) count))
 					(set (local function) (i32.add.wrapping (local function) (i32 1)))))
 			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0)))))))

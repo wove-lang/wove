@@ -16,7 +16,7 @@ SOURCE_MODULE_READER := stage-2/source/module.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
 SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove
 C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove emit/graph.wove emit/names.wove emit/text.wove \
-	scalar/syntax.wove scalar/plan.wove scalar/graph.wove)
+	scalar/syntax.wove scalar/flow.wove scalar/plan.wove scalar/graph.wove)
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv

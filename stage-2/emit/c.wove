@@ -11,8 +11,9 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only (type ModuleRead) (type SelectedDeclaration)))
+	(use wove-file "../scalar/flow.wove" (only after_arm (type ScalarStatement)))
 	(use wove-file "../scalar/plan.wove"
-		(only read_functions plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type ScalarStatement) (type CallSite)))
+		(only read_functions plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
 	(use wove-file "../scalar/syntax.wove" (only binary_result_type))
 	(use wove-file "./text.wove" (only c_byte c_text_fragment c_type_text c_cast c_i32_bias write_c_name c_decimal_digits
 			function_name_role parameter_name_role local_name_role temporary_name_role))
@@ -303,25 +304,38 @@
 			(let kind (record.get (local statement) kind))
 			(let target (record.get (local statement) target))
 			(let declaring (bool.or (u32.eq (local kind) (u32 15)) (u32.eq (local kind) (u32 16))))
+			(let conditional (u32.eq (local kind) (u32 22)))
 			(if
-				(:doc "Returns write their keyword. Other statements write the checked destination.")
-				(u32.eq (local kind) (u32 7))
+				(:doc "An if starts after its condition temporaries have been evaluated.")
+				(local conditional)
 				(then
-					(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 3) (local writing))))
+					(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 6) (local writing))))
 				(else
 					(if
-						(:doc "A declaration uses the exact fixed-width type of its checked initializer.")
-						(local declaring)
+						(:doc "Returns write their keyword. Other statements write the checked destination.")
+						(u32.eq (local kind) (u32 7))
 						(then
-							(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor)
-								(record.get (local value) type) (local writing)))
-							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))))
-					(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local target) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
-					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))))
+							(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 3) (local writing))))
+						(else
+							(if
+								(:doc "A declaration uses the exact fixed-width type of its checked initializer.")
+								(local declaring)
+								(then
+									(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor)
+										(record.get (local value) type) (local writing)))
+									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))))
+							(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local target) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))))))
 			(set (local cursor) (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local value) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(if
+				(:doc "Close the condition and open the then scope before emitting its statements.")
+				(local conditional)
+				(then
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 123) (local writing)))))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
 			(if
 				(:doc "A binding can be unused. A standard C void cast suppresses the warning.")
@@ -382,6 +396,57 @@
 			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))))
 
 	(fn
+		(:doc `Write nested statements and open and close each arm at its checked source-tree boundaries.`)
+		write_body
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function ScalarFunction)
+			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
+			(statements (shared-slice ScalarStatement)) (expressions (shared-slice ScalarExpression))
+			(output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(let-mut index (record.get (local function) first_statement))
+			(let outer (record.get (slice.load (local nodes) (local index)) parent))
+			(let-mut block (local outer))
+			(while
+				(:doc "Continue through statements and leave nested arms until the outer body ends.")
+				(bool.or (bool.not (i32.lt (local index) (i32 0))) (bool.not (i32.eq (local block) (local outer))))
+				(body
+					(if
+						(:doc "End an arm even when it is empty or ends in a return.")
+						(i32.lt (local index) (i32 0))
+						(then
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
+							(let exit (call after_arm (borrow-shared (local nodes)) (local block)))
+							(let alternate (record.get (local exit) next_arm))
+							(if
+								(:doc "An explicit else starts a fresh C block. Otherwise resume at the parent statement's sibling.")
+								(i32.lt (local alternate) (i32 0))
+								(then
+									(set (local block) (record.get (local exit) block))
+									(set (local index) (record.get (local exit) statement)))
+								(else
+									(set (local cursor) (call c_text_fragment
+										(borrow-mut (local output)) (local cursor) (u32 7) (local writing)))
+									(set (local block) (local alternate))
+									(set (local index) (record.get (slice.load (local statements) (local block)) first)))))
+						(else
+							(let statement (slice.load (local statements) (local index)))
+							(set (local cursor) (call write_statement (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local statement) (record.get (local function) tree_base)
+								(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local expressions))
+								(borrow-mut (local output)) (local cursor) (local writing)))
+							(let first (record.get (local statement) first))
+							(if
+								(:doc "A checked if opens its then block. Other statements continue in the current block.")
+								(i32.lt (local first) (i32 0))
+								(then (set (local index) (record.get (slice.load (local nodes) (local index)) next_sibling)))
+								(else
+									(set (local block) (local first))
+									(set (local index) (record.get (slice.load (local statements) (local block)) first))))))))
+			(return (local cursor))))
+
+	(fn
 		(:doc `Write a checked function definition and its statements in source order.`)
 		write_definition
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function ScalarFunction)
@@ -405,16 +470,10 @@
 						(borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
-			(set (local index) (record.get (local function) first_statement))
-			(while
-				(:doc "The checked statement rows follow the body's original sibling links.")
-				(bool.not (i32.lt (local index) (i32 0)))
-				(body
-					(set (local cursor) (call write_statement (borrow-shared (local source)) (borrow-shared (local nodes))
-						(slice.load (local statements) (local index)) (record.get (local function) tree_base)
-						(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local expressions))
-						(borrow-mut (local output)) (local cursor) (local writing)))
-					(set (local index) (record.get (slice.load (local nodes) (local index)) next_sibling))))
+			(set (local cursor) (call write_body (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local function) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local statements)) (borrow-shared (local expressions))
+				(borrow-mut (local output)) (local cursor) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))))
 
@@ -432,7 +491,7 @@
 			(let first_statement (slice.load (local statements) (record.get (local first) first_statement)))
 			(let first_value (slice.load (local expressions) (record.get (local first_statement) value)))
 			(if
-				(:doc "Include fixed-width types for helpers, locals, or a wrapping expression in a lone return.")
+				(:doc "Include fixed-width types for helpers, compound bodies, or a wrapping expression in a lone return.")
 				(bool.or (i32.lt (i32 1) (local count))
 					(bool.or (bool.not (u32.eq (record.get (local first_statement) kind) (u32 7)))
 						(u32.eq (call binary_result_type (record.get (local first_value) kind)) (u32 5))))
@@ -486,6 +545,7 @@
 			(issue "https://github.com/wove-lang/wove/issues/69"))
 		(:expect bootstrap.i32_locals (issue "https://github.com/wove-lang/wove/issues/72"))
 		(:expect bootstrap.i32_operators (issue "https://github.com/wove-lang/wove/issues/73"))
+		(:expect bootstrap.scalar_if (issue "https://github.com/wove-lang/wove/issues/74"))
 		emit_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))

@@ -162,8 +162,8 @@ before the error. Earlier tree errors keep their original spans and codes.
 | 21 | Invalid selection directive | The offending directive or predicate |
 
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
-and the selected declaration indices. It checks straight-line scalar
-functions ending in a return. Helpers can accept and return `i32`, `u8`,
+and the selected declaration indices. It checks scalar functions that
+return a value on every path. Helpers can accept and return `i32`, `u8`,
 `u32`, and `bool`. Expressions support exact-type literals, binding reads,
 and direct calls. An `i32` local declared with `let` or `let-mut` comes
 into scope after its initializer. A `set` requires an existing `let-mut`
@@ -177,6 +177,14 @@ prototypes, and nested calls evaluate from left to right.
 result modulo 2^32. All four operators require two `i32` operands,
 each evaluated once, left to right. Emitted C widens the arithmetic,
 reduces it to 32 bits as unsigned, and produces an in-range signed result.
+
+A statement `(if condition (then ...) (else ...))` checks its condition
+as `bool` and executes only the selected arm. An omitted `else` falls
+through when the condition is false. Each arm starts its own scope and
+can read or assign visible outer bindings. A local can shadow an outer
+name after its initializer and stays in scope only within its arm.
+A return exits the function from either arm. When both arms return,
+the conditional is terminal.
 
 [FNV-1a](hashing/fnv1a.wove) exposes the 31-bit seed with `fnv1a_seed`
 and updates it one raw byte at a time with `fnv1a_byte`. The declaration
@@ -219,7 +227,7 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | 16 | Short C output view | The selected entry |
 | 22 | Missing entry or unsupported declaration | The module, first function name, or offending declaration |
 | 23 | Unsupported signature | The parameter list, result, or offending signature form |
-| 24 | Unsupported body or incompatible expression type | The offending statement or expression |
+| 24 | Invalid, unsupported, or unreachable body form, or incompatible expression type | The offending form or expression |
 | 25 | Invalid scalar literal | The value or malformed literal form |
 | 32 | Stable declaration identity collision | The later function name |
 | 33 | Duplicate function, parameter, or local | The later name |
