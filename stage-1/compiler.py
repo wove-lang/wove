@@ -72,10 +72,66 @@ class Function:
 	body: Form
 
 
-# Accept scalar inputs and the two byte slice parameter types.
-def parameter_type(node: Node) -> str:
-	# Scalar types are written as bare symbols.
-	if isinstance(node, Atom) and not node.quoted and node.text in SCALAR_TYPES:
+@dataclass(frozen=True)
+class RecordField:
+	kind: str
+	c_name: str
+
+
+@dataclass(frozen=True)
+class Record:
+	c_name: str
+	fields: dict[str, RecordField]
+
+
+# Scalars and scalar-only records can be passed without a loan or transfer.
+def copyable(kind: str, records: dict[str, Record]) -> bool:
+	return kind in SCALAR_TYPES or kind in records
+
+
+# Use the generated typedef for a record without changing its source type.
+def c_type(kind: str, records: dict[str, Record]) -> str:
+	record = records.get(kind)
+	return record.c_name if record is not None else C_TYPE[kind]
+
+
+# Collect scalar fields in declaration order for the record's native layout.
+def read_record(node: Form, index: int) -> tuple[str, Record]:
+	name_node, fields_node = form(node, "struct", 2).operands
+	name = identifier(name_node)
+	# Keep named records distinct from builtin value and loan types.
+	if name in C_TYPE:
+		raise SourceError(name_node.line)
+	fields = {}
+	# Only scalar fields participate in the seed's copyable record layout.
+	for field_index, field_node in enumerate(form(fields_node, "fields").operands):
+		field = form(field_node, arity=1)
+		kind_node, = field.operands
+		kind = identifier(kind_node)
+		# Every source field name selects exactly one member.
+		if field.tag in fields:
+			raise SourceError(field.line)
+		# Owning and borrowed fields require record lifetime rules beyond the seed.
+		if kind not in SCALAR_TYPES:
+			raise SourceError(kind_node.line)
+		fields[field.tag] = RecordField(kind, f"wv_field_{field_index}")
+	return name, Record(f"wv_seed_record_{index}", fields)
+
+
+# Give each named record a distinct C type with its fields in declaration order.
+def record_definition(record: Record) -> list[str]:
+	fields = [
+		f"    {C_TYPE[field.kind]} {field.c_name};"
+		for field in record.fields.values()
+	]
+	# C11 needs at least one member even when the Wove record has no fields.
+	return ["typedef struct {", *(fields or ["    uint8_t wv_empty;"]), f"}} {record.c_name};", ""]
+
+
+# Read a copyable input or one of the two byte slice parameter types.
+def parameter_type(node: Node, records: dict[str, Record]) -> str:
+	# Copyable types are written as bare symbols.
+	if isinstance(node, Atom) and not node.quoted and copyable(node.text, records):
 		return node.text
 	view = form(node, arity=1)
 	# Slice parameters specify their loan kind and byte element type.
@@ -105,7 +161,7 @@ def read_expectation(node: Node) -> Form:
 
 
 # Read the signature before lowering calls, including forward calls.
-def read_function(node: Node, index: int) -> tuple[str, Function]:
+def read_function(node: Node, index: int, records: dict[str, Record]) -> tuple[str, Function]:
 	declaration = form(node, "fn")
 	# Require the name, parameters, result, and body before unpacking.
 	if len(declaration.operands) < 4:
@@ -120,11 +176,11 @@ def read_function(node: Node, index: int) -> tuple[str, Function]:
 		# Each parameter introduces a distinct binding.
 		if field.tag in params:
 			raise SourceError(param.line)
-		params[field.tag] = parameter_type(field.operands[0])
+		params[field.tag] = parameter_type(field.operands[0], records)
 	result_node, = form(returns_node, "returns", 1).operands
 	result = identifier(result_node)
-	# Seed functions return a scalar or complete without a value.
-	if result != VOID and result not in SCALAR_TYPES:
+	# A function returns a copyable value or completes without a value.
+	if result != VOID and not copyable(result, records):
 		raise SourceError(result_node.line)
 	# Keep the C entry point on its existing zero-argument i32 ABI.
 	if name == "main" and (params or result != I32):
@@ -151,20 +207,23 @@ def c_string(text: str) -> str:
 
 
 # Give each parameter a C name independently of its source spelling.
-def signature(function: Function) -> str:
+def signature(function: Function, records: dict[str, Record]) -> str:
 	params = ", ".join(
-		f"{C_TYPE[kind]} wv_value_{index}"
+		f"{c_type(kind, records)} wv_value_{index}"
 		for index, (_, kind) in enumerate(function.params)
 	)
-	result = "int" if function.c_name == "main" else f"static {C_TYPE[function.result]}"
+	result = "int" if function.c_name == "main" else f"static {c_type(function.result, records)}"
 	return f"{result} {function.c_name}({params or 'void'})"
 
 
 class FunctionEmitter:
 	# Initialize the function scope, C names, and ownership state.
-	def __init__(self, function: Function, functions: dict[str, Function], source: str):
+	def __init__(
+		self, function: Function, functions: dict[str, Function], records: dict[str, Record], source: str
+	):
 		self.function = function
 		self.functions = functions
+		self.records = records
 		self.source = source
 		self.lines = []
 		self.scopes = [{
@@ -183,7 +242,7 @@ class FunctionEmitter:
 	def temporary(self, kind: str, expression: str) -> Value:
 		name = f"wv_value_{self.next_value}"
 		self.next_value += 1
-		self.emit_line(f"{C_TYPE[kind]} {name} = {expression};")
+		self.emit_line(f"{c_type(kind, self.records)} {name} = {expression};")
 		return Value(kind, name)
 
 	# Resolve a live place and report failures at the operation using it.
@@ -285,14 +344,14 @@ class FunctionEmitter:
 		values = []
 		# Each argument may acquire a loan that constrains later arguments.
 		for argument, (_, kind) in zip(args, callee.params):
-			value = self.typed(argument, kind) if kind in SCALAR_TYPES else self.borrow(argument, kind)
+			value = self.borrow(argument, kind) if kind in (SHARED, MUT) else self.typed(argument, kind)
 			values.append(value.c)
 		expression = f"{callee.c_name}({', '.join(values)})"
 		# A void call is a statement and supplies no C value to a consumer.
 		if callee.result == VOID:
 			self.emit_line(f"{expression};")
 			result = Value(VOID, "")
-		# Scalar calls capture their result before the next operation.
+		# Value-returning calls capture their result before the next operation.
 		else:
 			result = self.temporary(callee.result, expression)
 		del self.loans[checkpoint:]
@@ -313,6 +372,47 @@ class FunctionEmitter:
 		self.scopes.pop()
 		self.emit_line("}")
 		return result
+
+	# Evaluate field expressions in source order and assemble the named value.
+	def make_record(self, node: Form) -> Value:
+		# The constructor needs a type name before its field initializers.
+		if not node.operands:
+			raise SourceError(node.line)
+		name, *fields = node.operands
+		kind = identifier(name)
+		record = self.records.get(kind)
+		# Only a declared record has a usable member layout.
+		if record is None:
+			raise SourceError(name.line)
+		initializers = {}
+		# Resolve each initializer to its C member before evaluating its value.
+		for field_node in fields:
+			initializer = form(field_node, arity=1)
+			field = record.fields.get(initializer.tag)
+			# A constructor supplies each declared member exactly once.
+			if field is None or initializer.tag in initializers:
+				raise SourceError(field_node.line)
+			value = self.typed(initializer.operands[0], field.kind)
+			initializers[initializer.tag] = f".{field.c_name} = {value.c}"
+		# Require a complete record without implicit defaults for source fields.
+		if len(initializers) != len(record.fields):
+			raise SourceError(node.line)
+		values = ", ".join(initializers.values()) or "0"
+		return self.temporary(kind, f"({record.c_name}){{{values}}}")
+
+	# Read a scalar member from an evaluated record value.
+	def record_field(self, node: Form) -> Value:
+		target, name = form(node, arity=2).operands
+		value = self.expression(target)
+		record = self.records.get(value.kind)
+		# A field lookup needs the target's declared record type.
+		if record is None:
+			raise SourceError(target.line)
+		field = record.fields.get(identifier(name))
+		# The declared type determines both the field's presence and scalar type.
+		if field is None:
+			raise SourceError(name.line)
+		return self.temporary(field.kind, f"{value.c}.{field.c_name}")
 
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
@@ -378,11 +478,19 @@ class FunctionEmitter:
 			value = self.typed(target, U8)
 			return self.temporary(I32, f"(int32_t){value.c}")
 
-		# An ordinary value use copies a scalar binding.
+		# A record construction produces a new value of its declared type.
+		if expr.tag == "record.make":
+			return self.make_record(expr)
+
+		# A member access produces a copy of the declared scalar field.
+		if expr.tag == "record.get":
+			return self.record_field(expr)
+
+		# An ordinary value use copies a scalar or record binding.
 		if expr.tag == "local":
 			binding = self.local(expr, node.line)
 			# Array and slice places need an explicit operation.
-			if binding.value.kind not in SCALAR_TYPES:
+			if not copyable(binding.value.kind, self.records):
 				raise SourceError(node.line)
 			# Capture the value now even if a later statement writes to its slot.
 			if binding.writable:
@@ -470,7 +578,7 @@ class FunctionEmitter:
 		if self.function.result == VOID:
 			form(node, arity=0)
 			exit_line = "return;"
-		# Scalar expressions produce a value before their source scopes are dropped.
+		# Evaluate the result before dropping the scopes it can read.
 		else:
 			operand, = form(node, arity=1).operands
 			value = self.typed(operand, self.function.result)
@@ -605,19 +713,19 @@ class FunctionEmitter:
 		if value.kind == VOID:
 			raise SourceError(initializer.line)
 		writable = statement.tag == "let-mut"
-		# A mutable scalar needs a separate slot even when initialized from another local.
-		if writable and value.kind in SCALAR_TYPES:
+		# A mutable copyable binding needs its own slot.
+		if writable and copyable(value.kind, self.records):
 			value = self.temporary(value.kind, value.c)
 		scope[symbol] = Binding(value, writable=writable)
 		return True
 
-	# Emit the function and require a result from each scalar exit path.
+	# Emit the function and require a result from each value-returning exit path.
 	def emit(self) -> list[str]:
 		body = self.function.body
-		self.lines.append(signature(self.function) + " {")
+		self.lines.append(signature(self.function, self.records) + " {")
 		# A path reaching the end of the body may only exit a void function.
 		if self.statements(body.operands):
-			# A scalar result must be supplied by an explicit return.
+			# A result must be supplied by an explicit return.
 			if self.function.result != VOID:
 				raise SourceError(body.line)
 			self.cleanup(self.scopes)
@@ -672,10 +780,24 @@ def compile_source(source: str, filename: str) -> str:
 		raise SourceError(module.line)
 	identifier(module.operands[0])
 	declarations = tuple(selected_declarations(module.operands[1:]))
+	records = {}
+	function_declarations = []
+	# Collect all active record types before validating function signatures.
+	for node in declarations:
+		# The remaining declarations are checked as functions.
+		if node.tag != "struct":
+			function_declarations.append(node)
+			continue
+		name, record = read_record(node, len(records))
+		# A module has one layout for each named record.
+		if name in records:
+			raise SourceError(node.line)
+		records[name] = record
+
 	functions = {}
 	# Collect only selected signatures before translating any function body.
-	for index, node in enumerate(declarations):
-		symbol, function = read_function(node, index)
+	for index, node in enumerate(function_declarations):
+		symbol, function = read_function(node, index, records)
 		# A top-level name identifies exactly one function.
 		if symbol in functions:
 			raise SourceError(node.line)
@@ -685,10 +807,13 @@ def compile_source(source: str, filename: str) -> str:
 		raise SourceError(module.line)
 
 	lines = ['#include "wove_runtime.h"', ""]
-	lines.extend(signature(fn) + ";" for fn in functions.values())
+	# Define complete native layouts before functions use them by value.
+	for record in records.values():
+		lines.extend(record_definition(record))
+	lines.extend(signature(fn, records) + ";" for fn in functions.values())
 	lines.append("")
 	path = c_string(filename)
 	# Keep generated bodies in source order.
 	for fn in functions.values():
-		lines.extend(FunctionEmitter(fn, functions, path).emit())
+		lines.extend(FunctionEmitter(fn, functions, records, path).emit())
 	return "\n".join(lines)
