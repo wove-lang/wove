@@ -26,7 +26,8 @@ SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove st
 C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove emit/runtime.wove emit/graph.wove emit/names.wove emit/records.wove emit/text.wove \
 	scalar/syntax.wove scalar/flow.wove scalar/plan.wove scalar/graph.wove scalar/records.wove) $(DECIMAL_WRITER)
 HASHING_DIGITS := stage-2/hashing/digits.wove
-HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_DIGITS)
+HASHING_BITS := stage-2/hashing/bits.wove
+HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_DIGITS) $(HASHING_BITS)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
@@ -166,11 +167,12 @@ $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove stage-2/has
 	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
 
-# Base16 and Base32hex use the same ASCII digit mapping.
+# Track the shared hashing helpers used by the standalone fixtures.
+$(STAGE2)/hashing/fnv1a: $(HASHING_BITS)
 $(addprefix $(STAGE2)/hashing/,base16 base32hex): $(HASHING_DIGITS)
 
 # Build the standalone BLAKE2b Wove fixture and its manifest transport.
-$(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCES) $(HASHING_DIGITS) stage-2/hashing/fnv1a.wove $(BYTE_TEXT_MODULE) $(SEED)
+$(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCES) $(HASHING_DIGITS) $(HASHING_BITS) $(BYTE_TEXT_MODULE) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
