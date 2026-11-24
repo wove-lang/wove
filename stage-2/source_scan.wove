@@ -4,15 +4,15 @@
 (module source_scan
 	(struct Token (fields (kind u32) (start i32) (end i32)))
 
-	;; Recognize the four ASCII bytes skipped between serialized forms.
-	(fn is_whitespace
+	;; Match the seed's ASCII separators, U+0009–U+000D and U+001C–U+0020.
+	(fn is_ascii_whitespace
 		(params (byte u8))
 		(returns bool)
 		(body
-			;; Accept horizontal space and either byte in a line ending.
+			;; Test the two half-open ranges directly in the raw bytes.
 			(return (bool.or
-				(bool.or (u8.eq (local byte) (u8 32)) (u8.eq (local byte) (u8 9)))
-				(call is_line_ending (local byte))))))
+				(bool.and (bool.not (u8.lt (local byte) (u8 9))) (u8.lt (local byte) (u8 14)))
+				(bool.and (bool.not (u8.lt (local byte) (u8 28))) (u8.lt (local byte) (u8 33)))))))
 
 	;; Parentheses are both atom boundaries and one-byte tokens.
 	(fn is_parenthesis
@@ -39,10 +39,11 @@
 			(while (i32.lt (local cursor) (local end))
 				(body
 					(let byte (slice.load (local source) (local cursor)))
+					(let width (call whitespace_width (borrow-shared (local source)) (local cursor) (local byte)))
 					;; Preserve the offset of the first byte that can start a token.
-					(if (bool.not (call is_whitespace (local byte)))
+					(if (i32.eq (local width) (i32 0))
 						(then (return (local cursor))))
-					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))
 			(return (local cursor))))
 
 	;; Find the first significant byte or the end of this view.
@@ -80,17 +81,18 @@
 			(while (i32.lt (local cursor) (local length))
 				(body
 					(let byte (slice.load (local source) (local cursor)))
-					;; Leave the delimiter for the caller's next scan.
+					;; Stop before the first byte of any separator or token delimiter.
 					(if (bool.or
-							(call is_whitespace (local byte))
 							(bool.or
 								(call is_parenthesis (local byte))
-								(call is_semicolon_or_quote (local byte))))
+								(call is_semicolon_or_quote (local byte)))
+							(i32.lt (i32 0)
+								(call whitespace_width (borrow-shared (local source)) (local cursor) (local byte))))
 						(then (return (local cursor))))
 					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
 			(return (local cursor))))
 
-	;; Share the physical newline boundary between whitespace and comments.
+	;; Keep line comments bounded by physical CR and LF bytes.
 	(fn is_line_ending
 		(params (byte u8))
 		(returns bool)
@@ -208,6 +210,8 @@
 			(issue "https://github.com/wove-lang/wove/issues/30"))
 		(expect lexer.quoted_string
 			(issue "https://github.com/wove-lang/wove/issues/31"))
+		(expect lexer.unicode_whitespace
+			(issue "https://github.com/wove-lang/wove/issues/33"))
 		(body
 			(let start (call skip_whitespace (borrow-shared (local source)) (local cursor)))
 			(let length (slice.len (local source)))
@@ -332,6 +336,65 @@
 									(set (local tail) (i32.add.wrapping (local tail) (i32 1)))))))
 					(set (local cursor) (local next))))
 			(return (i32 -1))))
+
+	;; Return the byte width of a seed separator at the cursor, or zero.
+	(fn whitespace_width
+		(params (source (shared-slice u8)) (cursor i32) (lead u8))
+		(returns i32)
+		(body
+			;; ASCII uses the seed's two contiguous separator ranges.
+			(if (u8.lt (local lead) (u8 128))
+				(then
+					;; Return a single-byte width for either ASCII range.
+					(if (call is_ascii_whitespace (local lead))
+						(then (return (i32 1))))
+					(return (i32 0))))
+			(let remaining (i32.sub.wrapping (slice.len (local source)) (local cursor)))
+			;; U+0085 and U+00A0 are the only two-byte separators.
+			(if (u8.eq (local lead) (u8 194))
+				(then
+					;; Keep the second-byte load inside this view.
+					(if (i32.lt (local remaining) (i32 2))
+						(then (return (i32 0))))
+					(let second (slice.load (local source) (i32.add.wrapping (local cursor) (i32 1))))
+					;; The C2 prefix has two accepted suffixes.
+					(if (bool.or (u8.eq (local second) (u8 133)) (u8.eq (local second) (u8 160)))
+						(then (return (i32 2))))
+					(return (i32 0))))
+			;; Three-byte separators start with E1, E2, or E3 and need both suffix bytes.
+			(if (bool.or
+					(i32.lt (local remaining) (i32 3))
+					(bool.or (u8.lt (local lead) (u8 225)) (u8.lt (u8 227) (local lead))))
+				(then (return (i32 0))))
+			(let second (slice.load (local source) (i32.add.wrapping (local cursor) (i32 1))))
+			(let third (slice.load (local source) (i32.add.wrapping (local cursor) (i32 2))))
+			;; E1 9A 80 is U+1680.
+			(if (u8.eq (local lead) (u8 225))
+				(then
+					;; U+1680 occupies all three bytes.
+					(if (bool.and (u8.eq (local second) (u8 154)) (u8.eq (local third) (u8 128)))
+						(then (return (i32 3))))
+					(return (i32 0))))
+			;; E3 80 80 is U+3000.
+			(if (u8.eq (local lead) (u8 227))
+				(then
+					;; The E3 prefix has one accepted suffix.
+					(if (bool.and (u8.eq (local second) (u8 128)) (u8.eq (local third) (u8 128)))
+						(then (return (i32 3))))
+					(return (i32 0))))
+			;; E2 81 9F is U+205F.
+			(if (bool.and (u8.eq (local second) (u8 129)) (u8.eq (local third) (u8 159)))
+				(then (return (i32 3))))
+			;; E2 80 covers U+2000 through U+200A, U+2028, U+2029, and U+202F.
+			(if (bool.and
+					(u8.eq (local second) (u8 128))
+					(bool.or
+						(bool.and (bool.not (u8.lt (local third) (u8 128))) (u8.lt (local third) (u8 139)))
+						(bool.or
+							(bool.or (u8.eq (local third) (u8 168)) (u8.eq (local third) (u8 169)))
+							(u8.eq (local third) (u8 175)))))
+				(then (return (i32 3))))
+			(return (i32 0))))
 
 	;; Supply the seed entry point while the fixture provides input slices.
 	(fn main

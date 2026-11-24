@@ -15,9 +15,10 @@ of zero and use each token's `end` as the next cursor. A cursor from zero throug
 the slice length is valid. The runtime rejects cursors outside that range.
 
 Each `Token` carries a `u32` kind and an `i32` half-open span, `[start, end)`,
-relative to the supplied slice. The scanner skips ASCII space, tab, carriage
-return, and newline. A bare atom stops at whitespace, a parenthesis, a
-semicolon, or a double quote. Atom kind is 1, opening and closing parenthesis
+relative to the supplied slice. The scanner uses the seed's whitespace set
+for both skipping separators and ending bare atoms. Separators consume their
+UTF-8 byte widths. A bare atom also stops at a parenthesis, a semicolon, or a
+double quote. Atom kind is 1, opening and closing parenthesis
 kinds are 40 and 41, and a lone semicolon consumes one byte with lexical error
 kind 3. End of input has kind 0 and both offsets equal to the slice length.
 

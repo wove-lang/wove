@@ -168,6 +168,52 @@ static const struct {
 };
 static const uint8_t utf8_parent[] = {'x', ' ', 0xe2, 0x82, 0xac, 'y'};
 
+static const struct {
+	uint32_t code_point;
+	uint8_t bytes[3];
+	uint8_t width;
+} separators[] = {
+	{0x0009, {0x09}, 1},
+	{0x000a, {0x0a}, 1},
+	{0x000b, {0x0b}, 1},
+	{0x000c, {0x0c}, 1},
+	{0x000d, {0x0d}, 1},
+	{0x001c, {0x1c}, 1},
+	{0x001d, {0x1d}, 1},
+	{0x001e, {0x1e}, 1},
+	{0x001f, {0x1f}, 1},
+	{0x0020, {0x20}, 1},
+	{0x0085, {0xc2, 0x85}, 2},
+	{0x00a0, {0xc2, 0xa0}, 2},
+	{0x1680, {0xe1, 0x9a, 0x80}, 3},
+	{0x2000, {0xe2, 0x80, 0x80}, 3},
+	{0x2001, {0xe2, 0x80, 0x81}, 3},
+	{0x2002, {0xe2, 0x80, 0x82}, 3},
+	{0x2003, {0xe2, 0x80, 0x83}, 3},
+	{0x2004, {0xe2, 0x80, 0x84}, 3},
+	{0x2005, {0xe2, 0x80, 0x85}, 3},
+	{0x2006, {0xe2, 0x80, 0x86}, 3},
+	{0x2007, {0xe2, 0x80, 0x87}, 3},
+	{0x2008, {0xe2, 0x80, 0x88}, 3},
+	{0x2009, {0xe2, 0x80, 0x89}, 3},
+	{0x200a, {0xe2, 0x80, 0x8a}, 3},
+	{0x2028, {0xe2, 0x80, 0xa8}, 3},
+	{0x2029, {0xe2, 0x80, 0xa9}, 3},
+	{0x202f, {0xe2, 0x80, 0xaf}, 3},
+	{0x205f, {0xe2, 0x81, 0x9f}, 3},
+	{0x3000, {0xe3, 0x80, 0x80}, 3},
+};
+
+static const uint8_t nonseparators[] = {
+	0xef, 0xbb, 0xbf, 'a', 0xe2, 0x80, 0x8b, 0xe2, 0x80, 0xaa, 'b',
+};
+static const TokenSpan nonseparator_tokens[] = {{1, 0, 11}, {0, 11, 11}};
+
+static const uint8_t unicode_comment[] = {
+	';', ';', 'a', 0xe2, 0x80, 0xa8, 'b', 0xe2, 0x80, 0xa9, 'c', 0xc2, 0x85, 'd', '\r', '\n', 'x',
+};
+static const TokenSpan unicode_comment_tokens[] = {{59, 0, 14}, {1, 16, 17}, {0, 17, 17}};
+
 // Compare the full offset and kind returned by the compiled Wove scanner.
 static void check(const char *label, wvrt_slice input, int32_t offset, uint32_t kind) {
 	int32_t actual_offset = source_offset(input);
@@ -251,6 +297,32 @@ static void check_significant_tokens(const char *label, wvrt_slice raw, wvrt_sli
 	}
 }
 
+// Compare the exact byte spans on both sides of every seed separator.
+static void check_whitespace(void) {
+	for (size_t i = 0; i < sizeof(separators) / sizeof(separators[0]); ++i) {
+		char label[32];
+		snprintf(label, sizeof(label), "separator U+%04" PRIX32, separators[i].code_point);
+		uint8_t bytes[5] = {'a'};
+		memcpy(bytes + 1, separators[i].bytes, separators[i].width);
+		int32_t right = 1 + separators[i].width;
+		int32_t end = right + 1;
+		bytes[right] = 'b';
+		wvrt_slice input = {bytes, end, sizeof(uint8_t)};
+		const TokenSpan tokens[] = {{1, 0, 1}, {1, right, end}, {0, end, end}};
+		check_tokens(label, input, tokens, sizeof(tokens) / sizeof(tokens[0]));
+
+		// The same bytes inside quotes follow the string's raw control-byte rule.
+		bytes[0] = '"';
+		bytes[right] = '"';
+		if (separators[i].code_point < 0x20) {
+			check_tokens(label, input, &(TokenSpan){3, 0, 2}, 1);
+		} else {
+			const TokenSpan quoted[] = {{2, 0, end}, {0, end, end}};
+			check_tokens(label, input, quoted, sizeof(quoted) / sizeof(quoted[0]));
+		}
+	}
+}
+
 // Exercise complete inputs and checked views into a larger buffer.
 int main(void) {
 	// Each complete input supplies its own logical byte length.
@@ -321,5 +393,12 @@ int main(void) {
 	check_utf8("subrange truncates a scalar", clipped_utf8, 1);
 	wvrt_slice starts_in_utf8 = wvrt_slice_range_u8(utf8_parent, sizeof(utf8_parent), 3, 6, site);
 	check_utf8("subrange starts at a continuation", starts_in_utf8, 0);
+	check_whitespace();
+	wvrt_slice contiguous_atom = {nonseparators, sizeof(nonseparators), sizeof(uint8_t)};
+	check_tokens("BOM and adjacent non-whitespace", contiguous_atom,
+		nonseparator_tokens, sizeof(nonseparator_tokens) / sizeof(nonseparator_tokens[0]));
+	wvrt_slice unicode_in_comment = {unicode_comment, sizeof(unicode_comment), sizeof(uint8_t)};
+	check_tokens("Unicode separators inside a comment", unicode_in_comment,
+		unicode_comment_tokens, sizeof(unicode_comment_tokens) / sizeof(unicode_comment_tokens[0]));
 	return wove_fixture_main();
 }
