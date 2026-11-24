@@ -309,7 +309,9 @@ identities and node indices. A failure gives the code and byte span with
 one-based coordinates in its original file.
 
 Use `--callers FILE NAME [START END [CAPACITY]]` to inspect a function by
-its Wove name. The single-file probe assigns file identity 0 to the input.
+its Wove name in a library module. Use `--callers-root` with the same
+arguments for an executable root, where `main` follows the C ABI rules.
+The single-file probe assigns file identity 0 to the input.
 The header gives the caller count, view-relative span, error, line, and
 column. A successful result contains a `declaration` form with computed
 `:callers` metadata and the declaration's identity. Each `call-site` gives

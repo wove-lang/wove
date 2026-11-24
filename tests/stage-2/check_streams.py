@@ -300,13 +300,13 @@ def check_compilations(executable, directory, manifest, clang):
 # Compare structured callers and exact file positions from external fixtures.
 def check_callers(executable, directory, manifest):
 	source = directory / "callers-input.wove"
-	# The fixture supplies the original module bytes, optional parent prefix, and requested callee.
-	for label, filename, query, prefix, capacity, fields, expected in fixture_rows(manifest):
+	# Use the fixture's compilation context, original module bytes, and requested callee.
+	for label, mode, filename, query, prefix, capacity, fields, expected in fixture_rows(manifest):
 		view = Path(filename).read_bytes()
 		parent_prefix = b"" if prefix == "-" else bytes.fromhex(prefix)
 		source.write_bytes(parent_prefix + view)
 		arguments = (query, len(parent_prefix), len(parent_prefix) + len(view), int(capacity))
-		output, status = run_probe(executable, "--callers", source, arguments)
+		output, status = run_probe(executable, mode, source, arguments)
 		header, delimiter, payload = output.partition(b"\n")
 		row = tuple(map(int, fields.split()))
 		assert delimiter and tuple(map(int, header.split(b"\t"))) == row, (label, header)

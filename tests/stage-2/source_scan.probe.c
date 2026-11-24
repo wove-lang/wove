@@ -646,7 +646,8 @@ static void write_callers(wvrt_slice input, wvrt_slice nodes, CallerInspection r
 }
 
 // Inspect a selected name and check that a short result preserves the supplied rows.
-static int dump_callers(wvrt_slice parent, wvrt_slice input, int32_t start, const char *name, int32_t capacity) {
+static int dump_callers(wvrt_slice parent, wvrt_slice input, int32_t start, const char *name, int32_t capacity,
+	bool entry_module) {
 	const CheckedModule source = checked_module(input);
 	if (capacity < 0) {
 		capacity = source.nodes.wvrt_length;
@@ -659,7 +660,7 @@ static int dump_callers(wvrt_slice parent, wvrt_slice input, int32_t start, cons
 	const wvrt_mut_slice output = {storage->wvrt_items, capacity, sizeof(CallSite)};
 	const wvrt_slice target = {name, (int32_t)strlen(name), sizeof(uint8_t)};
 	const CallerInspection result = inspect_callers(input, source.nodes, source.module, source.active, 0, start,
-		target, output);
+		entry_module, target, output);
 
 	int status = EXIT_FAILURE;
 	const int32_t count = result.wv_field_1;
@@ -864,14 +865,15 @@ static int source_mode(int argc, char **argv) {
 	const bool decode = strcmp(argv[1], "--decode") == 0;
 	const bool module = strcmp(argv[1], "--module") == 0;
 	const bool emit = strcmp(argv[1], "--emit-c") == 0;
-	const bool callers = strcmp(argv[1], "--callers") == 0;
+	const bool callers_root = strcmp(argv[1], "--callers-root") == 0;
+	const bool callers = callers_root || strcmp(argv[1], "--callers") == 0;
 	const bool takes_capacity = tree || render || decode || module || emit || callers;
 	const int bounds = callers ? 4 : 3;
 	if ((argc != bounds && argc != bounds + 2 && !(takes_capacity && argc == bounds + 3)) ||
 			(!tokens && !form && !takes_capacity)) {
 		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render | --decode | --module | --emit-c]"
 			" FILE [START END [CAPACITY]]\n"
-			"       source_scan --callers FILE NAME [START END [CAPACITY]]\n", stderr);
+			"       source_scan [--callers | --callers-root] FILE NAME [START END [CAPACITY]]\n", stderr);
 		return EXIT_FAILURE;
 	}
 
@@ -910,7 +912,7 @@ static int source_mode(int argc, char **argv) {
 	} else if (emit) {
 		status = dump_c(parent, view, start, capacity);
 	} else if (callers) {
-		status = dump_callers(parent, view, start, argv[3], capacity);
+		status = dump_callers(parent, view, start, argv[3], capacity, callers_root);
 	} else {
 		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	}
