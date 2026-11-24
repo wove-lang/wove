@@ -14,12 +14,14 @@
 #define source_offset wv_seed_fn_4
 #define source_kind wv_seed_fn_5
 #define scan_token wv_seed_fn_13
+#define admit_source wv_seed_fn_17
 
 typedef wv_seed_record_0 Token;
 
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
 _Static_assert(_Generic(&source_kind, uint32_t (*)(wvrt_slice): 1, default: 0), "source kind type");
 _Static_assert(_Generic(&scan_token, Token (*)(wvrt_slice, int32_t): 1, default: 0), "scan token type");
+_Static_assert(_Generic(&admit_source, int32_t (*)(wvrt_slice): 1, default: 0), "source admission type");
 _Static_assert(_Generic(((Token){0}).wv_field_0, uint32_t: 1, default: 0), "token kind type");
 _Static_assert(_Generic(((Token){0}).wv_field_1, int32_t: 1, default: 0), "token start type");
 _Static_assert(_Generic(((Token){0}).wv_field_2, int32_t: 1, default: 0), "token end type");
@@ -123,7 +125,6 @@ static const struct {
 	wvrt_slice input;
 	int32_t end;
 } string_errors[] = {
-	{"invalid short escape", {bad_escape, sizeof(bad_escape) - 1, sizeof(uint8_t)}, 4},
 	{"non-hex Unicode digit", {bad_hex, sizeof(bad_hex) - 1, sizeof(uint8_t)}, 6},
 	{"closing quote within Unicode escape", {short_hex_quote, sizeof(short_hex_quote) - 1, sizeof(uint8_t)}, 6},
 	{"Unicode escape ends at EOF", {short_hex, sizeof(short_hex) - 1, sizeof(uint8_t)}, 5},
@@ -136,6 +137,37 @@ static const struct {
 	{"raw NUL in string", {string_nul, sizeof(string_nul), sizeof(uint8_t)}, 3},
 };
 
+static const TokenSpan recovered_string_tokens[] = {{3, 0, 4}, {41, 4, 5}, {0, 5, 5}};
+
+static const uint8_t utf8_atom[] = {
+	' ', '(', 0xc2, 0x80, 0xe0, 0xa0, 0x80, 0xed, 0x9f, 0xbf,
+	0xee, 0x80, 0x80, 0xf0, 0x90, 0x80, 0x80, 0xf4, 0x8f, 0xbf, 0xbf, ')',
+};
+static const TokenSpan utf8_atom_tokens[] = {{40, 1, 2}, {1, 2, 21}, {41, 21, 22}, {0, 22, 22}};
+
+static const struct {
+	const char *label;
+	uint8_t bytes[8];
+	int32_t length;
+	int32_t offset;
+} utf8_errors[] = {
+	{"isolated continuation", {0x80}, 1, 0},
+	{"truncated two-byte sequence", {'a', 0xc2}, 2, 1},
+	{"truncated three-byte sequence", {'a', 0xe2, 0x82}, 3, 1},
+	{"truncated four-byte sequence", {'a', 0xf0, 0x90, 0x80}, 4, 1},
+	{"malformed first continuation", {'a', 0xc2, 'b', 0xff}, 4, 1},
+	{"malformed later continuation", {0xc2, 0x80, 'a', 0xf0, 0x90, 0x80, 'b'}, 7, 3},
+	{"overlong two-byte sequence", {0xc0, 0xaf}, 2, 0},
+	{"overlong three-byte sequence", {0xe0, 0x9f, 0xbf}, 3, 0},
+	{"overlong four-byte sequence", {0xf0, 0x8f, 0xbf, 0xbf}, 4, 0},
+	{"surrogate code point", {0xed, 0xa0, 0x80}, 3, 0},
+	{"code point above U+10FFFF", {0xf4, 0x90, 0x80, 0x80}, 4, 0},
+	{"invalid four-byte lead", {0xf5, 0x80, 0x80, 0x80}, 4, 0},
+	{"invalid byte in a comment", {'(', ')', ';', ';', 0xff}, 5, 4},
+	{"invalid sequence in a string", {'"', 'a', 0xe2, 0x82, '"'}, 5, 2},
+};
+static const uint8_t utf8_parent[] = {'x', ' ', 0xe2, 0x82, 0xac, 'y'};
+
 // Compare the full offset and kind returned by the compiled Wove scanner.
 static void check(const char *label, wvrt_slice input, int32_t offset, uint32_t kind) {
 	int32_t actual_offset = source_offset(input);
@@ -147,6 +179,22 @@ static void check(const char *label, wvrt_slice input, int32_t offset, uint32_t 
 			label, actual_offset, actual_kind, offset, kind);
 		exit(EXIT_FAILURE);
 	}
+}
+
+// Check the admission result before the fixture can proceed to tokenization.
+static void check_utf8(const char *label, wvrt_slice input, int32_t expected) {
+	int32_t offset = admit_source(input);
+	if (offset != expected) {
+		fprintf(stderr, "%s: UTF-8 admission returned %" PRId32 ", expected %" PRId32 "\n",
+			label, offset, expected);
+		exit(EXIT_FAILURE);
+	}
+}
+
+// Pass the original bytes and coordinates through after one successful admission.
+static wvrt_slice admit_view(const char *label, wvrt_slice input) {
+	check_utf8(label, input, -1);
+	return input;
 }
 
 // Read the scanner record through the fixture's named fields.
@@ -167,8 +215,9 @@ static int32_t check_token(const char *label, wvrt_slice input, int32_t cursor, 
 	return token.end;
 }
 
-// Exercise the same cursor progression used by the lexer caller.
+// Admit a view before walking its tokens, including a single-token check.
 static void check_tokens(const char *label, wvrt_slice input, const TokenSpan *tokens, size_t count) {
+	input = admit_view(label, input);
 	int32_t cursor = 0;
 	for (size_t i = 0; i < count; ++i) {
 		cursor = check_token(label, input, cursor, tokens[i]);
@@ -218,9 +267,9 @@ int main(void) {
 	wvrt_slice stream = {token_stream, sizeof(token_stream) - 1, sizeof(uint8_t)};
 	check_tokens("token stream", stream, stream_tokens, sizeof(stream_tokens) / sizeof(stream_tokens[0]));
 	check_token("cursor inside atom", stream, 6, (TokenSpan){1, 6, 8});
-	check_token("empty token view", (wvrt_slice){NULL, 0, sizeof(uint8_t)}, 0, (TokenSpan){0, 0, 0});
-	check_token("whitespace token view", (wvrt_slice){whitespace, sizeof(whitespace), sizeof(uint8_t)},
-		0, (TokenSpan){0, 4, 4});
+	check_tokens("empty token view", (wvrt_slice){NULL, 0, sizeof(uint8_t)}, &(TokenSpan){0, 0, 0}, 1);
+	check_tokens("whitespace token view", (wvrt_slice){whitespace, sizeof(whitespace), sizeof(uint8_t)},
+		&(TokenSpan){0, 4, 4}, 1);
 
 	wvrt_slice stream_view = wvrt_slice_range_u8(token_parent, sizeof(token_parent) - 1, 1, 10, site);
 	check_tokens("token stream subrange", stream_view, stream_tokens, sizeof(stream_tokens) / sizeof(stream_tokens[0]));
@@ -232,7 +281,8 @@ int main(void) {
 	check_tokens("atom delimiters", (wvrt_slice){delimiters, sizeof(delimiters) - 1, sizeof(uint8_t)},
 		delimiter_tokens, sizeof(delimiter_tokens) / sizeof(delimiter_tokens[0]));
 
-	wvrt_slice plain = {without_comments, sizeof(without_comments) - 1, sizeof(uint8_t)};
+	wvrt_slice plain = admit_view("significant token reference",
+		(wvrt_slice){without_comments, sizeof(without_comments) - 1, sizeof(uint8_t)});
 	for (size_t i = 0; i < sizeof(comment_cases) / sizeof(comment_cases[0]); ++i) {
 		check_tokens(comment_cases[i].label, comment_cases[i].input, comment_cases[i].tokens, comment_cases[i].count);
 		check_significant_tokens(comment_cases[i].label, comment_cases[i].input, plain);
@@ -242,22 +292,34 @@ int main(void) {
 	check_tokens("view splits comment opener", split_opener,
 		semicolon_tokens, sizeof(semicolon_tokens) / sizeof(semicolon_tokens[0]));
 	wvrt_slice empty_comment = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 3, site);
-	check_token("comment opener at EOF", empty_comment, 0, (TokenSpan){59, 0, 2});
+	check_tokens("comment opener at EOF", empty_comment, &(TokenSpan){59, 0, 2}, 1);
 	wvrt_slice clipped_comment = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 6, site);
-	check_token("view ends inside comment", clipped_comment, 0, (TokenSpan){59, 0, 5});
+	check_tokens("view ends inside comment", clipped_comment, &(TokenSpan){59, 0, 5}, 1);
 	wvrt_slice quoted = {quoted_stream, sizeof(quoted_stream) - 1, sizeof(uint8_t)};
 	check_tokens("quoted token stream", quoted, quoted_tokens, sizeof(quoted_tokens) / sizeof(quoted_tokens[0]));
 	for (size_t i = 0; i < sizeof(string_errors) / sizeof(string_errors[0]); ++i) {
-		check_token(string_errors[i].label, string_errors[i].input, 0, (TokenSpan){3, 0, string_errors[i].end});
+		check_tokens(string_errors[i].label, string_errors[i].input, &(TokenSpan){3, 0, string_errors[i].end}, 1);
 	}
 	wvrt_slice recovery = {bad_escape, sizeof(bad_escape) - 1, sizeof(uint8_t)};
-	check_token("resume after invalid escape", recovery, 4, (TokenSpan){41, 4, 5});
+	check_tokens("resume after invalid escape", recovery,
+		recovered_string_tokens, sizeof(recovered_string_tokens) / sizeof(recovered_string_tokens[0]));
 
 	wvrt_slice quoted_view = wvrt_slice_range_u8(quoted_parent, sizeof(quoted_parent) - 1, 1, 11, site);
-	check_token("quoted subrange", quoted_view, 0, (TokenSpan){2, 1, 10});
+	check_tokens("quoted subrange", quoted_view, &(TokenSpan){2, 1, 10}, 1);
 	wvrt_slice clipped_hex = wvrt_slice_range_u8(quoted_parent, sizeof(quoted_parent) - 1, 1, 8, site);
-	check_token("subrange ends inside Unicode escape", clipped_hex, 0, (TokenSpan){3, 1, 7});
+	check_tokens("subrange ends inside Unicode escape", clipped_hex, &(TokenSpan){3, 1, 7}, 1);
 	wvrt_slice clipped_quote = wvrt_slice_range_u8(quoted_parent, sizeof(quoted_parent) - 1, 1, 10, site);
-	check_token("closing quote outside subrange", clipped_quote, 0, (TokenSpan){3, 1, 9});
+	check_tokens("closing quote outside subrange", clipped_quote, &(TokenSpan){3, 1, 9}, 1);
+
+	wvrt_slice multibyte = {utf8_atom, sizeof(utf8_atom), sizeof(uint8_t)};
+	check_tokens("multibyte atom", multibyte, utf8_atom_tokens, sizeof(utf8_atom_tokens) / sizeof(utf8_atom_tokens[0]));
+	for (size_t i = 0; i < sizeof(utf8_errors) / sizeof(utf8_errors[0]); ++i) {
+		wvrt_slice invalid = {utf8_errors[i].bytes, utf8_errors[i].length, sizeof(uint8_t)};
+		check_utf8(utf8_errors[i].label, invalid, utf8_errors[i].offset);
+	}
+	wvrt_slice clipped_utf8 = wvrt_slice_range_u8(utf8_parent, sizeof(utf8_parent), 1, 4, site);
+	check_utf8("subrange truncates a scalar", clipped_utf8, 1);
+	wvrt_slice starts_in_utf8 = wvrt_slice_range_u8(utf8_parent, sizeof(utf8_parent), 3, 6, site);
+	check_utf8("subrange starts at a continuation", starts_in_utf8, 0);
 	return wove_fixture_main();
 }
