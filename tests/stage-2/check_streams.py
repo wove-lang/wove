@@ -82,28 +82,37 @@ def compare_stream(executable, path, bounds=()):
 	return spellings
 
 
-# Reformat between raw tokens with a line break after each line comment.
-def check_renderings(executable, directory, fixture):
-	expected = compare_stream(executable, fixture)
-	for label, newline in (("crlf", b"\r\n"), ("cr", b"\r")):
-		rendered = directory / f"rendered-{label}.wove"
-		rendered.write_bytes(b"\t" + (newline + b"  ").join(spelling for _, spelling in expected) + newline)
-		assert compare_stream(executable, rendered) == expected, label
+# Read shared TSV fixture rows while preserving empty fields.
+def fixture_rows(manifest):
+	for line in manifest.read_text(encoding="utf-8").splitlines():
+		if line and not line.startswith("#"):
+			yield line.split("\t")
 
-	embedded = directory / "embedded.wove"
-	prefix = b";; file context\r\n\t\xc3\xa9 "
-	view = fixture.read_bytes()
-	embedded.write_bytes(prefix + view + b"\n;; after the view")
-	assert compare_stream(executable, embedded, (len(prefix), len(prefix) + len(view))) == expected
+
+# Compare each configured rendering or embedded view to its original fixture.
+def check_layouts(executable, directory, manifest):
+	layout = directory / "layout.wove"
+	for mode, label, source, *settings in fixture_rows(manifest):
+		fixture = manifest.parent / source
+		expected = compare_stream(executable, fixture)
+		if mode == "render":
+			prefix, separator, suffix = map(bytes.fromhex, settings)
+			layout.write_bytes(prefix + separator.join(spelling for _, spelling in expected) + suffix)
+			bounds = ()
+		elif mode == "embed":
+			prefix, suffix = map(bytes.fromhex, settings)
+			view = fixture.read_bytes()
+			layout.write_bytes(prefix + view + suffix)
+			bounds = (len(prefix), len(prefix) + len(view))
+		else:
+			raise ValueError(f"{label}: unknown layout mode {mode!r}")
+		assert compare_stream(executable, layout, bounds) == expected, label
 
 
 # Exercise malformed bytes through the same executable and its checked file views.
 def check_diagnostics(executable, directory, manifest):
 	source = directory / "malformed.wove"
-	for line in manifest.read_text(encoding="utf-8").splitlines():
-		if not line or line.startswith("#"):
-			continue
-		label, raw, base, end, *fields = line.split("\t")
+	for label, raw, base, end, *fields in fixture_rows(manifest):
 		source.write_bytes(bytes.fromhex(raw))
 		bounds = (int(base), int(end))
 		expected = tuple(map(int, fields))
@@ -115,13 +124,13 @@ def check_diagnostics(executable, directory, manifest):
 
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	executable, fixture, diagnostics, *sources = map(Path, sys.argv[1:])
+	executable, layouts, diagnostics, *sources = map(Path, sys.argv[1:])
 	for source in sources:
 		compare_stream(executable, source)
 
 	with TemporaryDirectory(prefix="lexer-", dir=executable.parent) as path:
 		directory = Path(path)
-		check_renderings(executable, directory, fixture)
+		check_layouts(executable, directory, layouts)
 		check_diagnostics(executable, directory, diagnostics)
 
 

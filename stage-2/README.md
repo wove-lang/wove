@@ -62,9 +62,10 @@ for a parenthesis, and 1 for every other leading byte.
 `make stage-2` emits C with the Python seed and links the scanner with
 its [source fixture](../tests/stage-2/source_scan.probe.c) and the shared
 runtime. Run `make test-stage-2` to exercise those inputs and compare full
-streams with the Stage 1 lexer. The parity check also renders a fixture
-with different indentation and line endings and checks its token kinds
-and spellings, including comments. `make test` includes these checks.
+streams with the Stage 1 lexer. The [layout fixtures](../tests/stage-2/lexer_layouts.tsv)
+supply indentation, line endings, and parent view bytes. The parity check
+compares the resulting token kinds and spellings, including comments.
+`make test` includes these checks.
 
 The seed-built fixture executable accepts `--tokens FILE [START END]` to
 print numeric rows with kind, start, end, error, line, and column. The span
