@@ -1,0 +1,173 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Emit the bounded UTF-8 and ASCII fragments of a JSON document.")
+	json_text
+
+	(use wove-file "../text/utf8.wove" (only utf8_invalid_offset))
+
+	(struct DecimalPlace (fields (offset i32) (remainder u32) (started bool)))
+
+	(fn
+		(:doc "Append a byte at the cursor or return -1 when capacity is exhausted.")
+		json_byte
+		(params (output (mut-slice u8)) (offset i32) (byte u8))
+		(returns i32)
+		(body
+			(if
+				(:doc "A failed cursor remains failed and full output stays within bounds.")
+				(bool.or (i32.lt (local offset) (i32 0))
+					(bool.not (i32.lt (local offset) (slice.len (local output)))))
+				(then (return (i32 -1))))
+			(slice.store (local output) (local offset) (local byte))
+			(return (i32.add.wrapping (local offset) (i32 1)))))
+
+	(fn
+		(:doc "Emit a quoted validated UTF-8 string. Return -1 for capacity or -2 for invalid UTF-8.")
+		json_quoted
+		(params (output (mut-slice u8)) (offset i32) (text (shared-slice u8)))
+		(returns i32)
+		(body
+			(if
+				(:doc "A previous capacity failure takes precedence over inspecting the next fragment.")
+				(i32.lt (local offset) (i32 0))
+				(then (return (local offset))))
+			(if
+				(:doc "Reject malformed UTF-8 before emitting any of the string.")
+				(bool.not (i32.eq (call utf8_invalid_offset (borrow-shared (local text))) (i32 -1)))
+				(then (return (i32 -2))))
+			(let-mut next (call json_byte (borrow-mut (local output)) (local offset) (u8 34)))
+			(let-mut cursor (i32 0))
+			(while
+				(:doc "Copy literal UTF-8 bytes and escape only JSON punctuation and control bytes.")
+				(bool.and (bool.not (i32.lt (local next) (i32 0)))
+					(i32.lt (local cursor) (slice.len (local text))))
+				(body
+					(let byte (slice.load (local text) (local cursor)))
+					(if
+						(:doc "ASCII controls use six-byte escapes of the form \u005Cu00xx.")
+						(u8.lt (local byte) (u8 32))
+						(then
+							(set (local next) (call json_control_escape
+								(borrow-mut (local output)) (local next) (int.convert i32 (local byte)))))
+						(else
+							(if
+								(:doc "Quote and backslash retain their byte after a backslash.")
+								(bool.or (u8.eq (local byte) (u8 34)) (u8.eq (local byte) (u8 92)))
+								(then (set (local next)
+									(call json_byte (borrow-mut (local output)) (local next) (u8 92)))))
+							(set (local next) (call json_byte (borrow-mut (local output)) (local next) (local byte)))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (call json_byte (borrow-mut (local output)) (local next) (u8 34)))))
+
+	(fn
+		(:doc "Emit the Unicode escape for one byte in the range 0 through 31.")
+		json_control_escape
+		(params (output (mut-slice u8)) (offset i32) (byte i32))
+		(returns i32)
+		(body
+			(let-mut next (call json_byte (borrow-mut (local output)) (local offset) (u8 92)))
+			(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 117)))
+			(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 48)))
+			(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 48)))
+			(let-mut high (u8 48))
+			(let-mut low (local byte))
+			(if
+				(:doc "Only bit four can contribute to the high hex digit.")
+				(bool.not (i32.lt (local byte) (i32 16)))
+				(then
+					(set (local high) (u8 49))
+					(set (local low) (i32.sub.wrapping (local byte) (i32 16)))))
+			(set (local next) (call json_byte (borrow-mut (local output)) (local next) (local high)))
+			(let-mut base (i32 48))
+			(if
+				(:doc "Lowercase hex letters start at ASCII 97 for digit ten.")
+				(bool.not (i32.lt (local low) (i32 10)))
+				(then (set (local base) (i32 87))))
+			(return (call json_byte (borrow-mut (local output)) (local next)
+				(int.convert u8 (i32.add.wrapping (local base) (local low)))))))
+
+	(fn
+		(:doc "Extract one decimal digit by at most nine subtractions and suppress leading zeroes.")
+		write_decimal_place
+		(params (output (mut-slice u8)) (state DecimalPlace) (place u32))
+		(returns DecimalPlace)
+		(body
+			(let-mut rest (record.get (local state) remainder))
+			(let-mut digit (u32 0))
+			(while
+				(:doc "After this place, the remainder is smaller than its weight.")
+				(bool.not (u32.lt (local rest) (local place)))
+				(body
+					(set (local rest) (u32.sub.wrapping (local rest) (local place)))
+					(set (local digit) (u32.add.wrapping (local digit) (u32 1)))))
+			(let-mut next (record.get (local state) offset))
+			(let started (bool.or (record.get (local state) started)
+				(bool.or (bool.not (u32.eq (local digit) (u32 0))) (u32.eq (local place) (u32 1)))))
+			(if
+				(:doc "The ones place emits even when the whole number is zero.")
+				(local started)
+				(then
+					(set (local next) (call json_byte (borrow-mut (local output)) (local next)
+						(int.convert u8 (u32.add.wrapping (local digit) (u32 48)))))))
+			(return (record.make DecimalPlace (offset (local next)) (remainder (local rest)) (started (local started))))))
+
+	(fn
+		(:doc "Emit an unsigned 32-bit integer in decimal without a leading zero or a terminator.")
+		json_unsigned
+		(params (output (mut-slice u8)) (offset i32) (value u32))
+		(returns i32)
+		(body
+			(let place_10 (record.make DecimalPlace (offset (local offset)) (remainder (local value)) (started (bool false))))
+			(let place_9 (call write_decimal_place (borrow-mut (local output)) (local place_10) (u32 1000000000)))
+			(let place_8 (call write_decimal_place (borrow-mut (local output)) (local place_9) (u32 100000000)))
+			(let place_7 (call write_decimal_place (borrow-mut (local output)) (local place_8) (u32 10000000)))
+			(let place_6 (call write_decimal_place (borrow-mut (local output)) (local place_7) (u32 1000000)))
+			(let place_5 (call write_decimal_place (borrow-mut (local output)) (local place_6) (u32 100000)))
+			(let place_4 (call write_decimal_place (borrow-mut (local output)) (local place_5) (u32 10000)))
+			(let place_3 (call write_decimal_place (borrow-mut (local output)) (local place_4) (u32 1000)))
+			(let place_2 (call write_decimal_place (borrow-mut (local output)) (local place_3) (u32 100)))
+			(let place_1 (call write_decimal_place (borrow-mut (local output)) (local place_2) (u32 10)))
+			(let place_0 (call write_decimal_place (borrow-mut (local output)) (local place_1) (u32 1)))
+			(return (record.get (local place_0) offset))))
+
+	(fn
+		(:doc "Emit a signed 32-bit integer, including the minimum value.")
+		json_signed
+		(params (output (mut-slice u8)) (offset i32) (value i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "Add the last unit in u32 so the minimum signed magnitude fits.")
+				(i32.lt (local value) (i32 0))
+				(then
+					(let next (call json_byte (borrow-mut (local output)) (local offset) (u8 45)))
+					(let magnitude (u32.add.wrapping (int.convert u32 (i32.sub.wrapping (i32 -1) (local value))) (u32 1)))
+					(return (call json_unsigned (borrow-mut (local output)) (local next) (local magnitude)))))
+			(return (call json_unsigned (borrow-mut (local output)) (local offset) (int.convert u32 (local value))))))
+
+	(fn
+		(:doc "Emit one of the three JSON keywords selected by its first ASCII byte.")
+		json_keyword
+		(params (output (mut-slice u8)) (offset i32) (first u8))
+		(returns i32)
+		(body
+			(let-mut next (call json_byte (borrow-mut (local output)) (local offset) (local first)))
+			(if
+				(:doc "The keyword true has the suffix rue.")
+				(u8.eq (local first) (u8 116))
+				(then
+					(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 114)))
+					(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 117)))
+					(return (call json_byte (borrow-mut (local output)) (local next) (u8 101)))))
+			(if
+				(:doc "The keyword false has the suffix alse.")
+				(u8.eq (local first) (u8 102))
+				(then
+					(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 97)))
+					(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 108)))
+					(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 115)))
+					(return (call json_byte (borrow-mut (local output)) (local next) (u8 101)))))
+			(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 117)))
+			(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 108)))
+			(return (call json_byte (borrow-mut (local output)) (local next) (u8 108))))))
