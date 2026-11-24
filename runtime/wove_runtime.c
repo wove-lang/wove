@@ -23,6 +23,12 @@ static _Noreturn void wvrt_trap_at_span(int32_t wvrtfile, int32_t wvrtstart, int
 	exit(EXIT_FAILURE);
 }
 
+// A borrowed native handle must be present before it is passed to C.
+void wvrt_check_c_handle(const volatile void *wvrthandle, int32_t wvrtfile,
+	int32_t wvrtstart, int32_t wvrtend) {
+	if (wvrthandle == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "missing C handle"); }
+}
+
 // Validate the requested prefix before a C call borrows the original byte storage.
 void wvrt_check_c_bytes(wvrt_slice wvrtview, int64_t wvrtsize, int64_t wvrtcount,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {

@@ -7,8 +7,8 @@
 	tree row and raw spellings for later type checking and native emission.`)
 
 	(use wove-file "./scan.wove"
-		(only (type SourceNode) (type Token) check_source_form build_source_tree check_source_metadata))
-	(use wove-file "./module.wove" (only (type SelectedDeclaration) form_parts read_module select_form validate_form_metadata))
+		(only (type SourceNode) (type Token) is_head_byte check_source_form build_source_tree check_source_metadata))
+	(use wove-file "./module.wove" (only (type SelectedDeclaration) form_parts is_three_bytes read_module select_form validate_form_metadata))
 	(use wove-file "./imports.wove" (only import_keyword import_form))
 	(use wove-file "./paths.wove" (only (type SuppliedFile)))
 	(use wove-file "./strings.wove" (only decode_string))
@@ -191,25 +191,81 @@
 			(return (bool.or (u32.eq (local type) (u32 5))
 				(bool.and (u32.lt (u32 9) (local type)) (u32.lt (local type) (u32 13)))))))
 
-	(fn read_c_result_resource
-		(:doc `Resolve a non-scalar result in the defining bridge's type namespace.`)
+	(fn read_c_named_resource
+		(:doc `Resolve an exact resource name in the defining bridge's type namespace.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (bootstrap bool))
 		(returns CMemberRead)
 		(body
-			(if
-				(:doc "A scalar result has an empty resource contract.")
-				(call is_c_scalar (borrow-shared (local source)) (local node))
-				(then (return (call c_member_error (i32 0) (i32 0) (u32 0)))))
 			(let start (record.get (local node) start))
 			(let end (record.get (local node) end))
 			(let resource (call find_c_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local bridge) (borrow-shared (local source)) (local start) (local end) (local bootstrap)))
 			(if
-				(:doc "An unavailable resource result is diagnosed at the signature's type operand.")
+				(:doc "An unavailable resource is diagnosed at the original type name.")
 				(bool.and (u32.eq (record.get (local resource) error) (u32 0))
 					(i32.lt (record.get (local resource) declaration) (i32 0)))
 				(then (return (call c_member_error (local start) (local end) (u32 23)))))
 			(return (local resource))))
+
+	(fn read_c_result_resource
+		(:doc `Use an empty resource contract for a scalar or resolve the named result type.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (bootstrap bool))
+		(returns CMemberRead)
+		(body
+			(if
+				(:doc "Scalar results need no resource declaration.")
+				(call is_c_scalar (borrow-shared (local source)) (local node))
+				(then (return (call c_member_error (i32 0) (i32 0) (u32 0)))))
+			(return (call read_c_named_resource (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local bridge) (local bootstrap)))))
+
+	(fn is_shared_ref_head
+		(:doc `Match the full shared-ref spelling at a parameter type's head.`)
+		(:pragma (inline always))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (head i32))
+		(returns bool)
+		(body
+			(if
+				(:doc "A bare type has no form head.")
+				(i32.lt (local head) (i32 0))
+				(then (return (bool false))))
+			(let node (slice.load (local nodes) (local head)))
+			(let start (record.get (local node) start))
+			(return (bool.and (i32.eq (i32.sub.wrapping (record.get (local node) end) (local start)) (i32 10))
+				(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 115) (u8 104) (u8 97))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3))
+						(u8 114) (u8 101) (u8 100))
+						(bool.and (call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 6))
+							(u8 45) (u8 114) (u8 101))
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 9) (u8 102)))))))))
+
+	(fn read_c_handle_parameter
+		(:doc `Read one shared reference to an active pointer resource in this C bridge.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (bootstrap bool))
+		(returns CMemberRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (record.get (local parts) head))
+			(let target (record.get (local parts) operands))
+			(if
+				(:doc "A shared handle parameter needs the shared-ref tag and exactly one type operand.")
+				(bool.or (bool.not (call is_shared_ref_head (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))
+					(bool.or (i32.lt (local target) (i32 0))
+						(bool.not (i32.lt (record.get (slice.load (local nodes) (local target)) next_sibling) (i32 0)))))
+				(then (return (call c_member_error (record.get (local node) start) (record.get (local node) end) (u32 23)))))
+			(let choice (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local parts)))
+			(if
+				(:doc "Selection directives belong on declarations.")
+				(u32.lt (u32 0) (record.get (local choice) error))
+				(then (return (call c_member_error (record.get (local choice) start) (record.get (local choice) end)
+					(record.get (local choice) error)))))
+			(let name (slice.load (local nodes) (local target)))
+			(if
+				(:doc "The referenced resource must be a bare name.")
+				(bool.not (u32.eq (record.get (local name) kind) (u32 1)))
+				(then (return (call c_member_error (record.get (local name) start) (record.get (local name) end) (u32 23)))))
+			(return (call read_c_named_resource (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local name) (local bridge) (local bootstrap)))))
 
 	(fn read_c_function
 		(:doc `Check the selected foreign function's parameter and result forms and retain its exact signature.`)
@@ -285,11 +341,16 @@
 							(record.get (local choice) error)))))
 					(let type_node (slice.load (local nodes) (local type)))
 					(if
-						(:doc "Only scalar formals and byte slices have native bridge support.")
+						(:doc "Other supported formals borrow a named pointer resource from this bridge.")
 						(bool.not (bool.or (call is_c_scalar (borrow-shared (local source)) (local type_node))
 							(u32.lt (u32 0) (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))))
-						(then (return (call c_member_error (record.get (local type_node) start)
-							(record.get (local type_node) end) (u32 23)))))
+						(then
+							(let handle (call read_c_handle_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local type_node) (local bridge) (local bootstrap)))
+							(if
+								(:doc "Preserve type lookup and contract errors from the defining source.")
+								(u32.lt (u32 0) (record.get (local handle) error))
+								(then (return (local handle))))))
 					(let name (slice.load (local nodes) (record.get (local parts) head)))
 					(let name_start (record.get (local name) start))
 					(let name_end (record.get (local name) end))
