@@ -45,6 +45,12 @@ The new value has the same type as the binding.
 a mutable byte slice and writes to the owner's storage. Both take an `i32`
 index and trap if it falls outside the slice.
 
+Use `borrow-shared` to forward either kind of byte slice to a helper.
+Use `borrow-mut` to forward a mutable slice exclusively. A reborrow
+uses the original storage, and its loan stays active through later
+arguments and the call. Shared loans permit reads of the parent.
+Exclusive loans suspend access to the parent until the helper returns.
+
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.
 Run `make test` to check the transfer, its allocation lifetime, and the borrow
