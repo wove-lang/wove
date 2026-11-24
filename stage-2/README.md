@@ -335,6 +335,7 @@ Native symbols and the ABI entry `main` retain their original spellings.
 | `p` | Parameter | Zero-based position in its signature | Parameter name |
 | `l` | Local | Declared name's original file-local tree row | Local name |
 | `t` | Expression temporary | Original expression's file-local tree row | Empty |
+| `b` | C-string call storage | Original call's file-local tree row | `a` for descriptors, `b` for backing storage |
 
 For a single module, hash its declared name, the four-byte little-endian
 declaration kind, and the original declaration name using the archive's
@@ -352,7 +353,7 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | --- | --- | --- |
 | 16 | Short C output view | The selected entry |
 | 22 | Missing entry or unsupported declaration | The module, first function name, or offending declaration |
-| 23 | Unsupported signature or record field type | The parameter list, result, field type, or offending signature form |
+| 23 | Unsupported signature or record field type, or invalid C-string contract | The offending signature or contract form or operand |
 | 24 | Invalid, unsupported, or unreachable body form, or incompatible expression type | The offending form or expression |
 | 25 | Invalid scalar literal | The value or malformed literal form |
 | 32 | Stable declaration identity collision | The later declaration name |
@@ -391,8 +392,9 @@ A `use c-header` selects functions from a `bridge c-header` with the same
 decoded header key in the supplied source table. A key such as `"<stdlib.h>"`
 or `"./project.h"` identifies one active bridge in a well-formed canonical file.
 Header lookup leaves Wove-file reachability unchanged. A selected declaration
-has `params` and `returns` forms with exact `bool`, `u8`, `i32`, or `u32` types.
-Parameter names must be unique within the signature. The alias occupies the
+has `params` and `returns` forms. Both support exact `bool`, `u8`, `i32`, and
+`u32` types. A parameter may also be a `(shared-slice u8)` with a C-string
+contract. Parameter names must be unique within the signature. The alias occupies the
 importing file's function namespace. Its binding keeps the defining declaration
 and the raw header, native symbol, and signature spans in that file.
 
@@ -402,6 +404,15 @@ call uses the original native name. Each selected header contributes one
 include operand. Angle-bracket keys use system search. Bare or explicitly
 quoted project paths use quoted includes. The C compiler reads the native
 declarations from those headers.
+
+Use `(:pragma (c_cstr parameter ...))` or `(:pragma (c_cstr_raw parameter ...))`
+after the bridge function name to pass one or more shared byte slices as
+`const char *`. After evaluating all arguments, the call copies each named
+slice and appends a NUL byte. Checked mode traps at the Wove argument span
+on an embedded NUL before calling C. Raw mode copies every byte, including
+bytes after an embedded NUL. An empty view passes a pointer to one NUL byte.
+C can read the temporary buffers until the call returns, when Wove releases
+their backing storage.
 
 Each binding identifies the importing namespace and the name span in that
 file. Its target is the defining file identity and declaration node index
