@@ -169,12 +169,15 @@ reads, and direct calls. The selected `main` has the ABI signature
 `int main(void)`. Forward calls use checked prototypes, and nested calls
 evaluate from left to right.
 
-Internal function symbols use the archived `wvgF` prefix, seven uppercase
-Base32hex digits, and the original name with dots and hyphens replaced by
-underscores. For this single-module slice, hash the declared module name,
-the four-byte little-endian function kind, and the original function name
-using the archive's 31-bit FNV-1a. The ID is independent of source layout
-and declaration order. Detect collisions before writing C, even when the
+Internal function symbols use `wg` for Wove-generated names, `f` for
+functions, seven lowercase Base32hex digits, and the original name with
+dots and hyphens replaced by underscores. The first digit is `0` or `1`
+because IDs are 31 bits.
+
+For this single-module slice, hash the declared module name, the four-byte
+little-endian function kind, and the original function name using the
+archive's 31-bit FNV-1a. The ID is independent of source layout and
+declaration order. Detect collisions before writing C, even when the
 readable suffixes differ. Each resolved call keeps the callee's defining
 row and its own source node for later analysis.
 
