@@ -11,9 +11,11 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only (type ModuleRead) (type SelectedDeclaration)))
+	(use wove-file "../scalar/records.wove" (only count_records (type ScalarRecord)))
+	(use wove-file "./records.wove" (only write_value_type write_member_name write_record_layouts))
 	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement)))
 	(use wove-file "../scalar/plan.wove"
-		(only read_functions plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
+		(only read_module_declarations plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
 	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_byte_view_type is_reborrow_keyword (type ScalarOperator)))
 	(use wove-file "./runtime.wove"
 		(only write_runtime_header open_conversion open_slice_access open_shared_projection write_slice_length close_runtime_call
@@ -167,7 +169,7 @@
 		(returns bool)
 		(body
 			(return (bool.or (u32.eq (local kind) (u32 3))
-				(bool.or (call is_runtime_operation (local kind))
+				(bool.or (bool.or (call is_runtime_operation (local kind)) (u32.eq (local kind) (u32 52)))
 					(u32.lt (u32 0) (record.get (call scalar_operator (local kind)) result)))))))
 
 	(fn
@@ -272,15 +274,70 @@
 				(record.get (local expression) end) (local writing)))))
 
 	(fn
+		(:doc `Construct the named native record using already evaluated field values.`)
+		write_record_make
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(expressions (shared-slice ScalarExpression)) (expression ScalarExpression) (tree_base i32)
+			(output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (call c_byte (borrow-mut (local output)) (local offset) (u8 40) (local writing)))
+			(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (record.get (local expression) type)
+				(borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 123) (local writing)))
+			(let first (record.get (local expression) first))
+			(let-mut field (local first))
+			(if
+				(:doc "Initialize the placeholder member of an empty record.")
+				(i32.lt (local first) (i32 0))
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 48) (local writing)))))
+			(while
+				(:doc "Use a designator for each field so source order can differ from layout order.")
+				(bool.not (i32.lt (local field) (i32 0)))
+				(body
+					(if
+						(:doc "Commas separate adjacent initializer designators.")
+						(bool.not (i32.eq (local field) (local first)))
+						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))))
+					(let row (slice.load (local expressions) (local field)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 46) (local writing)))
+					(set (local cursor) (call write_member_name (borrow-shared (local source)) (record.get (local row) target)
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (record.get (local row) first)
+						(local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local field) (record.get (slice.load (local nodes) (local field)) next_sibling))))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))))
+
+	(fn
 		(:doc `Write a checked value using the temporaries already evaluated for its operands.`)
 		write_value
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (value_index i32) (tree_base i32)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
+			(records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let expression (slice.load (local expressions) (local value_index)))
 			(let kind (record.get (local expression) kind))
+			(if
+				(:doc "Assemble the record from its checked initializer temporaries.")
+				(u32.eq (local kind) (u32 50))
+				(then (return (call write_record_make (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (borrow-shared (local expressions)) (local expression) (local tree_base)
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Read the selected native member from the receiver's local value.")
+				(u32.eq (local kind) (u32 52))
+				(then
+					(let receiver (slice.load (local expressions) (record.get (local expression) first)))
+					(let value (call write_scalar (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local receiver) (local tree_base) (borrow-shared (local parameters))
+						(borrow-mut (local output)) (local offset) (local writing)))
+					(let dot (call c_byte (borrow-mut (local output)) (local value) (u8 46) (local writing)))
+					(return (call write_member_name (borrow-shared (local source)) (record.get (local expression) target)
+						(borrow-mut (local output)) (local dot) (local writing)))))
 			(if
 				(:doc "The runtime checks the already evaluated operand and returns the exact target type.")
 				(u32.eq (local kind) (u32 33))
@@ -417,7 +474,7 @@
 		write_nested_values
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (root i32) (tree_base i32)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
+			(records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let-mut index (local root))
@@ -430,8 +487,10 @@
 					(let expression (slice.load (local expressions) (local index)))
 					(let first (record.get (local expression) first))
 					(if
-						(:doc "Visit the first child of an unvisited call or operator.")
-						(bool.and (local entering) (bool.not (i32.lt (local first) (i32 0))))
+						(:doc "Descend into evaluated operands. Field reads use their named receiver directly.")
+						(bool.and (local entering)
+							(bool.and (bool.not (i32.lt (local first) (i32 0)))
+								(bool.not (u32.eq (record.get (local expression) kind) (u32 52)))))
 						(then (set (local index) (local first)))
 						(else
 							(if
@@ -450,14 +509,14 @@
 								(bool.and (bool.not (record.get (local operator) short_circuit))
 									(bool.or (call requires_value_temporary (local kind))
 										(bool.or (u32.lt (u32 0) (record.get (local parent_operator) result))
-											(call is_runtime_operation (local parent_kind)))))
+											(bool.or (call is_runtime_operation (local parent_kind)) (u32.eq (local parent_kind) (u32 51))))))
 								(then
 									(set (local cursor) (call write_temporary_declaration (borrow-shared (local source))
 										(local index) (local tree_base) (record.get (local expression) type)
 										(borrow-mut (local output)) (local cursor) (local writing)))
 									(set (local cursor) (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
 										(local index) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
-										(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
+										(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
 									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))))
 							(if
 								(:doc "Open the right guard after the left value. Close it after the right value.")
@@ -509,7 +568,7 @@
 		write_statement
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (index i32) (tree_base i32)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(statements (shared-slice ScalarStatement)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
+			(statements (shared-slice ScalarStatement)) (records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let statement (slice.load (local statements) (local index)))
@@ -527,7 +586,7 @@
 					(set (local condition_prefix) (u32 9))))
 			(set (local cursor) (call write_nested_values (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
+				(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
 			(if
 				(:doc "A store writes one checked runtime call as the complete statement.")
 				(u32.eq (local kind) (u32 40))
@@ -545,7 +604,7 @@
 						(borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
-						(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
+						(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
 					(set (local cursor) (call write_cleanup (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local index) (local tree_base)
@@ -573,15 +632,16 @@
 								(:doc "A declaration uses the exact fixed-width type of its checked initializer.")
 								(local declaring)
 								(then
-									(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor)
-										(record.get (local value) type) (local writing)))
+									(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+										(borrow-shared (local records)) (record.get (local value) type)
+										(borrow-mut (local output)) (local cursor) (local writing)))
 									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))))
 							(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local target) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))))))
 			(set (local cursor) (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
+				(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
 			(if
 				(:doc "Leave the loop before any body statement when the condition is false.")
 				(local loop)
@@ -656,7 +716,7 @@
 		write_body
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function ScalarFunction)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(statements (shared-slice ScalarStatement)) (expressions (shared-slice ScalarExpression))
+			(statements (shared-slice ScalarStatement)) (records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression))
 			(output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
@@ -700,7 +760,7 @@
 							(set (local cursor) (call write_statement (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local index) (record.get (local function) tree_base)
 								(borrow-shared (local functions)) (borrow-shared (local parameters))
-								(borrow-shared (local statements)) (borrow-shared (local expressions))
+								(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 								(borrow-mut (local output)) (local cursor) (local writing)))
 							(let first (record.get (local statement) first))
 							(if
@@ -717,7 +777,7 @@
 		write_definition
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function ScalarFunction)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(statements (shared-slice ScalarStatement)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
+			(statements (shared-slice ScalarStatement)) (records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let-mut cursor (call write_signature (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -738,7 +798,7 @@
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(set (local cursor) (call write_body (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local function) (borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local statements)) (borrow-shared (local expressions))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 				(borrow-mut (local output)) (local cursor) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))))
@@ -776,11 +836,13 @@
 		write_translation_unit
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(statements (shared-slice ScalarStatement)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (writing bool))
+			(statements (shared-slice ScalarStatement)) (records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (writing bool))
 		(returns u32)
 		(body
 			(let-mut cursor (u32 0))
 			(let count (slice.len (local functions)))
+			(let has_records (bool.and (i32.lt (i32 0) (slice.len (local records)))
+				(bool.not (i32.eq (record.get (slice.load (local records) (i32 0)) name) (i32 0)))))
 			(let first (slice.load (local functions) (i32 0)))
 			(let first_statement (slice.load (local statements) (record.get (local first) first_statement)))
 			(let first_value (slice.load (local expressions) (record.get (local first_statement) value)))
@@ -791,11 +853,13 @@
 				(else
 					(if
 						(:doc "Include fixed-width types for helpers, compound bodies, or a wrapping expression in a lone return.")
-						(bool.or (i32.lt (i32 1) (local count))
+						(bool.or (bool.or (local has_records) (i32.lt (i32 1) (local count)))
 							(bool.or (bool.not (u32.eq (record.get (local first_statement) kind) (u32 7)))
 								(u32.eq (record.get (call scalar_operator (record.get (local first_value) kind)) result) (u32 5))))
 						(then (set (local cursor)
 							(call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 0) (local writing)))))))
+			(set (local cursor) (call write_record_layouts (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-mut (local output)) (local cursor) (local writing)))
 			(let-mut index (i32 0))
 			(while
 				(:doc "Forward-declare local helpers before emitting the bodies in source order.")
@@ -819,7 +883,7 @@
 				(body
 					(set (local cursor) (call write_definition (borrow-shared (local source)) (borrow-shared (local nodes))
 						(slice.load (local functions) (local index)) (borrow-shared (local functions))
-						(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local expressions))
+						(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 						(borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (local cursor))))
@@ -846,7 +910,7 @@
 				"gh:wove-lang/wove:77" "gh:wove-lang/wove:79" "gh:wove-lang/wove:83"
 				"gh:wove-lang/wove:85" "gh:wove-lang/wove:90" "gh:wove-lang/wove:104"
 				"gh:wove-lang/wove:107" "gh:wove-lang/wove:110" "gh:wove-lang/wove:113"
-				"gh:wove-lang/wove:115"))
+				"gh:wove-lang/wove:115" "gh:wove-lang/wove:125"))
 		emit_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))
@@ -864,10 +928,13 @@
 				(:doc "An active module needs an ABI entry.")
 				(bool.or (bool.not (record.get (local module) active)) (i32.eq (local count) (i32 0)))
 				(then (return (call emit_result (i32 0) (local start) (local end) (u32 22)))))
-			(let-mut functions (array.alloc ScalarFunction (local count)))
+			(let record_count (call count_records (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local declarations)) (local count)))
+			(let-mut records (array.alloc ScalarRecord (local record_count)))
+			(let-mut functions (array.alloc ScalarFunction (i32.sub.wrapping (local count) (local record_count))))
 			(let-mut parameters (array.alloc ScalarParameter (slice.len (local nodes))))
-			(let signatures (call read_functions (borrow-shared (local source)) (borrow-shared (local nodes)) (local module)
-				(borrow-shared (local declarations)) (borrow-mut (local functions)) (borrow-mut (local parameters)) (local file) (bool true)))
+			(let signatures (call read_module_declarations (borrow-shared (local source)) (borrow-shared (local nodes)) (local module)
+				(borrow-shared (local declarations)) (borrow-mut (local functions)) (borrow-mut (local parameters)) (borrow-mut (local records)) (local file) (bool true)))
 			(if
 				(:doc "Signature, name, and stable identity failures precede any C emission.")
 				(u32.lt (u32 0) (record.get (local signatures) error))
@@ -879,7 +946,8 @@
 			(let bindings (array.alloc GraphBinding (i32 0)))
 			(let checked (call plan_bodies (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
-				(borrow-mut (local statements)) (borrow-mut (local expressions)) (borrow-mut (local sites)) (local view_start)))
+				(borrow-shared (local records)) (borrow-mut (local statements)) (borrow-mut (local expressions))
+				(borrow-mut (local sites)) (local view_start)))
 			(if
 				(:doc "Preserve the primary span and any related transfer from body checking.")
 				(u32.lt (u32 0) (record.get (local checked) error))
@@ -889,7 +957,8 @@
 					(related_start (record.get (local checked) related_start)) (related_end (record.get (local checked) related_end))))))
 			(let measured (call write_translation_unit (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local statements)) (borrow-shared (local expressions)) (borrow-mut (local output)) (bool false)))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+				(borrow-mut (local output)) (bool false)))
 			(if
 				(:doc "A short destination reports the entry span and keeps every output byte intact.")
 				(u32.lt (int.convert u32 (slice.len (local output))) (local measured))
@@ -899,5 +968,6 @@
 					(return (call emit_result (i32 0) (record.get (local entry) start) (record.get (local entry) end) (u32 16)))))
 			(let written (call write_translation_unit (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local statements)) (borrow-shared (local expressions)) (borrow-mut (local output)) (bool true)))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+				(borrow-mut (local output)) (bool true)))
 			(return (call emit_result (int.convert i32 (local written)) (local start) (local end) (u32 0))))))
