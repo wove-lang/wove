@@ -13,9 +13,14 @@ Each `Token` carries a `u32` kind and an `i32` half-open span, `[start, end)`,
 relative to the supplied slice. The scanner skips ASCII space, tab, carriage
 return, and newline. A bare atom stops at whitespace, a parenthesis, a
 semicolon, or a double quote. Atom kind is 1, opening and closing parenthesis
-kinds are 40 and 41, and a lone semicolon or double quote consumes one byte
-with lexical error kind 3. End of input has kind 0 and both offsets equal to
-the slice length.
+kinds are 40 and 41, and a lone semicolon consumes one byte with lexical error
+kind 3. End of input has kind 0 and both offsets equal to the slice length.
+
+A double-quoted string is kind 2. Its raw span includes both quotes and
+preserves the original spelling of JSON short escapes and `\u` escapes with
+four hexadecimal digits. A raw byte below `0x20`, an invalid escape, or a
+missing quote gives error kind 3. The error starts at the opening quote and
+ends just after the offending byte or at the view end on truncation.
 
 A `;;` line comment is a raw token of kind 59. Its span includes both
 semicolons and all comment text up to CR, LF, or the end of the view. The
