@@ -5,7 +5,8 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Stage 1 seed
 
-The Python seed reads one module of tagged IR forms and emits C11 to stdout.
+The Python seed is an internal build tool for bootstrapping Stage 2.
+It reads one module of tagged IR forms and emits C11 to stdout.
 The subset covers functions that return `u8`, `i32`, `u32`, `bool`, or
 `void`, owned byte arrays, and call-scoped shared and exclusive slice
 borrows. Every path through a scalar function returns a value. A void
@@ -61,10 +62,11 @@ Equal endpoints form an empty view, including at the end of the source.
 Guard module declarations with
 `(with-pragmas (pragmas (cfg bootstrap) (inline always)) target)`.
 A target can be a declaration or a `(decls ...)` group whose declarations
-share the enclosing module scope. The seed includes the target only when all
-its `cfg` predicates match. It supports `bootstrap` and `(not bootstrap)`
-and ignores other tagged pragmas, including `inline`.
-Selection happens before name resolution and lowering.
+share the enclosing module scope. Stage 1 always enables `bootstrap`.
+A target is included when all its `cfg` predicates are true, so
+`(cfg bootstrap)` selects its target and `(cfg (not bootstrap))` excludes it.
+Selection happens before name resolution and lowering. The seed ignores other
+tagged pragmas, including `inline`.
 
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.
@@ -72,16 +74,13 @@ Run `make test` to check the transfer, its allocation lifetime, and the borrow
 rejection cases. The runner reads fixture paths and expected results from
 [the case manifest](../tests/stage-1/cases.tsv). Each row specifies a mode,
 a source path relative to the manifest, and an exit status or diagnostic line.
-An optional fourth field, `bootstrap`, enables that profile for the case.
 Trap cases match the runtime diagnostic at that line.
 Use decimal numbers without leading zeros for expected results.
 Tracked cases also run with the allocation probe.
 
-The seed entry point is `python3 stage-1/wovec.py [--bootstrap] SOURCE`.
-The build passes `--bootstrap` to enable the flag for that compilation.
-The flag defaults to off. The generated C includes `wove_runtime.h` and
-links with `runtime/wove_runtime.c`. The byte array implementation and slice
-layouts come from the [archived C runtime](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/runtime).
+The seed entry point is `python3 stage-1/wovec.py SOURCE`. The generated C
+includes `wove_runtime.h` and links with `runtime/wove_runtime.c`. The byte
+array implementation and slice layouts come from the [archived C runtime](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/runtime).
 
 The [ownership expectation](https://github.com/wove-lang/wove/issues/1) stays
 on the function in the IR. Stage 2 will provide the structured diagnostic

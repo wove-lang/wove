@@ -12,20 +12,14 @@ from syntax import SourceError
 
 # Use stdout for generated C and report source failures by line.
 def main() -> int:
-	arguments = sys.argv[1:]
-	bootstrap = arguments[:1] == ["--bootstrap"]
-	# The optional flag affects selection throughout this compilation.
-	if bootstrap:
-		arguments = arguments[1:]
 	# The seed translates one source file per invocation.
-	if len(arguments) != 1:
-		print("usage: wovec.py [--bootstrap] SOURCE", file=sys.stderr)
+	if len(sys.argv) != 2:
+		print("usage: wovec.py SOURCE", file=sys.stderr)
 		return 1
-	filename = arguments[0]
+	filename = sys.argv[1]
 	# Buffer the translation so a rejected source emits no C.
 	try:
-		source = Path(filename).read_text(encoding="utf-8")
-		output = compile_source(source, filename, bootstrap=bootstrap)
+		output = compile_source(Path(filename).read_text(encoding="utf-8"), filename)
 	# Show the line of a rejected source operation.
 	except SourceError as error:
 		print(f"{filename}:{error.line}", file=sys.stderr)
