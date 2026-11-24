@@ -18,6 +18,7 @@ VALUE_TEXT_MODULES := $(BYTE_TEXT_MODULE) stage-2/text/decimal.wove
 DECIMAL_WRITER := stage-2/text/decimal_write.wove
 SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
 SOURCE_MODULE_READER := stage-2/source/module.wove
+SOURCE_TYPE_MODULE := stage-2/source/types.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
 SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove
 C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove emit/runtime.wove emit/graph.wove emit/names.wove emit/records.wove emit/text.wove \
@@ -108,7 +109,7 @@ test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 # Translate the compiler root and regenerate C when any source module changes.
 $(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
 	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
-	$(SOURCE_GRAPH_MODULES) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(SEED)
+	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
@@ -185,7 +186,7 @@ $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
 REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
 	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
-	$(SOURCE_GRAPH_MODULES) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(ROUND_TRIP_PROVIDERS) \
+	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(ROUND_TRIP_PROVIDERS) \
 	$(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
 
