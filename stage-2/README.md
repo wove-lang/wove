@@ -218,6 +218,15 @@ reports an invalid length or allocation failure at the allocation's
 original file identity and byte span. A shared call borrow keeps the
 owner's original storage. A mutable call borrow requires `let-mut`.
 
+A shared call argument can use
+`(borrow-shared (slice.range (local source) start end))` with a named byte
+owner or shared byte slice. The source view and its exact `i32` endpoints
+are evaluated once, left to right. The runtime checks
+`0 <= start <= end <= source.len` before entering the callee. The view
+uses the original storage, with length `end - start` and index zero at
+`start`. The loan lasts from projection through the call, including
+later argument evaluations. A bounds failure reports the range's span.
+
 Owners are released in reverse declaration order when their lexical
 scope exits, including on each completed loop iteration. A return
 evaluates its result first and releases the active owners from the
