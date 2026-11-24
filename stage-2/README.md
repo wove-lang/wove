@@ -134,6 +134,33 @@ the source span of the next scalar. An unpaired surrogate returns code 17 and
 the span of its six-byte escape. In both cases the written prefix ends at a
 scalar boundary and the remaining output retains its previous bytes.
 
+The [module reader](source_module.wove) works from the original bytes and a
+checked source tree. `form_parts` returns the head plus the first metadata
+and first ordinary operand indices. An empty view uses `-1`. Walk metadata
+siblings up to the first ordinary operand and walk ordinary operands to the
+end. All indices refer to existing tree rows.
+
+`read_module` reads the name from the first ordinary operand and writes the
+original indices of selected declarations into a caller-provided record slice.
+It applies bootstrap `cfg` and `test` selection to the module, its groups, and
+its declarations. It flattens active `decls` in source order. An excluded
+module succeeds with its name and zero declarations. Unknown metadata and
+unknown directive payloads stay opaque. Later passes resolve imports and
+interpret declarations.
+
+The result includes the module name index, whether the module is active,
+the number of written declarations, and a view-relative source span. On
+success the span covers the module. A failure can retain indices written
+before the error. Earlier tree errors keep their original spans and codes.
+
+| Code | Failure | Primary span |
+| --- | --- | --- |
+| 16 | Short declaration output view | The next selected declaration |
+| 18 | Expected a module root | The root head |
+| 19 | Missing or invalid module name | The module if the name is absent, otherwise its first ordinary operand |
+| 20 | Expected a declaration form | The offending ordinary operand |
+| 21 | Invalid selection directive | The offending directive or predicate |
+
 `make stage-2` translates [the compiler root](wovec.wove) with the Python seed
 and links `build/stage-1/wovec` with Clang and the shared runtime. The root
 imports `admit_source` and `scan_token` from [the scanner](source_scan.wove).
@@ -176,3 +203,12 @@ token is a string. The first output row contains the written count, span start,
 span end, error, line, and column. The rest is the decoded prefix as raw bytes.
 The [decode fixtures](../tests/stage-2/source_decodings.tsv) check spans,
 compare successful values with Stage 1, and check the prefix on failure.
+
+Use `--module FILE [START END [DECL_CAPACITY]]` to select a checked module.
+The first row contains the selected count, start, end, error, line, and
+column. The second row gives the name node index and the active flag.
+When the module has a checked name, the remaining rows describe the module
+and the selected declarations. Each lists the original form, head, first
+metadata, and first ordinary operand indices. The
+[module fixtures](../tests/stage-2/source_modules.tsv) compare these links
+and the active declarations with the Stage 1 seed.

@@ -23,12 +23,17 @@
 #define check_source_metadata wv_seed_fn_39
 #define render_source_tree wv_seed_fn_41
 #define decode_string wv_seed_fn_55
+#define form_parts wv_seed_fn_57
+#define read_module wv_seed_fn_66
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
 typedef wv_seed_record_4 SourceNode;
 typedef wv_seed_record_5 RenderResult;
 typedef wv_seed_record_6 DecodeResult;
+typedef wv_seed_record_8 FormParts;
+typedef wv_seed_record_9 SelectedDeclaration;
+typedef wv_seed_record_10 ModuleRead;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -452,12 +457,12 @@ static int dump_decode(wvrt_slice parent, wvrt_slice input, int32_t start, int32
 	return result.wv_field_3 == 0 && emitted == (size_t)written ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-// Build and validate the original tree before supplying it to the renderer.
-static int render_view(wvrt_slice input, int32_t capacity) {
+// Build and validate a source tree for consumers that require checked rows.
+static wvrt_array *checked_source_tree(wvrt_slice input, FormCheck *result) {
 	const FormCheck checked = check_source_form(input);
 	if (checked.wv_field_3 != 0) {
-		printf("0\t%" PRIu32 "\n", checked.wv_field_3);
-		return EXIT_FAILURE;
+		*result = checked;
+		return NULL;
 	}
 	const int32_t rows = (int32_t)checked.wv_field_0;
 	const wvrt_location site = {__FILE__, __LINE__, 1};
@@ -465,14 +470,80 @@ static int render_view(wvrt_slice input, int32_t capacity) {
 	const wvrt_mut_slice writable = {storage->wvrt_items, rows, sizeof(SourceNode)};
 	const wvrt_slice nodes = {storage->wvrt_items, rows, sizeof(SourceNode)};
 	const FormCheck built = build_source_tree(input, checked, writable);
-	const FormCheck validated = check_source_metadata(input, built, nodes);
+	*result = check_source_metadata(input, built, nodes);
+	return storage;
+}
+
+// Build and validate the original tree before supplying it to the renderer.
+static int render_view(wvrt_slice input, int32_t capacity) {
+	FormCheck checked;
+	wvrt_array *storage = checked_source_tree(input, &checked);
 	int status = EXIT_FAILURE;
-	// Surface source validation errors without opening the output view.
-	if (validated.wv_field_3 != 0) {
-		printf("0\t%" PRIu32 "\n", validated.wv_field_3);
+	// A malformed source keeps its original diagnostic.
+	if (checked.wv_field_3 != 0) {
+		printf("0\t%" PRIu32 "\n", checked.wv_field_3);
 	} else {
+		const wvrt_slice nodes = {storage->wvrt_items, storage->wvrt_length, sizeof(SourceNode)};
 		status = dump_render(input, nodes, capacity);
 	}
+	wvrt_array_drop(storage);
+	return status;
+}
+
+// Emit a form's index and the starting indices of its checked child views.
+static void write_form_parts(wvrt_slice input, wvrt_slice nodes, int32_t index) {
+	const SourceNode *rows = nodes.wvrt_items;
+	const FormParts parts = form_parts(input, nodes, rows[index]);
+	printf("%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\n",
+		index, parts.wv_field_0, parts.wv_field_1, parts.wv_field_2);
+}
+
+// Read one module and report the original row indices of its active declarations.
+static int dump_module(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity) {
+	FormCheck checked;
+	wvrt_array *storage = checked_source_tree(input, &checked);
+	const wvrt_slice nodes = {
+		storage != NULL ? storage->wvrt_items : NULL,
+		storage != NULL ? storage->wvrt_length : 0,
+		sizeof(SourceNode),
+	};
+	if (capacity < 0) {
+		capacity = nodes.wvrt_length;
+	}
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_array *selected = wvrt_array_new(capacity, sizeof(SelectedDeclaration), _Alignof(SelectedDeclaration), site);
+	const size_t size = (size_t)capacity * sizeof(SelectedDeclaration);
+	unsigned char *bytes = selected->wvrt_items;
+	memset(bytes, 0xa5, size);
+	const wvrt_mut_slice output = {bytes, capacity, sizeof(SelectedDeclaration)};
+	const ModuleRead result = read_module(input, nodes, checked, output);
+	const int32_t count = result.wv_field_1;
+	int status = EXIT_FAILURE;
+	// Report rows only when the count and untouched destination tail are valid.
+	if (count < 0 || count > capacity) {
+		fputs("module reader exceeded the output view\n", stderr);
+	} else {
+		size_t offset = (size_t)count * sizeof(SelectedDeclaration);
+		while (offset < size && bytes[offset] == 0xa5) {
+			++offset;
+		}
+		if (offset != size) {
+			fputs("module reader modified unused output rows\n", stderr);
+		} else {
+			write_span(parent, start, (uint32_t)count, result.wv_field_3, result.wv_field_4, result.wv_field_5);
+			printf("%" PRId32 "\t%d\n", result.wv_field_0, result.wv_field_2);
+			if (result.wv_field_0 >= 0) {
+				const SourceNode *rows = nodes.wvrt_items;
+				const SelectedDeclaration *declarations = selected->wvrt_items;
+				write_form_parts(input, nodes, rows[0].wv_field_4);
+				for (int32_t index = 0; index < count; ++index) {
+					write_form_parts(input, nodes, declarations[index].wv_field_0);
+				}
+			}
+			status = result.wv_field_5 == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+		}
+	}
+	wvrt_array_drop(selected);
 	wvrt_array_drop(storage);
 	return status;
 }
@@ -518,9 +589,10 @@ static int source_mode(int argc, char **argv) {
 	const bool tree = metadata || strcmp(argv[1], "--tree") == 0;
 	const bool render = strcmp(argv[1], "--render") == 0;
 	const bool decode = strcmp(argv[1], "--decode") == 0;
-	const bool takes_capacity = tree || render || decode;
+	const bool module = strcmp(argv[1], "--module") == 0;
+	const bool takes_capacity = tree || render || decode || module;
 	if ((argc != 3 && argc != 5 && !(takes_capacity && argc == 6)) || (!tokens && !form && !takes_capacity)) {
-		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render | --decode]"
+		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render | --decode | --module]"
 			" FILE [START END [CAPACITY]]\n", stderr);
 		return EXIT_FAILURE;
 	}
@@ -554,6 +626,8 @@ static int source_mode(int argc, char **argv) {
 		status = render_view(view, capacity);
 	} else if (decode) {
 		status = dump_decode(parent, view, start, capacity);
+	} else if (module) {
+		status = dump_module(parent, view, start, capacity);
 	} else {
 		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	}
