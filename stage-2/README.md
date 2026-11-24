@@ -169,10 +169,17 @@ reads, and direct calls. The selected `main` has the ABI signature
 `int main(void)`. Forward calls use checked prototypes, and nested calls
 evaluate from left to right.
 
-Internal function symbols use `wg` for Wove-generated names, `f` for
-functions, seven lowercase Base32hex digits, and the original name with
-dots and hyphens replaced by underscores. The first digit is `0` or `1`
-because IDs are 31 bits.
+Generated C names have the form `wg<role><id><suffix>`. The `wg` prefix
+stands for Wove-generated. The third character identifies the symbol's
+role. The ID uses seven lowercase Base32hex digits. Its first digit is
+`0` or `1` because IDs are 31 bits. A source suffix replaces dots and
+hyphens with underscores.
+
+| Tag | Role | ID | Suffix |
+| --- | --- | --- | --- |
+| `f` | Function | Stable declaration hash | Function name |
+| `p` | Parameter | Zero-based position in its signature | Parameter name |
+| `t` | Nested call temporary | Original expression's source-tree row index | Empty |
 
 For this single-module slice, hash the declared module name, the four-byte
 little-endian function kind, and the original function name using the
