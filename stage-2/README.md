@@ -184,6 +184,9 @@ The [graph resolver](source_graph.wove) reads a supplied virtual file table
 and binds active function imports in each file's namespace. The table maps
 normalized absolute paths to defining file identities and source ranges in a
 shared byte arena. Relative imports use the directory of the reached path.
+Stage 2 resolves virtual paths lexically before lookup, so a directory
+discarded by `..` can be absent from the graph. Stage 1 requires each
+intermediate directory to exist on the host filesystem.
 Several paths can refer to one identity, which the resolver reads once.
 An empty `only` still visits its provider. An excluded module contributes
 no names or nested imports.
