@@ -198,7 +198,7 @@
 										(then (return (call lexical_error (local start) (local cursor)))))))))))
 			(return (call lexical_error (local start) (local length)))))
 
-	;; Scan one raw token and return its half-open byte span in the supplied view.
+	;; Scan one raw token in a view already checked by admit_source.
 	(fn scan_token
 		(params (source (shared-slice u8)) (cursor i32))
 		(returns Token)
@@ -242,6 +242,96 @@
 				(then (return (call lexical_error (local start) (local next)))))
 			(let end (call bare_atom_end (borrow-shared (local source)) (local next)))
 			(return (record.make Token (kind (u32 1)) (start (local start)) (end (local end))))))
+
+	;; Classify an ASCII byte or a legal lead byte by the width of its scalar.
+	(fn utf8_width
+		(params (lead u8))
+		(returns i32)
+		(body
+			;; ASCII scalars occupy a single byte.
+			(if (u8.lt (local lead) (u8 128))
+				(then (return (i32 1))))
+			;; Continuations and the overlong two-byte prefixes cannot start a scalar.
+			(if (u8.lt (local lead) (u8 194))
+				(then (return (i32 0))))
+			;; C2 through DF are the legal two-byte leads.
+			(if (u8.lt (local lead) (u8 224))
+				(then (return (i32 2))))
+			;; E0 through EF start three-byte scalars.
+			(if (u8.lt (local lead) (u8 240))
+				(then (return (i32 3))))
+			;; F4 is the last lead that can encode a Unicode scalar.
+			(if (u8.lt (local lead) (u8 245))
+				(then (return (i32 4))))
+			(return (i32 0))))
+
+	;; A continuation byte has prefix 10 in binary.
+	(fn is_utf8_continuation
+		(params (byte u8))
+		(returns bool)
+		(body
+			(return (bool.and (bool.not (u8.lt (local byte) (u8 128))) (u8.lt (local byte) (u8 192))))))
+
+	;; Apply the extra restrictions on the first continuation byte.
+	(fn valid_utf8_second
+		(params (lead u8) (second u8))
+		(returns bool)
+		(body
+			;; Every multibyte scalar needs a continuation at this position.
+			(if (bool.not (call is_utf8_continuation (local second)))
+				(then (return (bool false))))
+			;; E0 requires a high second byte to avoid a three-byte overlong form.
+			(if (u8.eq (local lead) (u8 224))
+				(then (return (bool.not (u8.lt (local second) (u8 160))))))
+			;; ED must stop below the surrogate range.
+			(if (u8.eq (local lead) (u8 237))
+				(then (return (u8.lt (local second) (u8 160)))))
+			;; F0 requires a high second byte to avoid a four-byte overlong form.
+			(if (u8.eq (local lead) (u8 240))
+				(then (return (bool.not (u8.lt (local second) (u8 144))))))
+			;; F4 must stop at U+10FFFF.
+			(if (u8.eq (local lead) (u8 244))
+				(then (return (u8.lt (local second) (u8 144)))))
+			(return (bool true))))
+
+	;; Admit a source once before tokenization and report the start of its first malformed sequence.
+	(fn admit_source
+		(params (source (shared-slice u8)))
+		(returns i32)
+		(expect lexer.utf8_admission
+			(issue "https://github.com/wove-lang/wove/issues/32"))
+		(body
+			(let length (slice.len (local source)))
+			(let-mut cursor (i32 0))
+			;; Keep the cursor at the lead until the whole scalar has been checked.
+			(while (i32.lt (local cursor) (local length))
+				(body
+					(let lead (slice.load (local source) (local cursor)))
+					(let width (call utf8_width (local lead)))
+					(let remaining (i32.sub.wrapping (local length) (local cursor)))
+					;; Check the remaining width before adding it or reading any suffix byte.
+					(if (bool.or (i32.eq (local width) (i32 0)) (i32.lt (local remaining) (local width)))
+						(then (return (local cursor))))
+					(let next (i32.add.wrapping (local cursor) (local width)))
+					;; Only multibyte scalars have a restricted second byte.
+					(if (i32.lt (i32 1) (local width))
+						(then
+							(let second_index (i32.add.wrapping (local cursor) (i32 1)))
+							(let second (slice.load (local source) (local second_index)))
+							;; Report the lead rather than the byte that breaks the sequence.
+							(if (bool.not (call valid_utf8_second (local lead) (local second)))
+								(then (return (local cursor))))
+							(let-mut tail (i32.add.wrapping (local second_index) (i32 1)))
+							;; The rest of the verified span can contain only continuations.
+							(while (i32.lt (local tail) (local next))
+								(body
+									(let byte (slice.load (local source) (local tail)))
+									;; Keep errors at the first byte of the malformed scalar.
+									(if (bool.not (call is_utf8_continuation (local byte)))
+										(then (return (local cursor))))
+									(set (local tail) (i32.add.wrapping (local tail) (i32 1)))))))
+					(set (local cursor) (local next))))
+			(return (i32 -1))))
 
 	;; Supply the seed entry point while the fixture provides input slices.
 	(fn main

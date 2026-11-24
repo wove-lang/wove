@@ -5,6 +5,11 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Stage 2 source scanner
 
+Call `admit_source` once on the shared byte slice before tokenization. It
+returns `-1` for a valid UTF-8 view or the view-relative start of the first
+malformed sequence. The check covers the entire view, including bytes in
+comments and strings. Pass the same bytes to `scan_token` after admission.
+
 `scan_token` reads one token from a shared byte slice. Start with an `i32` cursor
 of zero and use each token's `end` as the next cursor. A cursor from zero through
 the slice length is valid. The runtime rejects cursors outside that range.
