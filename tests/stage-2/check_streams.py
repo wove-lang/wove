@@ -40,12 +40,18 @@ def position(source, offset):
 	return prefix.count("\n") + 1, len(prefix.rsplit("\n", 1)[-1]) + 1
 
 
-# Check that the executable terminates the stream and advances every nonterminal row.
-def read_stream(executable, path, view_length, bounds=()):
-	command = [str(executable), "--tokens", str(path), *map(str, bounds)]
+# Run a probe mode on the same checked file view and read its numeric rows.
+def probe_rows(executable, mode, path, bounds):
+	command = [str(executable), mode, str(path), *map(str, bounds)]
 	result = subprocess.run(command, capture_output=True, check=False, timeout=30)
 	assert not result.stderr, (path, result.stderr)
 	rows = [tuple(map(int, row.split(b"\t"))) for row in result.stdout.splitlines()]
+	return rows, result.returncode
+
+
+# Check that the executable terminates the stream and advances every nonterminal row.
+def read_stream(executable, path, view_length, bounds=()):
+	rows, status = probe_rows(executable, "--tokens", path, bounds)
 	assert rows, path
 	cursor = 0
 	for index, row in enumerate(rows):
@@ -54,9 +60,9 @@ def read_stream(executable, path, view_length, bounds=()):
 		if kind == 0 or error:
 			assert index == len(rows) - 1, (path, row)
 			if error:
-				assert kind == 3 and end > start and result.returncode == 1, (path, row)
+				assert kind == 3 and end > start and status == 1, (path, row)
 			else:
-				assert start == end == view_length and result.returncode == 0, (path, row)
+				assert start == end == view_length and status == 0, (path, row)
 		else:
 			assert kind != 3 and end > start, (path, row)
 		cursor = end
@@ -122,9 +128,20 @@ def check_diagnostics(executable, directory, manifest):
 			assert len(rows) == 1, label
 
 
+# Check result rows for the configured valid and malformed tagged forms.
+def check_forms(executable, directory, manifest):
+	source = directory / "form.wove"
+	for label, raw, base, end, *fields in fixture_rows(manifest):
+		source.write_bytes(bytes.fromhex(raw))
+		expected = tuple(map(int, fields))
+		rows, status = probe_rows(executable, "--form", source, (int(base), int(end)))
+		assert rows == [expected], (label, rows, expected)
+		assert status == int(expected[3] != 0), label
+
+
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	executable, layouts, diagnostics, *sources = map(Path, sys.argv[1:])
+	executable, layouts, diagnostics, forms, *sources = map(Path, sys.argv[1:])
 	for source in sources:
 		compare_stream(executable, source)
 
@@ -132,6 +149,7 @@ def main():
 		directory = Path(path)
 		check_layouts(executable, directory, layouts)
 		check_diagnostics(executable, directory, diagnostics)
+		check_forms(executable, directory, forms)
 
 
 if __name__ == "__main__":

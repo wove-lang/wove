@@ -18,8 +18,10 @@
 #define admit_source wv_seed_fn_17
 #define source_diagnostic wv_seed_fn_19
 #define source_position wv_seed_fn_20
+#define check_source_form wv_seed_fn_24
 
 typedef wv_seed_record_0 Token;
+typedef wv_seed_record_3 FormCheck;
 
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
 _Static_assert(_Generic(&source_kind, uint32_t (*)(wvrt_slice): 1, default: 0), "source kind type");
@@ -327,28 +329,26 @@ static void check_whitespace(void) {
 	}
 }
 
-// Emit numeric kinds, spans, and coordinates while leaving the source bytes in the input.
-static void write_token(wvrt_slice parent, int32_t view_start, Token token) {
-	const wv_seed_record_2 position = source_position(parent, view_start, token.wv_field_1);
+// Map a view-relative result to file coordinates and emit its numeric fields.
+static void write_span(wvrt_slice parent, int32_t view_start, uint32_t value, int32_t start, int32_t end,
+	uint32_t error) {
+	const wv_seed_record_2 position = source_position(parent, view_start, start);
 	printf("%" PRIu32 "\t%" PRId32 "\t%" PRId32 "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\n",
-		token.wv_field_0, token.wv_field_1, token.wv_field_2, token.wv_field_3,
-		position.wv_field_0, position.wv_field_1);
+		value, start, end, error, position.wv_field_0, position.wv_field_1);
 }
 
 // Check UTF-8 once, then advance by each token's exclusive end.
-static int dump_tokens(wvrt_slice parent, int32_t start, int32_t end) {
-	const wvrt_location site = {__FILE__, __LINE__, 1};
-	wvrt_slice input = wvrt_slice_range_u8(parent.wvrt_items, parent.wvrt_length, start, end, site);
+static int dump_tokens(wvrt_slice parent, wvrt_slice input, int32_t start) {
 	const wv_seed_record_1 diagnostic = source_diagnostic(input);
 	if (diagnostic.wv_field_0 != 0) {
-		write_token(parent, start, (Token){3, diagnostic.wv_field_1, diagnostic.wv_field_2, diagnostic.wv_field_0});
+		write_span(parent, start, 3, diagnostic.wv_field_1, diagnostic.wv_field_2, diagnostic.wv_field_0);
 		return EXIT_FAILURE;
 	}
 
 	int32_t cursor = 0;
 	for (;;) {
 		const Token token = scan_token(input, cursor);
-		write_token(parent, start, token);
+		write_span(parent, start, token.wv_field_0, token.wv_field_1, token.wv_field_2, token.wv_field_3);
 		if (token.wv_field_0 == 0) {
 			return EXIT_SUCCESS;
 		}
@@ -361,6 +361,13 @@ static int dump_tokens(wvrt_slice parent, int32_t start, int32_t end) {
 		}
 		cursor = token.wv_field_2;
 	}
+}
+
+// Emit one form check result with its root or error span.
+static int dump_form(wvrt_slice parent, wvrt_slice input, int32_t start) {
+	const FormCheck result = check_source_form(input);
+	write_span(parent, start, result.wv_field_0, result.wv_field_1, result.wv_field_2, result.wv_field_3);
+	return result.wv_field_3 == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 // Load the bytes unchanged so newline and UTF-8 offsets survive into the probe.
@@ -397,9 +404,11 @@ static bool read_offset(const char *text, int32_t *offset) {
 }
 
 // Supply a whole file or one checked view to the same seed-built executable.
-static int token_stream_mode(int argc, char **argv) {
-	if ((argc != 3 && argc != 5) || strcmp(argv[1], "--tokens") != 0) {
-		fputs("usage: source_scan --tokens FILE [START END]\n", stderr);
+static int source_mode(int argc, char **argv) {
+	const bool tokens = strcmp(argv[1], "--tokens") == 0;
+	const bool form = strcmp(argv[1], "--form") == 0;
+	if ((argc != 3 && argc != 5) || (!tokens && !form)) {
+		fputs("usage: source_scan [--tokens | --form] FILE [START END]\n", stderr);
 		return EXIT_FAILURE;
 	}
 
@@ -416,7 +425,10 @@ static int token_stream_mode(int argc, char **argv) {
 		free(bytes);
 		return EXIT_FAILURE;
 	}
-	int status = dump_tokens((wvrt_slice){bytes, length, sizeof(uint8_t)}, start, end);
+	const wvrt_slice parent = {bytes, length, sizeof(uint8_t)};
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	const wvrt_slice view = wvrt_slice_range_u8(bytes, length, start, end, site);
+	int status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	free(bytes);
 	return status;
 }
@@ -424,7 +436,7 @@ static int token_stream_mode(int argc, char **argv) {
 // Exercise complete inputs and checked views into a larger buffer.
 int main(int argc, char **argv) {
 	if (argc > 1) {
-		return token_stream_mode(argc, argv);
+		return source_mode(argc, argv);
 	}
 	// Each complete input supplies its own logical byte length.
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
