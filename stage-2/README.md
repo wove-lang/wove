@@ -447,8 +447,8 @@ destructor contract.
 (bridge c-header "<stdio.h>"
 	(type (:pragma (c_owned (drop fclose))) File (c-type "FILE *"))
 	(fn tmpfile (params) (returns File))
-	(fn fileno (params (stream (shared-ref File))) (returns i32)))
-(use c-header "<stdio.h>" (only (type File) tmpfile fileno))
+	(fn fgetc (params (stream (shared-ref File))) (returns i32)))
+(use c-header "<stdio.h>" (only (type File) tmpfile fgetc))
 ```
 
 A resource result resolves to its type in the defining bridge. Type selectors
@@ -460,7 +460,7 @@ destructor once for each present handle. Returns evaluate their value before
 cleanup. A local `move` transfers cleanup to the receiving binding.
 
 A bridge parameter spelled `(shared-ref File)` borrows that exact resource
-type from a local owner. For example, `(call fileno (borrow-shared (local file)))`
+type from a local owner. For example, `(call fgetc (borrow-shared (local file)))`
 checks the handle at the borrow's source span and passes its original C
 pointer. A missing handle traps before the call. The loan ends on return
 from C, and the local owner retains its destructor responsibility.
