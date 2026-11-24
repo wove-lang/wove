@@ -1,0 +1,308 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Scan JSON values and JSONC trivia while retaining their original byte spans.")
+	json_lex
+
+	(use wove-file "../text/quoted.wove" (only scan_double_quoted validate_double_quoted_scalars))
+
+	(struct JsonToken (fields (kind u32) (start i32) (end i32) (error u32)))
+
+	(fn
+		(:doc "Read a byte or return zero at the end of the view.")
+		json_peek
+		(params (source (shared-slice u8)) (at i32))
+		(returns u8)
+		(body
+			(if
+				(:doc "The virtual end byte is neither trivia nor valid JSON punctuation.")
+				(bool.not (i32.lt (local at) (slice.len (local source))))
+				(then (return (u8 0))))
+			(return (slice.load (local source) (local at)))))
+
+	(fn
+		(:doc "Create a successful token with its original byte span.")
+		json_token
+		(params (kind u32) (start i32) (end i32))
+		(returns JsonToken)
+		(body (return (record.make JsonToken (kind (local kind)) (start (local start)) (end (local end)) (error (u32 0))))))
+
+	(fn
+		(:doc "Retain the source span that caused a lexical or syntax error.")
+		json_lex_error
+		(params (error u32) (start i32) (end i32))
+		(returns JsonToken)
+		(body (return (record.make JsonToken (kind (u32 0)) (start (local start)) (end (local end)) (error (local error))))))
+
+	(fn
+		(:doc "Locate an unexpected byte, or use an empty span at end of input.")
+		json_error_at
+		(params (source (shared-slice u8)) (error u32) (at i32))
+		(returns JsonToken)
+		(body
+			(if
+				(:doc "At EOF the span has no byte to cover.")
+				(i32.eq (local at) (slice.len (local source)))
+				(then (return (call json_lex_error (local error) (local at) (local at)))))
+			(return (call json_lex_error (local error) (local at) (i32.add.wrapping (local at) (i32 1))))))
+
+	(fn
+		(:doc "Recognize exactly the four ASCII bytes that JSON treats as whitespace.")
+		json_whitespace
+		(params (byte u8))
+		(returns bool)
+		(body
+			(return
+				(bool.or (bool.or (u8.eq (local byte) (u8 32)) (u8.eq (local byte) (u8 9)))
+					(bool.or (u8.eq (local byte) (u8 10)) (u8.eq (local byte) (u8 13)))))))
+
+	(fn
+		(:doc "Skip a line comment up to a physical line ending or EOF.")
+		line_comment_end
+		(params (source (shared-slice u8)) (start i32))
+		(returns i32)
+		(body
+			(let-mut cursor (local start))
+			(while
+				(:doc "Only actual CR and LF bytes end a line comment.")
+				(i32.lt (local cursor) (slice.len (local source)))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					(if
+						(:doc "Leave the line break for the whitespace check.")
+						(bool.or (u8.eq (local byte) (u8 10)) (u8.eq (local byte) (u8 13)))
+						(then (return (local cursor))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (local cursor))))
+
+	(fn
+		(:doc "Find the byte after the first block-comment closer, or return -1.")
+		block_comment_end
+		(params (source (shared-slice u8)) (start i32))
+		(returns i32)
+		(body
+			(let-mut cursor (local start))
+			(while
+				(:doc "A closer needs room for both bytes.")
+				(i32.lt (local cursor) (i32.sub.wrapping (slice.len (local source)) (i32 1)))
+				(body
+					(if
+						(:doc "The first star followed by slash terminates the comment.")
+						(bool.and (u8.eq (slice.load (local source) (local cursor)) (u8 42))
+							(u8.eq (slice.load (local source) (i32.add.wrapping (local cursor) (i32 1))) (u8 47)))
+						(then (return (i32.add.wrapping (local cursor) (i32 2)))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (i32 -1))))
+
+	(fn
+		(:doc "Advance through JSON whitespace and both JSONC comment forms.")
+		json_skip_trivia
+		(params (source (shared-slice u8)) (start i32))
+		(returns JsonToken)
+		(body
+			(let-mut cursor (local start))
+			(let length (slice.len (local source)))
+			(while
+				(:doc "Stop at the first significant byte or retain an unterminated comment's span.")
+				(i32.lt (local cursor) (local length))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					(let next (i32.add.wrapping (local cursor) (i32 1)))
+					(if
+						(:doc "ASCII whitespace advances one byte. Only slash can introduce a comment.")
+						(call json_whitespace (local byte))
+						(then (set (local cursor) (local next)))
+						(else
+							(if
+								(:doc "A slash with no comment marker is significant input.")
+								(bool.not (u8.eq (local byte) (u8 47)))
+								(then (return (call json_token (u32 0) (local start) (local cursor)))))
+							(let marker (call json_peek (borrow-shared (local source)) (local next)))
+							(if
+								(:doc "A second slash begins a line comment.")
+								(u8.eq (local marker) (u8 47))
+								(then
+									(set (local cursor) (call line_comment_end (borrow-shared (local source))
+										(i32.add.wrapping (local next) (i32 1)))))
+								(else
+									(if
+										(:doc "Any marker other than slash or star leaves the slash unconsumed.")
+										(bool.not (u8.eq (local marker) (u8 42)))
+										(then (return (call json_token (u32 0) (local start) (local cursor)))))
+									(let end (call block_comment_end (borrow-shared (local source))
+										(i32.add.wrapping (local next) (i32 1))))
+									(if
+										(:doc "An open block comment consumes the remaining view in its diagnostic.")
+										(i32.lt (local end) (i32 0))
+										(then (return (call json_lex_error (u32 6) (local cursor) (local length)))))
+									(set (local cursor) (local end))))))))
+			(return (call json_token (u32 0) (local start) (local cursor)))))
+
+	(fn
+		(:doc "Scan a JSON string and validate its decoded Unicode scalar values.")
+		json_scan_string
+		(params (source (shared-slice u8)) (start i32))
+		(returns JsonToken)
+		(body
+			(let span (call scan_double_quoted (borrow-shared (local source)) (local start)))
+			(let end (record.get (local span) end))
+			(if
+				(:doc "Every quoted spelling error maps to a malformed JSON string.")
+				(u32.lt (u32 0) (record.get (local span) error))
+				(then (return (call json_lex_error (u32 3) (local start) (local end)))))
+			(let validated (call validate_double_quoted_scalars (borrow-shared (local source)) (local start) (local end)))
+			(if
+				(:doc "Use the shared validator's exact escape span for an unpaired surrogate.")
+				(u32.lt (u32 0) (record.get (local validated) error))
+				(then (return (call json_lex_error (u32 3)
+					(record.get (local validated) start) (record.get (local validated) end)))))
+			(return (call json_token (u32 3) (local start) (local end)))))
+
+	(fn
+		(:doc "Recognize a base-ten digit in the original view.")
+		is_json_digit
+		(params (byte u8))
+		(returns bool)
+		(body (return (bool.and (bool.not (u8.lt (local byte) (u8 48))) (u8.lt (local byte) (u8 58))))))
+
+	(fn
+		(:doc "Advance past a run of decimal digits.")
+		digit_end
+		(params (source (shared-slice u8)) (start i32))
+		(returns i32)
+		(body
+			(let-mut cursor (local start))
+			(while
+				(:doc "The virtual byte returned at EOF cannot extend a number.")
+				(call is_json_digit (call json_peek (borrow-shared (local source)) (local cursor)))
+				(body (set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (local cursor))))
+
+	(fn
+		(:doc "Recognize the JSON number grammar and keep the unconverted lexeme.")
+		json_scan_number
+		(params (source (shared-slice u8)) (start i32))
+		(returns JsonToken)
+		(body
+			(let-mut cursor (local start))
+			(if
+				(:doc "The integer part can have a single leading minus.")
+				(u8.eq (call json_peek (borrow-shared (local source)) (local cursor)) (u8 45))
+				(then (set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(let first (call json_peek (borrow-shared (local source)) (local cursor)))
+			(if
+				(:doc "A sign alone has no integer part.")
+				(bool.not (call is_json_digit (local first)))
+				(then (return (call json_error_at (borrow-shared (local source)) (u32 4) (local cursor)))))
+			(if
+				(:doc "Zero is the entire integer part when it starts with zero.")
+				(u8.eq (local first) (u8 48))
+				(then
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+					(if
+						(:doc "A second consecutive digit would be a forbidden leading zero.")
+						(call is_json_digit (call json_peek (borrow-shared (local source)) (local cursor)))
+						(then (return (call json_error_at (borrow-shared (local source)) (u32 4) (local cursor))))))
+				(else (set (local cursor) (call digit_end (borrow-shared (local source)) (local cursor)))))
+			(if
+				(:doc "A decimal point requires at least one fraction digit.")
+				(u8.eq (call json_peek (borrow-shared (local source)) (local cursor)) (u8 46))
+				(then
+					(let first_digit (i32.add.wrapping (local cursor) (i32 1)))
+					(set (local cursor) (call digit_end (borrow-shared (local source)) (local first_digit)))
+					(if
+						(:doc "Point to the position that should hold a fraction digit.")
+						(i32.eq (local cursor) (local first_digit))
+						(then (return (call json_error_at (borrow-shared (local source)) (u32 4) (local cursor)))))))
+			(let marker (call json_peek (borrow-shared (local source)) (local cursor)))
+			(if
+				(:doc "An exponent starts with e or E and may include a sign.")
+				(bool.or (u8.eq (local marker) (u8 101)) (u8.eq (local marker) (u8 69)))
+				(then
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+					(let sign (call json_peek (borrow-shared (local source)) (local cursor)))
+					(if
+						(:doc "Both positive and negative exponent signs are allowed.")
+						(bool.or (u8.eq (local sign) (u8 43)) (u8.eq (local sign) (u8 45)))
+						(then (set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+					(let exponent_start (local cursor))
+					(set (local cursor) (call digit_end (borrow-shared (local source)) (local cursor)))
+					(if
+						(:doc "The exponent needs at least one digit after its marker or sign.")
+						(i32.eq (local cursor) (local exponent_start))
+						(then (return (call json_error_at (borrow-shared (local source)) (u32 4) (local cursor)))))))
+			(return (call json_token (u32 4) (local start) (local cursor)))))
+
+	(fn
+		(:doc "Check the suffix of true, false, or null and point to its first missing or invalid byte.")
+		json_literal
+		(params (source (shared-slice u8)) (start i32) (kind u32) (second u8) (third u8) (fourth u8) (fifth u8))
+		(returns JsonToken)
+		(body
+			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+			(if
+				(:doc "Check the second literal byte before advancing.")
+				(bool.not (u8.eq (call json_peek (borrow-shared (local source)) (local cursor)) (local second)))
+				(then (return (call json_error_at (borrow-shared (local source)) (u32 5) (local cursor)))))
+			(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+			(if
+				(:doc "Check the third literal byte before advancing.")
+				(bool.not (u8.eq (call json_peek (borrow-shared (local source)) (local cursor)) (local third)))
+				(then (return (call json_error_at (borrow-shared (local source)) (u32 5) (local cursor)))))
+			(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+			(if
+				(:doc "Check the fourth literal byte before advancing.")
+				(bool.not (u8.eq (call json_peek (borrow-shared (local source)) (local cursor)) (local fourth)))
+				(then (return (call json_error_at (borrow-shared (local source)) (u32 5) (local cursor)))))
+			(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+			(if
+				(:doc "Only false requires a fifth byte.")
+				(bool.not (u8.eq (local fifth) (u8 0)))
+				(then
+					(if
+						(:doc "Any byte other than the expected e leaves false incomplete.")
+						(bool.not (u8.eq (call json_peek (borrow-shared (local source)) (local cursor)) (local fifth)))
+						(then (return (call json_error_at (borrow-shared (local source)) (u32 5) (local cursor)))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (call json_token (local kind) (local start) (local cursor)))))
+
+
+	(fn
+		(:doc "Read the next value token at a significant input byte.")
+		json_scan_value
+		(params (source (shared-slice u8)) (start i32))
+		(returns JsonToken)
+		(body
+			(let byte (call json_peek (borrow-shared (local source)) (local start)))
+			(if
+				(:doc "An opening brace starts an object whose extent the reader completes.")
+				(u8.eq (local byte) (u8 123))
+				(then (return (call json_token (u32 1) (local start) (i32.add.wrapping (local start) (i32 1))))))
+			(if
+				(:doc "An opening bracket starts an array whose extent the reader completes.")
+				(u8.eq (local byte) (u8 91))
+				(then (return (call json_token (u32 2) (local start) (i32.add.wrapping (local start) (i32 1))))))
+			(if
+				(:doc "Strings must start with the JSON double-quote delimiter.")
+				(u8.eq (local byte) (u8 34))
+				(then (return (call json_scan_string (borrow-shared (local source)) (local start)))))
+			(if
+				(:doc "A digit or minus belongs to the number scanner.")
+				(bool.or (call is_json_digit (local byte)) (u8.eq (local byte) (u8 45)))
+				(then (return (call json_scan_number (borrow-shared (local source)) (local start)))))
+			(if
+				(:doc "The t prefix selects true.")
+				(u8.eq (local byte) (u8 116))
+				(then (return (call json_literal (borrow-shared (local source)) (local start) (u32 5)
+					(u8 114) (u8 117) (u8 101) (u8 0)))))
+			(if
+				(:doc "The f prefix selects false.")
+				(u8.eq (local byte) (u8 102))
+				(then (return (call json_literal (borrow-shared (local source)) (local start) (u32 6)
+					(u8 97) (u8 108) (u8 115) (u8 101)))))
+			(if
+				(:doc "The n prefix selects null.")
+				(u8.eq (local byte) (u8 110))
+				(then (return (call json_literal (borrow-shared (local source)) (local start) (u32 7)
+					(u8 117) (u8 108) (u8 108) (u8 0)))))
+			(return (call json_error_at (borrow-shared (local source)) (u32 2) (local start))))))
