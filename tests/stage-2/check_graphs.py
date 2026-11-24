@@ -15,7 +15,6 @@ def read_cases(manifest):
 	arguments = []
 	expected = []
 	label = None
-	mode = "--graph"
 	native = None
 	# A case header starts a new argv and stdout expectation.
 	for line in manifest.read_text(encoding="utf-8").splitlines():
@@ -25,12 +24,14 @@ def read_cases(manifest):
 		fields = payload.split("\t")
 		if kind == "case":
 			if label is not None:
-				yield label, mode, arguments, expected, native
+				yield label, arguments, expected, native
 			label, entry, capacity, *options = fields
-			mode = options[0] if options else "--graph"
-			arguments = [entry, capacity, *options[1:]]
+			command = options[0] if options else "--graph"
+			arguments = [command, entry, capacity, *options[1:]]
 			expected = []
 			native = None
+		elif kind == "mode" and label is not None:
+			arguments[:0] = ["--mode", payload]
 		elif kind == "file" and label is not None:
 			identity, virtual_path, source = fields
 			arguments.extend((identity, virtual_path, source))
@@ -46,7 +47,7 @@ def read_cases(manifest):
 		else:
 			raise ValueError(f"invalid graph manifest record {kind}")
 	if label is not None:
-		yield label, mode, arguments, expected, native
+		yield label, arguments, expected, native
 
 
 # Compile and run an emitted translation unit with the same compiler settings as the rest of the suite.
@@ -72,8 +73,8 @@ def check_native(probe, label, emitted, expected, fixture_flags, diagnostic):
 # Run each supplied graph through the seed-built executable.
 def check_manifest(probe, manifest):
 	# The fixture owns the graph, consumer mode, expected output, and optional native result.
-	for label, mode, arguments, expected, native in read_cases(Path(manifest)):
-		run = subprocess.run([probe, mode, *arguments], capture_output=True, text=True, timeout=30)
+	for label, arguments, expected, native in read_cases(Path(manifest)):
+		run = subprocess.run([probe, *arguments], capture_output=True, text=True, timeout=30)
 		status = int(expected[0].startswith("error "))
 		actual = run.stdout.splitlines()
 		if run.returncode != status or run.stderr or actual != expected:
