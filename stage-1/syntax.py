@@ -30,16 +30,43 @@ class Form:
 	tag: str
 	operands: tuple[Node, ...]
 	line: int
+	metadata: tuple[Form, ...] = ()
 
 
 Node = Atom | Form
 
 TOKEN = re.compile(
-	r'(?P<space>\s+)|(?P<comment>;;[^\n]*)|(?P<open>\()|(?P<close>\))|'
+	r'(?P<space>\s+)|(?P<open>\()|(?P<close>\))|'
 	r'(?P<string>"(?:\\[^\n]|[^"\\\n])*")|(?P<atom>[^\s();"]+)|(?P<invalid>.)'
 )
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 TAG = re.compile(":?" + IDENTIFIER.pattern)
+
+
+# Separate the initial metadata entries from the operands of a completed form.
+def read_form(children: list[Node], line: int) -> Form:
+	# Every opener needs a bare tag.
+	if not children:
+		raise SourceError(line)
+	head, *children = children
+	tag = identifier(head, TAG)
+	# The old attachment forms are reserved so they fail at their old spelling.
+	if tag in ("with-meta", "meta"):
+		raise SourceError(head.line)
+	metadata = []
+	operands = []
+	# Once an operand appears, later colon-tagged children cannot attach.
+	for child in children:
+		# Metadata entries are forms with colon-prefixed heads, never colon atoms.
+		if isinstance(child, Form) and child.tag.startswith(":"):
+			# The prefix is the only valid site for a colon-tagged form.
+			if operands:
+				raise SourceError(child.line)
+			metadata.append(child)
+		# Atoms and ordinary forms start or extend the operand list.
+		else:
+			operands.append(child)
+	return Form(tag, tuple(operands), line, tuple(metadata))
 
 
 # Read one IR tree and record each form's opening line.
@@ -50,8 +77,8 @@ def parse(source: str) -> Form:
 	for match in TOKEN.finditer(source):
 		token = match.group()
 		kind = match.lastgroup
-		# Count newlines in trivia before skipping it.
-		if kind in ("space", "comment"):
+		# Count newlines while skipping inter-token whitespace.
+		if kind == "space":
 			line += token.count("\n")
 			continue
 		# Start a new operand list at the opening token.
@@ -64,11 +91,7 @@ def parse(source: str) -> Form:
 			if len(stack) == 1:
 				raise SourceError(line)
 			start, children = stack.pop()
-			# Every form needs a tag before its operands.
-			if not children:
-				raise SourceError(start)
-			tag, *operands = children
-			node = Form(identifier(tag, TAG), tuple(operands), start)
+			node = read_form(children, start)
 		# Keep string values distinct from symbols.
 		elif kind == "string":
 			# Decode escapes before storing the string value.
@@ -92,7 +115,11 @@ def parse(source: str) -> Form:
 	# The seed consumes exactly one root form.
 	if len(roots) != 1:
 		raise SourceError(roots[1].line if roots else 1)
-	return form(roots[0])
+	root = form(roots[0])
+	# The source root has no enclosing form to own a metadata entry.
+	if root.tag.startswith(":"):
+		raise SourceError(root.line)
+	return root
 
 
 # Require the form and operand count used by an IR operation.

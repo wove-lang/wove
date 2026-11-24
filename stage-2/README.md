@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 # Stage 2 source scanner, tree reader, and renderer
 
 Call `source_diagnostic` once on the shared byte slice before tokenization.
-The admission check covers the entire view, including bytes in comments and
-strings. Pass the same bytes to `scan_token` after a successful check.
+The admission check covers the entire view, including bytes in quoted metadata.
+Pass the same bytes to `scan_token` after a successful check.
 
 `scan_token` reads one token from a shared byte slice. Start with an `i32` cursor
 of zero and use each token's `end` as the next cursor. A cursor from zero through
@@ -18,8 +18,9 @@ relative to the supplied slice. The scanner uses the seed's whitespace set
 for both skipping separators and ending bare atoms. Separators consume their
 UTF-8 byte widths. A bare atom also stops at a parenthesis, a semicolon, or a
 double quote. Atom kind is 1, opening and closing parenthesis
-kinds are 40 and 41, and a lone semicolon consumes one byte with lexical error
-kind 3. End of input has kind 0 and both offsets equal to the slice length.
+kinds are 40 and 41. An unquoted semicolon produces a one-byte lexical
+error of kind 3. End of input has kind 0 and both offsets equal to the slice
+length.
 
 A double-quoted string is kind 2. Its raw span includes both quotes and
 preserves the original spelling of JSON short escapes and `\u` escapes with
@@ -27,11 +28,7 @@ four hexadecimal digits. A raw byte below `0x20`, an invalid escape, or a
 missing quote gives error kind 3. The error starts at the opening quote and
 ends just after the offending byte or at the view end on truncation.
 
-A `;;` line comment is a raw token of kind 59. Its span includes both
-semicolons and all comment text up to CR, LF, or the end of the view. The
-line ending is available to the next scan as whitespace, and offsets
-preserve the original bytes under LF, CRLF, and lone CR. A caller can skip
-kind 59 to walk the significant tokens.
+Quoted tokens can contain semicolons, including the literal text `;;`.
 
 The `error` field of a token is zero on success. Error tokens use kind 3
 and carry a primary span with a numeric failure code.
@@ -60,20 +57,19 @@ significant byte from cursor zero. `source_kind` returns 0 at EOF, 40 or 41
 for a parenthesis, and 1 for every other leading byte.
 
 `check_source_form` validates exactly one top-level tagged form. Each opener
-requires a bare tag as the first significant token. Operands may be atoms,
-quoted strings, or nested forms. Comments remain in source order and count
-toward the row total.
+requires a bare tag as its first token. The following children can be bare
+atoms, quoted tokens, or nested forms.
 
 The result gives the real root's span, including its closing parenthesis,
 and the number of rows needed for the source tree. Count one synthetic source
-root and one row for each opener, bare atom, quoted atom, or comment.
+root and one row for each opener, bare atom, or quoted atom.
 
 A failed check returns zero rows and the original diagnostic span. Lexer and
 admission errors retain codes 1–5. Structural checks use the following codes.
 
 | Code | Failure | Primary span |
 | --- | --- | --- |
-| 6 | Expected a root form | The first significant token, or EOF for empty or comment-only input |
+| 6 | Expected a root form | The first token, or EOF for empty or whitespace-only input |
 | 7 | Expected a bare tag | The significant token that followed the opener |
 | 8 | Unexpected closer | The closer without a matching opener |
 | 9 | Unclosed form | The innermost unmatched opener |
@@ -86,36 +82,31 @@ order and returns the original check. Short storage returns code 11
 with the real root's span.
 
 Row 0 is the synthetic source root and covers the entire view. Node kinds
-are 0 for that root, 40 for a parenthesized form, 1 for a bare atom, 2 for a
-quoted atom, and 59 for a comment. Each row carries a half-open byte span
-and `parent`, `first_child`, and `next_sibling` indices. An absent link is
-`-1`. A form spans both parentheses. Its tag is the first child after
-skipping any preceding comment rows. Atom and comment spellings are
-available from the original source bytes.
+are 0 for that root, 40 for a parenthesized form, 1 for a bare atom, and 2 for
+a quoted atom. Each row carries a half-open byte span and `parent`,
+`first_child`, and `next_sibling` indices. An absent link is `-1`. A form
+spans both parentheses and has its tag as its first child.
 
-After building the tree, use `check_source_metadata` with the same source
+After building the tree, call `check_source_metadata` with the same source
 view, successful result, and shared node slice. Form heads use
-`[A-Za-z_][A-Za-z0-9_.-]*`. A leading colon marks an entry head only in
-the direct `meta` list operand of a `with-meta` wrapper.
-
-The significant operands of `with-meta` are one `meta` list followed by one
-target. Each significant entry in the list is a colon-tagged form. The
-target is the next significant sibling of the list. Comments and extension
-entries keep their original rows, links, and byte spans.
+`[A-Za-z_][A-Za-z0-9_.-]*`. A leading colon marks a metadata entry only
+when the form is in its parent's prefix. That prefix is the contiguous
+sequence of colon-tagged forms immediately after the parent's tag. The
+first ordinary child after the prefix is operand zero. Each entry keeps its
+order, parent link, spelling, and original byte span.
 
 | Code | Failure | Primary span |
 | --- | --- | --- |
 | 12 | Invalid head spelling | The head atom |
-| 13 | Misplaced metadata head | The colon-prefixed head atom |
-| 14 | Malformed wrapper | The offending operand or the wrapper itself when an operand is missing |
-| 15 | Malformed metadata entry | The offending direct entry |
+| 13 | Misplaced metadata entry | The colon-prefixed head atom |
+| 14 | Retired `with-meta` or `meta` form | The head atom |
 
 `render_source_tree` takes the original byte view, its built and validated
 shared node slice, and a writable byte slice. It walks the tree links in
 source order and copies each token's raw bytes, including parentheses,
-quoted escapes, and comments. It adds one space between tokens except
-immediately inside parentheses, and uses LF after a comment whenever another
-token follows. Layout around the outermost tokens is discarded.
+metadata entries, and quoted escapes. It adds one space between tokens
+except immediately inside parentheses. Layout around the outermost tokens
+is discarded.
 
 The result contains the number of bytes written and an error code. Code 0
 means the emitted prefix contains the entire source. Code 16 means the next
@@ -127,7 +118,7 @@ its [source fixture](../tests/stage-2/source_scan.probe.c) and the shared
 runtime. Run `make test-stage-2` to exercise those inputs and compare full
 streams with the Stage 1 lexer. The [layout fixtures](../tests/stage-2/lexer_layouts.tsv)
 supply indentation, line endings, and parent view bytes. The parity check
-compares the resulting token kinds and spellings, including comments.
+compares the resulting token kinds and raw spellings.
 `make test` includes these checks.
 
 The seed-built fixture executable accepts `--tokens FILE [START END]` to

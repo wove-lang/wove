@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "stage-1"))
 from syntax import TOKEN
 
-KINDS = {"open": 40, "close": 41, "atom": 1, "string": 2, "comment": 59}
+KINDS = {"open": 40, "close": 41, "atom": 1, "string": 2}
 
 
 # Use the seed's universal-newline input while retaining each original byte boundary.

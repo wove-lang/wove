@@ -76,17 +76,20 @@ half-open range of a named byte buffer or slice. The seed evaluates the
 storage starting at `start` and a length of `end - start`.
 Equal endpoints form an empty view, including at the end of the source.
 
-Attach metadata to one target with `(with-meta (meta entries...) target)`.
-Entries are tagged forms such as `(:doc "text")`, `(:expect ...)`, and
-`(:pragma (cfg bootstrap) (inline always))`. Additional entries use the same
-colon-prefixed tag spelling. A wrapped statement or value keeps its normal
-scope and behavior.
+Put metadata entries immediately after the form's tag, before its ordinary
+operands. Entries use colon-prefixed tags such as `(:doc "text")`,
+`(:expect ...)`, and `(:pragma (cfg bootstrap) (inline always))`.
+For example, `(let (:doc "Keep the owner in this scope.") buffer
+(array.alloc u8 (i32 3)))` binds `buffer` in the usual scope. Extra metadata
+tags and their payloads use the same prefix. A colon-tagged form after an
+operand is a source error, as are the retired `with-meta`, `meta`, and `;;`
+spellings. Quoted text can contain semicolons.
 
-Stage 1 selects module declarations and `(decls ...)` groups before name
-resolution. It always enables `bootstrap`. All `cfg` predicates on a target
-must pass, and a `(test)` marker in any `:pragma` entry excludes the target.
-The seed skips other directives, including `inline`, and leaves other metadata
-payloads for later stages.
+Stage 1 selects declarations and `(decls ...)` groups inside a module before
+name resolution. It always enables `bootstrap`. All `cfg` predicates on a
+declaration must pass, and a `(test)` marker in any `:pragma` entry excludes
+it. The seed skips other directives, including `inline`, and leaves other
+metadata payloads for later stages.
 
 Use `(use wove-file "./source_scan.wove" (only scan_token (as source_kind
 lexer_kind)))` to select functions from a local file. The path resolves from
@@ -97,9 +100,10 @@ defining file. A provider supplies its own function declarations for selection.
 
 Bootstrap selection runs before the seed opens a provider. The seed loads
 each file once by identity, so multiple paths to the same module share its
-declarations and use its first resolved path. An active missing file or cycle is diagnosed at the importing
-`use` line. Errors inside an imported file use that file's spelling and line.
-The entry module supplies the executable's `main`.
+declarations and use its first resolved path. An active missing file or cycle
+is diagnosed at the importing `use` line. Errors inside an imported file use
+that file's spelling and line. The entry module supplies the executable's
+`main`.
 
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.
