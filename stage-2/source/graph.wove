@@ -1,9 +1,9 @@
 (module
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Resolve the active function and type imports of a supplied Stage 2 source graph.
+	(:doc `Resolve active Wove and C header imports from a supplied Stage 2 source graph.
 
-	Walk reached files in depth-first order and read each supplied identity once.
+	Walk Wove-file edges in depth-first order and visit each reached identity once.
 	Keep declarations and local spellings as references into the original views.
 	The caller supplies file ranges inside an immutable byte arena and separate
 	writable storage for module rows, local bindings, edges, and selectors.`)
@@ -18,19 +18,22 @@
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "./imports.wove" (only import_keyword is_import_name read_import read_selector))
 	(use wove-file "./types.wove" (only is_reserved_type_name))
+	(use wove-file "./c_headers.wove" (only (type HeaderMatch) find_c_header find_c_function))
 
 	(struct GraphModule
 		(fields (state u32) (path i32) (order i32) (parent i32) (next_use i32) (end_use i32) (active bool)))
 	(struct GraphBinding
-		(fields (owner i32) (start i32) (end i32) (file i32) (declaration i32) (namespace u32)))
+		(fields (owner i32) (start i32) (end i32) (file i32) (declaration i32) (namespace u32)
+			(provider u32) (header_start i32) (header_end i32) (native_start i32) (native_end i32)
+			(signature_start i32) (signature_end i32)))
 	(struct GraphUse
-		(fields (start i32) (end i32) (path_start i32) (path_end i32) (first i32) (limit i32) (error u32)))
+		(fields (start i32) (end i32) (path_start i32) (path_end i32) (first i32) (limit i32) (error u32) (provider u32)))
 	(struct GraphSelector
 		(fields (original_start i32) (original_end i32) (local_start i32) (local_end i32) (local_bare bool) (error u32) (namespace u32)))
 	(struct GraphResult (fields (modules i32) (bindings i32) (file i32) (start i32) (end i32) (error u32)))
 	(struct FileRead
 		(fields (bindings i32) (uses i32) (selectors i32) (active bool) (start i32) (end i32) (error u32)))
-	(struct GraphRead (fields (next i32) (start i32) (end i32) (error u32)))
+	(struct GraphRead (fields (next i32) (start i32) (end i32) (error u32) (file i32)))
 
 	(fn
 		(:doc `Package a file read with its absolute table cursors and view-relative diagnostic.`)
@@ -49,7 +52,7 @@
 		(returns GraphRead)
 		(body
 			(return (record.make GraphRead (next (local next)) (start (local start))
-				(end (local end)) (error (local error))))))
+				(end (local end)) (error (local error)) (file (i32 -1))))))
 
 	(fn
 		(:doc `Return graph counts and a diagnostic in the named file's original source view.`)
@@ -83,7 +86,9 @@
 							(bool.and (i32.eq (record.get (local item) owner) (local owner))
 								(u32.eq (record.get (local item) namespace) (local namespace)))
 							(bool.and
-								(bool.or (bool.not (local locals_only)) (i32.eq (record.get (local item) file) (local owner)))
+								(bool.or (bool.not (local locals_only))
+									(bool.and (u32.eq (record.get (local item) provider) (u32 3))
+										(i32.eq (record.get (local item) file) (local owner))))
 								(call same_bytes (borrow-shared (local names))
 									(i32.add.wrapping (local base) (record.get (local item) start))
 									(i32.add.wrapping (local base) (record.get (local item) end)) (borrow-shared (local spelling)) (local start) (local end))))
@@ -121,7 +126,9 @@
 				(then (return (call graph_read (local count) (local start) (local end) (u32 16)))))
 			(slice.store (local bindings) (local count)
 				(record.make GraphBinding (owner (local file)) (start (local start)) (end (local end))
-					(file (local file)) (declaration (local declaration)) (namespace (local namespace))))
+					(file (local file)) (declaration (local declaration)) (namespace (local namespace)) (provider (u32 3))
+					(header_start (i32 -1)) (header_end (i32 -1)) (native_start (i32 -1)) (native_end (i32 -1))
+					(signature_start (i32 -1)) (signature_end (i32 -1))))
 			(return (call graph_read (i32.add.wrapping (local count) (i32 1)) (i32 0) (i32 0) (u32 0)))))
 
 	(fn
@@ -191,7 +198,7 @@
 				(then
 					(slice.store (local uses) (local index)
 						(record.make GraphUse (start (local start)) (end (local end)) (path_start (i32 -1)) (path_end (i32 -1))
-							(first (local offset)) (limit (local offset)) (error (local error))))
+							(first (local offset)) (limit (local offset)) (error (local error)) (provider (u32 0))))
 					(return (call graph_read (local offset) (i32 0) (i32 0) (u32 0)))))
 			(let selected (call collect_selectors (borrow-shared (local source)) (borrow-shared (local nodes))
 				(record.get (local use) second) (borrow-mut (local selectors)) (local offset)))
@@ -203,7 +210,7 @@
 			(slice.store (local uses) (local index)
 				(record.make GraphUse (start (local start)) (end (local end))
 					(path_start (record.get (local path) start)) (path_end (record.get (local path) end))
-					(first (local offset)) (limit (record.get (local selected) next)) (error (u32 0))))
+					(first (local offset)) (limit (record.get (local selected) next)) (error (u32 0)) (provider (record.get (local use) provider))))
 			(return (local selected))))
 
 	(fn
@@ -248,7 +255,7 @@
 									(bool true) (record.get (local result) start) (record.get (local result) end) (local error)))))
 							(set (local binding_count) (record.get (local result) next))))
 					(if
-						(:doc "Keep just the path token and the selector interval for an active use.")
+						(:doc "Keep the provider, key span, and selector interval for an active use.")
 						(u32.eq (local tag) (u32 2))
 						(then
 							(let use (call collect_use (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -340,6 +347,42 @@
 			(return (call graph_read (local target) (i32 0) (i32 0) (u32 0)))))
 
 	(fn
+		(:doc `Reserve a file-local alias after either provider has resolved its defining declaration.`)
+		publish_binding
+		(params (source (shared-slice u8)) (selector GraphSelector) (importer i32) (target GraphBinding)
+			(bindings (mut-slice GraphBinding)) (index i32))
+		(returns GraphRead)
+		(body
+			(let start (record.get (local selector) local_start))
+			(let end (record.get (local selector) local_end))
+			(if
+				(:doc "Validate the local spelling only after resolving the requested definition.")
+				(bool.not (bool.and (record.get (local selector) local_bare)
+					(call is_identifier_head (borrow-shared (local source)) (local start) (local end))))
+				(then (return (call graph_read (local index) (local start) (local end) (u32 26)))))
+			(let existing (call find_binding
+				(borrow-shared (local source)) (borrow-shared (local source)) (local start) (local end)
+				(borrow-shared (local bindings)) (local index) (local importer) (bool false) (i32 0) (record.get (local selector) namespace)))
+			(if
+				(:doc "A conflict points at the new local spelling.")
+				(bool.or (bool.not (i32.lt (local existing) (i32 0)))
+					(bool.and (u32.eq (record.get (local selector) namespace) (u32 1))
+						(call is_reserved_type_name (borrow-shared (local source)) (local start) (local end))))
+				(then (return (call graph_read (local index) (local start) (local end) (u32 30)))))
+			(if
+				(:doc "Check binding capacity before adding the alias.")
+				(bool.not (i32.lt (local index) (slice.len (local bindings))))
+				(then (return (call graph_read (local index) (local start) (local end) (u32 16)))))
+			(slice.store (local bindings) (local index)
+				(record.make GraphBinding (owner (local importer)) (start (local start)) (end (local end))
+					(file (record.get (local target) file)) (declaration (record.get (local target) declaration))
+					(namespace (record.get (local selector) namespace)) (provider (record.get (local target) provider))
+					(header_start (record.get (local target) header_start)) (header_end (record.get (local target) header_end))
+					(native_start (record.get (local target) native_start)) (native_end (record.get (local target) native_end))
+					(signature_start (record.get (local target) signature_start)) (signature_end (record.get (local target) signature_end))))
+			(return (call graph_read (i32.add.wrapping (local index) (i32 1)) (i32 0) (i32 0) (u32 0)))))
+
+	(fn
 		(:doc `Bind one resolved edge in the importer's namespace using the provider's own declarations.`)
 		bind_edge
 		(params (source (shared-slice u8)) (provider_source (shared-slice u8))
@@ -370,34 +413,126 @@
 						(:doc "An unavailable function or type points at its original requested name.")
 						(i32.lt (local definition) (i32 0))
 						(then (return (call graph_read (local count) (local original_start) (local original_end) (u32 29)))))
-					(let start (record.get (local selector) local_start))
-					(let end (record.get (local selector) local_end))
-					(if
-						(:doc "Validate the local spelling only after resolving the requested definition.")
-						(bool.not (bool.and (record.get (local selector) local_bare)
-							(call is_identifier_head (borrow-shared (local source)) (local start) (local end))))
-						(then (return (call graph_read (local count) (local start) (local end) (u32 26)))))
-					(let existing (call find_binding
-						(borrow-shared (local source)) (borrow-shared (local source)) (local start) (local end)
-						(borrow-shared (local bindings)) (local count) (local importer) (bool false) (i32 0) (local namespace)))
-					(if
-						(:doc "A conflict points at the new local spelling.")
-						(bool.or (bool.not (i32.lt (local existing) (i32 0)))
-							(bool.and (u32.eq (local namespace) (u32 1))
-								(call is_reserved_type_name (borrow-shared (local source)) (local start) (local end))))
-						(then (return (call graph_read (local count) (local start) (local end) (u32 30)))))
-					(if
-						(:doc "Check binding capacity before adding the alias.")
-						(bool.not (i32.lt (local count) (slice.len (local bindings))))
-						(then (return (call graph_read (local count) (local start) (local end) (u32 16)))))
 					(let target (slice.load (local bindings) (local definition)))
-					(slice.store (local bindings) (local count)
-						(record.make GraphBinding (owner (local importer)) (start (local start)) (end (local end))
-							(file (record.get (local target) file)) (declaration (record.get (local target) declaration))
-							(namespace (local namespace))))
-					(set (local count) (i32.add.wrapping (local count) (i32 1)))
+					(let published (call publish_binding (borrow-shared (local source)) (local selector) (local importer)
+						(local target) (borrow-mut (local bindings)) (local count)))
+					(if
+						(:doc "Keep the failed alias at the importing source span.")
+						(u32.lt (u32 0) (record.get (local published) error))
+						(then (return (local published))))
+					(set (local count) (record.get (local published) next))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (call graph_read (local count) (i32 0) (i32 0) (u32 0)))))
+
+	(fn
+		(:doc `Bind each selected C function to its checked signature and original native spelling.`)
+		bind_c_functions
+		(params (source (shared-slice u8)) (provider_source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(importer i32) (header HeaderMatch) (edge GraphUse) (selectors (shared-slice GraphSelector))
+			(bindings (mut-slice GraphBinding)) (offset i32))
+		(returns GraphRead)
+		(body
+			(let-mut count (local offset))
+			(let-mut index (record.get (local edge) first))
+			(while
+				(:doc "Select and publish each local name in source order.")
+				(i32.lt (local index) (record.get (local edge) limit))
+				(body
+					(let selector (slice.load (local selectors) (local index)))
+					(let start (record.get (local selector) original_start))
+					(let end (record.get (local selector) original_end))
+					(let error (record.get (local selector) error))
+					(if
+						(:doc "A malformed selector keeps its cached importing span.")
+						(u32.lt (u32 0) (local error))
+						(then (return (call graph_read (local count) (local start) (local end) (local error)))))
+					(if
+						(:doc "C header selection in this slice exposes scalar functions.")
+						(bool.not (u32.eq (record.get (local selector) namespace) (u32 0)))
+						(then (return (call graph_read (local count) (local start) (local end) (u32 29)))))
+					(let function (call find_c_function (borrow-shared (local provider_source)) (borrow-shared (local nodes))
+						(local header) (borrow-shared (local source)) (local start) (local end)))
+					(let rejected (record.get (local function) error))
+					(if
+						(:doc "The selected provider's invalid signature belongs to the declaring Wove file.")
+						(u32.lt (u32 0) (local rejected))
+						(then (return (record.make GraphRead (next (local count))
+							(start (record.get (local function) start)) (end (record.get (local function) end))
+							(error (local rejected)) (file (record.get (local header) file))))))
+					(let declaration (record.get (local function) declaration))
+					(if
+						(:doc "A missing C function points at the original requested spelling.")
+						(i32.lt (local declaration) (i32 0))
+						(then (return (call graph_read (local count) (local start) (local end) (u32 29)))))
+					(let target (record.make GraphBinding (owner (local importer)) (start (i32 -1)) (end (i32 -1))
+						(file (record.get (local header) file)) (declaration (local declaration)) (namespace (u32 0)) (provider (u32 8))
+						(header_start (record.get (local header) start)) (header_end (record.get (local header) end))
+						(native_start (record.get (local function) native_start)) (native_end (record.get (local function) native_end))
+						(signature_start (record.get (local function) signature_start)) (signature_end (record.get (local function) signature_end))))
+					(let published (call publish_binding (borrow-shared (local source)) (local selector) (local importer)
+						(local target) (borrow-mut (local bindings)) (local count)))
+					(if
+						(:doc "An alias conflict or short destination belongs to the importing file.")
+						(u32.lt (u32 0) (record.get (local published) error))
+						(then (return (local published))))
+					(set (local count) (record.get (local published) next))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call graph_read (local count) (i32 0) (i32 0) (u32 0)))))
+
+	(fn
+		(:doc `Decode and resolve a C provider key before checking any of its requested functions.`)
+		bind_c_header_edge
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (source (shared-slice u8)) (importer i32)
+			(edge GraphUse) (selectors (shared-slice GraphSelector)) (bindings (mut-slice GraphBinding)) (offset i32))
+		(returns GraphRead)
+		(body
+			(let start (record.get (local edge) path_start))
+			(let end (record.get (local edge) path_end))
+			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let key (call decode_string (borrow-shared (local source))
+				(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
+				(borrow-mut (local decoded))))
+			(if
+				(:doc "A malformed use key retains its exact escaped input span.")
+				(u32.lt (u32 0) (record.get (local key) error))
+				(then (return (call graph_read (local offset) (record.get (local key) start)
+					(record.get (local key) end) (record.get (local key) error)))))
+			(let header (call find_c_header (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (slice.range (local decoded) (i32 0) (record.get (local key) written)))))
+			(let provider (record.get (local header) file))
+			(let error (record.get (local header) error))
+			(if
+				(:doc "Ambiguous headers point to the later defining literal.")
+				(u32.lt (u32 0) (local error))
+				(then (return (record.make GraphRead (next (local offset)) (start (record.get (local header) start))
+					(end (record.get (local header) end)) (error (local error)) (file (local provider))))))
+			(if
+				(:doc "A missing bridge is diagnosed at the original importing use.")
+				(i32.lt (local provider) (i32 0))
+				(then (return (call graph_read (local offset) (record.get (local edge) start) (record.get (local edge) end) (u32 27)))))
+			(let input (slice.load (local files) (local provider)))
+			(return (call bind_c_header_file (borrow-shared (local source))
+				(borrow-shared (slice.range (local arena) (record.get (local input) source_start) (record.get (local input) source_end)))
+				(local importer) (local header) (local edge) (borrow-shared (local selectors)) (borrow-mut (local bindings)) (local offset)))))
+
+	(fn
+		(:doc `Rebuild the selected provider's immutable tree once for all selectors on this edge.`)
+		bind_c_header_file
+		(params (source (shared-slice u8)) (provider_source (shared-slice u8)) (importer i32) (header HeaderMatch)
+			(edge GraphUse) (selectors (shared-slice GraphSelector)) (bindings (mut-slice GraphBinding)) (offset i32))
+		(returns GraphRead)
+		(body
+			(let checked (call check_source_form (borrow-shared (local provider_source))))
+			(let-mut nodes (array.alloc SourceNode (int.convert i32 (record.get (local checked) rows))))
+			(let built (call build_source_tree (borrow-shared (local provider_source)) (local checked) (borrow-mut (local nodes))))
+			(if
+				(:doc "Forward any tree construction failure at the original provider span.")
+				(u32.lt (u32 0) (record.get (local built) error))
+				(then (return (record.make GraphRead (next (local offset)) (start (record.get (local built) start))
+					(end (record.get (local built) end)) (error (record.get (local built) error)) (file (record.get (local header) file))))))
+			(return (call bind_c_functions (borrow-shared (local source)) (borrow-shared (local provider_source))
+				(borrow-shared (local nodes)) (local importer) (local header) (local edge)
+				(borrow-shared (local selectors)) (borrow-mut (local bindings)) (local offset)))))
 
 	(fn
 		(:doc `Store the current traversal state while preserving the file's discovery data.`)
@@ -419,11 +554,13 @@
 		(1), and complete (2). Rows report the first reached path and discovery
 		order. Binding names are byte spans in the owner's view. Their targets
 		are a defining identity and the declaration's node index in that file's
-		checked tree. Error spans are byte offsets in the named diagnostic file.
+		checked tree. Provider kind 3 identifies Wove definitions. Kind 8 identifies
+		C targets with header, native name, and signature spans in the defining view.
+		Error spans are byte offsets in the named diagnostic file.
 		On failure, the counts report reached modules and the initialized binding prefix.`)
 		(:expect
 			(tests "stage-2/source_graphs.tsv")
-			(issues "gh:wove-lang/wove:68"))
+			(issues "gh:wove-lang/wove:68" "gh:wove-lang/wove:138"))
 		resolve_graph
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (entry i32)
 			(modules (mut-slice GraphModule)) (bindings (mut-slice GraphBinding))
@@ -513,33 +650,57 @@
 										(record.get (slice.load (local modules) (local importer)) next_use) (i32 1))))))
 						(else
 							(let edge (slice.load (local uses) (local next)))
-							(let resolved (call resolve_edge (borrow-shared (local arena)) (borrow-shared (local files))
-								(borrow-shared (slice.range (local arena) (local source_start) (local source_end)))
-								(record.get (local frame) path) (local edge)))
-							(let error (record.get (local resolved) error))
 							(if
-								(:doc "Path errors belong to the importing file.")
-								(u32.lt (u32 0) (local error))
-								(then (return (call graph_result (local module_count) (local binding_count) (local current)
-									(record.get (local resolved) start) (record.get (local resolved) end) (local error)))))
-							(let path (record.get (local resolved) next))
-							(let target (record.get (slice.load (local files) (local path)) identity))
-							(let state (record.get (slice.load (local modules) (local target)) state))
-							(if
-								(:doc "An edge into a visiting identity closes an active cycle.")
-								(u32.eq (local state) (u32 1))
-								(then (return (call graph_result (local module_count) (local binding_count) (local current)
-									(record.get (local edge) start) (record.get (local edge) end) (u32 28)))))
-							(call update_frame (borrow-mut (local modules)) (local current) (local frame) (u32 1)
-								(i32.add.wrapping (local next) (i32 1)))
-							(if
-								(:doc "Bind immediately for a completed provider or suspend this importer for a new one.")
-								(u32.eq (local state) (u32 2))
-								(then (set (local provider) (local target)))
+								(:doc "A C header uses a declared key and does not traverse a Wove-file edge.")
+								(u32.eq (record.get (local edge) provider) (u32 8))
+								(then
+									(let bound (call bind_c_header_edge (borrow-shared (local arena)) (borrow-shared (local files))
+										(borrow-shared (slice.range (local arena) (local source_start) (local source_end)))
+										(local current) (local edge) (borrow-shared (local selectors))
+										(borrow-mut (local bindings)) (local binding_count)))
+									(set (local binding_count) (record.get (local bound) next))
+									(let error (record.get (local bound) error))
+									(if
+										(:doc "Use the provider file for a defining error and the importer for a selection error.")
+										(u32.lt (u32 0) (local error))
+										(then
+											(let-mut file (record.get (local bound) file))
+											(if
+												(:doc "A selection error has no separate defining file.")
+												(i32.lt (local file) (i32 0))
+												(then (set (local file) (local current))))
+											(return (call graph_result (local module_count) (local binding_count) (local file)
+												(record.get (local bound) start) (record.get (local bound) end) (local error)))))
+									(call update_frame (borrow-mut (local modules)) (local current) (local frame) (u32 1)
+										(i32.add.wrapping (local next) (i32 1))))
 								(else
-									(set (local pending_parent) (local current))
-									(set (local pending_path) (local path))
-									(set (local current) (local target))))))
+									(let resolved (call resolve_edge (borrow-shared (local arena)) (borrow-shared (local files))
+										(borrow-shared (slice.range (local arena) (local source_start) (local source_end)))
+										(record.get (local frame) path) (local edge)))
+									(let error (record.get (local resolved) error))
+									(if
+										(:doc "Path errors belong to the importing file.")
+										(u32.lt (u32 0) (local error))
+										(then (return (call graph_result (local module_count) (local binding_count) (local current)
+											(record.get (local resolved) start) (record.get (local resolved) end) (local error)))))
+									(let path (record.get (local resolved) next))
+									(let target (record.get (slice.load (local files) (local path)) identity))
+									(let state (record.get (slice.load (local modules) (local target)) state))
+									(if
+										(:doc "An edge into a visiting identity closes an active cycle.")
+										(u32.eq (local state) (u32 1))
+										(then (return (call graph_result (local module_count) (local binding_count) (local current)
+											(record.get (local edge) start) (record.get (local edge) end) (u32 28)))))
+									(call update_frame (borrow-mut (local modules)) (local current) (local frame) (u32 1)
+										(i32.add.wrapping (local next) (i32 1)))
+									(if
+										(:doc "Bind immediately for a completed provider or suspend this importer for a new one.")
+										(u32.eq (local state) (u32 2))
+										(then (set (local provider) (local target)))
+										(else
+											(set (local pending_parent) (local current))
+											(set (local pending_path) (local path))
+											(set (local current) (local target))))))))
 					(if
 						(:doc "Bind exactly once after the provider completes, including for a cached identity.")
 						(bool.and (bool.not (i32.lt (local importer) (i32 0))) (bool.not (i32.lt (local provider) (i32 0))))

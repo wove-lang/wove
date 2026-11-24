@@ -1,7 +1,7 @@
 (module
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Read declaration names and selective Wove-file imports from checked source rows.
+	(:doc `Read declaration names and selective Wove-file and C-header imports from checked source rows.
 
 	Return child indices into the same tree. A malformed operand retains its
 	original byte span for the graph diagnostic.`)
@@ -10,13 +10,14 @@
 	(use wove-file "./scan.wove" (only is_head_byte is_identifier_head (type SourceNode)))
 	(use wove-file "./module.wove" (only form_parts select_form is_three_bytes))
 
-	(struct ImportRead (fields (first i32) (second i32) (start i32) (end i32) (error u32) (namespace u32)))
+	(struct ImportRead (fields (first i32) (second i32) (start i32) (end i32) (error u32) (namespace u32) (provider u32)))
 
 	(fn
 		(:doc `Recognize the graph grammar's bare keywords.
 
 		Return 1 for fn, 2 for use, 3 for wove-file, 4 for only,
-		5 for as, 6 for type, and 7 for struct.`)
+		5 for as, 6 for type, 7 for struct, 8 for c-header,
+		9 for bridge, 10 for params, and 11 for returns.`)
 		import_keyword
 		(params (source (shared-slice u8)) (node SourceNode))
 		(returns u32)
@@ -80,6 +81,33 @@
 						(call is_three_bytes (borrow-shared (local source))
 							(i32.add.wrapping (local start) (i32 3)) (u8 117) (u8 99) (u8 116))))
 				(then (return (u32 7))))
+			(if
+				(:doc "Match the complete c-header spelling.")
+				(bool.and (i32.eq (local width) (i32 8))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 99) (u8 45) (u8 104))
+						(bool.and (call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3)) (u8 101) (u8 97) (u8 100))
+						(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 101))
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 7) (u8 114))))))
+				(then (return (u32 8))))
+			(if
+				(:doc "Match the complete bridge spelling.")
+				(bool.and (i32.eq (local width) (i32 6))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 98) (u8 114) (u8 105))
+						(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3)) (u8 100) (u8 103) (u8 101))))
+				(then (return (u32 9))))
+			(if
+				(:doc "Match the complete params spelling.")
+				(bool.and (i32.eq (local width) (i32 6))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 112) (u8 97) (u8 114))
+						(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3)) (u8 97) (u8 109) (u8 115))))
+				(then (return (u32 10))))
+			(if
+				(:doc "Match the complete returns spelling.")
+				(bool.and (i32.eq (local width) (i32 7))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 114) (u8 101) (u8 116))
+						(bool.and (call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3)) (u8 117) (u8 114) (u8 110))
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 115)))))
+				(then (return (u32 11))))
 			(return (u32 0))))
 
 	(fn
@@ -101,7 +129,7 @@
 		(body
 			(return (record.make ImportRead (first (local first)) (second (local second))
 				(start (record.get (local node) start)) (end (record.get (local node) end))
-				(error (local error)) (namespace (u32 0))))))
+				(error (local error)) (namespace (u32 0)) (provider (u32 0))))))
 
 	(fn
 		(:doc `Require a known operand form and check its ordinary metadata context.`)
@@ -124,11 +152,11 @@
 				(u32.lt (u32 0) (record.get (local selection) error))
 				(then (return (record.make ImportRead (first (i32 -1)) (second (i32 -1))
 					(start (record.get (local selection) start)) (end (record.get (local selection) end))
-					(error (record.get (local selection) error)) (namespace (u32 0))))))
+					(error (record.get (local selection) error)) (namespace (u32 0)) (provider (u32 0))))))
 			(return (call import_at (local node) (record.get (local parts) operands) (i32 -1) (u32 0)))))
 
 	(fn
-		(:doc `Read the file token and the first only selector from an active use.`)
+		(:doc `Read the provider, quoted key, and first only selector from an active use.`)
 		read_import
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (operands i32))
 		(returns ImportRead)
@@ -138,9 +166,10 @@
 				(i32.lt (local operands) (i32 0))
 				(then (return (call import_at (local node) (i32 -1) (i32 -1) (u32 26)))))
 			(let provider (slice.load (local nodes) (local operands)))
+			(let kind (call import_keyword (borrow-shared (local source)) (local provider)))
 			(if
-				(:doc "This graph accepts the Wove-file provider.")
-				(bool.not (u32.eq (call import_keyword (borrow-shared (local source)) (local provider)) (u32 3)))
+				(:doc "File paths and C header keys use their own provider names.")
+				(bool.not (bool.or (u32.eq (local kind) (u32 3)) (u32.eq (local kind) (u32 8))))
 				(then (return (call import_at (local provider) (i32 -1) (i32 -1) (u32 26)))))
 			(let path (record.get (local provider) next_sibling))
 			(if
@@ -168,7 +197,9 @@
 				(:doc "Return the original error before interpreting the selection list.")
 				(u32.lt (u32 0) (record.get (local only) error))
 				(then (return (local only))))
-			(return (call import_at (local node) (local path) (record.get (local only) first) (u32 0)))))
+			(return (record.make ImportRead (first (local path)) (second (record.get (local only) first))
+				(start (record.get (local node) start)) (end (record.get (local node) end))
+				(error (u32 0)) (namespace (u32 0)) (provider (local kind))))))
 
 	(fn
 		(:doc `Read a bare or aliased selector. The binder checks the local spelling.`)
@@ -237,4 +268,4 @@
 			(let selected (call read_name_selector (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 			(return (record.make ImportRead (first (record.get (local selected) first)) (second (record.get (local selected) second))
 				(start (record.get (local selected) start)) (end (record.get (local selected) end))
-				(error (record.get (local selected) error)) (namespace (u32 1)))))))
+				(error (record.get (local selected) error)) (namespace (u32 1)) (provider (u32 0)))))))
