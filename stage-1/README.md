@@ -99,7 +99,7 @@ form. The seed skips other directives, including `inline`, and leaves other
 metadata payloads for later stages.
 
 A module can use `(:pragma (cfg (not bootstrap)))` to guard the entire file.
-An excluded provider exposes no functions and its nested imports are skipped.
+An excluded provider exposes no declarations and its nested imports are skipped.
 An empty `(only)` can load that provider, while a named selection reports the
 unavailable name at its source line. The entry module must be active.
 
@@ -107,8 +107,15 @@ Use `(use wove-file "./source_scan.wove" (only scan_token (as source_kind
 lexer_kind)))` to select functions from a local file. The path resolves from
 the importing file. A bare name keeps its spelling, and `(as original local)`
 binds a new name to the original declaration and signature. `(only)` loads the
-file and binds no names. Each function resolves its helpers and types in its
-defining file. A provider supplies its own function declarations for selection.
+file and binds no names.
+
+Use `(type SourceNode)` or `(type (as SourceNode Node))` inside `only` to
+select a record type. A provider can have a function and a record with the
+same spelling. Function and type selectors bind their own namespaces.
+A type alias preserves the record's defining identity in signatures,
+constructors, arrays, and slices. Each file can select its provider's local
+declarations, and each function resolves helpers and type names in its
+defining file.
 
 The seed evaluates selection pragmas on a `use` before opening its provider.
 It loads each file once by identity, so multiple paths to the same module

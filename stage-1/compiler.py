@@ -5,7 +5,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
@@ -98,10 +98,13 @@ class Function:
 @dataclass(frozen=True)
 class Module:
 	filename: str
-	records: dict[str, Record]
-	functions: dict[str, Function]
-	uses: list[Form]
-	bindings: dict[str, Function]
+	function_index: int
+	records: dict[str, Record] = field(default_factory=dict)
+	function_declarations: dict[str, Form] = field(default_factory=dict)
+	uses: list[Form] = field(default_factory=list)
+	type_bindings: dict[str, Record] = field(default_factory=dict)
+	functions: dict[str, Function] = field(default_factory=dict)
+	bindings: dict[str, Function] = field(default_factory=dict)
 
 
 # Scalars and scalar-only records can be passed without a loan or transfer.
@@ -171,10 +174,9 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 
 # Read the signature before lowering calls, including forward calls.
 def read_function(
-	node: Node, index: int, records: dict[str, Record], *, entry_module: bool
-) -> tuple[str, Function]:
-	name_node, params_node, returns_node, body_node = form(node, "fn", 4).operands
-	name = identifier(name_node)
+	name: str, node: Form, index: int, records: dict[str, Record], *, entry_module: bool
+) -> Function:
+	_, params_node, returns_node, body_node = node.operands
 
 	params = {}
 	# Preserve parameter order for the generated C signature.
@@ -196,7 +198,7 @@ def read_function(
 		raise SourceError(node.line)
 
 	c_name = "main" if entry else f"wv_seed_fn_{index}"
-	return name, Function(c_name, tuple(params.items()), result, checked_form(body_node, "body"))
+	return Function(c_name, tuple(params.items()), result, checked_form(body_node, "body"))
 
 
 # Encode a source filename as a C literal, including arbitrary path bytes.
@@ -850,11 +852,11 @@ def source_file(filename: str) -> Iterator[None]:
 		raise
 
 
-# Read active declarations and establish the file's own signatures before loading providers.
+# Collect active local declarations and preserve their emission order.
 def read_module(
 	source: str, filename: str, record_index: int, function_index: int, *, entry: bool = False
 ) -> Module:
-	# Parsing, declaration selection, and signature checks belong to this file.
+	# Parsing and declaration selection belong to the defining file.
 	with source_file(filename):
 		module = form(parse(source), "module")
 		# The module name precedes its declarations.
@@ -866,38 +868,43 @@ def read_module(
 			# A build still needs its entry module to be active.
 			if entry:
 				raise SourceError(module.line)
-			return Module(filename, {}, {}, [], {})
+			return Module(filename, function_index)
 		records = {}
-		function_declarations = []
+		function_declarations = {}
 		uses = []
 		# Select active declarations before looking at any import's operands or path.
 		for node in selected_declarations(module.operands[1:]):
-			# Providers are loaded after the file's own types and functions are known.
+			# Collect imports for the dependency walk.
 			if node.tag == "use":
 				uses.append(node)
-			# Read declared record types before validating function signatures.
+			# Local record layouts contain only scalars, so imports cannot affect them.
 			elif node.tag == "struct":
 				name, record = read_record(node, record_index + len(records))
-				# A file has one layout for each named record.
+				# A file has one declaration per record name.
 				if name in records:
 					raise SourceError(node.line)
 				records[name] = record
-			# All other active declarations must be functions.
+			# Collect function names now and check their signatures after imports bind.
 			else:
-				function_declarations.append(node)
-
-		functions = {}
-		# Read every local signature before translating any function body.
-		for index, node in enumerate(function_declarations, function_index):
-			symbol, function = read_function(node, index, records, entry_module=entry)
-			# A file has one declaration per function name.
-			if symbol in functions:
-				raise SourceError(node.line)
-			functions[symbol] = function
+				name = identifier(form(node, "fn", 4).operands[0])
+				# A file has one declaration per function name in its function namespace.
+				if name in function_declarations:
+					raise SourceError(node.line)
+				function_declarations[name] = node
 		# The root supplies the executable entry point even when a provider defines main.
-		if entry and "main" not in functions:
+		if entry and "main" not in function_declarations:
 			raise SourceError(module.line)
-		return Module(filename, records, functions, uses, functions.copy())
+		return Module(filename, function_index, records, function_declarations, uses, records.copy())
+
+
+# Resolve signatures in the file's complete type namespace before binding callers.
+def prepare_functions(module: Module, *, entry: bool) -> None:
+	# Report any invalid signature in its own defining file.
+	with source_file(module.filename):
+		# Number only local definitions, in their original declaration order.
+		for index, (name, node) in enumerate(module.function_declarations.items(), module.function_index):
+			module.functions[name] = read_function(name, node, index, module.type_bindings, entry_module=entry)
+	module.bindings.update(module.functions)
 
 
 # Decode the seed's local-file provider and its explicit selection list.
@@ -912,25 +919,32 @@ def read_use(node: Form) -> tuple[str, Form]:
 	return source.text, checked_form(only, "only")
 
 
-# Bind provider declarations directly, so aliases keep the original type and identity.
+# Bind provider declarations directly so aliases retain the defining identity.
 def bind_use(only: Form, provider: Module, importer: Module) -> None:
-	# Each item contributes one function name to the importer's scope.
+	# Each item selects one declaration in either the function or type namespace.
 	for item in only.operands:
+		selects_type = isinstance(item, Form) and item.tag == "type"
+		# Type selectors wrap a bare name or the same alias form as functions.
+		if selects_type:
+			item, = checked_form(item, "type", 1).operands
 		# A bare name uses the provider spelling locally.
 		if isinstance(item, Atom):
 			original = local = item
 		# A renamed import carries both the defining and local names.
 		else:
 			original, local = checked_form(item, "as", 2).operands
-		function = provider.functions.get(identifier(original))
-		# A provider exposes only its own declarations to explicit file imports.
-		if function is None:
+		declarations = provider.records if selects_type else provider.functions
+		target = declarations.get(identifier(original))
+		# Only declarations defined in the provider can be selected.
+		if target is None:
 			raise SourceError(original.line)
 		name = identifier(local)
-		# Local declarations and earlier import bindings share the same function scope.
-		if name in importer.bindings:
+		bindings = importer.type_bindings if selects_type else importer.bindings
+		reserved = C_TYPE if selects_type else importer.function_declarations
+		# Keep builtins and local declarations distinct from imports in their own namespace.
+		if name in bindings or name in reserved:
 			raise SourceError(local.line)
-		importer.bindings[name] = function
+		bindings[name] = target
 
 
 # Read an active provider and distinguish its source errors from failures to open it.
@@ -953,7 +967,12 @@ def file_identity(path: Path) -> tuple[int, int]:
 
 
 # Visit the active source graph in declaration order and keep the first defining path.
-def load_modules(root: Module, path: Path) -> list[Module]:
+def load_modules(root: Module) -> list[Module]:
+	# A single file only needs signature preparation.
+	if not root.uses:
+		prepare_functions(root, entry=True)
+		return [root]
+	path = Path(root.filename).resolve()
 	# The root text can also be supplied in memory under a prospective filename.
 	try:
 		root_identity = file_identity(path)
@@ -961,20 +980,27 @@ def load_modules(root: Module, path: Path) -> list[Module]:
 		root_identity = path
 	modules = {root_identity: root}
 	active = {root_identity}
-	stack = [(root_identity, path, iter(root.uses))]
+	stack = [(root_identity, path, iter(root.uses), None)]
 	record_index = len(root.records)
-	function_index = len(root.functions)
+	function_index = len(root.function_declarations)
 	absolute_paths = Path(root.filename).is_absolute()
 	# Keep active importers on the stack until their last use has been processed.
 	while stack:
-		identity, path, uses = stack[-1]
+		identity, path, uses, incoming = stack[-1]
+		importer = modules[identity]
 		use = next(uses, None)
-		# Leaving a file makes later paths to it shared dependencies.
+		# A file's signatures are ready when all of its imports have bound.
 		if use is None:
+			prepare_functions(importer, entry=incoming is None)
 			active.remove(identity)
 			stack.pop()
+			# Bind the pending edge that brought this file into the graph.
+			if incoming is not None:
+				parent, only = incoming
+				# Invalid selections belong to the importer.
+				with source_file(parent.filename):
+					bind_use(only, importer, parent)
 			continue
-		importer = modules[identity]
 		# An active edge or an invalid selection is diagnosed in this importer.
 		with source_file(importer.filename):
 			requested, only = read_use(use)
@@ -988,24 +1014,25 @@ def load_modules(root: Module, path: Path) -> list[Module]:
 			if target_identity in active:
 				raise SourceError(use.line)
 			provider = modules.get(target_identity)
-			# Read and declare each active provider once, even with an empty selection.
-			if provider is None:
-				filename = str(target) if absolute_paths else os.path.relpath(target)
-				source = read_provider(target, filename, use)
-				provider = read_module(source, filename, record_index, function_index)
-				modules[target_identity] = provider
-				record_index += len(provider.records)
-				function_index += len(provider.functions)
-				active.add(target_identity)
-				stack.append((target_identity, target, iter(provider.uses)))
-			bind_use(only, provider, importer)
+			# A provider reached again already has its complete signatures.
+			if provider is not None:
+				bind_use(only, provider, importer)
+				continue
+			filename = str(target) if absolute_paths else os.path.relpath(target)
+			source = read_provider(target, filename, use)
+			provider = read_module(source, filename, record_index, function_index)
+			modules[target_identity] = provider
+			record_index += len(provider.records)
+			function_index += len(provider.function_declarations)
+			active.add(target_identity)
+			stack.append((target_identity, target, iter(provider.uses), (importer, only)))
 	return list(modules.values())
 
 
 # Emit a complete C translation unit after the source graph succeeds.
 def compile_source(source: str, filename: str) -> str:
 	root = read_module(source, filename, 0, 0, entry=True)
-	modules = load_modules(root, Path(filename).resolve()) if root.uses else [root]
+	modules = load_modules(root)
 	functions = [function for module in modules for function in module.functions.values()]
 	retained = tuple(function.c_name for module in modules[1:] for function in module.functions.values())
 
@@ -1025,5 +1052,5 @@ def compile_source(source: str, filename: str) -> str:
 			# Emit provider bodies only once, regardless of their local aliases.
 			for function in module.functions.values():
 				references = retained if function.c_name == "main" else ()
-				lines.extend(FunctionEmitter(function, module.bindings, module.records, path).emit(references))
+				lines.extend(FunctionEmitter(function, module.bindings, module.type_bindings, path).emit(references))
 	return "\n".join(lines)
