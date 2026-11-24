@@ -3,7 +3,7 @@ Copyright (c) 2026 wove contributors
 SPDX-License-Identifier: MIT OR Apache-2.0
 -->
 
-# Stage 2 source scanner and tree reader
+# Stage 2 source scanner, tree reader, and renderer
 
 Call `source_diagnostic` once on the shared byte slice before tokenization.
 The admission check covers the entire view, including bytes in comments and
@@ -110,6 +110,18 @@ entries keep their original rows, links, and byte spans.
 | 14 | Malformed wrapper | The offending operand or the wrapper itself when an operand is missing |
 | 15 | Malformed metadata entry | The offending direct entry |
 
+`render_source_tree` takes the original byte view, its built and validated
+shared node slice, and a writable byte slice. It walks the tree links in
+source order and copies each token's raw bytes, including parentheses,
+quoted escapes, and comments. It adds one space between tokens except
+immediately inside parentheses, and uses LF after a comment whenever another
+token follows. Layout around the outermost tokens is discarded.
+
+The result contains the number of bytes written and an error code. Code 0
+means the emitted prefix contains the entire source. Code 16 means the next
+token and its separator could not fit. In either case the prefix ends on a
+token boundary and the remaining output bytes retain their original values.
+
 `make stage-2` emits C with the Python seed and links the scanner with
 its [source fixture](../tests/stage-2/source_scan.probe.c) and the shared
 runtime. Run `make test-stage-2` to exercise those inputs and compare full
@@ -133,3 +145,11 @@ retains its original bytes.
 
 Use `--metadata FILE [START END [TREE_CAPACITY]]` to validate the built
 tree. On success it emits the same rows as `--tree`.
+
+Use `--render FILE [START END [OUTPUT_CAPACITY]]` to render the validated
+tree. The first output line contains the written byte count and error
+code, separated by a tab. The remaining output is the exact written prefix.
+The probe checks guard bytes around the output view and compares unwritten
+bytes against their original values. The
+[rendering fixtures](../tests/stage-2/source_renderings.tsv) compare the
+original and reparsed trees and tokens on each successful render.

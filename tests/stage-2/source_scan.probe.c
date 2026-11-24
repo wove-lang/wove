@@ -21,10 +21,12 @@
 #define check_source_form wv_seed_fn_24
 #define build_source_tree wv_seed_fn_29
 #define check_source_metadata wv_seed_fn_41
+#define render_source_tree wv_seed_fn_43
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
 typedef wv_seed_record_4 SourceNode;
+typedef wv_seed_record_5 RenderResult;
 
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
 _Static_assert(_Generic(&source_kind, uint32_t (*)(wvrt_slice): 1, default: 0), "source kind type");
@@ -421,6 +423,65 @@ static int dump_tree(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t
 	return result.wv_field_3 == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// Render into an interior slice and check the guards and unwritten tail before reporting bytes.
+static int dump_render(wvrt_slice input, wvrt_slice nodes, int32_t capacity) {
+	if (capacity < 0) {
+		capacity = input.wvrt_length > INT32_MAX / 2 ? INT32_MAX : input.wvrt_length * 2;
+	}
+	const size_t size = (size_t)capacity + 2;
+	uint8_t *storage = malloc(size);
+	if (storage == NULL) {
+		fputs("could not allocate render buffer\n", stderr);
+		return EXIT_FAILURE;
+	}
+	memset(storage, 0xa5, size);
+	const wvrt_mut_slice output = {storage + 1, capacity, sizeof(uint8_t)};
+	const RenderResult result = render_source_tree(input, nodes, output);
+	const int32_t written = result.wv_field_0;
+	if (written < 0 || written > capacity || storage[0] != 0xa5) {
+		fputs("renderer exceeded the output view\n", stderr);
+		free(storage);
+		return EXIT_FAILURE;
+	}
+	// Start after the written prefix and include the right guard byte.
+	for (size_t offset = (size_t)written + 1; offset < size; ++offset) {
+		if (storage[offset] != 0xa5) {
+			fputs("renderer modified unused output bytes\n", stderr);
+			free(storage);
+			return EXIT_FAILURE;
+		}
+	}
+	printf("%" PRId32 "\t%" PRIu32 "\n", written, result.wv_field_1);
+	const size_t emitted = fwrite(storage + 1, 1, (size_t)written, stdout);
+	free(storage);
+	return result.wv_field_1 == 0 && emitted == (size_t)written ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+// Build and validate the original tree before supplying it to the renderer.
+static int render_view(wvrt_slice input, int32_t capacity) {
+	const FormCheck checked = check_source_form(input);
+	if (checked.wv_field_3 != 0) {
+		printf("0\t%" PRIu32 "\n", checked.wv_field_3);
+		return EXIT_FAILURE;
+	}
+	const int32_t rows = (int32_t)checked.wv_field_0;
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_array *storage = wvrt_array_new(rows, sizeof(SourceNode), _Alignof(SourceNode), site);
+	const wvrt_mut_slice writable = {storage->wvrt_items, rows, sizeof(SourceNode)};
+	const wvrt_slice nodes = {storage->wvrt_items, rows, sizeof(SourceNode)};
+	const FormCheck built = build_source_tree(input, checked, writable);
+	const FormCheck validated = check_source_metadata(input, built, nodes);
+	int status = EXIT_FAILURE;
+	// Surface source validation errors without opening the output view.
+	if (validated.wv_field_3 != 0) {
+		printf("0\t%" PRIu32 "\n", validated.wv_field_3);
+	} else {
+		status = dump_render(input, nodes, capacity);
+	}
+	wvrt_array_drop(storage);
+	return status;
+}
+
 // Load the bytes unchanged so newline and UTF-8 offsets survive into the probe.
 static uint8_t *read_source(const char *filename, int32_t *length) {
 	FILE *input = fopen(filename, "rb");
@@ -460,8 +521,10 @@ static int source_mode(int argc, char **argv) {
 	const bool form = strcmp(argv[1], "--form") == 0;
 	const bool metadata = strcmp(argv[1], "--metadata") == 0;
 	const bool tree = metadata || strcmp(argv[1], "--tree") == 0;
-	if ((argc != 3 && argc != 5 && !(tree && argc == 6)) || (!tokens && !form && !tree)) {
-		fputs("usage: source_scan [--tokens | --form | --tree | --metadata] FILE [START END [TREE_CAPACITY]]\n", stderr);
+	const bool render = strcmp(argv[1], "--render") == 0;
+	if ((argc != 3 && argc != 5 && !((tree || render) && argc == 6)) || (!tokens && !form && !tree && !render)) {
+		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render]"
+			" FILE [START END [CAPACITY]]\n", stderr);
 		return EXIT_FAILURE;
 	}
 
@@ -480,7 +543,7 @@ static int source_mode(int argc, char **argv) {
 	}
 	int32_t capacity = -1;
 	if (argc == 6 && !read_offset(argv[5], &capacity)) {
-		fputs("invalid source tree capacity\n", stderr);
+		fputs("invalid view capacity\n", stderr);
 		free(bytes);
 		return EXIT_FAILURE;
 	}
@@ -490,6 +553,8 @@ static int source_mode(int argc, char **argv) {
 	int status;
 	if (tree) {
 		status = dump_tree(parent, view, start, capacity, metadata);
+	} else if (render) {
+		status = render_view(view, capacity);
 	} else {
 		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	}

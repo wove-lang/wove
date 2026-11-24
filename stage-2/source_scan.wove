@@ -8,6 +8,7 @@
 	(struct FormCheck (fields (rows u32) (start i32) (end i32) (error u32)))
 	(struct SourceNode
 		(fields (kind u32) (start i32) (end i32) (parent i32) (first_child i32) (next_sibling i32)))
+	(struct RenderResult (fields (written i32) (error u32)))
 
 	(with-meta
 		(meta
@@ -1039,6 +1040,92 @@
 									(then (return (local result))))))
 						(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 				(return (local checked)))))
+
+	(with-meta
+		(meta (:doc "Append a whole raw token and its separator, or return -1 if both cannot fit."))
+		(fn render_source_token
+			(params (source (shared-slice u8)) (output (mut-slice u8))
+				(start i32) (end i32) (kind u32) (previous u32) (written i32))
+			(returns i32)
+			(body
+				(let newline (u32.eq (local previous) (u32 59)))
+				(let separator (bool.and (bool.not (u32.eq (local previous) (u32 0)))
+					(bool.or (local newline)
+						(bool.and (bool.not (u32.eq (local previous) (u32 40)))
+							(bool.not (u32.eq (local kind) (u32 41)))))))
+				(let width (i32.sub.wrapping (local end) (local start)))
+				(let room (i32.sub.wrapping (slice.len (local output)) (local written)))
+				;; Compare with the remaining capacity before adding any offsets or writing a partial token.
+				(if (bool.or (i32.lt (local room) (local width))
+						(bool.and (local separator) (i32.eq (local room) (local width))))
+					(then (return (i32 -1))))
+				(let-mut cursor (local written))
+				;; A comment requires LF even when the following token closes a form.
+				(if (local separator)
+					(then
+						(let-mut byte (u8 32))
+						;; Physical line breaks outside comments are otherwise unnecessary.
+						(if (local newline)
+							(then (set (local byte) (u8 10))))
+						(slice.store (local output) (local cursor) (local byte))
+						(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+				(let-mut offset (local start))
+				;; Copy the original spelling byte for byte, including any escapes.
+				(while (i32.lt (local offset) (local end))
+					(body
+						(slice.store (local output) (local cursor) (slice.load (local source) (local offset)))
+						(set (local offset) (i32.add.wrapping (local offset) (i32 1)))
+						(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+				(return (local cursor)))))
+
+	(with-meta
+		(meta
+			(:doc "Render the validated tree against its original source, using links to visit each token in order.")
+			(:expect source.token_roundtrip
+				(issue "https://github.com/wove-lang/wove/issues/47")))
+		(fn render_source_tree
+			(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (output (mut-slice u8)))
+			(returns RenderResult)
+			(body
+				(let root (slice.load (local nodes) (i32 0)))
+				(let-mut index (record.get (local root) first_child))
+				(let-mut closing (bool false))
+				(let-mut previous (u32 0))
+				(let-mut written (i32 0))
+				;; Parent links schedule pending closers without recursion or a separate stack.
+				(while (i32.lt (i32 0) (local index))
+					(body
+						(let node (slice.load (local nodes) (local index)))
+						(let-mut kind (record.get (local node) kind))
+						(let-mut start (record.get (local node) start))
+						(let-mut end (record.get (local node) end))
+						;; A form contributes its opener before the children and its closer on the way back up.
+						(if (local closing)
+							(then
+								(set (local kind) (u32 41))
+								(set (local start) (i32.sub.wrapping (local end) (i32 1))))
+							(else
+								;; On entry, emit just the opener instead of copying the full form span.
+								(if (u32.eq (local kind) (u32 40))
+									(then (set (local end) (i32.add.wrapping (local start) (i32 1)))))))
+						(let next (call render_source_token (borrow-shared (local source)) (borrow-mut (local output))
+							(local start) (local end) (local kind) (local previous) (local written)))
+						;; Keep the completed prefix and leave the remaining output bytes alone on capacity failure.
+						(if (i32.lt (local next) (i32 0))
+							(then (return (record.make RenderResult (written (local written)) (error (u32 16))))))
+						(set (local written) (local next))
+						(set (local previous) (local kind))
+						;; Every validated form has a child. Other tokens proceed to a sibling or close their parent.
+						(if (u32.eq (local kind) (u32 40))
+							(then (set (local index) (record.get (local node) first_child)))
+							(else
+								(let sibling (record.get (local node) next_sibling))
+								(set (local closing) (i32.lt (local sibling) (i32 0)))
+								;; The synthetic source root has no closer, so returning to index zero ends the walk.
+								(if (local closing)
+									(then (set (local index) (record.get (local node) parent)))
+									(else (set (local index) (local sibling))))))))
+				(return (record.make RenderResult (written (local written)) (error (u32 0)))))))
 
 	(with-meta
 		(meta (:doc "Supply the seed entry point while the fixture provides input slices."))

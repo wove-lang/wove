@@ -40,13 +40,19 @@ def position(source, offset):
 	return prefix.count("\n") + 1, len(prefix.rsplit("\n", 1)[-1]) + 1
 
 
-# Run a probe mode on the same checked file view and read its numeric rows.
-def probe_rows(executable, mode, path, bounds):
+# Run a probe mode on a file or a checked subrange and keep its output bytes.
+def run_probe(executable, mode, path, bounds):
 	command = [str(executable), mode, str(path), *map(str, bounds)]
 	result = subprocess.run(command, capture_output=True, check=False, timeout=30)
 	assert not result.stderr, (path, result.stderr)
-	rows = [tuple(map(int, row.split(b"\t"))) for row in result.stdout.splitlines()]
-	return rows, result.returncode
+	return result.stdout, result.returncode
+
+
+# Read numeric rows from a probe mode.
+def probe_rows(executable, mode, path, bounds):
+	output, status = run_probe(executable, mode, path, bounds)
+	rows = [tuple(map(int, row.split(b"\t"))) for row in output.splitlines()]
+	return rows, status
 
 
 # Check that the executable terminates the stream and advances every nonterminal row.
@@ -151,9 +157,39 @@ def check_trees(executable, directory, manifest, mode):
 		assert status == int(expected[0][3] != 0), label
 
 
+# Compare node kinds and links independently of byte offsets and layout.
+def tree_shape(executable, source, bounds=()):
+	rows, status = probe_rows(executable, "--metadata", source, bounds)
+	assert status == 0 and rows[0][0] == len(rows) - 1, (source, rows)
+	return [(index, kind, parent, child, sibling) for index, kind, _, _, parent, child, sibling, _, _ in rows[1:]]
+
+
+# Check the renderer's byte count, exact layout, and successful parse-render-parse cases.
+def check_renderings(executable, directory, manifest):
+	source = directory / "render-input.wove"
+	rendered = directory / "render-output.wove"
+	# Both the original parent bytes and the expected output prefix come from the fixture.
+	for label, raw, base, end, capacity, written, error, expected in fixture_rows(manifest):
+		source.write_bytes(bytes.fromhex(raw))
+		bounds = (int(base), int(end))
+		expected_count, expected_error = int(written), int(error)
+		output, status = run_probe(executable, "--render", source, (*bounds, int(capacity)))
+		header, delimiter, prefix = output.partition(b"\n")
+		assert delimiter, (label, output)
+		assert tuple(map(int, header.split(b"\t"))) == (expected_count, expected_error), (label, header)
+		expected_prefix = b"" if expected == "-" else bytes.fromhex(expected)
+		assert len(prefix) == expected_count and prefix == expected_prefix, (label, prefix)
+		assert status == int(expected_error != 0), label
+		# Reparse the written bytes and compare both raw tokens and metadata-aware tree links.
+		if status == 0:
+			rendered.write_bytes(prefix)
+			assert compare_stream(executable, source, bounds) == compare_stream(executable, rendered), label
+			assert tree_shape(executable, source, bounds) == tree_shape(executable, rendered), label
+
+
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	executable, layouts, diagnostics, forms, trees, metadata, *sources = map(Path, sys.argv[1:])
+	executable, layouts, diagnostics, forms, trees, metadata, renderings, *sources = map(Path, sys.argv[1:])
 	for source in sources:
 		compare_stream(executable, source)
 
@@ -164,6 +200,7 @@ def main():
 		check_forms(executable, directory, forms)
 		check_trees(executable, directory, trees, "--tree")
 		check_trees(executable, directory, metadata, "--metadata")
+		check_renderings(executable, directory, renderings)
 
 
 if __name__ == "__main__":
