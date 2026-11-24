@@ -117,7 +117,13 @@ constructors, arrays, and slices. Each file can select its provider's local
 declarations, and each function resolves helpers and type names in its
 defining file.
 
-The seed evaluates selection pragmas on a `use` before opening its provider.
+The seed skips a `bridge` and all its members. A `use` with a bare
+provider tag other than `wove-file` is also skipped. Both forms must be
+readable IR. Their metadata and payloads belong to later stages. They
+contribute zero names and import edges in the seed. Bootstrap runtime
+operations keep their fixed C bindings.
+
+The seed evaluates selection pragmas on a `use wove-file` before opening its provider.
 It loads each file once by identity, so multiple paths to the same module
 share its declarations and use its first resolved path. An active missing
 file or cycle is diagnosed at the importing `use` line. Errors inside an

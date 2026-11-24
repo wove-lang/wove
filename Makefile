@@ -124,6 +124,7 @@ MODULE_SELECT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,module.select.wove modu
 TYPE_IMPORT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,types.round_trip.wove types/base.wove types/forward.wove)
 SOURCE_TREE_IMPORT := $(OWNERSHIP_TESTS)/types.source_tree.wove
 $(STAGE1)/imports.round_trip.c: $(ROUND_TRIP_PROVIDERS)
+$(STAGE1)/imports.host_declarations.c: $(OWNERSHIP_TESTS)/imports/nested/shared.wove
 $(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
 $(STAGE1)/module.select.c: $(MODULE_SELECT_SOURCES)
 $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)

@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 
-from syntax import Atom, Form, Node, SourceError, form, identifier, parse
+from syntax import IDENTIFIER, Atom, Form, Node, SourceError, form, identifier, parse
 
 
 I32 = "i32"
@@ -824,16 +824,32 @@ def checked_form(node: Node, tag: str | None = None, arity: int | None = None) -
 
 
 # Flatten active groups in source order before declaring any names.
-def selected_declarations(nodes: tuple[Node, ...]) -> Iterator[Form]:
+def selected_declarations(nodes: tuple[Node, ...], *, skip_host: bool = False) -> Iterator[Form]:
 	# Exclude declarations before opening imported files or validating bodies.
 	for node in nodes:
 		declaration = form(node)
+		# Bootstrap discards host declarations before interpreting any pragmas.
+		if skip_host:
+			# A bridge and every member belong to later compilation stages.
+			if declaration.tag == "bridge":
+				continue
+			# Classify a use by its provider tag without checking its payload.
+			if declaration.tag == "use" and declaration.operands:
+				provider = declaration.operands[0]
+				# Malformed provider tags still go through ordinary use diagnostics.
+				if (
+					isinstance(provider, Atom)
+					and not provider.quoted
+					and provider.text != "wove-file"
+					and IDENTIFIER.fullmatch(provider.text)
+				):
+					continue
 		# An inactive declaration or group contributes no definitions.
 		if not metadata_enabled(declaration, selectable=True):
 			continue
 		# A group declares its active children in the enclosing module.
 		if declaration.tag == "decls":
-			yield from selected_declarations(declaration.operands)
+			yield from selected_declarations(declaration.operands, skip_host=skip_host)
 		# Keep active declarations and their source locations intact.
 		else:
 			yield declaration
@@ -873,7 +889,7 @@ def read_module(
 		function_declarations = {}
 		uses = []
 		# Select active declarations before looking at any import's operands or path.
-		for node in selected_declarations(module.operands[1:]):
+		for node in selected_declarations(module.operands[1:], skip_host=True):
 			# Collect imports for the dependency walk.
 			if node.tag == "use":
 				uses.append(node)
