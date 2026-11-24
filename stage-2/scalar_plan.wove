@@ -1,0 +1,522 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve the selected single-module scalar functions before C emission.
+
+	Collect signatures first, then check each return expression against the
+	function and parameter tables. Function rows keep original declaration
+	and name nodes. Checked call rows keep the callee row independently of
+	the name that will be used in C, and are indexed by original call node.`)
+	scalar_plan
+
+	(use wove-file "./source_scan.wove" (only is_identifier_head (type SourceNode)))
+	(use wove-file "./source_module.wove" (only form_parts select_form (type ModuleRead) (type SelectedDeclaration)))
+	(use wove-file "./source_paths.wove" (only same_bytes))
+	(use wove-file "./c_names.wove" (only module_identity function_identity))
+	(use wove-file "./scalar_syntax.wove"
+		(only entry_keyword entry_at entry_form read_return scalar_type decimal_scalar (type EntryRead)))
+
+	(struct ScalarFunction
+		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
+			(expression i32) (identity u32) (entry bool)))
+	(struct ScalarParameter (fields (name i32) (type u32) (position i32)))
+	(struct ScalarExpression
+		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool)))
+	(struct ScalarSignature (fields (params i32) (result u32) (expression i32) (start i32) (end i32) (error u32)))
+
+	(fn
+		(:doc `Carry an original source diagnostic through the signature reader.`)
+		signature_error
+		(params (error EntryRead))
+		(returns ScalarSignature)
+		(body
+			(return (record.make ScalarSignature (params (i32 -1)) (result (u32 0)) (expression (i32 -1))
+				(start (record.get (local error) start)) (end (record.get (local error) end))
+				(error (record.get (local error) error))))))
+
+	(fn
+		(:doc `Check the signature and body shape of one named scalar function.`)
+		read_signature
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(name SourceNode) (entry bool))
+		(returns ScalarSignature)
+		(body
+			(let params (record.get (local name) next_sibling))
+			(if
+				(:doc "The first form after the name declares the parameter list.")
+				(i32.lt (local params) (i32 0))
+				(then (return (call signature_error (call entry_at (local node) (i32 -1) (u32 23))))))
+			(let params_node (slice.load (local nodes) (local params)))
+			(let parameters (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local params_node) (u32 3) (u32 23)))
+			(if
+				(:doc "Preserve the original params diagnostic.")
+				(u32.lt (u32 0) (record.get (local parameters) error))
+				(then (return (call signature_error (local parameters)))))
+			(let first (record.get (local parameters) operand))
+			(if
+				(:doc "The C entry takes no Wove parameters.")
+				(bool.and (local entry) (bool.not (i32.lt (local first) (i32 0))))
+				(then (return (call signature_error (call entry_at (local params_node) (i32 -1) (u32 23))))))
+			(let result_node (record.get (local params_node) next_sibling))
+			(if
+				(:doc "Every function declares its exact scalar result type.")
+				(i32.lt (local result_node) (i32 0))
+				(then (return (call signature_error (call entry_at (local node) (i32 -1) (u32 23))))))
+			(let returns (slice.load (local nodes) (local result_node)))
+			(let signature (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local returns) (u32 4) (u32 23)))
+			(if
+				(:doc "Keep the return form's diagnostic before inspecting its operands.")
+				(u32.lt (u32 0) (record.get (local signature) error))
+				(then (return (call signature_error (local signature)))))
+			(let type_node (record.get (local signature) operand))
+			(if
+				(:doc "The returns form takes exactly one type.")
+				(bool.or (i32.lt (local type_node) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local type_node)) next_sibling) (i32 0))))
+				(then (return (call signature_error (call entry_at (local returns) (i32 -1) (u32 23))))))
+			(let result (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
+			(if
+				(:doc "Helpers can return any supported scalar, and main returns i32.")
+				(bool.or (u32.eq (local result) (u32 0))
+					(bool.and (local entry) (bool.not (u32.eq (local result) (u32 5)))))
+				(then (return (call signature_error
+					(call entry_at (slice.load (local nodes) (local type_node)) (i32 -1) (u32 23))))))
+			(let body (record.get (local returns) next_sibling))
+			(if
+				(:doc "One body follows the signature.")
+				(i32.lt (local body) (i32 0))
+				(then (return (call signature_error (call entry_at (local node) (i32 -1) (u32 24))))))
+			(let body_node (slice.load (local nodes) (local body)))
+			(let extra (record.get (local body_node) next_sibling))
+			(if
+				(:doc "Keep the first extra operand's span.")
+				(bool.not (i32.lt (local extra) (i32 0)))
+				(then (return (call signature_error
+					(call entry_at (slice.load (local nodes) (local extra)) (i32 -1) (u32 24))))))
+			(let expression (call read_return (borrow-shared (local source)) (borrow-shared (local nodes)) (local body_node)))
+			(if
+				(:doc "Forward an unsupported body or return statement unchanged.")
+				(u32.lt (u32 0) (record.get (local expression) error))
+				(then (return (call signature_error (local expression)))))
+			(return (record.make ScalarSignature (params (local first)) (result (local result))
+				(expression (record.get (local expression) operand))
+				(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))))))
+
+	(fn
+		(:doc `Check that the source operand names an unquoted Wove identifier.`)
+		(:pragma (inline always))
+		is_scalar_name
+		(params (source (shared-slice u8)) (node SourceNode))
+		(returns bool)
+		(body
+			(return (bool.and (u32.eq (record.get (local node) kind) (u32 1))
+				(call is_identifier_head (borrow-shared (local source))
+					(record.get (local node) start) (record.get (local node) end))))))
+
+	(fn
+		(:doc `Compare the original spellings of two checked identifier nodes.`)
+		same_name
+		(params (source (shared-slice u8)) (left SourceNode) (right SourceNode))
+		(returns bool)
+		(body
+			(return (call same_bytes (borrow-shared (local source)) (record.get (local left) start)
+				(record.get (local left) end) (borrow-shared (local source)) (record.get (local right) start)
+				(record.get (local right) end)))))
+
+	(fn
+		(:doc `Look up a parameter within the owning function's contiguous parameter interval.`)
+		find_parameter
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name SourceNode)
+			(parameters (shared-slice ScalarParameter)) (start i32) (end i32))
+		(returns i32)
+		(body
+			(let-mut cursor (local start))
+			(while
+				(:doc "Only parameters of this function participate in its local namespace.")
+				(i32.lt (local cursor) (local end))
+				(body
+					(let item (slice.load (local parameters) (local cursor)))
+					(let node (slice.load (local nodes) (record.get (local item) name)))
+					(if
+						(:doc "Match the raw spelling before any C suffix transformation.")
+						(call same_name (borrow-shared (local source)) (local node) (local name))
+						(then (return (local cursor))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (i32 -1))))
+
+	(fn
+		(:doc `Check each parameter's unique spelling, metadata, and exact scalar type.`)
+		read_parameters
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32)
+			(parameters (mut-slice ScalarParameter)) (start i32))
+		(returns EntryRead)
+		(body
+			(let-mut index (local first))
+			(let-mut written (local start))
+			(while
+				(:doc "Keep formal parameter order and use one row for each checked parameter.")
+				(bool.not (i32.lt (local index) (i32 0)))
+				(body
+					(let node (slice.load (local nodes) (local index)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let name (record.get (local parts) head))
+					(let operand (record.get (local parts) operands))
+					(if
+						(:doc "A named parameter is a form with exactly one ordinary type operand.")
+						(bool.or (bool.or (i32.lt (local name) (i32 0)) (i32.lt (local operand) (i32 0)))
+							(bool.not (i32.lt (record.get (slice.load (local nodes) (local operand)) next_sibling) (i32 0))))
+						(then (return (call entry_at (local node) (i32 -1) (u32 23)))))
+					(let selection (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (local parts) (bool false)))
+					(if
+						(:doc "Known selection directives belong at declaration scope.")
+						(u32.lt (u32 0) (record.get (local selection) error))
+						(then (return (record.make EntryRead (operand (i32 -1))
+							(start (record.get (local selection) start)) (end (record.get (local selection) end))
+							(error (record.get (local selection) error))))))
+					(let type (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+					(if
+						(:doc "Point an unsupported parameter type at the type operand.")
+						(u32.eq (local type) (u32 0))
+						(then (return (call entry_at (slice.load (local nodes) (local operand)) (i32 -1) (u32 23)))))
+					(let name_node (slice.load (local nodes) (local name)))
+					(let existing (call find_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local name_node) (borrow-shared (local parameters)) (local start) (local written)))
+					(if
+						(:doc "The second occurrence of a name conflicts with its earlier parameter.")
+						(bool.not (i32.lt (local existing) (i32 0)))
+						(then (return (call entry_at (local name_node) (i32 -1) (u32 33)))))
+					(slice.store (local parameters) (local written)
+						(record.make ScalarParameter (name (local name)) (type (local type))
+							(position (i32.sub.wrapping (local written) (local start)))))
+					(set (local written) (i32.add.wrapping (local written) (i32 1)))
+					(set (local index) (record.get (local node) next_sibling))))
+			(return (record.make EntryRead (operand (local written)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+
+	(fn
+		(:doc `Find the checked local function row whose original name matches the requested spelling.`)
+		find_function
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name SourceNode)
+			(functions (shared-slice ScalarFunction)) (count i32))
+		(returns i32)
+		(body
+			(let-mut cursor (i32 0))
+			(while
+				(:doc "The selected namespace is the populated function prefix.")
+				(i32.lt (local cursor) (local count))
+				(body
+					(let target (slice.load (local functions) (local cursor)))
+					(let declared (slice.load (local nodes) (record.get (local target) name)))
+					(if
+						(:doc "C suffix sanitization has no role in source name resolution.")
+						(call same_name (borrow-shared (local source)) (local declared) (local name))
+						(then (return (local cursor))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (i32 -1))))
+
+	(fn
+		(:doc `Register selected function signatures and reject duplicate or colliding identities.`)
+		read_functions
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
+			(declarations (shared-slice SelectedDeclaration)) (functions (mut-slice ScalarFunction))
+			(parameters (mut-slice ScalarParameter)))
+		(returns EntryRead)
+		(body
+			(let scope (slice.load (local nodes) (record.get (local module) name)))
+			(let module_id (call module_identity (borrow-shared (local source))
+				(record.get (local scope) start) (record.get (local scope) end)))
+			(let-mut index (i32 0))
+			(let-mut next_param (i32 0))
+			(let-mut main (i32 -1))
+			(while
+				(:doc "Read every selected signature before resolving bodies and forward references.")
+				(i32.lt (local index) (record.get (local module) count))
+				(body
+					(let declaration (record.get (slice.load (local declarations) (local index)) node))
+					(let node (slice.load (local nodes) (local declaration)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let name (record.get (local parts) operands))
+					(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+					(if
+						(:doc "This translation unit accepts local functions as its selected declarations.")
+						(bool.or (bool.not (u32.eq (local tag) (u32 1))) (i32.lt (local name) (i32 0)))
+						(then (return (call entry_at (local node) (i32 -1) (u32 22)))))
+					(let spelling (slice.load (local nodes) (local name)))
+					(if
+						(:doc "Function names use the checked Wove identifier alphabet.")
+						(bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
+						(then (return (call entry_at (local spelling) (i32 -1) (u32 22)))))
+					(let identity (call function_identity (borrow-shared (local source))
+						(record.get (local spelling) start) (record.get (local spelling) end) (local module_id)))
+					(let-mut previous (i32 0))
+					(while
+						(:doc "Reject a stable hash collision even if readable suffixes differ.")
+						(i32.lt (local previous) (local index))
+						(body
+							(let earlier (slice.load (local functions) (local previous)))
+							(if
+								(:doc "Equal IDs can come from a duplicate spelling or a collision between distinct names.")
+								(u32.eq (local identity) (record.get (local earlier) identity))
+								(then
+									(let prior (slice.load (local nodes) (record.get (local earlier) name)))
+									(if
+										(:doc "A repeated name is a source-level binding conflict.")
+										(call same_name (borrow-shared (local source)) (local spelling) (local prior))
+										(then (return (call entry_at (local spelling) (i32 -1) (u32 33)))))
+									(return (call entry_at (local spelling) (i32 -1) (u32 32)))))
+							(set (local previous) (i32.add.wrapping (local previous) (i32 1)))))
+					(let entry (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)) (u32 2)))
+					(let signature (call read_signature (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (local spelling) (local entry)))
+					(if
+						(:doc "A malformed signature keeps its originating span.")
+						(u32.lt (u32 0) (record.get (local signature) error))
+						(then (return (record.make EntryRead (operand (i32 -1))
+							(start (record.get (local signature) start)) (end (record.get (local signature) end))
+							(error (record.get (local signature) error))))))
+					(let checked (call read_parameters (borrow-shared (local source)) (borrow-shared (local nodes))
+						(record.get (local signature) params) (borrow-mut (local parameters)) (local next_param)))
+					(if
+						(:doc "Pass through the parameter list's first failure.")
+						(u32.lt (u32 0) (record.get (local checked) error))
+						(then (return (local checked))))
+					(let limit (record.get (local checked) operand))
+					(slice.store (local functions) (local index)
+						(record.make ScalarFunction (declaration (local declaration)) (name (local name))
+							(params (local next_param)) (arity (i32.sub.wrapping (local limit) (local next_param)))
+							(result (record.get (local signature) result)) (expression (record.get (local signature) expression))
+							(identity (local identity)) (entry (local entry))))
+					(if
+						(:doc "Remember the selected C entry independently of declaration order.")
+						(local entry)
+						(then (set (local main) (local declaration))))
+					(set (local next_param) (local limit))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(if
+				(:doc "Report a module with functions but no main at its first function name.")
+				(i32.lt (local main) (i32 0))
+				(then (return (call entry_at
+					(slice.load (local nodes) (record.get (slice.load (local functions) (i32 0)) name)) (i32 -1) (u32 22)))))
+			(return (record.make EntryRead (operand (local main)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+
+	(fn
+		(:doc `Build a checked expression row, or an unvisited row with an expected scalar type.`)
+		expression_row
+		(params (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool))
+		(returns ScalarExpression)
+		(body
+			(return (record.make ScalarExpression (kind (local kind)) (type (local type)) (target (local target))
+				(first (local first)) (start (local start)) (end (local end)) (negative (local negative))))))
+
+	(fn
+		(:doc `Check one literal operand and record its normalized C spelling.`)
+		plan_literal
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(operand i32) (type u32) (index i32) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A literal with missing or extra operands keeps the form's span.")
+				(bool.or (i32.lt (local operand) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local operand)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 25)))))
+			(let value (slice.load (local nodes) (local operand)))
+			(if
+				(:doc "Normalize bool to a C integer constant that converts exactly to _Bool.")
+				(u32.eq (local type) (u32 12))
+				(then
+					(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+					(if
+						(:doc "Only the bare true and false spellings are bool values.")
+						(bool.and (bool.not (u32.eq (local tag) (u32 13))) (bool.not (u32.eq (local tag) (u32 14))))
+						(then (return (call entry_at (local value) (i32 -1) (u32 25)))))
+					(let-mut kind (u32 4))
+					(if
+						(:doc "Store false and true as distinct verified literal kinds.")
+						(u32.eq (local tag) (u32 13))
+						(then (set (local kind) (u32 5))))
+					(slice.store (local expressions) (local index)
+						(call expression_row (local kind) (local type) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
+					(return (call entry_at (local node) (local index) (u32 0)))))
+			(let spelling (call decimal_scalar (borrow-shared (local source)) (local value) (local type)))
+			(let digits (record.get (local spelling) digits))
+			(if
+				(:doc "An invalid spelling or magnitude points at the original value atom.")
+				(i32.lt (local digits) (i32 0))
+				(then (return (call entry_at (local value) (i32 -1) (u32 25)))))
+			(slice.store (local expressions) (local index)
+				(call expression_row (u32 1) (local type) (i32 -1) (i32 -1)
+					(local digits) (record.get (local value) end) (record.get (local spelling) negative)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
+		(:doc `Resolve a scalar local to the owning function's formal parameter row.`)
+		plan_local
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(operand i32) (type u32) (index i32) (caller ScalarFunction)
+			(parameters (shared-slice ScalarParameter)) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A local expression takes exactly one name.")
+				(bool.or (i32.lt (local operand) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local operand)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let name (slice.load (local nodes) (local operand)))
+			(if
+				(:doc "A malformed parameter reference keeps the operand span.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+			(let start (record.get (local caller) params))
+			(let target (call find_parameter (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)
+				(borrow-shared (local parameters)) (local start) (i32.add.wrapping (local start) (record.get (local caller) arity))))
+			(if
+				(:doc "The parameter must be in the current function's namespace.")
+				(i32.lt (local target) (i32 0))
+				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+			(if
+				(:doc "The local type must exactly match the return or parameter type expected here.")
+				(bool.not (u32.eq (local type) (record.get (slice.load (local parameters) (local target)) type)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(slice.store (local expressions) (local index)
+				(call expression_row (u32 2) (local type) (local target) (i32 -1) (i32 0) (i32 0) (bool false)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
+		(:doc `Resolve a direct call and seed each argument with its formal scalar type.
+
+		The verified call row is keyed by the original call node and refers to
+		the defining function row. Its operands retain their original links.`)
+		plan_call
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(operand i32) (type u32) (index i32)
+			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
+			(expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "An empty call has no target to resolve.")
+				(i32.lt (local operand) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 34)))))
+			(let name (slice.load (local nodes) (local operand)))
+			(if
+				(:doc "A direct call names a local function with a bare identifier.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+			(let target (call find_function (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local name) (borrow-shared (local functions)) (slice.len (local functions))))
+			(if
+				(:doc "The ABI entry is a host entry point and is unavailable to direct Wove calls.")
+				(bool.or (i32.lt (local target) (i32 0))
+					(record.get (slice.load (local functions) (local target)) entry))
+				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+			(let callee (slice.load (local functions) (local target)))
+			(if
+				(:doc "Use the target's declared result to check the call in its original context.")
+				(bool.not (u32.eq (local type) (record.get (local callee) result)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let first (record.get (local name) next_sibling))
+			(let-mut argument (local first))
+			(let-mut formal (record.get (local callee) params))
+			(let limit (i32.add.wrapping (local formal) (record.get (local callee) arity)))
+			(while
+				(:doc "Associate each actual argument with the corresponding formal in source order.")
+				(bool.and (i32.lt (local formal) (local limit)) (bool.not (i32.lt (local argument) (i32 0))))
+				(body
+					(let param (slice.load (local parameters) (local formal)))
+					(slice.store (local expressions) (local argument)
+						(call expression_row (u32 0) (record.get (local param) type)
+							(i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
+					(set (local argument) (record.get (slice.load (local nodes) (local argument)) next_sibling))
+					(set (local formal) (i32.add.wrapping (local formal) (i32 1)))))
+			(if
+				(:doc "The number of actual arguments must exactly match the signature.")
+				(bool.or (i32.lt (local formal) (local limit)) (bool.not (i32.lt (local argument) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 35)))))
+			(slice.store (local expressions) (local index)
+				(call expression_row (u32 3) (local type) (local target) (local first) (i32 0) (i32 0) (bool false)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
+		(:doc `Check the scalar expression at a source row whose expected type is known.`)
+		plan_expression
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
+			(index i32) (type u32) (functions (shared-slice ScalarFunction))
+			(parameters (shared-slice ScalarParameter)) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let node (slice.load (local nodes) (local index)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+			(if
+				(:doc "Accept an exact-type literal, a parameter read, or a direct call.")
+				(bool.not (bool.or (u32.eq (local tag) (local type))
+					(bool.or (u32.eq (local tag) (u32 8)) (u32.eq (local tag) (u32 9)))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) (u32 24)))
+			(if
+				(:doc "Known selection pragmas cannot alter expression structure or call arguments.")
+				(u32.lt (u32 0) (record.get (local form) error))
+				(then (return (local form))))
+			(let operand (record.get (local form) operand))
+			(if
+				(:doc "A local resolves in the caller's parameter scope.")
+				(u32.eq (local tag) (u32 8))
+				(then (return (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local operand) (local type) (local index) (local caller)
+					(borrow-shared (local parameters)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A call resolves in the selected function table.")
+				(u32.eq (local tag) (u32 9))
+				(then (return (call plan_call (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local operand) (local type) (local index)
+					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-mut (local expressions))))))
+			(return (call plan_literal (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local operand) (local type) (local index) (borrow-mut (local expressions))))))
+
+	(fn
+		(:doc `Resolve every scalar expression in source order without walking the native call stack.
+
+		A call seeds its direct argument rows before they are reached. Source
+		rows with type zero are outside the expression plan, such as metadata,
+		literal payloads, and called-name atoms. Start with zeroed plan storage.`)
+		plan_bodies
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
+			(expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let-mut function (i32 0))
+			(while
+				(:doc "Each selected function contributes one checked return expression tree.")
+				(i32.lt (local function) (slice.len (local functions)))
+				(body
+					(let caller (slice.load (local functions) (local function)))
+					(let root (record.get (local caller) expression))
+					(let end (record.get (slice.load (local nodes) (local root)) end))
+					(slice.store (local expressions) (local root)
+						(call expression_row (u32 0) (record.get (local caller) result)
+							(i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
+					(let-mut index (local root))
+					(while
+						(:doc "Every source row inside the return expression follows its parent in the tree table.")
+						(bool.and (i32.lt (local index) (slice.len (local nodes)))
+							(i32.lt (record.get (slice.load (local nodes) (local index)) start) (local end)))
+						(body
+							(let type (record.get (slice.load (local expressions) (local index)) type))
+							(if
+								(:doc "Only the root and verified call arguments receive an expected type.")
+								(u32.lt (u32 0) (local type))
+								(then
+									(let checked (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local caller) (local index) (local type) (borrow-shared (local functions))
+										(borrow-shared (local parameters)) (borrow-mut (local expressions))))
+									(if
+										(:doc "Preserve source spans from the first failing signature or expression.")
+										(u32.lt (u32 0) (record.get (local checked) error))
+										(then (return (local checked))))))
+							(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+					(set (local function) (i32.add.wrapping (local function) (i32 1)))))
+			(return (record.make EntryRead (operand (i32 0)) (start (i32 0)) (end (i32 0)) (error (u32 0)))))))

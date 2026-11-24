@@ -267,7 +267,8 @@ def check_compilations(executable, directory, manifest, clang):
 	program = directory / "emitted"
 	harness = manifest.with_name("emitted_main.probe.c")
 	for label, raw, base, end, capacity, fields, expected, mode, value in fixture_rows(manifest):
-		source.write_bytes(bytes.fromhex(raw))
+		# File references keep larger compilation examples readable.
+		source.write_bytes(Path(raw[1:]).read_bytes() if raw.startswith("@") else bytes.fromhex(raw))
 		bounds = (int(base), int(end), int(capacity))
 		output, status = run_probe(executable, "--emit-c", source, bounds)
 		header, delimiter, emitted = output.partition(b"\n")

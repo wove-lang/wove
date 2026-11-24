@@ -1,0 +1,150 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Build Stage 2 C names from stable declaration identities.
+
+	Use the archive's 31-bit FNV-1a and seven-digit uppercase Base32hex encoding.
+	Hash the declared module name as the defining module key for single-module
+	emission. Add the declaration kind and original name, independent of file
+	layout, declaration order, and any future import spelling.`)
+	c_names
+
+	(fn
+		(:doc `Double a word once per shift, using the Python seed's wrapping addition.`)
+		shift_word
+		(params (value u32) (bits i32))
+		(returns u32)
+		(body
+			(let-mut word (local value))
+			(let-mut remaining (local bits))
+			(while
+				(:doc "Low zero bits replace the high bits discarded by each doubling.")
+				(i32.lt (i32 0) (local remaining))
+				(body
+					(set (local word) (u32.add.wrapping (local word) (local word)))
+					(set (local remaining) (i32.sub.wrapping (local remaining) (i32 1)))))
+			(return (local word))))
+
+	(fn
+		(:doc `Read the top bit of an unsigned word with an exact comparison.`)
+		top_bit
+		(params (word u32))
+		(returns u32)
+		(body
+			(if
+				(:doc "The unsigned high half has its most significant bit set.")
+				(u32.lt (local word) (u32 2147483648))
+				(then (return (u32 0))))
+			(return (u32 1))))
+
+	(fn
+		(:doc `Apply one byte of the archive's FNV-1a hash.
+
+		Rebuild the low byte with XOR and multiply by 16777619 as a sum of
+		powers of two. Wrapping u32 intermediates preserve the low 31 bits.`)
+		hash_byte
+		(params (hash u32) (byte u8))
+		(returns u32)
+		(body
+			(let-mut left (call shift_word (local hash) (i32 24)))
+			(let-mut right (call shift_word (int.convert u32 (local byte)) (i32 24)))
+			(let-mut old (u32 0))
+			(let-mut low (u32 0))
+			(let-mut remaining (i32 8))
+			(while
+				(:doc "Walk the low byte most significant bit first, accumulating both byte values.")
+				(i32.lt (i32 0) (local remaining))
+				(body
+					(let bit (call top_bit (local left)))
+					(set (local old) (u32.add.wrapping (u32.add.wrapping (local old) (local old)) (local bit)))
+					(set (local low) (u32.add.wrapping (local low) (local low)))
+					(if
+						(:doc "The XOR bit is set when the two original bits differ.")
+						(bool.not (u32.eq (local bit) (call top_bit (local right))))
+						(then (set (local low) (u32.add.wrapping (local low) (u32 1)))))
+					(set (local left) (u32.add.wrapping (local left) (local left)))
+					(set (local right) (u32.add.wrapping (local right) (local right)))
+					(set (local remaining) (i32.sub.wrapping (local remaining) (i32 1)))))
+			(let mixed (u32.add.wrapping (u32.sub.wrapping (local hash) (local old)) (local low)))
+			(let twice (u32.add.wrapping (local mixed) (local mixed)))
+			(let sixteen (call shift_word (local twice) (i32 3)))
+			(let one_twenty_eight (call shift_word (local sixteen) (i32 3)))
+			(let two_fifty_six (u32.add.wrapping (local one_twenty_eight) (local one_twenty_eight)))
+			(let high (call shift_word (local two_fifty_six) (i32 16)))
+			(let product (u32.add.wrapping
+				(u32.add.wrapping (local high) (local two_fifty_six))
+				(u32.add.wrapping (local one_twenty_eight)
+					(u32.add.wrapping (local sixteen) (u32.add.wrapping (local twice) (local mixed))))))
+			(if
+				(:doc "Reduce modulo 2^31 for the archive's nonnegative identity range.")
+				(u32.lt (u32 2147483647) (local product))
+				(then (return (u32.sub.wrapping (local product) (u32 2147483648)))))
+			(return (local product))))
+
+	(fn
+		(:doc `Hash a raw source span and a zero delimiter to separate identity components.`)
+		hash_spelling
+		(params (source (shared-slice u8)) (start i32) (end i32) (identity u32))
+		(returns u32)
+		(body
+			(let-mut hash (local identity))
+			(let-mut cursor (local start))
+			(while
+				(:doc "Use the exact original bytes, including any punctuation in the spelling.")
+				(i32.lt (local cursor) (local end))
+				(body
+					(set (local hash) (call hash_byte (local hash) (slice.load (local source) (local cursor))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (call hash_byte (local hash) (u8 0)))))
+
+	(fn
+		(:doc `Seed a defining module identity from its declared name.`)
+		module_identity
+		(params (source (shared-slice u8)) (start i32) (end i32))
+		(returns u32)
+		(body
+			(return (call hash_spelling (borrow-shared (local source)) (local start) (local end) (u32 18652613)))))
+
+	(fn
+		(:doc `Apply the archive's four-byte little-endian function kind before the source spelling.`)
+		function_identity
+		(params (source (shared-slice u8)) (start i32) (end i32) (module u32))
+		(returns u32)
+		(body
+			(let kind (call hash_byte (call hash_byte (call hash_byte (call hash_byte (local module) (u8 2)) (u8 0)) (u8 0)) (u8 0)))
+			(return (call hash_spelling (borrow-shared (local source)) (local start) (local end) (local kind)))))
+
+	(fn
+		(:doc `Extract one upper group of five bits from a left-aligned unsigned word.`)
+		base32_digit
+		(params (word u32))
+		(returns u8)
+		(body
+			(let-mut shifted (local word))
+			(let-mut digit (u32 0))
+			(let-mut remaining (i32 5))
+			(while
+				(:doc "Gather five bits from the most significant end, preserving leading zeroes.")
+				(i32.lt (i32 0) (local remaining))
+				(body
+					(set (local digit) (u32.add.wrapping (u32.add.wrapping (local digit) (local digit))
+						(call top_bit (local shifted))))
+					(set (local shifted) (u32.add.wrapping (local shifted) (local shifted)))
+					(set (local remaining) (i32.sub.wrapping (local remaining) (i32 1)))))
+			(if
+				(:doc "Base32hex uses ASCII 0 through 9, then uppercase A through V.")
+				(u32.lt (local digit) (u32 10))
+				(then (return (int.convert u8 (u32.add.wrapping (u32 48) (local digit))))))
+			(return (int.convert u8 (u32.add.wrapping (u32 55) (local digit))))))
+
+	(fn
+		(:doc `Map every byte outside the C identifier alphabet to an underscore.`)
+		c_suffix_byte
+		(params (byte u8))
+		(returns u8)
+		(body
+			(if
+				(:doc "The Wove name verifier already accepts only letters, digits, underscores, dots, and hyphens.")
+				(bool.or (u8.eq (local byte) (u8 45)) (u8.eq (local byte) (u8 46)))
+				(then (return (u8 95))))
+			(return (local byte)))))
