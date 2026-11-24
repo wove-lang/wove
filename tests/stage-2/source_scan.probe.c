@@ -516,8 +516,8 @@ static int render_view(wvrt_slice input, int32_t capacity) {
 static void write_form_parts(wvrt_slice input, wvrt_slice nodes, int32_t index) {
 	const SourceNode *rows = nodes.wvrt_items;
 	const FormParts parts = form_parts(input, nodes, rows[index]);
-	printf("%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\n",
-		index, parts.wv_field_0, parts.wv_field_1, parts.wv_field_2, parts.wv_field_3, parts.wv_field_4);
+	printf("%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\n",
+		index, parts.wv_field_0, parts.wv_field_1, parts.wv_field_2, parts.wv_field_3);
 }
 
 // Read one module and report the original row indices of its active declarations.

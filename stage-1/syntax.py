@@ -71,8 +71,7 @@ def function_declaration(parents: list[tuple[int, list[Node]]]) -> bool:
 			return False
 		# A module contributes declarations after its name at the source root.
 		if head.text == "module":
-			index = first_ordinary(children)
-			name = children[index] if index < len(children) else None
+			name = children[1] if len(children) > 1 else None
 			return depth == 1 and isinstance(name, Atom) and not name.quoted and bool(IDENTIFIER.fullmatch(name.text))
 		# Declaration groups are transparent within a declaration ancestry.
 		if head.text == "decls":
@@ -108,27 +107,26 @@ def read_form(children: list[Node], line: int, parents: list[tuple[int, list[Nod
 	named = (tag == "module" and len(parents) == 1) or (tag == "fn" and function_declaration(parents))
 	metadata = []
 	operands = []
+	# A declaration's fixed name slot precedes any metadata entries.
+	if named:
+		# With no operand, the missing name points to the declaration opener.
+		if not children:
+			raise SourceError(line)
+		identifier(children[0])
+		operands.append(children[0])
+		children = children[1:]
 	prefix_open = True
-	name_first = named
-	# A bare declaration name can precede the prefix when it is the first child.
+	# The first ordinary field closes the one contiguous metadata prefix.
 	for child in children:
-		# A colon-tagged form belongs to the one contiguous metadata prefix.
+		# Metadata is attached to the declaration independently of its name and fields.
 		if is_metadata(child):
-			# Once ordinary fields begin, metadata has no attachment point.
+			# A later colon-tagged form has no attachment point.
 			if not prefix_open:
 				raise SourceError(child.line)
 			metadata.append(child)
-		# Preserve the name as the first logical operand for the seed's consumers.
 		else:
-			# The first ordinary child of a declaration must be its bare name.
-			if named and not operands:
-				identifier(child)
-			prefix_open = name_first
+			prefix_open = False
 			operands.append(child)
-		name_first = False
-	# A metadata-only declaration without a name points to its opener.
-	if named and not operands:
-		raise SourceError(line)
 	return Form(tag, tuple(operands), line, tuple(metadata))
 
 

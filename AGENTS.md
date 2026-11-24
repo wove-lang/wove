@@ -15,6 +15,9 @@ Split reusable logic into focused modules. Organize related modules in
 directories named for their purpose, with short module filenames inside
 each group. For example, keep the Stage 2 scanner in `stage-2/source/scan.wove`.
 
+Write the bare name immediately after `module` and `fn`, including C bridge
+functions. Place their metadata prefix directly after that name.
+
 In Wove modules under `stage-2/`, document each function and multiline
 control-flow form with a `(:doc "...")` entry at the start of its metadata
 prefix. Explain the form's purpose or an important invariant. Attach a
@@ -28,7 +31,7 @@ Purpose notes are optional under `tests/`.
 
 ## Copyright headers
 
-- Start Wove source and fixtures with a module whose first two metadata entries are
+- Start Wove source and fixtures with a named module whose first two metadata entries are
   `(:copyright "Copyright (c) 2026 wove contributors")` and
   `(:license "SPDX-License-Identifier: MIT OR Apache-2.0")`, in that order.
 - Start other checked-in files with the same notices in their own comment syntax.

@@ -217,14 +217,14 @@ def check_decodings(executable, directory, manifest):
 
 # Compare the sibling views with the seed's separated metadata and operand lists.
 def compare_form_parts(view, nodes, parts, form):
-	owner, head, metadata, operands, name, metadata_end = parts
+	owner, head, metadata, operands, name = parts
 	assert nodes[owner][5] == head
 	_, _, start, end, *_ = nodes[head]
 	assert view[start:end].decode("utf-8") == form.tag
 	assert position(view, nodes[owner][2])[0] == form.line
 
 	tags = []
-	while metadata >= 0 and metadata != metadata_end:
+	while metadata >= 0 and metadata != operands:
 		_, _, start, end, *_ = nodes[nodes[metadata][5]]
 		tags.append(view[start:end].decode("utf-8"))
 		metadata = nodes[metadata][6]

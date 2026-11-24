@@ -1,4 +1,4 @@
-(module
+(module source_module
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Read module declarations from the checked source tree.
@@ -6,24 +6,21 @@
 	Expose the metadata prefix and ordinary operands through the original node links.
 	Apply the seed's bootstrap selection and flatten selected declaration groups in
 	source order. Keep each declaration's original node index for later passes.`)
-	source_module
 
 	(use wove-file "./scan.wove"
 		(only is_head_byte is_identifier_head is_metadata_form named_form_error (type SourceNode) (type FormCheck)))
 
-	(struct FormParts (fields (head i32) (metadata i32) (operands i32) (name i32) (metadata_end i32)))
+	(struct FormParts (fields (head i32) (metadata i32) (operands i32) (name i32)))
 	(struct SelectedDeclaration (fields (node i32)))
 	(struct ModuleRead (fields (name i32) (count i32) (active bool) (start i32) (end i32) (error u32)))
 	(struct Selection (fields (active bool) (start i32) (end i32) (error u32)))
 
-	(fn
+	(fn form_parts
 		(:doc `Expose a checked form's name, metadata range, and remaining ordinary operands.
 
 		Each field is an original row index or -1. A module or function name
-		has its own slot. Walk metadata siblings up to metadata_end and
-		ordinary operand siblings to the end. Either metadata placement
-		produces the same logical views.`)
-		form_parts
+		has its own slot. Walk metadata siblings up to the first ordinary
+		field. Walk ordinary fields to the end of their sibling list.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
 		(returns FormParts)
 		(body
@@ -31,7 +28,7 @@
 				(:doc "Nodes without a form head have no name, metadata, or operand view.")
 				(bool.not (u32.eq (record.get (local node) kind) (u32 40)))
 				(then (return (record.make FormParts (head (i32 -1)) (metadata (i32 -1))
-					(operands (i32 -1)) (name (i32 -1)) (metadata_end (i32 -1))))))
+					(operands (i32 -1)) (name (i32 -1))))))
 			(let head (record.get (local node) first_child))
 			(let tag (slice.load (local nodes) (local head)))
 			(let named (u32.lt (u32 0) (call named_form_error (borrow-shared (local source))
@@ -39,10 +36,8 @@
 			(let-mut cursor (record.get (local tag) next_sibling))
 			(let-mut name (i32 -1))
 			(if
-				(:doc "A declaration starting with its name puts any metadata in the next sibling range.")
-				(bool.and (local named) (bool.and (bool.not (i32.lt (local cursor) (i32 0)))
-					(bool.not (call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes))
-						(slice.load (local nodes) (local cursor))))))
+				(:doc "A declared name occupies the first slot before metadata.")
+				(bool.and (local named) (bool.not (i32.lt (local cursor) (i32 0))))
 				(then
 					(set (local name) (local cursor))
 					(set (local cursor) (record.get (slice.load (local nodes) (local name)) next_sibling))))
@@ -56,25 +51,12 @@
 				(body
 					(set (local metadata) (local first))
 					(set (local cursor) (record.get (slice.load (local nodes) (local cursor)) next_sibling))))
-			(let-mut metadata_end (i32 -1))
-			(if
-				(:doc "Remember the first sibling outside a nonempty metadata range.")
-				(bool.not (i32.lt (local metadata) (i32 0)))
-				(then (set (local metadata_end) (local cursor))))
-			(if
-				(:doc "A legacy prefix ends at the name before the ordinary fields.")
-				(bool.and (local named) (bool.and (i32.lt (local name) (i32 0))
-					(bool.not (i32.lt (local cursor) (i32 0)))))
-				(then
-					(set (local name) (local cursor))
-					(set (local cursor) (record.get (slice.load (local nodes) (local name)) next_sibling))))
 			(return (record.make FormParts (head (local head)) (metadata (local metadata))
-				(operands (local cursor)) (name (local name)) (metadata_end (local metadata_end))))))
+				(operands (local cursor)) (name (local name))))))
 
-	(fn
+	(fn is_three_bytes
 		(:doc `Compare three bytes inside an atom whose width has already been checked.`)
 		(:pragma (inline always))
-		is_three_bytes
 		(params (source (shared-slice u8)) (start i32) (first u8) (second u8) (third u8))
 		(returns bool)
 		(body
@@ -84,12 +66,11 @@
 						(call is_head_byte (borrow-shared (local source)) (local start) (i32 1) (local second))
 						(call is_head_byte (borrow-shared (local source)) (local start) (i32 2) (local third)))))))
 
-	(fn
+	(fn source_keyword
 		(:doc `Match the exact atom spellings used by module selection.
 
 		Return 1 for module, 2 for decls, 3 for :pragma, 4 for cfg, 5 for test,
 		6 for not, 7 for bootstrap, and 0 for every other node.`)
-		source_keyword
 		(params (source (shared-slice u8)) (node SourceNode))
 		(returns u32)
 		(body
@@ -159,18 +140,16 @@
 				(then (return (u32 7))))
 			(return (u32 0))))
 
-	(fn
+	(fn selection_at
 		(:doc `Record a selection result at the original span of its originating node.`)
-		selection_at
 		(params (node SourceNode) (active bool) (error u32))
 		(returns Selection)
 		(body
 			(return (record.make Selection (active (local active)) (error (local error))
 				(start (record.get (local node) start)) (end (record.get (local node) end))))))
 
-	(fn
+	(fn cfg_selection
 		(:doc `Check the bootstrap predicate and its one supported negation.`)
-		cfg_selection
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (operand i32))
 		(returns Selection)
 		(body
@@ -201,9 +180,8 @@
 				(then (return (call selection_at (local predicate) (bool false) (u32 21)))))
 			(return (call selection_at (local node) (bool.not (local negate)) (u32 0)))))
 
-	(fn
+	(fn select_directive
 		(:doc `Read a checked pragma directive and apply the seed's cfg and test rules.`)
-		select_directive
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (selectable bool))
 		(returns Selection)
 		(body
@@ -244,19 +222,18 @@
 				(then (return (call selection_at (local node) (bool false) (u32 21)))))
 			(return (local choice))))
 
-	(fn
+	(fn select_form
 		(:doc `Validate pragmas on a checked form and select it when the context permits.
 
 		Every known directive is checked in prefix order even after one excludes
 		the target. Other entries and unknown directive contents remain opaque.`)
-		select_form
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(node SourceNode) (parts FormParts) (selectable bool))
 		(returns Selection)
 		(body
 			(let-mut active (bool true))
 			(let-mut index (record.get (local parts) metadata))
-			(let stop (record.get (local parts) metadata_end))
+			(let stop (record.get (local parts) operands))
 			(while
 				(:doc "Only rows in the metadata view may select this form.")
 				(bool.and (bool.not (i32.lt (local index) (i32 0))) (bool.not (i32.eq (local index) (local stop))))
@@ -285,9 +262,8 @@
 					(set (local index) (record.get (local entry) next_sibling))))
 			(return (call selection_at (local node) (local active) (u32 0)))))
 
-	(fn
+	(fn next_declaration
 		(:doc `Find the next declaration after a leaf or a group that will not be descended.`)
-		next_declaration
 		(params (nodes (shared-slice SourceNode)) (node SourceNode) (module i32))
 		(returns i32)
 		(body
@@ -302,9 +278,8 @@
 					(set (local parent) (record.get (local group) parent))))
 			(return (local next))))
 
-	(fn
+	(fn module_result
 		(:doc `Return the original module name index, selected count, and result span.`)
-		module_result
 		(params (name i32) (count i32) (active bool) (start i32) (end i32) (error u32))
 		(returns ModuleRead)
 		(body
@@ -312,7 +287,7 @@
 				(name (local name)) (count (local count)) (active (local active))
 				(start (local start)) (end (local end)) (error (local error))))))
 
-	(fn
+	(fn read_module
 		(:doc `Read a checked module and collect selected declarations in source order.
 
 		Meta and operand views refer to the original tree. An excluded module succeeds
@@ -321,7 +296,6 @@
 		(:expect
 			(tests "stage-2/source_modules.tsv")
 			(issues "gh:wove-lang/wove:66"))
-		read_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (checked FormCheck)
 			(output (mut-slice SelectedDeclaration)))
 		(returns ModuleRead)

@@ -99,8 +99,8 @@ After building the tree, call `check_source_metadata` with the same source
 view, successful result, and shared node slice. Form heads use
 `[A-Za-z_][A-Za-z0-9_.-]*`. A leading colon marks a metadata entry only
 when the form is in its parent's prefix. For a module or function
-declaration, the contiguous prefix may follow its bare name. The legacy
-placement immediately after the tag is also accepted during migration.
+declaration, the bare name directly follows the tag. The contiguous
+metadata prefix follows that name.
 Other forms use the prefix immediately after the tag. Name slots follow
 declaration ancestry through declaration groups and supported C bridges.
 An opaque payload can contain the same tags as ordinary data. Each entry
@@ -142,9 +142,8 @@ scalar boundary and the remaining output retains its previous bytes.
 The [module reader](source/module.wove) works from the original bytes and a
 checked source tree. `form_parts` returns the head, optional module or
 function name, metadata range, and first ordinary field. Empty views use
-`-1`. Walk metadata siblings up to the exclusive `metadata_end` bound and
-ordinary fields to the end. Both declaration layouts use the same logical
-views. All indices refer to existing tree rows.
+`-1`. Walk metadata siblings up to the first ordinary field and ordinary
+fields to the end. All indices refer to existing tree rows.
 
 `read_module` reads the name slot and writes the original indices of selected
 declarations into a caller-provided record slice.
@@ -484,7 +483,7 @@ The first row contains the selected count, start, end, error, line, and
 column. The second row gives the name node index and the active flag.
 When the module has a checked name, the remaining rows describe the module
 and the selected declarations. Each lists the original form, head, first
-metadata, first ordinary field, name, and exclusive metadata bound indices. The
+metadata, first ordinary field, and name indices. The
 [module fixtures](../tests/stage-2/source_modules.tsv) compare these links
 and the active declarations with the Stage 1 seed.
 

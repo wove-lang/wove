@@ -79,8 +79,7 @@ Equal endpoints form an empty view, including at the end of the source.
 A `module` or `fn` declaration starts with its tag and bare name.
 Place its contiguous metadata prefix after the name and before ordinary
 fields, as in `(fn main (:doc "Return success.") (params) ...)`.
-During migration, a declaration can also put the whole prefix immediately
-after the tag. The same naming syntax applies to functions in C bridges.
+The same naming syntax applies to functions in C bridges.
 Declaration groups carry that context through their members. Opaque
 metadata payloads can use the same form tags as ordinary data.
 
@@ -89,9 +88,8 @@ Other forms keep metadata immediately after the tag. For example,
 binds `buffer` in the usual scope. In plain `let` and `let-mut`, the binding
 name follows the tag. Metadata entries use colon-prefixed tags such as
 `(:doc "text")`, `(:expect ...)`, and `(:pragma (cfg bootstrap) (inline always))`.
-An entry after an ordinary field, or a prefix split across a declaration
-name, is a source error. The retired `with-meta`, `meta`, and `;;` spellings
-remain invalid. Quoted text can contain semicolons.
+An entry before a declaration name or after an ordinary field is a source
+error. The retired `with-meta`, `meta`, and `;;` spellings remain invalid. Quoted text can contain semicolons.
 
 An `:expect` entry can group test and issue links on the form it describes.
 
