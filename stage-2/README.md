@@ -384,7 +384,8 @@ decoded header key in the supplied source table. A key such as `"<stdlib.h>"`
 or `"./project.h"` identifies one active bridge in a well-formed canonical file.
 Header lookup leaves Wove-file reachability unchanged. A selected declaration
 has `params` and `returns` forms with exact `bool`, `u8`, `i32`, or `u32` types.
-The alias occupies the importing file's function namespace. Its binding keeps
+Parameter names must be unique within the signature. The alias occupies the
+importing file's function namespace. Its binding keeps
 the defining declaration and the raw header, native symbol, and signature
 spans in that file for C call emission in [issue #140](https://github.com/wove-lang/wove/issues/140).
 
