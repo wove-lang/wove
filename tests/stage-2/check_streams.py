@@ -11,6 +11,7 @@ import sys
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "stage-1"))
+from compiler import metadata_enabled, selected_declarations
 from syntax import TOKEN, parse
 
 KINDS = {"open": 40, "close": 41, "atom": 1, "string": 2}
@@ -207,9 +208,59 @@ def check_decodings(executable, directory, manifest):
 			assert kind == 2 and value.quoted and prefix == value.text.encode("utf-8"), label
 
 
+# Compare the sibling views with the seed's separated metadata and operand lists.
+def compare_form_parts(view, nodes, parts, form):
+	owner, head, metadata, operands = parts
+	assert nodes[owner][5] == head
+	_, _, start, end, *_ = nodes[head]
+	assert view[start:end].decode("utf-8") == form.tag
+	assert position(view, nodes[owner][2])[0] == form.line
+
+	tags = []
+	while metadata >= 0 and metadata != operands:
+		_, _, start, end, *_ = nodes[nodes[metadata][5]]
+		tags.append(view[start:end].decode("utf-8"))
+		metadata = nodes[metadata][6]
+	assert tags == [entry.tag for entry in form.metadata]
+
+	count = 0
+	while operands >= 0:
+		count += 1
+		operands = nodes[operands][6]
+	assert count == len(form.operands)
+
+
+# Verify exact result rows and compare successful module selection with the seed.
+def check_modules(executable, directory, manifest):
+	source = directory / "module.wove"
+	for label, raw, base, end, capacity, *fields in fixture_rows(manifest):
+		parent = bytes.fromhex(raw)
+		source.write_bytes(parent)
+		start, stop = int(base), int(end)
+		expected = [tuple(map(int, row.split())) for row in fields]
+		rows, status = probe_rows(executable, "--module", source, (start, stop, int(capacity)))
+		assert rows == expected, (label, rows, expected)
+		assert status == int(expected[0][3] != 0), label
+		# Function bodies and import resolution are outside both selection walks.
+		if status == 0:
+			view = parent[start:stop]
+			module = parse(view.decode("utf-8"))
+			active = metadata_enabled(module, selectable=True)
+			selected = list(selected_declarations(module.operands[1:])) if active else []
+			name, emitted_active = rows[1]
+			assert emitted_active == active and len(rows) == len(selected) + 3, label
+
+			tree, tree_status = probe_rows(executable, "--metadata", source, (start, stop))
+			assert tree_status == 0
+			nodes = tree[1:]
+			assert view[nodes[name][2]:nodes[name][3]].decode("utf-8") == module.operands[0].text
+			for parts, form in zip(rows[2:], [module, *selected]):
+				compare_form_parts(view, nodes, parts, form)
+
+
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, *sources = map(Path, sys.argv[1:])
+	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, modules, *sources = map(Path, sys.argv[1:])
 	for source in sources:
 		compare_stream(executable, source)
 
@@ -222,6 +273,7 @@ def main():
 		check_trees(executable, directory, metadata, "--metadata")
 		check_renderings(executable, directory, renderings)
 		check_decodings(executable, directory, decodings)
+		check_modules(executable, directory, modules)
 
 
 if __name__ == "__main__":
