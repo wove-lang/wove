@@ -14,9 +14,9 @@
 	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement)))
 	(use wove-file "../scalar/plan.wove"
 		(only read_functions plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
-	(use wove-file "../scalar/syntax.wove" (only scalar_operator (type ScalarOperator)))
+	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_byte_view_type is_reborrow_keyword (type ScalarOperator)))
 	(use wove-file "./runtime.wove"
-		(only write_runtime_header open_conversion open_slice_load write_slice_length close_runtime_call))
+		(only write_runtime_header open_conversion open_slice_access open_shared_projection write_slice_length close_runtime_call))
 	(use wove-file "./text.wove" (only c_byte c_text_fragment c_type_text c_cast c_i32_bias write_c_name c_decimal_digits
 			function_name_role parameter_name_role local_name_role temporary_name_role))
 
@@ -66,7 +66,7 @@
 				(record.get (local name) start) (record.get (local name) end)))))
 
 	(fn
-		(:doc `Write one checked scalar leaf as a literal or binding reference.`)
+		(:doc `Write one checked leaf as a literal, binding reference, or slice reborrow.`)
 		write_scalar
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (row ScalarExpression) (tree_base i32)
 			(parameters (shared-slice ScalarParameter)) (output (mut-slice u8)) (offset u32) (writing bool))
@@ -74,11 +74,24 @@
 		(body
 			(let kind (record.get (local row) kind))
 			(if
-				(:doc "Use the same formal parameter name as in the signature.")
-				(u32.eq (local kind) (u32 2))
-				(then (return (call write_parameter_name (borrow-shared (local source)) (borrow-shared (local nodes))
-					(slice.load (local parameters) (record.get (local row) target))
-					(borrow-mut (local output)) (local offset) (local writing)))))
+				(:doc "Parameter references and whole-view reborrows read the same formal descriptor.")
+				(bool.or (u32.eq (local kind) (u32 2)) (call is_reborrow_keyword (local kind)))
+				(then
+					(let parameter (slice.load (local parameters) (record.get (local row) target)))
+					(let projection (bool.and (u32.eq (record.get (local row) type) (u32 34))
+						(u32.eq (record.get (local parameter) type) (u32 38))))
+					(let-mut cursor (local offset))
+					(if
+						(:doc "A shared use of a mutable view projects the descriptor without touching the backing bytes.")
+						(local projection)
+						(then (set (local cursor) (call open_shared_projection (borrow-mut (local output)) (local cursor) (local writing)))))
+					(set (local cursor) (call write_parameter_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local parameter) (borrow-mut (local output)) (local cursor) (local writing)))
+					(if
+						(:doc "Finish the shared projection when it was opened.")
+						(local projection)
+						(then (return (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))))
+					(return (local cursor))))
 			(if
 				(:doc "Read the generated name of the checked local declaration.")
 				(u32.eq (local kind) (u32 6))
@@ -119,14 +132,15 @@
 				(borrow-shared (local source)) (i32 0) (i32 0)))))
 
 	(fn
-		(:doc `Identify the expressions that use the shared runtime ABI.`)
+		(:doc `Identify the checked operations that use the shared runtime ABI.`)
 		(:pragma (inline always))
-		is_runtime_value
+		is_runtime_operation
 		(params (kind u32))
 		(returns bool)
 		(body
 			(return (bool.or (u32.eq (local kind) (u32 33))
-				(bool.or (u32.eq (local kind) (u32 36)) (u32.eq (local kind) (u32 37)))))))
+				(bool.or (u32.eq (local kind) (u32 36))
+					(bool.or (u32.eq (local kind) (u32 37)) (u32.eq (local kind) (u32 40))))))))
 
 	(fn
 		(:doc `Identify expressions with their own evaluation step when nested in another expression.`)
@@ -135,7 +149,7 @@
 		(returns bool)
 		(body
 			(return (bool.or (u32.eq (local kind) (u32 3))
-				(bool.or (call is_runtime_value (local kind))
+				(bool.or (call is_runtime_operation (local kind))
 					(u32.lt (u32 0) (record.get (call scalar_operator (local kind)) result)))))))
 
 	(fn
@@ -192,7 +206,7 @@
 			(return (local cursor))))
 
 	(fn
-		(:doc `Read the descriptor length or pass both checked operands and the original load span to the runtime.`)
+		(:doc `Read the descriptor length or pass the evaluated operands and original access span to the runtime.`)
 		write_slice_access
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (expression ScalarExpression)
 			(tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
@@ -207,13 +221,22 @@
 						(borrow-mut (local output)) (local offset) (local writing)))
 					(return (call write_slice_length (borrow-mut (local output)) (local cursor) (local writing)))))
 			(let index (record.get (slice.load (local nodes) (local receiver)) next_sibling))
-			(let open (call open_slice_load (borrow-mut (local output)) (local offset) (local writing)))
+			(let store (u32.eq (record.get (local expression) kind) (u32 40)))
+			(let open (call open_slice_access (borrow-mut (local output)) (local offset) (local store) (local writing)))
 			(let view (call write_temporary_name (borrow-shared (local source)) (local receiver) (local tree_base)
 				(borrow-mut (local output)) (local open) (local writing)))
 			(let comma (call c_byte (borrow-mut (local output)) (local view) (u8 44) (local writing)))
-			(let subscript (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
+			(let-mut cursor (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
 				(borrow-mut (local output)) (local comma) (local writing)))
-			(return (call close_runtime_call (borrow-mut (local output)) (local subscript)
+			(if
+				(:doc "A store passes the already evaluated byte after its index.")
+				(local store)
+				(then
+					(let byte (record.get (slice.load (local nodes) (local index)) next_sibling))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local byte) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local writing)))))
+			(return (call close_runtime_call (borrow-mut (local output)) (local cursor)
 				(record.get (local expression) target) (record.get (local expression) start)
 				(record.get (local expression) end) (local writing)))))
 
@@ -384,7 +407,7 @@
 								(bool.and (bool.not (record.get (local operator) short_circuit))
 									(bool.or (call requires_value_temporary (local kind))
 										(bool.or (u32.lt (u32 0) (record.get (local parent_operator) result))
-											(call is_runtime_value (local parent_kind)))))
+											(call is_runtime_operation (local parent_kind)))))
 								(then
 									(set (local cursor) (call write_temporary_declaration (borrow-shared (local source))
 										(local index) (local tree_base) (record.get (local expression) type)
@@ -433,6 +456,13 @@
 			(set (local cursor) (call write_nested_values (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(if
+				(:doc "A store writes one checked runtime call as the complete statement.")
+				(u32.eq (local kind) (u32 40))
+				(then
+					(let next (call write_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local value) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local next) (u8 59) (local writing)))))
 			(let target (record.get (local statement) target))
 			(let declaring (bool.or (u32.eq (local kind) (u32 15)) (u32.eq (local kind) (u32 16))))
 			(let conditional (bool.or (local loop) (u32.eq (local kind) (u32 22))))
@@ -625,17 +655,17 @@
 				(body
 					(if
 						(:doc "The runtime ABI supplies slice descriptors and checked operations.")
-						(call is_runtime_value (record.get (slice.load (local expressions) (local index)) kind))
+						(call is_runtime_operation (record.get (slice.load (local expressions) (local index)) kind))
 						(then (return (bool true))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(set (local index) (i32 0))
 			(while
-				(:doc "A shared slice signature needs its ABI even when the body ignores the parameter.")
+				(:doc "A byte slice signature needs its ABI even when the body ignores the parameter.")
 				(i32.lt (local index) (slice.len (local parameters)))
 				(body
 					(if
-						(:doc "Type 34 is the shared byte slice descriptor.")
-						(u32.eq (record.get (slice.load (local parameters) (local index)) type) (u32 34))
+						(:doc "Both access modes use descriptors defined by the runtime.")
+						(call is_byte_view_type (record.get (slice.load (local parameters) (local index)) type))
 						(then (return (bool true))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (bool false))))
@@ -720,6 +750,7 @@
 		(:expect bootstrap.short_circuit (issue "https://github.com/wove-lang/wove/issues/83"))
 		(:expect bootstrap.checked_int_conversion (issue "https://github.com/wove-lang/wove/issues/85"))
 		(:expect bootstrap.shared_byte_slices (issue "https://github.com/wove-lang/wove/issues/90"))
+		(:expect bootstrap.mutable_byte_slices (issue "https://github.com/wove-lang/wove/issues/104"))
 		emit_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))

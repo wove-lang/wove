@@ -123,14 +123,21 @@ uint8_t wvrt_slice_load_u8(const void *wvrtitems, int32_t wvrtlength, int32_t wv
 	return ((const uint8_t *)wvrtitems)[wvrt_offset];
 }
 
-// Read a byte from a checked Stage 2 view, with a file-relative trap span.
-uint8_t wvrt_slice_load_u8_at_span(wvrt_slice wvrtview, int32_t wvrtindex,
+// Check a Stage 2 index before deriving a backing storage address.
+static size_t wvrt_slice_offset_at_span(int32_t wvrtlength, int32_t wvrtindex,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	// Validate before computing an address in the backing storage.
-	if (!wvrt_slice_index_valid(wvrtview.wvrt_length, wvrtindex)) {
+	// Preserve the span of the original access in the trap.
+	if (!wvrt_slice_index_valid(wvrtlength, wvrtindex)) {
 		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "slice index out of bounds");
 	}
-	return ((const uint8_t *)wvrtview.wvrt_items)[(size_t)wvrtindex];
+	return (size_t)wvrtindex;
+}
+
+// Read a byte from the original storage through a checked Stage 2 view.
+uint8_t wvrt_slice_load_u8_at_span(wvrt_slice wvrtview, int32_t wvrtindex,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	size_t wvrt_offset = wvrt_slice_offset_at_span(wvrtview.wvrt_length, wvrtindex, wvrtfile, wvrtstart, wvrtend);
+	return ((const uint8_t *)wvrtview.wvrt_items)[wvrt_offset];
 }
 
 // Update the original storage after checking the mutable view's byte index.
@@ -138,6 +145,13 @@ void wvrt_slice_store_u8(void *wvrtitems, int32_t wvrtlength, int32_t wvrtindex,
 	uint8_t wvrtvalue, wvrt_location wvrtsite) {
 	size_t wvrt_offset = wvrt_slice_offset(wvrtlength, wvrtindex, wvrtsite);
 	((uint8_t *)wvrtitems)[wvrt_offset] = wvrtvalue;
+}
+
+// Store through the caller's mutable view only after checking the signed index.
+void wvrt_slice_store_u8_at_span(wvrt_mut_slice wvrtview, int32_t wvrtindex, uint8_t wvrtvalue,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	size_t wvrt_offset = wvrt_slice_offset_at_span(wvrtview.wvrt_length, wvrtindex, wvrtfile, wvrtstart, wvrtend);
+	((uint8_t *)wvrtview.wvrt_items)[wvrt_offset] = wvrtvalue;
 }
 
 // All supported integers fit in the common signed domain, including high-bit u32 values.

@@ -198,6 +198,20 @@ the length traps before reading the slice, with the original file ID and
 half-open byte span of the load. C emitted for a shared view includes
 `wove_runtime.h`. Link the shared runtime when the code uses a checked load.
 
+Helpers can also take `(mut-slice u8)` parameters using `wvrt_mut_slice`.
+Pass one to a writable parameter with `(borrow-mut (local data))`, or
+to a shared parameter with `(borrow-shared (local data))`. An explicit
+reborrow lasts through the call. A later argument cannot use the same
+parameter while it is exclusively borrowed, and a shared loan prevents
+an exclusive one until the call returns. Both view types support
+`slice.len` and `slice.load`.
+
+`(slice.store (local data) index value)` is a statement. It requires a
+mutable byte view, an exact `i32` index, and an exact `u8` value. It
+evaluates its operands in order and checks bounds before writing the
+byte in the caller's storage. An out-of-bounds store reports the same
+file identity and half-open span format as a checked load.
+
 `(bool.and left right)` evaluates the right operand when the left is true.
 `(bool.or left right)` evaluates it when the left is false. Both operands
 are type-checked as `bool`. Each operand that runs does so once, with the
