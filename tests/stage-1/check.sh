@@ -26,8 +26,9 @@ check_status() {
 check_rejected() {
 	fixture=$1
 	line=$2
+	shift 2
 	status=0
-	"$python" stage-1/wovec.py "$fixture" > "$build/rejected.c" 2> "$build/rejected.stderr" || status=$?
+	"$python" stage-1/wovec.py "$@" "$fixture" > "$build/rejected.c" 2> "$build/rejected.stderr" || status=$?
 	# A rejected source must exit with the seed error status and leave stdout empty.
 	if [ "$status" -ne 1 ] || [ -s "$build/rejected.c" ]; then
 		printf '%s did not reject cleanly\n' "$fixture" >&2
@@ -55,14 +56,14 @@ check_trap() {
 }
 
 # Evaluate the fixture list supplied by Make.
-while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
+while read -r mode source expected profile extra <&3 || [ -n "${mode:-}" ]; do
 	# Allow blank lines and comments between cases.
 	case "$mode" in
 		""|\#*) continue ;;
 	esac
-	# Every case names one source and one expected result.
+	# Every case names one source and one expected result, with an optional profile.
 	if [ -z "$source" ] || [ -z "$expected" ] || [ -n "$extra" ]; then
-		printf 'invalid case in %s: %s %s %s %s\n' "$manifest" "$mode" "$source" "$expected" "$extra" >&2
+		printf 'invalid case in %s: %s %s %s %s %s\n' "$manifest" "$mode" "$source" "$expected" "$profile" "$extra" >&2
 		exit 1
 	fi
 
@@ -74,7 +75,22 @@ while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 			;;
 	esac
 
-	program="$build/${source%.wove}"
+	# Match the build directory and seed flags to the case's profile.
+	case "$profile" in
+		"")
+			program="$build/${source%.wove}"
+			set --
+			;;
+		bootstrap)
+			program="$build/bootstrap/${source%.wove}"
+			set -- --bootstrap
+			;;
+		*)
+			printf 'unknown build profile in %s for %s: %s\n' "$manifest" "$source" "$profile" >&2
+			exit 1
+			;;
+	esac
+
 	# Run the requested check and compare the result from the manifest.
 	case "$mode" in
 		# Compare the fixture exit status with the ordinary runtime.
@@ -88,7 +104,7 @@ while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 			;;
 		# Check that the source fails on the specified line.
 		reject)
-			check_rejected "$fixtures/$source" "$expected"
+			check_rejected "$fixtures/$source" "$expected" "$@"
 			;;
 		# Check the exact diagnostic from a runtime bounds trap.
 		bounds-trap)

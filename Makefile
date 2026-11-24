@@ -17,7 +17,9 @@ OWNERSHIP_CASES := $(OWNERSHIP_TESTS)/cases.tsv
 
 # Build native programs for executable cases. The runner handles compile-only rejections.
 TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|range-trap)$$/ { \
-	name = $$2; sub(/\.wove$$/, "", name); print name; \
+	name = $$2; sub(/\.wove$$/, "", name); \
+	if ($$4 == "bootstrap") name = "bootstrap/" name; \
+	print name; \
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
 
@@ -37,10 +39,10 @@ test-stage-2: stage-2
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
 
-# Translate the canonical Stage 2 scanner directly with the Python seed.
+# Translate the Stage 2 scanner with the bootstrap profile of the Python seed.
 $(STAGE2)/source_scan.c: stage-2/source_scan.wove $(SEED)
 	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@"
+	$(PYTHON) stage-1/wovec.py --bootstrap "$<" > "$@"
 
 # Supply source slices and check full-width results in the fixture executable.
 $(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(STAGE2)/source_scan.c $(STAGE1)/runtime.o
@@ -50,6 +52,11 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
+# Keep both profiles buildable from the same fixture at the same time.
+$(STAGE1)/bootstrap/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
+	mkdir -p "$(@D)"
+	$(PYTHON) stage-1/wovec.py --bootstrap "$<" > "$@"
+
 $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -c "$<" -o "$@"
@@ -57,13 +64,16 @@ $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)
 $(STAGE1)/%.fixture.o: $(STAGE1)/%.c $(RUNTIME_HEADER)
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -c "$<" -o "$@"
 
+# Inspect the full scalar results in the generated translation unit.
+$(STAGE1)/%: $(OWNERSHIP_TESTS)/%.probe.c $(STAGE1)/%.c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+
+# Find the same source-side probe when building a bootstrap case.
+$(STAGE1)/bootstrap/%: $(OWNERSHIP_TESTS)/%.probe.c $(STAGE1)/bootstrap/%.c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+
 $(STAGE1)/%: $(STAGE1)/%.fixture.o $(STAGE1)/runtime.o
 	$(CLANG) $(CFLAGS) $^ -o "$@"
-
-# Inspect the full scalar results in the generated translation unit.
-$(STAGE1)/scalar.round_trip $(STAGE1)/scalar.convert $(STAGE1)/scalar.wrapping $(STAGE1)/scalar.compare: $(STAGE1)/%: \
-	$(OWNERSHIP_TESTS)/%.probe.c $(STAGE1)/%.c $(STAGE1)/runtime.o
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE1)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(STAGE1)/runtime.tracked.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
