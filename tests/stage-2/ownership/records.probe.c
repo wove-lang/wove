@@ -13,4 +13,4 @@ typedef struct {
 #define WOVE_TRACK_ARRAYS 2
 #define WOVE_TRACK_ELEMENTS 2
 #define WOVE_TRACK_ELEMENT_SIZE sizeof(RecordLayout)
-#include "../../stage-1/allocations.c"
+#include "../../support/array_tracking.h"
