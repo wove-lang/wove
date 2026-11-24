@@ -604,6 +604,27 @@ gives the output count, defining file identity, and file-relative span.
 The [scalar graph fixtures](../tests/stage-2/scalar_graphs.tsv) check the
 native result, defining symbols, repeated imports, and original call spans.
 
+## Native single-source compilation
+
+Run `make stage-2` to build `build/stage-2/wovec`. The seed-built Stage 2
+emitter compiles the native entry and its Wove dependencies. The linked
+executable reads host arguments, resolves command and project settings, and
+uses its C bridges for file I/O.
+
+```sh
+build/stage-2/wovec cc input.wove -o build/input
+clang -std=c11 build/.wovec-cache/default/input/bin/main.c -o build/input
+```
+
+`cc` takes one explicit source and an explicit output target. It writes
+`main.c` below `<target-parent>/.wovec-cache/<profile>/<target-name>/bin/`.
+For output that uses Wove runtime operations, compile with `-I runtime`
+and link `runtime/wove_runtime.c`. The command reads `wovec.jsonc` from its
+working directory for profile selection. `--profile NAME` selects that
+profile and uses its name in the retained path. Argument and source
+failures print one JSON diagnostic to stderr. On-disk source graph loading
+is tracked in [#188](https://github.com/wove-lang/wove/issues/188).
+
 ## Structured JSON diagnostics
 
 Use [the diagnostic record](diagnostics/record.wove) to retain an error's
