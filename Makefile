@@ -69,13 +69,17 @@ ROUND_TRIP_PROVIDERS := $(addprefix $(OWNERSHIP_TESTS)/imports/,left.wove right.
 RUNTIME_LOCATION_PROVIDER := $(OWNERSHIP_TESTS)/slice.load_negative.wove
 MODULE_SELECT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,module.select.wove modules/bootstrap.wove \
 	modules/full.wove modules/testing.wove imports/nested/shared.wove)
+TYPE_IMPORT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,types.round_trip.wove types/base.wove types/forward.wove)
+SOURCE_TREE_IMPORT := $(OWNERSHIP_TESTS)/types.source_tree.wove
 $(STAGE1)/imports.round_trip.c: $(ROUND_TRIP_PROVIDERS)
 $(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
 $(STAGE1)/module.select.c: $(MODULE_SELECT_SOURCES)
+$(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
+$(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE)
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
 REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(ROUND_TRIP_PROVIDERS) \
-	$(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES)
+	$(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
 
 $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)
