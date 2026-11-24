@@ -12,7 +12,8 @@
 	(use wove-file "./imports.wove" (only import_keyword import_form))
 	(use wove-file "./paths.wove" (only (type SuppliedFile)))
 	(use wove-file "./strings.wove" (only decode_string))
-	(use wove-file "./types.wove" (only builtin_type_keyword))
+	(use wove-file "./types.wove" (only source_builtin_type))
+	(use wove-file "./c_strings.wove" (only is_c_string_slice read_c_string_contracts))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 
 	(struct HeaderMatch (fields (file i32) (node i32) (start i32) (end i32) (error u32)))
@@ -207,13 +208,7 @@
 		(params (source (shared-slice u8)) (node SourceNode))
 		(returns bool)
 		(body
-			(if
-				(:doc "A scalar type uses a bare built-in spelling.")
-				(bool.not (u32.eq (record.get (local node) kind) (u32 1)))
-				(then (return (bool false))))
-			(let start (record.get (local node) start))
-			(let type (call builtin_type_keyword (borrow-shared (local source)) (local start)
-				(i32.sub.wrapping (record.get (local node) end) (local start))))
+			(let type (call source_builtin_type (borrow-shared (local source)) (local node)))
 			(return (bool.or (u32.eq (local type) (u32 5))
 				(bool.and (u32.lt (u32 9) (local type)) (u32.lt (local type) (u32 13)))))))
 
@@ -272,8 +267,9 @@
 				(then (return (call c_function_error (record.get (local result_type) start) (record.get (local result_type) end) (u32 23)))))
 			(let first_parameter (record.get (local form_params) first))
 			(let-mut parameter (local first_parameter))
+			(let-mut count (i32 0))
 			(while
-				(:doc "Each parameter has one scalar type and a unique name in this signature.")
+				(:doc "Each parameter has one supported type and a unique name in this signature.")
 				(bool.not (i32.lt (local parameter) (i32 0)))
 				(body
 					(let item (slice.load (local nodes) (local parameter)))
@@ -292,8 +288,9 @@
 							(record.get (local choice) error)))))
 					(let type_node (slice.load (local nodes) (local type)))
 					(if
-						(:doc "An unsupported parameter type is diagnosed at its original operand.")
-						(bool.not (call is_c_scalar (borrow-shared (local source)) (local type_node)))
+						(:doc "Only scalar formals and shared byte slices have native bridge support.")
+						(bool.not (bool.or (call is_c_scalar (borrow-shared (local source)) (local type_node))
+							(call is_c_string_slice (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node))))
 						(then (return (call c_function_error (record.get (local type_node) start)
 							(record.get (local type_node) end) (u32 23)))))
 					(let name (slice.load (local nodes) (record.get (local parts) head)))
@@ -313,7 +310,17 @@
 									(borrow-shared (local source)) (local name_start) (local name_end))
 								(then (return (call c_function_error (local name_start) (local name_end) (u32 33)))))
 							(set (local earlier) (record.get (local previous) next_sibling))))
-					(set (local parameter) (record.get (local item) next_sibling))))
+					(set (local parameter) (record.get (local item) next_sibling))
+					(set (local count) (i32.add.wrapping (local count) (i32 1)))))
+			(let-mut modes (array.alloc u8 (local count)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
+			(let contracts (call read_c_string_contracts (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local parts) (local first_parameter) (borrow-mut (local modes))))
+			(if
+				(:doc "Keep a bad conversion at its original defining span.")
+				(u32.lt (u32 0) (record.get (local contracts) error))
+				(then (return (call c_function_error (record.get (local contracts) start) (record.get (local contracts) end)
+					(record.get (local contracts) error)))))
 			(return (record.make CFunctionRead (declaration (local declaration))
 				(native_start (record.get (local name) start)) (native_end (record.get (local name) end))
 				(signature_start (record.get (local params_node) start)) (signature_end (record.get (local returns_node) end))

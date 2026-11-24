@@ -11,6 +11,7 @@
 	(use wove-file "../source/scan.wove" (only check_source_form build_source_tree (type FormCheck) (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts read_module (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../source/imports.wove" (only import_keyword))
+	(use wove-file "../source/c_strings.wove" (only read_c_string_contracts))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity hash_spelling))
@@ -356,6 +357,29 @@
 			(return (call signatures_result (local next_function) (local next_param) (local next_record) (local entry) (i32 -1)
 				(i32 0) (i32 0) (u32 0)))))
 
+	(fn attach_c_string_modes
+		(:doc `Store the native conversion mode alongside each exact Wove parameter type.`)
+		(params (modes (shared-slice u8)) (parameters (mut-slice ScalarParameter)) (start i32))
+		(returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "The mode array follows the signature's formal parameter order.")
+				(i32.lt (local index) (slice.len (local modes)))
+				(body
+					(let mode (slice.load (local modes) (local index)))
+					(if
+						(:doc "Scalar formals keep their ordinary native value ABI.")
+						(u8.lt (u8 0) (local mode))
+						(then
+							(let row (i32.add.wrapping (local start) (local index)))
+							(let previous (slice.load (local parameters) (local row)))
+							(slice.store (local parameters) (local row)
+								(record.make ScalarParameter (name (record.get (local previous) name))
+									(type (record.get (local previous) type)) (position (record.get (local previous) position))
+									(c_string (local mode))))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
 	(fn register_bridge_signature
 		(:doc `Register a checked C bridge signature using the same parameter rows as Wove functions.`)
 		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32) (scope FunctionScope)
@@ -378,11 +402,26 @@
 				(u32.lt (u32 0) (record.get (local checked) error))
 				(then (return (local checked))))
 			(let limit (record.get (local checked) operand))
+			(let arity (i32.sub.wrapping (local limit) (local next_param)))
+			(let-mut modes (array.alloc u8 (local arity)))
+			(let contracts (call read_c_string_contracts (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(local parts) (local first) (borrow-mut (local modes))))
+			(if
+				(:doc "Keep contract diagnostics tied to the original defining signature.")
+				(u32.lt (u32 0) (record.get (local contracts) error))
+				(then (return (record.make EntryRead (operand (i32 -1))
+					(start (record.get (local contracts) start)) (end (record.get (local contracts) end))
+					(error (record.get (local contracts) error)) (related (i32 -1))))))
+			(let strings (record.get (local contracts) count))
+			(if
+				(:doc "Only converted parameters need a separate native mode.")
+				(i32.lt (i32 0) (local strings))
+				(then (call attach_c_string_modes (borrow-shared (local modes)) (borrow-mut (local parameters)) (local next_param))))
 			(slice.store (local functions) (local index)
 				(record.make ScalarFunction (declaration (local declaration)) (name (local name))
-					(params (local next_param)) (arity (i32.sub.wrapping (local limit) (local next_param)))
+					(params (local next_param)) (arity (local arity))
 					(result (call scalar_type (borrow-shared (local arena)) (borrow-shared (local nodes)) (local result)))
-					(first_statement (i32 -1)) (identity (u32 0)) (entry (bool false))
+					(first_statement (i32 -1)) (identity (u32 0)) (entry (bool false)) (c_strings (local strings))
 					(file (record.get (local scope) file)) (tree_base (record.get (local scope) tree_base))
 					(tree_limit (record.get (local scope) tree_limit)) (source_base (record.get (local scope) source_base))))
 			(return (local checked))))

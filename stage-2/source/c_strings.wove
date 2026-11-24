@@ -1,0 +1,213 @@
+(module source_c_strings
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Read named C-string contracts from a bridge function's pragma prefix.
+
+	Resolve directives against the checked formal parameters. Store one
+	conversion mode per formal and retain the original span of a bad contract.`)
+
+	(use wove-file "./scan.wove" (only is_head_byte (type SourceNode)))
+	(use wove-file "./module.wove" (only form_parts is_three_bytes source_keyword (type FormParts)))
+	(use wove-file "./types.wove" (only source_builtin_type))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct CStringContracts (fields (count i32) (start i32) (end i32) (error u32)))
+
+	(fn is_c_string_slice
+		(:doc `Accept exactly the shared u8 slice shape required by both C-string contracts.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns bool)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (record.get (local parts) head))
+			(let element (record.get (local parts) operands))
+			(if
+				(:doc "A view needs a form head and an element operand.")
+				(bool.or (i32.lt (local head) (i32 0)) (i32.lt (local element) (i32 0)))
+				(then (return (bool false))))
+			(let type (slice.load (local nodes) (local element)))
+			(return (bool.and (i32.lt (record.get (local type) next_sibling) (i32 0))
+				(bool.and (u32.eq (call source_builtin_type (borrow-shared (local source)) (slice.load (local nodes) (local head))) (u32 34))
+					(u32.eq (call source_builtin_type (borrow-shared (local source)) (local type)) (u32 10)))))))
+
+	(fn c_string_directive
+		(:doc `Return 1 for checked C strings, 2 for raw C strings, or 0 for other directives.`)
+		(params (source (shared-slice u8)) (head SourceNode))
+		(returns u8)
+		(body
+			(let start (record.get (local head) start))
+			(let width (i32.sub.wrapping (record.get (local head) end) (local start)))
+			(if
+				(:doc "The complete common spelling fits in either supported directive.")
+				(bool.not (bool.and (bool.or (i32.eq (local width) (i32 6)) (i32.eq (local width) (i32 10)))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 99) (u8 95) (u8 99))
+						(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3))
+							(u8 115) (u8 116) (u8 114)))))
+				(then (return (u8 0))))
+			(if
+				(:doc "The shorter spelling ends after c_cstr.")
+				(i32.eq (local width) (i32 6))
+				(then (return (u8 1))))
+			(if
+				(:doc "Raw conversion requires the complete _raw suffix.")
+				(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 95))
+					(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 7))
+						(u8 114) (u8 97) (u8 119)))
+				(then (return (u8 2))))
+			(return (u8 0))))
+
+	(fn c_string_error
+		(:doc `Point a malformed C-string contract or unsupported formal at its source node.`)
+		(params (node SourceNode))
+		(returns CStringContracts)
+		(body
+			(return (record.make CStringContracts (count (i32 0)) (error (u32 23))
+				(start (record.get (local node) start)) (end (record.get (local node) end))))))
+
+	(fn checked_c_strings
+		(:doc `Return the number of formals carrying a C-string conversion.`)
+		(params (count i32))
+		(returns CStringContracts)
+		(body
+			(return (record.make CStringContracts (count (local count)) (error (u32 0))
+				(start (i32 0)) (end (i32 0))))))
+
+	(fn bind_c_string
+		(:doc `Resolve one named directive operand to its formal slot and reserve its conversion mode.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32)
+			(name SourceNode) (mode u8) (modes (mut-slice u8)))
+		(returns CStringContracts)
+		(body
+			(if
+				(:doc "Quoted strings and forms cannot name a formal parameter.")
+				(bool.not (u32.eq (record.get (local name) kind) (u32 1)))
+				(then (return (call c_string_error (local name)))))
+			(let-mut parameter (local first))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Match the original spelling against the checked parameter list.")
+				(bool.not (i32.lt (local parameter) (i32 0)))
+				(body
+					(let node (slice.load (local nodes) (local parameter)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let spelling (slice.load (local nodes) (record.get (local parts) head)))
+					(if
+						(:doc "An annotation belongs to the exact formal name in this signature.")
+						(call same_bytes (borrow-shared (local source))
+							(record.get (local spelling) start) (record.get (local spelling) end)
+							(borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end))
+						(then
+							(let type (slice.load (local nodes) (record.get (local parts) operands)))
+							(if
+								(:doc "An incompatible formal points to its declared type.")
+								(bool.not (call is_c_string_slice (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
+								(then (return (call c_string_error (local type)))))
+							(let prior (slice.load (local modes) (local index)))
+							(if
+								(:doc "A different conversion on the same formal conflicts at the later annotation.")
+								(bool.not (u8.eq (local prior) (u8 0)))
+								(then
+									(if
+										(:doc "Repeated identical annotations leave the established mode in place.")
+										(u8.eq (local prior) (local mode))
+										(then (return (call checked_c_strings (i32 0)))))
+									(return (call c_string_error (local name)))))
+							(slice.store (local modes) (local index) (local mode))
+							(return (call checked_c_strings (i32 1)))))
+					(set (local parameter) (record.get (local node) next_sibling))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call c_string_error (local name)))))
+
+	(fn read_c_string_pragma
+		(:doc `Apply the recognized C-string directives in one pragma and skip opaque directives.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32)
+			(pragma SourceNode) (modes (mut-slice u8)))
+		(returns CStringContracts)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local pragma)))
+			(let-mut directive (record.get (local parts) operands))
+			(let-mut count (i32 0))
+			(while
+				(:doc "Pragma forms retain the declaration's original directive order.")
+				(bool.not (i32.lt (local directive) (i32 0)))
+				(body
+					(let node (slice.load (local nodes) (local directive)))
+					(let fields (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let head (record.get (local fields) head))
+					(if
+						(:doc "Selection has checked that pragma directives are forms.")
+						(i32.lt (local head) (i32 0))
+						(then (return (call c_string_error (local node)))))
+					(let mode (call c_string_directive (borrow-shared (local source)) (slice.load (local nodes) (local head))))
+					(if
+						(:doc "Only the two exact C-string spellings claim parameters.")
+						(u8.lt (u8 0) (local mode))
+						(then
+							(let-mut name (record.get (local fields) operands))
+							(if
+								(:doc "A conversion directive names at least one formal.")
+								(i32.lt (local name) (i32 0))
+								(then (return (call c_string_error (local node)))))
+							(while
+								(:doc "Each ordinary operand identifies one shared byte slice.")
+								(bool.not (i32.lt (local name) (i32 0)))
+								(body
+									(let spelling (slice.load (local nodes) (local name)))
+									(let bound (call bind_c_string (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local first) (local spelling) (local mode) (borrow-mut (local modes))))
+									(if
+										(:doc "Keep the first bad contract at its originating operand.")
+										(u32.lt (u32 0) (record.get (local bound) error))
+										(then (return (local bound))))
+									(set (local count) (i32.add.wrapping (local count) (record.get (local bound) count)))
+									(set (local name) (record.get (local spelling) next_sibling))))))
+					(set (local directive) (record.get (local node) next_sibling))))
+			(return (call checked_c_strings (local count)))))
+
+	(fn read_c_string_contracts
+		(:doc `Read bridge metadata into zeroed mode slots in formal parameter order.
+
+		The signature shape and name uniqueness have already been checked.
+		Every shared byte slice needs a conversion for the native call ABI.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function FormParts)
+			(first i32) (modes (mut-slice u8)))
+		(returns CStringContracts)
+		(body
+			(let-mut entry (record.get (local function) metadata))
+			(let-mut count (i32 0))
+			(while
+				(:doc "Read conversion directives only from the bridge function's pragma entries.")
+				(bool.and (bool.not (i32.lt (local entry) (i32 0)))
+					(bool.not (i32.eq (local entry) (record.get (local function) operands))))
+				(body
+					(let node (slice.load (local nodes) (local entry)))
+					(let head (slice.load (local nodes) (record.get (local node) first_child)))
+					(if
+						(:doc "Other metadata roles leave contracts untouched.")
+						(u32.eq (call source_keyword (borrow-shared (local source)) (local head)) (u32 3))
+						(then
+							(let read (call read_c_string_pragma (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local first) (local node) (borrow-mut (local modes))))
+							(if
+								(:doc "Return the first malformed C-string directive.")
+								(u32.lt (u32 0) (record.get (local read) error))
+								(then (return (local read))))
+							(set (local count) (i32.add.wrapping (local count) (record.get (local read) count)))))
+					(set (local entry) (record.get (local node) next_sibling))))
+			(let-mut parameter (local first))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Validate that each slice formal acquired an explicit conversion.")
+				(bool.not (i32.lt (local parameter) (i32 0)))
+				(body
+					(let node (slice.load (local nodes) (local parameter)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let type (slice.load (local nodes) (record.get (local parts) operands)))
+					(if
+						(:doc "Without a contract the slice type has no supported native ABI.")
+						(bool.and (u8.eq (slice.load (local modes) (local index)) (u8 0))
+							(call is_c_string_slice (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
+						(then (return (call c_string_error (local type)))))
+					(set (local parameter) (record.get (local node) next_sibling))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call checked_c_strings (local count))))))

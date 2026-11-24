@@ -1,6 +1,7 @@
 # Copyright (c) 2026 wove contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
+import json
 import os
 import shlex
 import subprocess
@@ -35,7 +36,11 @@ def read_cases(manifest):
 			arguments.extend((identity, virtual_path, source))
 		elif kind == "native" and label is not None:
 			status, *flags = fields
-			native = int(status), flags
+			native = int(status), flags, b""
+		# Runtime traps use the same native recipe with exact stderr.
+		elif kind == "native-trap" and label is not None:
+			diagnostic, *flags = fields
+			native = 1, flags, json.loads(diagnostic).encode("utf-8")
 		elif kind == "expect" and label is not None:
 			expected.append(payload)
 		else:
@@ -45,7 +50,7 @@ def read_cases(manifest):
 
 
 # Compile and run an emitted translation unit with the same compiler settings as the rest of the suite.
-def check_native(probe, label, emitted, expected, fixture_flags):
+def check_native(probe, label, emitted, expected, fixture_flags, diagnostic):
 	header, _, source = emitted.partition("\n")
 	count = int(header.split()[1])
 	assert len(source.encode()) == count, (label, header)
@@ -61,7 +66,7 @@ def check_native(probe, label, emitted, expected, fixture_flags):
 		command = [*compiler, "-std=c11", *flags, "-I", "runtime", *fixture_flags, str(generated), runtime, "-o", str(program)]
 		subprocess.run(command, check=True, timeout=30)
 		result = subprocess.run([program], capture_output=True, timeout=30)
-		assert result.returncode == expected and not result.stdout and not result.stderr, (label, result)
+		assert result.returncode == expected and not result.stdout and result.stderr == diagnostic, (label, result)
 
 
 # Run each supplied graph through the seed-built executable.

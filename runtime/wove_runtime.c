@@ -23,6 +23,57 @@ static _Noreturn void wvrt_trap_at_span(int32_t wvrtfile, int32_t wvrtstart, int
 	exit(EXIT_FAILURE);
 }
 
+// Check every argument before allocating one short-lived backing store for the call.
+char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrtarguments, size_t wvrtcount) {
+	if (wvrtcount == 0) { return NULL; }
+	size_t wvrt_total = 0;
+	// Validate byte views and the shared allocation extent before touching any bytes.
+	for (size_t wvrt_i = 0; wvrt_i < wvrtcount; ++wvrt_i) {
+		const wvrt_cstr_argument *wvrt_argument = &wvrtarguments[wvrt_i];
+		const wvrt_slice wvrt_view = wvrt_argument->wvrt_view;
+		// Empty views can use a null address. Nonempty views require byte storage.
+		if (wvrt_view.wvrt_length < 0 || (wvrt_view.wvrt_length > 0 &&
+			(wvrt_view.wvrt_items == NULL || wvrt_view.wvrt_element_size != sizeof(uint8_t)))) {
+			wvrt_trap_at_span(wvrt_argument->wvrt_file, wvrt_argument->wvrt_start, wvrt_argument->wvrt_end,
+				"invalid C string byte slice");
+		}
+		// Allow one additional byte for each argument's final NUL.
+		if ((uintmax_t)wvrt_view.wvrt_length >= SIZE_MAX - wvrt_total) {
+			wvrt_trap_at_span(wvrt_argument->wvrt_file, wvrt_argument->wvrt_start, wvrt_argument->wvrt_end,
+				"C string allocation size overflow");
+		}
+		const size_t wvrt_length = (size_t)wvrt_view.wvrt_length;
+		// Checked conversion rejects embedded NUL before entering native code.
+		if (wvrt_argument->wvrt_checked && wvrt_length != 0 && memchr(wvrt_view.wvrt_items, 0, wvrt_length) != NULL) {
+			wvrt_trap_at_span(wvrt_argument->wvrt_file, wvrt_argument->wvrt_start, wvrt_argument->wvrt_end,
+				"embedded NUL in C string argument");
+		}
+		wvrt_total += wvrt_length + 1;
+	}
+	char *wvrt_storage = malloc(wvrt_total);
+	// The first argument owns the allocation diagnostic for this call's scratch.
+	if (wvrt_storage == NULL) {
+		wvrt_trap_at_span(wvrtarguments[0].wvrt_file, wvrtarguments[0].wvrt_start, wvrtarguments[0].wvrt_end,
+			"could not allocate C string arguments");
+	}
+	char *wvrt_next = wvrt_storage;
+	// All copied strings remain live simultaneously until the native call returns.
+	for (size_t wvrt_i = 0; wvrt_i < wvrtcount; ++wvrt_i) {
+		wvrt_cstr_argument *wvrt_argument = &wvrtarguments[wvrt_i];
+		const size_t wvrt_length = (size_t)wvrt_argument->wvrt_view.wvrt_length;
+		if (wvrt_length != 0) { memcpy(wvrt_next, wvrt_argument->wvrt_view.wvrt_items, wvrt_length); }
+		wvrt_next[wvrt_length] = '\0';
+		wvrt_argument->wvrt_value = wvrt_next;
+		wvrt_next += wvrt_length + 1;
+	}
+	return wvrt_storage;
+}
+
+// Release only the temporary storage owned by a completed native call.
+void wvrt_cstr_drop(char *wvrtstorage) {
+	free(wvrtstorage);
+}
+
 // Preserve C object alignment, including native types with extended alignment.
 // The caller owns failure handling, so a newly acquired foreign resource can be closed.
 static void *wvrt_calloc(size_t wvrtcount, size_t wvrtsize, size_t wvrtalignment) {
