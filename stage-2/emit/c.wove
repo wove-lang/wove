@@ -49,7 +49,7 @@
 			(let name (slice.load (local nodes) (record.get (local function) name)))
 			(if
 				(:doc "A C bridge call uses the spelling declared in its native header.")
-				(i32.lt (record.get (local function) first_statement) (i32 0))
+				(i32.lt (record.get (local function) body) (i32 0))
 				(then (return (call c_span (borrow-shared (local source))
 					(record.get (local name) start) (record.get (local name) end)
 					(borrow-mut (local output)) (local offset) (local writing)))))
@@ -444,9 +444,9 @@
 					(borrow-shared (local records)) (local expression) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
-				(:doc "A slice expression uses the already evaluated descriptor and any checked indices.")
-				(bool.or (u32.eq (local kind) (u32 36))
-					(bool.or (u32.eq (local kind) (u32 37)) (u32.eq (local kind) (u32 44))))
+				(:doc "A slice operation uses the already evaluated descriptor and checked indices.")
+				(bool.or (bool.or (u32.eq (local kind) (u32 36)) (u32.eq (local kind) (u32 37)))
+					(bool.or (u32.eq (local kind) (u32 40)) (u32.eq (local kind) (u32 44))))
 				(then (return (call write_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
 					(borrow-shared (local records)) (borrow-shared (local expressions)) (local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(let operator (call scalar_operator (local kind)))
@@ -708,6 +708,16 @@
 			(let tree_base (record.get (local caller) tree_base))
 			(let statement (slice.load (local statements) (local index)))
 			(let root (record.get (local statement) value))
+			(let previous_owner (record.get (local statement) previous_owner))
+			(if
+				(:doc "A value-less return releases active owners without evaluating an expression.")
+				(i32.lt (local root) (i32 0))
+				(then
+					(let cleaned (call write_cleanup (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local index) (local tree_base)
+						(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
+					(let keyword (call c_text_fragment (borrow-mut (local output)) (local cleaned) (u32 11) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local keyword) (u8 59) (local writing)))))
 			(let value (slice.load (local expressions) (local root)))
 			(let kind (record.get (local statement) kind))
 			(let loop (u32.eq (local kind) (u32 25)))
@@ -723,13 +733,14 @@
 				(local root) (local caller) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(if
-				(:doc "A checked store writes one element as the complete statement.")
-				(u32.eq (local kind) (u32 40))
+				(:doc "A store or void call is a complete statement after its operands are ready.")
+				(bool.or (u32.eq (local kind) (u32 40)) (u32.eq (local kind) (u32 9)))
 				(then
-					(let next (call write_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (borrow-shared (local expressions)) (local value) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(let next (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
+						(borrow-shared (local records)) (borrow-shared (local expressions))
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(return (call c_byte (borrow-mut (local output)) (local next) (u8 59) (local writing)))))
-			(let previous_owner (record.get (local statement) previous_owner))
 			(if
 				(:doc "Save the return value before releasing live owners.")
 				(bool.and (u32.eq (local kind) (u32 7)) (bool.not (i32.lt (local previous_owner) (i32 0))))
@@ -857,7 +868,7 @@
 		(body
 			(let-mut cursor (local offset))
 			(let-mut index (record.get (local function) first_statement))
-			(let outer (record.get (slice.load (local nodes) (local index)) parent))
+			(let outer (record.get (local function) body))
 			(let-mut block (local outer))
 			(while
 				(:doc "Continue through statements and leave nested blocks until the outer body ends.")
@@ -905,6 +916,14 @@
 								(else
 									(set (local block) (local first))
 									(set (local index) (record.get (slice.load (local statements) (local block)) first))))))))
+			(let end (slice.load (local statements) (local outer)))
+			(if
+				(:doc "Completing a void body also releases its outermost scope.")
+				(record.get (local end) falls_through)
+				(then (set (local cursor) (call write_cleanup
+					(borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local statements))
+					(record.get (local end) previous_owner) (i32 -1) (i32 -1) (record.get (local function) tree_base)
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(return (local cursor))))
 
 	(fn write_host_wrapper
@@ -989,6 +1008,19 @@
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (bool false))))
 
+	(fn entry_needs_stdint
+		(:doc `A lone entry needs fixed-width types for compound bodies or a wrapping expression in its return.`)
+		(params (entry ScalarFunction) (statements (shared-slice ScalarStatement)) (expressions (shared-slice ScalarExpression)))
+		(returns bool)
+		(body
+			(let first (slice.load (local statements) (record.get (local entry) first_statement)))
+			(if
+				(:doc "A non-return statement can introduce typed locals or temporaries.")
+				(bool.not (u32.eq (record.get (local first) kind) (u32 7)))
+				(then (return (bool true))))
+			(let value (slice.load (local expressions) (record.get (local first) value)))
+			(return (u32.eq (record.get (call scalar_operator (record.get (local value) kind)) result) (u32 5)))))
+
 	(fn write_translation_unit
 		(:doc `Measure or write the same complete translation unit using the resolved plan.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
@@ -1001,9 +1033,6 @@
 			(let count (slice.len (local functions)))
 			(let has_records (bool.and (i32.lt (i32 0) (slice.len (local records)))
 				(bool.not (i32.eq (record.get (slice.load (local records) (i32 0)) name) (i32 0)))))
-			(let first (slice.load (local functions) (i32 0)))
-			(let first_statement (slice.load (local statements) (record.get (local first) first_statement)))
-			(let first_value (slice.load (local expressions) (record.get (local first_statement) value)))
 			(if
 				(:doc "The shared runtime header provides the fixed-width types too.")
 				(call uses_runtime (borrow-shared (local expressions)) (borrow-shared (local parameters)))
@@ -1014,11 +1043,11 @@
 						(then (set (local cursor) (call write_runtime_header (borrow-mut (local output)) (local cursor) (local writing))))))
 				(else
 					(if
-						(:doc "Include fixed-width types for helpers, compound bodies, or a wrapping expression in a lone return.")
+						(:doc "Use a fixed-width header if the selected program needs it and no header already supplies it.")
 						(bool.and (bool.not (local has_stdint))
 							(bool.or (bool.or (local has_records) (i32.lt (i32 1) (local count)))
-								(bool.or (bool.not (u32.eq (record.get (local first_statement) kind) (u32 7)))
-									(u32.eq (record.get (call scalar_operator (record.get (local first_value) kind)) result) (u32 5)))))
+								(call entry_needs_stdint (slice.load (local functions) (i32 0))
+									(borrow-shared (local statements)) (borrow-shared (local expressions)))))
 						(then (set (local cursor)
 							(call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 0) (local writing)))))))
 			(set (local cursor) (call write_record_layouts (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -1032,7 +1061,7 @@
 					(if
 						(:doc "Local helpers need a prototype. The entry and bridge declarations have their own ABI.")
 						(bool.and (bool.not (record.get (local function) entry))
-							(bool.not (i32.lt (record.get (local function) first_statement) (i32 0))))
+							(bool.not (i32.lt (record.get (local function) body) (i32 0))))
 						(then
 							(set (local cursor) (call write_signature (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local function) (borrow-shared (local parameters)) (borrow-shared (local records)) (bool true)
@@ -1048,7 +1077,7 @@
 					(let function (slice.load (local functions) (local index)))
 					(if
 						(:doc "Only Wove definitions have a body to write in this translation unit.")
-						(bool.not (i32.lt (record.get (local function) first_statement) (i32 0)))
+						(bool.not (i32.lt (record.get (local function) body) (i32 0)))
 						(then
 							(set (local cursor) (call write_definition (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local function) (borrow-shared (local functions))
@@ -1080,7 +1109,8 @@
 				"gh:wove-lang/wove:85" "gh:wove-lang/wove:90" "gh:wove-lang/wove:104"
 				"gh:wove-lang/wove:107" "gh:wove-lang/wove:110" "gh:wove-lang/wove:113"
 				"gh:wove-lang/wove:115" "gh:wove-lang/wove:125" "gh:wove-lang/wove:127"
-				"gh:wove-lang/wove:130" "gh:wove-lang/wove:133" "gh:wove-lang/wove:134"))
+				"gh:wove-lang/wove:130" "gh:wove-lang/wove:133" "gh:wove-lang/wove:134"
+				"gh:wove-lang/wove:159"))
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))
 		(returns EmitResult)
