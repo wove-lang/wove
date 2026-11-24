@@ -15,7 +15,7 @@
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity hash_spelling))
-	(use wove-file "./records.wove" (only declaration_kind register_module_records (type ScalarRecord)))
+	(use wove-file "./records.wove" (only register_module_records (type ScalarRecord)))
 	(use wove-file "./plan.wove" (only register_function (type ScalarFunction) (type ScalarParameter) (type FunctionScope)))
 
 	(struct ScalarTree (fields (base i32) (rows i32) (start i32) (end i32)))
@@ -87,7 +87,8 @@
 					(let row (slice.load (local bindings) (local index)))
 					(if
 						(:doc "Cyclic and self imports have already been rejected by graph resolution.")
-						(i32.eq (record.get (local row) owner) (record.get (local row) file))
+						(bool.and (u32.eq (record.get (local row) namespace) (u32 0))
+							(i32.eq (record.get (local row) owner) (record.get (local row) file)))
 						(then (set (local count) (i32.add.wrapping (local count) (i32 1)))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (local count))))
@@ -135,22 +136,33 @@
 				(entry (local entry)) (file (local file)) (start (local start)) (end (local end)) (error (local error))))))
 
 	(fn
-		(:doc `Register this file's layouts and signatures using its canonical module key.`)
-		register_file
+		(:doc `Hash both the canonical path and the module name for emitted identities.`)
+		graph_module_key
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(module ModuleRead) (input SuppliedFile) (base i32))
+		(returns u32)
+		(body
+			(let name (slice.load (local nodes) (i32.add.wrapping (local base) (record.get (local module) name))))
+			(let path_key (call module_identity (borrow-shared (local arena))
+				(record.get (local input) path_start) (record.get (local input) path_end)))
+			(return (call hash_spelling (borrow-shared (local arena)) (record.get (local name) start)
+				(record.get (local name) end) (local path_key)))))
+
+	(fn
+		(:doc `Check this file's active signatures with the complete graph type table.`)
+		register_file_signatures
 		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(declarations (shared-slice SelectedDeclaration)) (module ModuleRead)
 			(input SuppliedFile) (tree ScalarTree) (file i32) (root i32)
-			(functions (mut-slice ScalarFunction)) (parameters (mut-slice ScalarParameter)) (records (mut-slice ScalarRecord))
+			(functions (mut-slice ScalarFunction)) (parameters (mut-slice ScalarParameter)) (records (shared-slice ScalarRecord))
+			(bindings (shared-slice GraphBinding))
 			(previous GraphSignatures))
 		(returns GraphSignatures)
 		(body
 			(let base (record.get (local tree) base))
 			(let source_base (record.get (local input) source_start))
-			(let name (slice.load (local nodes) (i32.add.wrapping (local base) (record.get (local module) name))))
-			(let path_key (call module_identity (borrow-shared (local arena))
-				(record.get (local input) path_start) (record.get (local input) path_end)))
-			(let module_id (call hash_spelling (borrow-shared (local arena)) (record.get (local name) start)
-				(record.get (local name) end) (local path_key)))
+			(let module_id (call graph_module_key (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(local module) (local input) (local base)))
 			(let entry_module (i32.eq (local file) (local root)))
 			(let scope (record.make FunctionScope (file (local file)) (tree_base (local base))
 				(tree_limit (i32.add.wrapping (local base) (record.get (local tree) rows)))
@@ -158,37 +170,26 @@
 			(let-mut next_function (record.get (local previous) functions))
 			(let-mut next_param (record.get (local previous) params))
 			(let-mut entry (record.get (local previous) entry))
-			(let layouts (call register_module_records (borrow-shared (local arena)) (borrow-shared (local nodes))
-				(borrow-shared (local declarations)) (record.get (local module) count) (local base)
-				(local file) (local module_id) (borrow-mut (local records)) (record.get (local previous) records)))
-			(if
-				(:doc "Complete the defining file's type namespace before checking its signatures.")
-				(u32.lt (u32 0) (record.get (local layouts) error))
-				(then (return (call signatures_result (local next_function) (local next_param) (record.get (local previous) records)
-					(local entry) (local file)
-					(i32.sub.wrapping (record.get (local layouts) start) (local source_base))
-					(i32.sub.wrapping (record.get (local layouts) end) (local source_base)) (record.get (local layouts) error)))))
-			(let next_record (record.get (local layouts) operand))
+			(let next_record (record.get (local previous) records))
 			(let-mut index (i32 0))
 			(while
 				(:doc "Walk active declarations only and send definitions through the shared signature checker.")
 				(i32.lt (local index) (record.get (local module) count))
 				(body
-					(let declaration (i32.add.wrapping (local base)
-						(record.get (slice.load (local declarations) (local index)) node)))
+					(let declaration (record.get
+						(slice.load (local declarations) (i32.add.wrapping (local base) (local index))) node))
 					(let node (slice.load (local nodes) (local declaration)))
 					(let parts (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node)))
 					(let tag (call import_keyword (borrow-shared (local arena))
 						(slice.load (local nodes) (record.get (local parts) head))))
-					(let is_record (u32.eq
-						(call declaration_kind (borrow-shared (local arena)) (borrow-shared (local nodes)) (local declaration)) (u32 48)))
 					(if
 						(:doc "Import edges and record types do not require a function signature.")
-						(bool.not (bool.or (local is_record) (u32.eq (local tag) (u32 2))))
+						(bool.not (bool.or (u32.eq (local tag) (u32 7)) (u32.eq (local tag) (u32 2))))
 						(then
 							(let registered (call register_function (borrow-shared (local arena)) (borrow-shared (local nodes))
 								(local declaration) (local scope) (borrow-mut (local functions)) (local next_function)
-								(borrow-mut (local parameters)) (local next_param) (borrow-shared (local records))))
+								(borrow-mut (local parameters)) (local next_param) (borrow-shared (local records))
+								(borrow-shared (local bindings))))
 							(let error (record.get (local registered) error))
 							(if
 								(:doc "Translate a rejected signature's span back to its defining file.")
@@ -214,12 +215,31 @@
 				(i32 0) (i32 0) (u32 0)))))
 
 	(fn
-		(:doc `Build one measured source tree, preserve its rows, and register its active definitions.`)
+		(:doc `Keep a file's selected declaration indices in its reserved range of the flat table.`)
+		copy_selections
+		(params (declarations (shared-slice SelectedDeclaration)) (count i32) (base i32)
+			(selected (mut-slice SelectedDeclaration)))
+		(returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Keep selected declaration rows in source order with their rebased node indices.")
+				(i32.lt (local index) (local count))
+				(body
+					(let node (record.get (slice.load (local declarations) (local index)) node))
+					(slice.store (local selected) (i32.add.wrapping (local base) (local index))
+						(record.make SelectedDeclaration (node (i32.add.wrapping (local base) (local node)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn
+		(:doc `Build one measured source tree and register this file's defining record layouts.
+
+		Retain active declaration indices in the file's reserved tree range
+		so signature checking can follow selection order after all layouts exist.`)
 		prepare_graph_file
 		(params (arena (shared-slice u8)) (source (shared-slice u8)) (input SuppliedFile) (tree ScalarTree)
-			(file i32) (root i32) (flat (mut-slice SourceNode))
-			(functions (mut-slice ScalarFunction)) (parameters (mut-slice ScalarParameter)) (records (mut-slice ScalarRecord))
-			(previous GraphSignatures))
+			(file i32) (flat (mut-slice SourceNode)) (selected (mut-slice SelectedDeclaration)) (views (mut-slice ModuleRead))
+			(records (mut-slice ScalarRecord)) (next_record i32))
 		(returns GraphSignatures)
 		(body
 			(let rows (record.get (local tree) rows))
@@ -233,53 +253,102 @@
 			(if
 				(:doc "The source graph already checked admission, metadata, and selection for the same immutable bytes.")
 				(u32.lt (u32 0) (record.get (local module) error))
-				(then (return (call signatures_result (record.get (local previous) functions)
-					(record.get (local previous) params) (record.get (local previous) records) (record.get (local previous) entry) (local file)
+				(then (return (call signatures_result (i32 0) (i32 0) (local next_record) (i32 -1) (local file)
 					(record.get (local module) start) (record.get (local module) end) (record.get (local module) error)))))
-			(call copy_tree (borrow-shared (local nodes)) (borrow-mut (local flat))
-				(record.get (local tree) base) (record.get (local input) source_start))
-			(return (call register_file (borrow-shared (local arena)) (borrow-shared (local flat))
-				(borrow-shared (local declarations)) (local module) (local input) (local tree) (local file)
-				(local root) (borrow-mut (local functions)) (borrow-mut (local parameters)) (borrow-mut (local records)) (local previous)))))
+			(let base (record.get (local tree) base))
+			(let source_base (record.get (local input) source_start))
+			(call copy_tree (borrow-shared (local nodes)) (borrow-mut (local flat)) (local base) (local source_base))
+			(let module_id (call graph_module_key (borrow-shared (local arena)) (borrow-shared (local flat))
+				(local module) (local input) (local base)))
+			(let layouts (call register_module_records (borrow-shared (local arena)) (borrow-shared (local flat))
+				(borrow-shared (local declarations)) (record.get (local module) count) (local base)
+				(local file) (local module_id) (borrow-mut (local records)) (local next_record)))
+			(if
+				(:doc "Translate any defining layout error back to the original file view.")
+				(u32.lt (u32 0) (record.get (local layouts) error))
+				(then (return (call signatures_result (i32 0) (i32 0) (local next_record) (i32 -1) (local file)
+					(i32.sub.wrapping (record.get (local layouts) start) (local source_base))
+					(i32.sub.wrapping (record.get (local layouts) end) (local source_base)) (record.get (local layouts) error)))))
+			(slice.store (local views) (local file) (local module))
+			(call copy_selections (borrow-shared (local declarations)) (record.get (local module) count)
+				(local base) (borrow-mut (local selected)))
+			(return (call signatures_result (i32 0) (i32 0) (record.get (local layouts) operand) (i32 -1) (i32 -1)
+				(i32 0) (i32 0) (u32 0)))))
 
 	(fn
-		(:doc `Collect signatures and source rows for every reached active file before checking any bodies.`)
-		prepare_graph
+		(:doc `Check the reached signatures in their original declaration order.`)
+		register_graph_signatures
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
-			(trees (shared-slice ScalarTree)) (root i32) (nodes (mut-slice SourceNode))
-			(functions (mut-slice ScalarFunction)) (parameters (mut-slice ScalarParameter)) (records (mut-slice ScalarRecord)))
+			(trees (shared-slice ScalarTree)) (bindings (shared-slice GraphBinding)) (root i32) (nodes (shared-slice SourceNode))
+			(selected (shared-slice SelectedDeclaration)) (views (shared-slice ModuleRead))
+			(functions (mut-slice ScalarFunction)) (parameters (mut-slice ScalarParameter))
+			(records (shared-slice ScalarRecord)) (next_record i32))
 		(returns GraphSignatures)
 		(body
 			(let-mut next_function (i32 0))
 			(let-mut next_param (i32 0))
-			(let-mut next_record (i32 0))
 			(let-mut entry (i32 -1))
 			(let-mut file (i32 0))
 			(while
-				(:doc "Use the canonical file table so diamonds and independent path aliases share a definition.")
+				(:doc "Register signatures in canonical file order after their imported layouts are available.")
 				(i32.lt (local file) (slice.len (local files)))
 				(body
 					(if
-						(:doc "An inactive or unreachable file contributes no emitted declarations.")
+						(:doc "Only reached active files have a recorded declaration view.")
+						(record.get (slice.load (local modules) (local file)) active)
+						(then
+							(let signatures (call register_file_signatures (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(borrow-shared (local selected)) (slice.load (local views) (local file))
+								(slice.load (local files) (local file)) (slice.load (local trees) (local file)) (local file)
+								(local root) (borrow-mut (local functions)) (borrow-mut (local parameters))
+								(borrow-shared (local records)) (borrow-shared (local bindings))
+								(call signatures_result (local next_function) (local next_param) (local next_record) (local entry)
+									(i32 -1) (i32 0) (i32 0) (u32 0))))
+							(if
+								(:doc "A failed signature retains the original file and source span.")
+								(u32.lt (u32 0) (record.get (local signatures) error))
+								(then (return (local signatures))))
+							(set (local next_function) (record.get (local signatures) functions))
+							(set (local next_param) (record.get (local signatures) params))
+							(set (local entry) (record.get (local signatures) entry))))
+					(set (local file) (i32.add.wrapping (local file) (i32 1)))))
+			(return (call signatures_result (local next_function) (local next_param) (local next_record) (local entry) (i32 -1)
+				(i32 0) (i32 0) (u32 0)))))
+
+	(fn
+		(:doc `Collect every defining layout before any reached function signature uses it.`)
+		prepare_graph
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
+			(trees (shared-slice ScalarTree)) (bindings (shared-slice GraphBinding)) (root i32) (nodes (mut-slice SourceNode))
+			(functions (mut-slice ScalarFunction)) (parameters (mut-slice ScalarParameter)) (records (mut-slice ScalarRecord)))
+		(returns GraphSignatures)
+		(body
+			(let-mut selected (array.alloc SelectedDeclaration (slice.len (local nodes))))
+			(let-mut views (array.alloc ModuleRead (slice.len (local files))))
+			(let-mut next_record (i32 0))
+			(let-mut file (i32 0))
+			(while
+				(:doc "Use one layout per definition in the canonical file table.")
+				(i32.lt (local file) (slice.len (local files)))
+				(body
+					(if
+						(:doc "An inactive or unreachable file contributes no layouts or selected declarations.")
 						(record.get (slice.load (local modules) (local file)) active)
 						(then
 							(let input (slice.load (local files) (local file)))
 							(let checked (call prepare_graph_file (borrow-shared (local arena))
 								(borrow-shared (slice.range (local arena) (record.get (local input) source_start)
 									(record.get (local input) source_end)))
-								(local input) (slice.load (local trees) (local file)) (local file) (local root)
-								(borrow-mut (local nodes)) (borrow-mut (local functions)) (borrow-mut (local parameters))
-								(borrow-mut (local records))
-								(call signatures_result (local next_function) (local next_param) (local next_record) (local entry)
-									(i32 -1) (i32 0) (i32 0) (u32 0))))
+								(local input) (slice.load (local trees) (local file)) (local file)
+								(borrow-mut (local nodes)) (borrow-mut (local selected)) (borrow-mut (local views))
+								(borrow-mut (local records)) (local next_record)))
 							(if
-								(:doc "Stop before checking any bodies if a reached signature is invalid.")
+								(:doc "Stop at the originating file if a reached record layout is invalid.")
 								(u32.lt (u32 0) (record.get (local checked) error))
 								(then (return (local checked))))
-							(set (local next_function) (record.get (local checked) functions))
-							(set (local next_param) (record.get (local checked) params))
-							(set (local next_record) (record.get (local checked) records))
-							(set (local entry) (record.get (local checked) entry))))
+							(set (local next_record) (record.get (local checked) records))))
 					(set (local file) (i32.add.wrapping (local file) (i32 1)))))
-			(return (call signatures_result (local next_function) (local next_param) (local next_record) (local entry) (i32 -1)
-				(i32 0) (i32 0) (u32 0))))))
+			(return (call register_graph_signatures (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings)) (local root)
+				(borrow-shared (local nodes)) (borrow-shared (local selected)) (borrow-shared (local views))
+				(borrow-mut (local functions)) (borrow-mut (local parameters)) (borrow-shared (local records)) (local next_record))))))

@@ -179,7 +179,7 @@ initializer exactly once in the order written. Supply every field once
 with its declared type. A local stores the result by value, and
 `(record.get (local tok) start)` reads a field with its exact type.
 
-Functions can take and return records declared in their defining module.
+Functions can take and return locally declared or explicitly imported records.
 Calls pass these values by copy, and a caller retains its original local.
 An argument or return must match the defining record identity, so two
 types with the same fields remain distinct. Record layout declarations
@@ -342,7 +342,7 @@ requested function is unavailable in the selected module. Code 16 reports
 the first incoming call that exceeds the supplied output capacity.
 
 The [graph resolver](source/graph.wove) reads a supplied virtual file table
-and binds active function imports in each file's namespace. The table maps
+and binds active function and record imports in separate namespaces. The table maps
 normalized absolute paths to defining file identities and source ranges in a
 shared byte arena. Relative imports use the directory of the reached path.
 Stage 2 resolves virtual paths lexically before lookup, so a directory
@@ -352,26 +352,33 @@ Several paths can refer to one identity, which the resolver reads once.
 An empty `only` still visits its provider. An excluded module contributes
 no names or nested imports.
 
+In an `only` list, `Token` or `(as Token read_token)` selects a
+function. `(type Token)` or `(type (as Token LocalToken))` selects a
+record. The same name can refer to one function and one type in a file.
+Each selector binds a declaration defined by the provider.
+
 Each binding identifies the importing namespace and the name span in that
-file. Its target is the defining file identity and function's node index
+file. Its target is the defining file identity and declaration node index
 in the defining source tree. Earlier reader diagnostics keep their codes
 and add the identity of the file where they originated.
 
 | Code | Failure | Primary span |
 | --- | --- | --- |
 | 16 | Short graph storage | The next row's source node, when available |
-| 26 | Malformed use, selector, or function name | The originating form or operand |
+| 26 | Malformed use, selector, or declaration name | The originating form or operand |
 | 27 | Missing active provider | The importing use |
 | 28 | Active import cycle | The closing use |
-| 29 | Unavailable function | The requested name |
+| 29 | Unavailable function or type | The requested name |
 | 30 | Conflicting binding | The new local name |
 | 31 | Excluded entry module | The entry module |
 
 The [scalar graph compiler](emit/graph.wove) consumes the resolver's
 active modules and populated bindings. It checks all reached scalar
 signatures and resolves every direct call in the caller's file before
-emitting C. A definition has one symbol across aliases and diamond
-edges. Its graph symbol uses the defining file's canonical virtual
+emitting C. Signatures and constructors resolve record names through
+the current file's type bindings. Each record keeps one C typedef
+across aliases, and each function has one symbol across aliases and
+diamond edges. Its graph symbol uses the defining file's canonical virtual
 path and declared module name for the namespace. Library functions
 named `main` have ordinary scalar signatures. The root's `main` keeps
 the executable ABI.
@@ -448,8 +455,9 @@ suffix and identity collisions, and source locations for invalid calls.
 
 The [graph fixtures](../tests/stage-2/source_graphs.tsv) pass virtual paths
 and raw source files to `--graph ENTRY CAPACITY (IDENTITY PATH FILE)...`.
-The probe prints the reached module rows, local bindings, and their defining
-identities and node indices. A failure gives the code and byte span with
+The probe prints the reached module rows and local bindings with their
+defining identities and node indices. It prints `binding` for functions
+and `type-binding` for records. A failure gives the code and byte span with
 one-based coordinates in its original file.
 
 Use `--callers FILE NAME [START END [CAPACITY]]` to inspect a function by
