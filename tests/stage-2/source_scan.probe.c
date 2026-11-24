@@ -25,10 +25,10 @@
 #define decode_string wv_seed_fn_63
 #define form_parts wv_seed_fn_65
 #define read_module wv_seed_fn_74
-#define emit_module wv_seed_fn_90
-#define resolve_graph wv_seed_fn_103
-#define inspect_callers wv_seed_fn_185
-#define run_scalar_graph wv_seed_fn_198
+#define emit_module wv_seed_fn_92
+#define resolve_graph wv_seed_fn_105
+#define inspect_callers wv_seed_fn_188
+#define run_scalar_graph wv_seed_fn_201
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;

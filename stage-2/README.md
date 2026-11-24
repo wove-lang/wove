@@ -181,6 +181,12 @@ return their signed 32-bit result modulo 2^32. Each binary operand is
 evaluated once, left to right. Emitted C widens the arithmetic,
 reduces it to 32 bits as unsigned, and produces an in-range signed result.
 
+`(bool.and left right)` evaluates the right operand when the left is true.
+`(bool.or left right)` evaluates it when the left is false. Both operands
+are type-checked as `bool`. Each operand that runs does so once, with the
+left first. `(bool.not value)` negates its single `bool` operand. All three
+forms return `bool`.
+
 A statement `(if condition (then ...) (else ...))` checks its condition
 as `bool` and executes only the selected arm. An omitted `else` falls
 through when the condition is false. Each arm starts its own scope and
