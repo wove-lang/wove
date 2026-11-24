@@ -6,9 +6,13 @@
 	(struct SourceDiagnostic (fields (error u32) (start i32) (end i32)))
 	(struct SourcePosition (fields (line u32) (column u32)))
 	(struct FormCheck (fields (rows u32) (start i32) (end i32) (error u32)))
+	(struct SourceNode
+		(fields (kind u32) (start i32) (end i32) (parent i32) (first_child i32) (next_sibling i32)))
 
 	(with-meta
-		(meta (:doc "Match the seed's ASCII separators, U+0009–U+000D and U+001C–U+0020."))
+		(meta
+			(:doc "Match the seed's ASCII separators, U+0009–U+000D and U+001C–U+0020.")
+			(:pragma (inline always)))
 		(fn is_ascii_whitespace
 			(params (byte u8))
 			(returns bool)
@@ -19,7 +23,9 @@
 					(bool.and (bool.not (u8.lt (local byte) (u8 28))) (u8.lt (local byte) (u8 33))))))))
 
 	(with-meta
-		(meta (:doc "Parentheses are both atom boundaries and one-byte tokens."))
+		(meta
+			(:doc "Parentheses are both atom boundaries and one-byte tokens.")
+			(:pragma (inline always)))
 		(fn is_parenthesis
 			(params (byte u8))
 			(returns bool)
@@ -27,7 +33,9 @@
 				(return (bool.or (u8.eq (local byte) (u8 40)) (u8.eq (local byte) (u8 41)))))))
 
 	(with-meta
-		(meta (:doc "Leave comment markers and quote delimiters for their own token scan."))
+		(meta
+			(:doc "Leave comment markers and quote delimiters for their own token scan.")
+			(:pragma (inline always)))
 		(fn is_semicolon_or_quote
 			(params (byte u8))
 			(returns bool)
@@ -104,7 +112,9 @@
 				(return (local cursor)))))
 
 	(with-meta
-		(meta (:doc "Keep line comments bounded by physical CR and LF bytes."))
+		(meta
+			(:doc "Keep line comments bounded by physical CR and LF bytes.")
+			(:pragma (inline always)))
 		(fn is_line_ending
 			(params (byte u8))
 			(returns bool)
@@ -130,7 +140,9 @@
 				(return (local cursor)))))
 
 	(with-meta
-		(meta (:doc "Recognize the JSON short escapes after their opening backslash."))
+		(meta
+			(:doc "Recognize the JSON short escapes after their opening backslash.")
+			(:pragma (inline always)))
 		(fn is_short_escape
 			(params (byte u8))
 			(returns bool)
@@ -147,7 +159,9 @@
 							(bool.or (u8.eq (local byte) (u8 114)) (u8.eq (local byte) (u8 116))))))))))
 
 	(with-meta
-		(meta (:doc "Accept ASCII digits and both cases of A through F in Unicode escapes."))
+		(meta
+			(:doc "Accept ASCII digits and both cases of A through F in Unicode escapes.")
+			(:pragma (inline always)))
 		(fn is_hex_digit
 			(params (byte u8))
 			(returns bool)
@@ -294,7 +308,9 @@
 				(return (i32 0)))))
 
 	(with-meta
-		(meta (:doc "A continuation byte has prefix 10 in binary."))
+		(meta
+			(:doc "A continuation byte has prefix 10 in binary.")
+			(:pragma (inline always)))
 		(fn is_utf8_continuation
 			(params (byte u8))
 			(returns bool)
@@ -605,6 +621,120 @@
 					(then (return (call form_failure (u32 6) (local length) (local length)))))
 				(return (record.make FormCheck
 					(rows (local rows)) (start (local root_start)) (end (local root_end)) (error (u32 0)))))))
+
+	(with-meta
+		(meta (:doc "Initialize a row with its parent and empty child and sibling links."))
+		(fn new_source_node
+			(params (kind u32) (start i32) (end i32) (parent i32))
+			(returns SourceNode)
+			(body
+				(return (record.make SourceNode
+					(kind (local kind)) (start (local start)) (end (local end)) (parent (local parent))
+					(first_child (i32 -1)) (next_sibling (i32 -1)))))))
+
+	(with-meta
+		(meta (:doc "Replace a row's end and outgoing links while keeping its identity and parent."))
+		(fn revise_source_node
+			(params (node SourceNode) (end i32) (first_child i32) (next_sibling i32))
+			(returns SourceNode)
+			(body
+				(return (record.make SourceNode
+					(kind (record.get (local node) kind))
+					(start (record.get (local node) start))
+					(end (local end))
+					(parent (record.get (local node) parent))
+					(first_child (local first_child))
+					(next_sibling (local next_sibling)))))))
+
+	(with-meta
+		(meta (:doc "Append a child in source order using the open parent's end field to track its last child."))
+		(fn append_source_child
+			(params (nodes (mut-slice SourceNode)) (parent i32) (index i32) (child SourceNode))
+			(returns void)
+			(body
+				(let container (slice.load (local nodes) (local parent)))
+				(let tail (record.get (local container) end))
+				(let-mut first (record.get (local container) first_child))
+				;; A first child sets the container entry point; later children extend the sibling chain.
+				(if (i32.lt (local tail) (i32 0))
+					(then (set (local first) (local index)))
+					(else
+						(let sibling (slice.load (local nodes) (local tail)))
+						(slice.store (local nodes) (local tail)
+							(call revise_source_node (local sibling)
+								(record.get (local sibling) end)
+								(record.get (local sibling) first_child)
+								(local index)))))
+				(slice.store (local nodes) (local parent)
+					(call revise_source_node (local container) (local index) (local first)
+						(record.get (local container) next_sibling)))
+				(slice.store (local nodes) (local index) (local child)))))
+
+	(with-meta
+		(meta (:doc "Finalize the byte span once an open container has received all of its children."))
+		(fn seal_source_node
+			(params (nodes (mut-slice SourceNode)) (index i32) (node SourceNode) (end i32))
+			(returns void)
+			(body
+				(slice.store (local nodes) (local index)
+					(call revise_source_node (local node) (local end)
+						(record.get (local node) first_child)
+						(record.get (local node) next_sibling))))))
+
+	(with-meta
+		(meta
+			(:doc "Materialize the checked view as a source-ordered tree in the caller's record slice.")
+			(:expect parser.flat_source_tree
+				(issue "https://github.com/wove-lang/wove/issues/45")))
+		(fn build_source_tree
+			(params (source (shared-slice u8)) (checked FormCheck) (nodes (mut-slice SourceNode)))
+			(returns FormCheck)
+			(body
+				;; Leave storage alone when the same view failed its form check.
+				(if (u32.lt (u32 0) (record.get (local checked) error))
+					(then (return (local checked))))
+				(let capacity (int.convert u32 (slice.len (local nodes))))
+				;; The row count from admission guarantees room for every write below.
+				(if (u32.lt (local capacity) (record.get (local checked) rows))
+					(then
+						(return (call form_failure (u32 11)
+							(record.get (local checked) start) (record.get (local checked) end)))))
+				(let length (slice.len (local source)))
+				(slice.store (local nodes) (i32 0) (call new_source_node (u32 0) (i32 0) (i32 -1) (i32 -1)))
+				(let-mut cursor (i32 0))
+				(let-mut parent (i32 0))
+				(let-mut next_index (i32 1))
+				;; An open form's parent link acts as the stack for the admitted token stream.
+				(while (i32.lt (local cursor) (local length))
+					(body
+						(let token (call scan_token (borrow-shared (local source)) (local cursor)))
+						(let kind (record.get (local token) kind))
+						(let end (record.get (local token) end))
+						(set (local cursor) (local end))
+						;; The closer seals its form rather than occupying its own row.
+						(if (u32.eq (local kind) (u32 41))
+							(then
+								(let open_node (slice.load (local nodes) (local parent)))
+								(call seal_source_node (borrow-mut (local nodes)) (local parent) (local open_node) (local end))
+								(set (local parent) (record.get (local open_node) parent))))
+						;; Each opener, operand, and comment appends one child row.
+						(if (bool.not (bool.or (u32.eq (local kind) (u32 0)) (u32.eq (local kind) (u32 41))))
+							(then
+								(let is_form (u32.eq (local kind) (u32 40)))
+								(let-mut node_end (local end))
+								;; An open form starts with no last child until a token is appended.
+								(if (local is_form)
+									(then (set (local node_end) (i32 -1))))
+								(let child (call new_source_node (local kind) (record.get (local token) start)
+									(local node_end) (local parent)))
+								(call append_source_child (borrow-mut (local nodes)) (local parent) (local next_index) (local child))
+								;; Subsequent tokens belong to the new form until its closer.
+								(if (local is_form)
+									(then (set (local parent) (local next_index))))
+								(set (local next_index) (i32.add.wrapping (local next_index) (i32 1)))))))
+				(let root (slice.load (local nodes) (i32 0)))
+				(call seal_source_node (borrow-mut (local nodes)) (i32 0) (local root) (local length))
+				(return (local checked)))))
 
 	(with-meta
 		(meta (:doc "Supply the seed entry point while the fixture provides input slices."))
