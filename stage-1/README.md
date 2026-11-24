@@ -6,11 +6,11 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 # Stage 1 seed
 
 The Python seed reads one module of tagged IR forms and emits C11 to stdout.
-The subset covers straight-line functions that return `u8`, `i32`, `u32`,
-`bool`, or `void`, owned byte arrays, and call-scoped shared and exclusive
-slice borrows.
-Scalar functions end in an explicit return. Void functions complete at the end
-of their body. A source rejection prints the filename and line.
+The subset covers functions that return `u8`, `i32`, `u32`, `bool`, or
+`void`, owned byte arrays, and call-scoped shared and exclusive slice
+borrows. Every path through a scalar function returns a value. A void
+function can return without a value or complete at the end of its body.
+A source rejection prints the filename and line.
 
 Write integer literals as typed decimal nodes such as `(u32 4294967295)`.
 The seed checks the range of each literal and preserves its exact type
@@ -26,6 +26,12 @@ the operation's named type.
 Write boolean literals as `(bool true)` or `(bool false)`. Equality and
 less-than forms such as `(u8.eq (local byte) (u8 40))` and `(i32.lt (i32 -1)
 (i32 0))` take two operands of the named integer type and return `bool`.
+
+An `if` statement takes a boolean condition, a `(then ...)` block, and an
+optional `(else ...)` block. Only the selected block executes. Each arm
+releases its local owners on exit, and a return releases all enclosing scopes.
+An outer binding is available after the branch when every continuing path
+still owns it. An omitted `else` contributes the incoming state.
 
 `slice.load` reads a `u8` from either kind of byte slice. `slice.store` needs
 a mutable byte slice and writes to the owner's storage. Both take an `i32`

@@ -60,7 +60,6 @@ class Value:
 class Binding:
 	value: Value
 	writable: bool = False
-	moved: bool = False
 
 
 @dataclass(frozen=True)
@@ -161,34 +160,45 @@ def signature(function: Function) -> str:
 
 
 class FunctionEmitter:
-	# Initialize the bindings, temporaries, and outstanding loans for one function.
+	# Initialize the function scope, C names, and ownership state.
 	def __init__(self, function: Function, functions: dict[str, Function], source: str):
 		self.function = function
 		self.functions = functions
 		self.source = source
 		self.lines = []
-		self.bindings = {
+		self.scopes = [{
 			name: Binding(Value(kind, f"wv_value_{index}"))
 			for index, (name, kind) in enumerate(function.params)
-		}
-		self.next_value = len(self.bindings)
+		}]
+		self.next_value = len(function.params)
+		self.moved: set[Binding] = set()
 		self.loans: list[tuple[Binding, str]] = []
+
+	# Indent generated statements at the current lexical scope.
+	def emit_line(self, line: str) -> None:
+		self.lines.append("    " * len(self.scopes) + line)
 
 	# Evaluate each operation in source order before emitting its consumer.
 	def temporary(self, kind: str, expression: str) -> Value:
 		name = f"wv_value_{self.next_value}"
 		self.next_value += 1
-		self.lines.append(f"    {C_TYPE[kind]} {name} = {expression};")
+		self.emit_line(f"{C_TYPE[kind]} {name} = {expression};")
 		return Value(kind, name)
 
 	# Resolve a live place and report failures at the operation using it.
 	def local(self, node: Node, line: int) -> Binding:
 		name, = form(node, "local", 1).operands
-		binding = self.bindings.get(identifier(name))
-		# A missing or moved binding cannot supply a place.
-		if binding is None or binding.moved:
-			raise SourceError(line)
-		return binding
+		symbol = identifier(name)
+		# The nearest declaration shadows any outer binding with the same name.
+		for scope in reversed(self.scopes):
+			binding = scope.get(symbol)
+			# Stop at the first declaration so a moved shadow still hides the outer name.
+			if binding is not None:
+				# A move on any incoming path makes this place unavailable.
+				if binding in self.moved:
+					raise SourceError(line)
+				return binding
+		raise SourceError(line)
 
 	# Require the exact result type at the operation that consumes it.
 	def typed(self, node: Node, kind: str) -> Value:
@@ -250,7 +260,7 @@ class FunctionEmitter:
 		expression = f"{callee.c_name}({', '.join(values)})"
 		# A void call is a statement and supplies no C value to a consumer.
 		if callee.result == VOID:
-			self.lines.append(f"    {expression};")
+			self.emit_line(f"{expression};")
 			result = Value(VOID, "")
 		# Scalar calls capture their result before the next operation.
 		else:
@@ -340,8 +350,8 @@ class FunctionEmitter:
 			if binding.value.kind != OWNED or any(owner is binding for owner, _ in self.loans):
 				raise SourceError(node.line)
 			result = self.temporary(OWNED, binding.value.c)
-			binding.moved = True
-			self.lines.append(f"    {binding.value.c} = NULL;")
+			self.moved.add(binding)
+			self.emit_line(f"{binding.value.c} = NULL;")
 			return result
 
 		# Read the length from the non-owning slice descriptor.
@@ -384,66 +394,133 @@ class FunctionEmitter:
 
 		raise SourceError(node.line)
 
-	# Lower statements that bind a value, call a void function, or store a byte.
-	def statement(self, node: Node) -> None:
+	# Release owned slots from the scopes being exited in reverse declaration order.
+	def cleanup(self, scopes: list[dict[str, Binding]]) -> None:
+		# Clean up inner scopes before outer ones.
+		for scope in reversed(scopes):
+			# An earlier declaration outlives a later one in the same scope.
+			for binding in reversed(scope.values()):
+				# A moved slot holds NULL on the path that moved it.
+				if binding.value.kind == OWNED:
+					self.emit_line(f"wvrt_array_drop({binding.value.c});")
+
+	# Evaluate the return value before releasing every scope the return leaves.
+	def emit_return(self, node: Form) -> None:
+		# A void return leaves the function without a value.
+		if self.function.result == VOID:
+			form(node, arity=0)
+			exit_line = "return;"
+		# Scalar expressions produce a value before their source scopes are dropped.
+		else:
+			operand, = form(node, arity=1).operands
+			value = self.typed(operand, self.function.result)
+			exit_line = f"return {value.c};"
+		self.cleanup(self.scopes)
+		self.emit_line(exit_line)
+
+	# Evaluate statements in order until the current path returns.
+	def statements(self, nodes: tuple[Node, ...]) -> bool:
+		# A terminating statement has already emitted all required cleanup.
+		for node in nodes:
+			# Subsequent statements are unreachable on a terminated path.
+			if not self.statement(node):
+				return False
+		return True
+
+	# Enter an arm's scope and drop its locals when the arm falls through.
+	def block(self, node: Form) -> bool:
+		self.scopes.append({})
+		continues = self.statements(node.operands)
+		# A return has already dropped the locals in this arm.
+		if continues:
+			self.cleanup(self.scopes[-1:])
+		scope = self.scopes.pop()
+		self.moved.difference_update(scope.values())
+		return continues
+
+	# Emit a boolean branch and merge ownership on paths that reach its join.
+	def conditional(self, node: Form) -> bool:
+		# An if has a condition, a then arm, and at most one else arm.
+		if len(node.operands) not in (2, 3):
+			raise SourceError(node.line)
+		test, then_node, *otherwise = node.operands
+		then_arm = form(then_node, "then")
+		else_arm = form(otherwise[0], "else") if otherwise else None
+		condition = self.typed(test, BOOL)
+
+		# Both arms start with the state after evaluating the condition.
+		incoming = self.moved.copy()
+		self.emit_line(f"if ({condition.c}) {{")
+		then_continues = self.block(then_arm)
+		then_moved = self.moved if then_continues else set()
+		self.moved = incoming
+
+		# An omitted else reaches the join with the incoming state.
+		else_continues = True
+		if else_arm is not None:
+			self.emit_line("} else {")
+			else_continues = self.block(else_arm)
+		self.emit_line("}")
+
+		# Any continuing arm can make an outer owner unavailable at the join.
+		self.moved = then_moved | self.moved if else_continues else then_moved
+		return then_continues or else_continues
+
+	# Lower a statement and report whether execution can continue past it.
+	def statement(self, node: Node) -> bool:
 		statement = form(node)
+		# Branches emit and join their own lexical scopes.
+		if statement.tag == "if":
+			return self.conditional(statement)
+
+		# A return exits the function and every enclosing arm.
+		if statement.tag == "return":
+			self.emit_return(statement)
+			return False
+
 		# Store directly into the mutable view's backing storage.
 		if statement.tag == "slice.store":
 			target, subscript, operand = form(statement, arity=3).operands
 			view = self.slice(target, node.line, writable=True)
 			index = self.typed(subscript, I32)
 			value = self.typed(operand, U8)
-			self.lines.append(
-				f"    wvrt_slice_store_u8({view.c}.wvrt_items, {view.c}.wvrt_length, "
+			self.emit_line(
+				f"wvrt_slice_store_u8({view.c}.wvrt_items, {view.c}.wvrt_length, "
 				f"{index.c}, {value.c}, {self.site(node.line)});"
 			)
-			return
+			return True
 
 		# Calls used as statements complete without a result.
 		if statement.tag == "call":
 			self.typed(statement, VOID)
-			return
+			return True
 
 		# Every other statement in the seed introduces a binding.
 		if statement.tag not in ("let", "let-mut"):
 			raise SourceError(node.line)
 		name, initializer = form(statement, arity=2).operands
 		symbol = identifier(name)
-		# A duplicate name would hide the original owner or parameter.
-		if symbol in self.bindings:
+		scope = self.scopes[-1]
+		# Each name can be declared once in the current lexical scope.
+		if symbol in scope:
 			raise SourceError(name.line)
 		value = self.expression(initializer)
 		# A binding needs a value to own or copy.
 		if value.kind == VOID:
 			raise SourceError(initializer.line)
-		self.bindings[symbol] = Binding(value, writable=statement.tag == "let-mut")
+		scope[symbol] = Binding(value, writable=statement.tag == "let-mut")
+		return True
 
-	# Emit a straight-line body and release its owners before leaving the function.
+	# Emit the function and require a result from each scalar exit path.
 	def emit(self) -> list[str]:
 		body = self.function.body
-		statements = body.operands
-		result = None
-		# Scalar functions end in a return, while void functions fall through.
-		if self.function.result != VOID:
-			# The body must supply a return operand.
-			if not statements:
-				raise SourceError(body.line)
-			*statements, last = statements
-			result, = form(last, "return", 1).operands
-
 		self.lines.append(signature(self.function) + " {")
-		# Evaluate statements in source order while their locals remain in scope.
-		for node in statements:
-			self.statement(node)
-		value = self.typed(result, self.function.result) if result is not None else None
-		# Release owners in reverse declaration order after evaluating the result.
-		for binding in reversed(self.bindings.values()):
-			# The last owner is responsible for the release.
-			if binding.value.kind == OWNED and not binding.moved:
-				self.lines.append(f"    wvrt_array_drop({binding.value.c});")
-		# A scalar result is ready to return after cleanup.
-		if value is not None:
-			self.lines.append(f"    return {value.c};")
+		# A path reaching the end of the body may only exit a void function.
+		if self.statements(body.operands):
+			# A scalar result must be supplied by an explicit return.
+			if self.function.result != VOID:
+				raise SourceError(body.line)
+			self.cleanup(self.scopes)
 		self.lines.extend(["}", ""])
 		return self.lines
 
