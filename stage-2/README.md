@@ -169,6 +169,15 @@ reads, and direct calls. The selected `main` has the ABI signature
 `int main(void)`. Forward calls use checked prototypes, and nested calls
 evaluate from left to right.
 
+[FNV-1a](hashing/fnv1a.wove) exposes the 31-bit seed with `fnv1a_seed`
+and updates it one raw byte at a time with `fnv1a_byte`. The declaration
+identity builder supplies the order and delimiters for its components.
+
+[Base32hex](hashing/base32hex.wove) exposes `base32hex31_width` and
+`encode_base32hex31`. The encoder writes all seven digits at the requested
+offset and returns true. An out-of-range ID or output span returns false
+and preserves the destination.
+
 The [C name generator](emit/text.wove) takes a `CNameRole`, a checked ID,
 and the source name's byte span. The seed represents the role enum with
 a record and named constructors. The generator writes
