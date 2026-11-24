@@ -7,6 +7,9 @@
 	spans and links for forms, atoms, and metadata. Rendering uses those links to copy
 	the original token spellings into caller-provided storage.`)
 	source_scan
+
+	(use wove-file "../text/utf8.wove" (only utf8_invalid_offset valid_utf8_width))
+
 	(struct Token (fields (kind u32) (start i32) (end i32) (error u32)))
 	(struct SourceDiagnostic (fields (error u32) (start i32) (end i32)))
 	(struct SourcePosition (fields (line u32) (column u32)))
@@ -315,71 +318,6 @@
 			(return (record.make Token (kind (u32 1)) (error (u32 0)) (start (local start)) (end (local end))))))
 
 	(fn
-		(:doc `Classify an ASCII byte or a legal lead byte by the width of its scalar.`)
-		utf8_width
-		(params (lead u8))
-		(returns i32)
-		(body
-			(if
-				(:doc "ASCII scalars occupy a single byte.")
-				(u8.lt (local lead) (u8 128))
-				(then (return (i32 1))))
-			(if
-				(:doc "Continuations and the overlong two-byte prefixes cannot start a scalar.")
-				(u8.lt (local lead) (u8 194))
-				(then (return (i32 0))))
-			(if
-				(:doc "C2 through DF are the legal two-byte leads.")
-				(u8.lt (local lead) (u8 224))
-				(then (return (i32 2))))
-			(if
-				(:doc "E0 through EF start three-byte scalars.")
-				(u8.lt (local lead) (u8 240))
-				(then (return (i32 3))))
-			(if
-				(:doc "F4 is the last lead that can encode a Unicode scalar.")
-				(u8.lt (local lead) (u8 245))
-				(then (return (i32 4))))
-			(return (i32 0))))
-
-	(fn
-		(:doc `A continuation byte has prefix 10 in binary.`)
-		(:pragma (inline always))
-		is_utf8_continuation
-		(params (byte u8))
-		(returns bool)
-		(body
-			(return (bool.and (bool.not (u8.lt (local byte) (u8 128))) (u8.lt (local byte) (u8 192))))))
-
-	(fn
-		(:doc `Apply the extra restrictions on the first continuation byte.`)
-		valid_utf8_second
-		(params (lead u8) (second u8))
-		(returns bool)
-		(body
-			(if
-				(:doc "Every multibyte scalar needs a continuation at this position.")
-				(bool.not (call is_utf8_continuation (local second)))
-				(then (return (bool false))))
-			(if
-				(:doc "E0 requires a high second byte to avoid a three-byte overlong form.")
-				(u8.eq (local lead) (u8 224))
-				(then (return (bool.not (u8.lt (local second) (u8 160))))))
-			(if
-				(:doc "ED must stop below the surrogate range.")
-				(u8.eq (local lead) (u8 237))
-				(then (return (u8.lt (local second) (u8 160)))))
-			(if
-				(:doc "F0 requires a high second byte to avoid a four-byte overlong form.")
-				(u8.eq (local lead) (u8 240))
-				(then (return (bool.not (u8.lt (local second) (u8 144))))))
-			(if
-				(:doc "F4 must stop at U+10FFFF.")
-				(u8.eq (local lead) (u8 244))
-				(then (return (u8.lt (local second) (u8 144)))))
-			(return (bool true))))
-
-	(fn
 		(:doc `Admit the entire byte view once before tokenization.
 
 		Return -1 for valid UTF-8 or the view-relative byte offset of the first
@@ -389,21 +327,7 @@
 		admit_source
 		(params (source (shared-slice u8)))
 		(returns i32)
-		(body
-			(let length (slice.len (local source)))
-			(let-mut cursor (i32 0))
-			(while
-				(:doc "Keep the cursor at the lead until the whole scalar has been checked.")
-				(i32.lt (local cursor) (local length))
-				(body
-					(let lead (slice.load (local source) (local cursor)))
-					(let width (call valid_utf8_width (borrow-shared (local source)) (local cursor) (local lead)))
-					(if
-						(:doc "Admission reports the lead of the first invalid sequence.")
-						(i32.eq (local width) (i32 0))
-						(then (return (local cursor))))
-					(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))
-			(return (i32 -1))))
+		(body (return (call utf8_invalid_offset (borrow-shared (local source))))))
 
 	(fn
 		(:doc `Return the byte width of a seed separator at the cursor, or zero.`)
@@ -536,42 +460,6 @@
 									(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))))
 					(set (local previous_cr) (u8.eq (local byte) (u8 13)))))
 			(return (record.make SourcePosition (line (local line)) (column (local column))))))
-
-	(fn
-		(:doc `Return the complete UTF-8 scalar width or zero for a malformed sequence.`)
-		valid_utf8_width
-		(params (source (shared-slice u8)) (cursor i32) (lead u8))
-		(returns i32)
-		(body
-			(let width (call utf8_width (local lead)))
-			(let remaining (i32.sub.wrapping (slice.len (local source)) (local cursor)))
-			(if
-				(:doc "Reject truncation before adding the width or reading any suffix bytes.")
-				(bool.or (i32.eq (local width) (i32 0)) (i32.lt (local remaining) (local width)))
-				(then (return (i32 0))))
-			(if
-				(:doc "ASCII needs no continuation loads.")
-				(i32.eq (local width) (i32 1))
-				(then (return (i32 1))))
-			(let second_index (i32.add.wrapping (local cursor) (i32 1)))
-			(let second (slice.load (local source) (local second_index)))
-			(if
-				(:doc "Apply the lead-specific lower and upper bounds on the second byte.")
-				(bool.not (call valid_utf8_second (local lead) (local second)))
-				(then (return (i32 0))))
-			(let end (i32.add.wrapping (local cursor) (local width)))
-			(let-mut tail (i32.add.wrapping (local second_index) (i32 1)))
-			(while
-				(:doc "Check each remaining continuation within the verified span.")
-				(i32.lt (local tail) (local end))
-				(body
-					(let byte (slice.load (local source) (local tail)))
-					(if
-						(:doc "Reject the whole scalar if a tail byte is not a continuation.")
-						(bool.not (call is_utf8_continuation (local byte)))
-						(then (return (i32 0))))
-					(set (local tail) (i32.add.wrapping (local tail) (i32 1)))))
-			(return (local width))))
 
 	(fn
 		(:doc `Carry the first failure's original span back through the form check.`)
