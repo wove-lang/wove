@@ -72,12 +72,23 @@ wvrt_array *wvrt_array_new(int32_t wvrtlength, size_t wvrtelement_size,
 	return wvrt_result;
 }
 
-// Allocate a zeroed Stage 2 byte owner and report failure at its source span.
-wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrtlength, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+// Allocate zero-initialized elements using their native layout and original Wove span.
+wvrt_array *wvrt_array_new_at_span(int32_t wvrtlength, size_t wvrtelement_size, size_t wvrtelement_alignment,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	if (wvrtlength < 0) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "array length cannot be negative"); }
-	wvrt_array *wvrt_result = wvrt_array_try_new(wvrtlength, sizeof(uint8_t), _Alignof(uint8_t));
+	size_t wvrt_count = wvrtlength == 0 ? 1 : (size_t)wvrtlength;
+	// Reject an unrepresentable backing size before requesting storage.
+	if (wvrt_count > SIZE_MAX / wvrtelement_size) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "array allocation size overflow");
+	}
+	wvrt_array *wvrt_result = wvrt_array_try_new(wvrtlength, wvrtelement_size, wvrtelement_alignment);
 	if (wvrt_result == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not allocate array"); }
 	return wvrt_result;
+}
+
+// Supply the native byte layout for the existing Stage 2 byte allocation ABI.
+wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrtlength, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_array_new_at_span(wvrtlength, sizeof(uint8_t), _Alignof(uint8_t), wvrtfile, wvrtstart, wvrtend);
 }
 
 // Retire exactly the active owners in an element range.

@@ -251,6 +251,13 @@ reports an invalid length or allocation failure at the allocation's
 original file identity and byte span. A shared call borrow keeps the
 owner's original storage. A mutable call borrow requires `let-mut`.
 
+For a copyable record, `(array.alloc Token count)` owns `count` zeroed
+records. The runtime allocates with `sizeof` and `_Alignof` of the
+defining C type. A whole-array call borrow uses a slice of the same
+defining record and the allocation's original storage. A `let-mut`
+binding permits exclusive access. The usual scope exits and moves apply
+to record owners.
+
 A shared call argument can use
 `(borrow-shared (slice.range (local source) start end))` with a named byte
 owner or shared byte slice. The source view and its exact `i32` endpoints

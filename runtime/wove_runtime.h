@@ -45,6 +45,8 @@ static inline wvrt_slice wvrt_share_mut_slice(wvrt_mut_slice wvrtview) {
 
 wvrt_array *wvrt_array_new(int32_t wvrt_length, size_t wvrt_element_size,
 	size_t wvrt_element_alignment, wvrt_location wvrt_site);
+wvrt_array *wvrt_array_new_at_span(int32_t wvrt_length, size_t wvrt_element_size, size_t wvrt_element_alignment,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrt_length, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
 wvrt_slice wvrt_slice_range_u8(const void *wvrt_items, int32_t wvrt_length,

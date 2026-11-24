@@ -232,5 +232,6 @@ $(STAGE1)/runtime.tracked.o: $(RUNTIME) $(RUNTIME_HEADER)
 $(STAGE1)/%.tracked.o: $(STAGE1)/%.c $(RUNTIME_HEADER)
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -Dmain=wove_test_main -c "$<" -o "$@"
 
-$(STAGE1)/%.tracked: $(OWNERSHIP_TESTS)/allocations.c $(STAGE1)/%.tracked.o $(STAGE1)/runtime.tracked.o
-	$(CLANG) -std=c11 $(CFLAGS) $^ -o "$@"
+# Relink tracked fixtures when the shared allocator probe changes.
+$(STAGE1)/%.tracked: $(OWNERSHIP_TESTS)/allocations.c $(STAGE1)/%.tracked.o $(STAGE1)/runtime.tracked.o tests/support/array_tracking.h
+	$(CLANG) -std=c11 $(CFLAGS) $(filter-out %.h,$^) -o "$@"
