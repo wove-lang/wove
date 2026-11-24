@@ -11,7 +11,7 @@ manifest=$3
 shift 3
 fixtures=$(dirname "$manifest")
 tab=$(printf '\t')
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/wove-clang-cases.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/wove-ast-cases.XXXXXX")
 trap 'rm -rf "$scratch"' 0
 
 # Report the case and the Wove assertion or C compiler exit status.

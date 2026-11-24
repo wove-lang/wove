@@ -10,7 +10,7 @@ inspector=$3
 gcc=$4
 cxx=$5
 fixtures=$(dirname "$0")
-runner="$fixtures/../clang/check.sh"
+runner="$fixtures/../../support/ast/check.sh"
 
 plugin_dir=$("$gcc" -print-file-name=plugin)
 # GCC must supply headers from the same build that will load the plugin.

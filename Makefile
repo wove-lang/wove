@@ -53,9 +53,10 @@ COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
 CLANG_FIXTURES := tests/stage-2/clang
-CLANG_PROBE := $(STAGE2)/clang/probe
 CLANG_SOURCES := $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
+AST_FIXTURES := tests/support/ast
+AST_PROBE := $(STAGE2)/ast/probe
 GCC_FIXTURES := tests/stage-2/gcc
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
@@ -120,16 +121,16 @@ test-stage-2-config: $(CONFIG_PROGRAM)
 	$(PYTHON) "$(CONFIG_FIXTURES)/check.py" "$(CONFIG_PROGRAM)" "$(CONFIG_FIXTURES)/cases.tsv"
 
 # Check generated C input and captured JSON separately from native command launching.
-test-stage-2-clang: $(CLANG_PROBE) $(CLANG_TEMPLATE)
-	sh "$(CLANG_FIXTURES)/check.sh" "$(CLANG_PROBE)" "$(CLANG_TEMPLATE)" "$(CLANG_FIXTURES)/cases.tsv" $(CLANG)
+test-stage-2-clang: $(AST_PROBE) $(CLANG_TEMPLATE)
+	sh "$(AST_FIXTURES)/check.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" "$(CLANG_FIXTURES)/cases.tsv" $(CLANG)
 
 # Check an archived-format GCC capture through the shared AST lookup fixture.
-test-stage-2-gcc: $(CLANG_PROBE)
-	sh "$(CLANG_FIXTURES)/check.sh" "$(CLANG_PROBE)" "$(CLANG_TEMPLATE)" "$(GCC_FIXTURES)/cases.tsv"
+test-stage-2-gcc: $(AST_PROBE)
+	sh "$(AST_FIXTURES)/check.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" "$(GCC_FIXTURES)/cases.tsv"
 
 # Build and load the plugin only on hosts with matching GNU GCC plugin headers.
-test-stage-2-gcc-live: $(CLANG_PROBE) $(CLANG_TEMPLATE)
-	sh "$(GCC_FIXTURES)/check-live.sh" "$(CLANG_PROBE)" "$(CLANG_TEMPLATE)" stage-2/gcc/inspect.cc "$(GCC)" "$(GCC_CXX)"
+test-stage-2-gcc-live: $(AST_PROBE) $(CLANG_TEMPLATE)
+	sh "$(GCC_FIXTURES)/check-live.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" stage-2/gcc/inspect.cc "$(GCC)" "$(GCC_CXX)"
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
@@ -203,11 +204,11 @@ $(COMMAND_PROGRAM): $(CLI_FIXTURES)/command.probe.c $(COMMAND_PROGRAM).c $(STAGE
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Bring only the JSON and byte helpers into the standalone probe fixture.
-$(CLANG_PROBE).c: $(CLANG_FIXTURES)/probe.wove $(CLANG_SOURCES) $(JSON_FRAME_MODULE) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED)
+$(AST_PROBE).c: $(AST_FIXTURES)/probe.wove $(CLANG_SOURCES) $(JSON_FRAME_MODULE) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
-$(CLANG_PROBE): $(CLANG_FIXTURES)/probe.probe.c $(CLANG_PROBE).c $(STAGE1)/runtime.o
+$(AST_PROBE): $(AST_FIXTURES)/probe.probe.c $(AST_PROBE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
