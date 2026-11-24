@@ -62,8 +62,7 @@ for a parenthesis, and 1 for every other leading byte.
 `check_source_form` validates exactly one top-level tagged form. Each opener
 requires a bare tag as the first significant token. Operands may be atoms,
 quoted strings, or nested forms. Comments remain in source order and count
-toward the row total. Tag spelling and metadata context belong to a later
-pass.
+toward the row total.
 
 The result gives the real root's span, including its closing parenthesis,
 and the number of rows needed for the source tree. Count one synthetic source
@@ -94,6 +93,23 @@ and `parent`, `first_child`, and `next_sibling` indices. An absent link is
 skipping any preceding comment rows. Atom and comment spellings are
 available from the original source bytes.
 
+After building the tree, use `check_source_metadata` with the same source
+view, successful result, and shared node slice. Form heads use
+`[A-Za-z_][A-Za-z0-9_.-]*`. A leading colon marks an entry head only in
+the direct `meta` list operand of a `with-meta` wrapper.
+
+The significant operands of `with-meta` are one `meta` list followed by one
+target. Each significant entry in the list is a colon-tagged form. The
+target is the next significant sibling of the list. Comments and extension
+entries keep their original rows, links, and byte spans.
+
+| Code | Failure | Primary span |
+| --- | --- | --- |
+| 12 | Invalid head spelling | The head atom |
+| 13 | Misplaced metadata head | The colon-prefixed head atom |
+| 14 | Malformed wrapper | The offending operand or the wrapper itself when an operand is missing |
+| 15 | Malformed metadata entry | The offending direct entry |
+
 `make stage-2` emits C with the Python seed and links the scanner with
 its [source fixture](../tests/stage-2/source_scan.probe.c) and the shared
 runtime. Run `make test-stage-2` to exercise those inputs and compare full
@@ -114,3 +130,6 @@ Use `--tree FILE [START END [TREE_CAPACITY]]` to build a tree. It emits the
 form check result followed by the populated nodes. When supplied, the
 capacity is an element count. The fixture verifies that spare storage
 retains its original bytes.
+
+Use `--metadata FILE [START END [TREE_CAPACITY]]` to validate the built
+tree. On success it emits the same rows as `--tree`.

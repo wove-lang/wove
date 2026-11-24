@@ -20,6 +20,7 @@
 #define source_position wv_seed_fn_20
 #define check_source_form wv_seed_fn_24
 #define build_source_tree wv_seed_fn_29
+#define check_source_metadata wv_seed_fn_41
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -381,7 +382,7 @@ static void write_source_node(wvrt_slice parent, int32_t view_start, uint32_t in
 }
 
 // Build into the caller's buffer and verify that all unused storage retains its sentinel.
-static int dump_tree(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity) {
+static int dump_tree(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity, bool metadata) {
 	const FormCheck checked = check_source_form(input);
 	if (capacity < 0) {
 		capacity = (int32_t)checked.wv_field_0;
@@ -407,13 +408,17 @@ static int dump_tree(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t
 		}
 	}
 
-	write_span(parent, start, built.wv_field_0, built.wv_field_1, built.wv_field_2, built.wv_field_3);
+	const wvrt_slice shared_nodes = {bytes, capacity, sizeof(SourceNode)};
+	const FormCheck result = metadata ? check_source_metadata(input, built, shared_nodes) : built;
+	write_span(parent, start, result.wv_field_0, result.wv_field_1, result.wv_field_2, result.wv_field_3);
 	const SourceNode *rows = storage->wvrt_items;
-	for (uint32_t index = 0; index < used; ++index) {
-		write_source_node(parent, start, index, rows[index]);
+	if (result.wv_field_3 == 0) {
+		for (uint32_t index = 0; index < used; ++index) {
+			write_source_node(parent, start, index, rows[index]);
+		}
 	}
 	wvrt_array_drop(storage);
-	return built.wv_field_3 == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+	return result.wv_field_3 == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 // Load the bytes unchanged so newline and UTF-8 offsets survive into the probe.
@@ -453,9 +458,10 @@ static bool read_offset(const char *text, int32_t *offset) {
 static int source_mode(int argc, char **argv) {
 	const bool tokens = strcmp(argv[1], "--tokens") == 0;
 	const bool form = strcmp(argv[1], "--form") == 0;
-	const bool tree = strcmp(argv[1], "--tree") == 0;
+	const bool metadata = strcmp(argv[1], "--metadata") == 0;
+	const bool tree = metadata || strcmp(argv[1], "--tree") == 0;
 	if ((argc != 3 && argc != 5 && !(tree && argc == 6)) || (!tokens && !form && !tree)) {
-		fputs("usage: source_scan [--tokens | --form | --tree] FILE [START END [TREE_CAPACITY]]\n", stderr);
+		fputs("usage: source_scan [--tokens | --form | --tree | --metadata] FILE [START END [TREE_CAPACITY]]\n", stderr);
 		return EXIT_FAILURE;
 	}
 
@@ -483,7 +489,7 @@ static int source_mode(int argc, char **argv) {
 	const wvrt_slice view = wvrt_slice_range_u8(bytes, length, start, end, site);
 	int status;
 	if (tree) {
-		status = dump_tree(parent, view, start, capacity);
+		status = dump_tree(parent, view, start, capacity, metadata);
 	} else {
 		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	}

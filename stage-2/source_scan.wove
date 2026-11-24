@@ -737,6 +737,310 @@
 				(return (local checked)))))
 
 	(with-meta
+		(meta (:doc "Find the first non-comment row at or after a sibling index."))
+		(fn significant_source_node
+			(params (nodes (shared-slice SourceNode)) (start i32))
+			(returns i32)
+			(body
+				(let-mut cursor (local start))
+				;; Follow the sibling links without changing the raw tree.
+				(while (bool.not (i32.lt (local cursor) (i32 0)))
+					(body
+						(let node (slice.load (local nodes) (local cursor)))
+						;; Any non-comment node can participate in form structure.
+						(if (bool.not (u32.eq (record.get (local node) kind) (u32 59)))
+							(then (return (local cursor))))
+						(set (local cursor) (record.get (local node) next_sibling))))
+				(return (i32 -1)))))
+
+	(with-meta
+		(meta
+			(:doc "Recognize the ASCII letter or underscore that begins an identifier head.")
+			(:pragma (inline always)))
+		(fn is_head_start_byte
+			(params (byte u8))
+			(returns bool)
+			(body
+				;; Match the seed's uppercase and lowercase letter ranges.
+				(return (bool.or
+					(u8.eq (local byte) (u8 95))
+					(bool.or
+						(bool.and (bool.not (u8.lt (local byte) (u8 65))) (u8.lt (local byte) (u8 91)))
+						(bool.and (bool.not (u8.lt (local byte) (u8 97))) (u8.lt (local byte) (u8 123)))))))))
+
+	(with-meta
+		(meta
+			(:doc "Recognize identifier continuation bytes, including digits, dot, and hyphen.")
+			(:pragma (inline always)))
+		(fn is_head_tail_byte
+			(params (byte u8))
+			(returns bool)
+			(body
+				;; Keep the head's continuation alphabet identical to the seed's.
+				(return (bool.or
+					(call is_head_start_byte (local byte))
+					(bool.or
+						(bool.or (u8.eq (local byte) (u8 45)) (u8.eq (local byte) (u8 46)))
+						(bool.and (bool.not (u8.lt (local byte) (u8 48))) (u8.lt (local byte) (u8 58)))))))))
+
+	(with-meta
+		(meta
+			(:doc "Check the identifier bytes after the optional metadata colon.")
+			(:pragma (inline always)))
+		(fn is_identifier_head
+			(params (source (shared-slice u8)) (start i32) (end i32))
+			(returns bool)
+			(body
+				;; A colon alone has no identifier and must never trigger a byte load.
+				(if (bool.not (i32.lt (local start) (local end)))
+					(then (return (bool false))))
+				(let first (slice.load (local source) (local start)))
+				;; The leading identifier byte cannot use continuation-only characters.
+				(if (bool.not (call is_head_start_byte (local first)))
+					(then (return (bool false))))
+				(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+				;; Check the rest of the raw spelling up to its exclusive end.
+				(while (i32.lt (local cursor) (local end))
+					(body
+						(let byte (slice.load (local source) (local cursor)))
+						;; A non-ASCII byte or invalid punctuation makes the whole head invalid.
+						(if (bool.not (call is_head_tail_byte (local byte)))
+							(then (return (bool false))))
+						(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+				(return (bool true)))))
+
+	(with-meta
+		(meta
+			(:doc "Compare a byte inside a tag whose width has already been checked.")
+			(:pragma (inline always)))
+		(fn is_head_byte
+			(params (source (shared-slice u8)) (start i32) (offset i32) (byte u8))
+			(returns bool)
+			(body
+				(return (u8.eq
+					(slice.load (local source) (i32.add.wrapping (local start) (local offset)))
+					(local byte))))))
+
+	(with-meta
+		(meta
+			(:doc "Match the literal meta head within its raw byte span.")
+			(:pragma (inline always)))
+		(fn is_meta_head
+			(params (source (shared-slice u8)) (start i32) (end i32))
+			(returns bool)
+			(body
+				;; The width comparison protects all four byte reads.
+				(return (bool.and
+					(i32.eq (i32.sub.wrapping (local end) (local start)) (i32 4))
+					(bool.and
+						(bool.and
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 0) (u8 109))
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 1) (u8 101)))
+						(bool.and
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 2) (u8 116))
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 97)))))))))
+
+	(with-meta
+		(meta
+			(:doc "Match with-meta exactly and reuse the checked meta suffix.")
+			(:pragma (inline always)))
+		(fn is_with_meta_head
+			(params (source (shared-slice u8)) (head SourceNode))
+			(returns bool)
+			(body
+				(let start (record.get (local head) start))
+				(let end (record.get (local head) end))
+				;; Read the prefix and suffix only after checking the full head width.
+				(return (bool.and
+					(i32.eq (i32.sub.wrapping (local end) (local start)) (i32 9))
+					(bool.and
+						(bool.and
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 0) (u8 119))
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 1) (u8 105)))
+						(bool.and
+							(bool.and
+								(call is_head_byte (borrow-shared (local source)) (local start) (i32 2) (u8 116))
+								(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 104)))
+							(bool.and
+								(call is_head_byte (borrow-shared (local source)) (local start) (i32 4) (u8 45))
+								(call is_meta_head (borrow-shared (local source))
+									(i32.add.wrapping (local start) (i32 5)) (local end))))))))))
+
+	(with-meta
+		(meta (:doc "Use an existing row as the primary span of a structural diagnostic."))
+		(fn source_node_failure
+			(params (code u32) (node SourceNode))
+			(returns FormCheck)
+			(body
+				(return (call form_failure (local code)
+					(record.get (local node) start) (record.get (local node) end))))))
+
+	(with-meta
+		(meta (:doc "Check that a with-meta wrapper has a meta list followed by exactly one target."))
+		(fn check_metadata_wrapper
+			(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+				(wrapper SourceNode) (list_index i32) (checked FormCheck))
+			(returns FormCheck)
+			(body
+				;; A missing operand has no span of its own.
+				(if (i32.lt (local list_index) (i32 0))
+					(then (return (call source_node_failure (u32 14) (local wrapper)))))
+				(let list (slice.load (local nodes) (local list_index)))
+				;; The first operand must be a parenthesized meta list.
+				(if (bool.not (u32.eq (record.get (local list) kind) (u32 40)))
+					(then (return (call source_node_failure (u32 14) (local list)))))
+				(let meta_index (call significant_source_node (borrow-shared (local nodes))
+					(record.get (local list) first_child)))
+				(let meta (slice.load (local nodes) (local meta_index)))
+				;; A differently tagged form cannot supply the wrapper's metadata.
+				(if (bool.not (call is_meta_head (borrow-shared (local source))
+						(record.get (local meta) start) (record.get (local meta) end)))
+					(then (return (call source_node_failure (u32 14) (local list)))))
+				(let target_index (call significant_source_node (borrow-shared (local nodes))
+					(record.get (local list) next_sibling)))
+				;; Missing targets point at the full wrapper.
+				(if (i32.lt (local target_index) (i32 0))
+					(then (return (call source_node_failure (u32 14) (local wrapper)))))
+				(let target (slice.load (local nodes) (local target_index)))
+				(let extra (call significant_source_node (borrow-shared (local nodes))
+					(record.get (local target) next_sibling)))
+				;; The first extra significant operand is the malformed target span.
+				(if (bool.not (i32.lt (local extra) (i32 0)))
+					(then (return (call source_node_failure (u32 14) (slice.load (local nodes) (local extra))))))
+				(let-mut entry_index (call significant_source_node (borrow-shared (local nodes))
+					(record.get (local meta) next_sibling)))
+				;; Metadata payloads belong to direct colon-tagged entry forms.
+				(while (bool.not (i32.lt (local entry_index) (i32 0)))
+					(body
+						(let entry (slice.load (local nodes) (local entry_index)))
+						;; Atoms cannot stand in for entry forms.
+						(if (bool.not (u32.eq (record.get (local entry) kind) (u32 40)))
+							(then (return (call source_node_failure (u32 15) (local entry)))))
+						(let entry_head_index (call significant_source_node (borrow-shared (local nodes))
+							(record.get (local entry) first_child)))
+						(let entry_head (slice.load (local nodes) (local entry_head_index)))
+						(let first (slice.load (local source) (record.get (local entry_head) start)))
+						;; A normal form head is malformed in the direct entry slot.
+						(if (bool.not (u8.eq (local first) (u8 58)))
+							(then (return (call source_node_failure (u32 15) (local entry)))))
+						(set (local entry_index) (call significant_source_node (borrow-shared (local nodes))
+							(record.get (local entry) next_sibling)))))
+				(return (local checked)))))
+
+	(with-meta
+		(meta
+			(:doc "Recognize a list as the first operand of its enclosing with-meta wrapper.")
+			(:pragma (inline always)))
+		(fn is_attached_meta
+			(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+				(index i32) (container SourceNode))
+			(returns bool)
+			(body
+				(let parent (record.get (local container) parent))
+				;; Neither the synthetic root nor its immediate children are metadata lists.
+				(if (bool.not (i32.lt (i32 0) (local parent)))
+					(then (return (bool false))))
+				(let wrapper (slice.load (local nodes) (local parent)))
+				(let head_index (call significant_source_node (borrow-shared (local nodes))
+					(record.get (local wrapper) first_child)))
+				(let head (slice.load (local nodes) (local head_index)))
+				;; The parent needs the exact wrapper head before any attachment is possible.
+				(if (bool.not (call is_with_meta_head (borrow-shared (local source)) (local head)))
+					(then (return (bool false))))
+				(let operand (call significant_source_node (borrow-shared (local nodes))
+					(record.get (local head) next_sibling)))
+				(return (i32.eq (local operand) (local index))))))
+
+	(with-meta
+		(meta (:doc "Check wrapper shape and the form heads of one container's immediate children."))
+		(fn check_metadata_container
+			(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+				(index i32) (container SourceNode) (checked FormCheck))
+			(returns FormCheck)
+			(body
+				(let-mut child_index (call significant_source_node (borrow-shared (local nodes))
+					(record.get (local container) first_child)))
+				;; Real forms reserve their first significant child for the head.
+				(if (u32.eq (record.get (local container) kind) (u32 40))
+					(then
+						(let head (slice.load (local nodes) (local child_index)))
+						(set (local child_index) (call significant_source_node (borrow-shared (local nodes))
+							(record.get (local head) next_sibling)))
+						;; Check the wrapper's explicit target before visiting its descendants.
+						(if (call is_with_meta_head (borrow-shared (local source)) (local head))
+							(then
+								(let wrapper_check (call check_metadata_wrapper
+									(borrow-shared (local source)) (borrow-shared (local nodes))
+									(local container) (local child_index) (local checked)))
+								;; Preserve the first malformed wrapper or entry span.
+								(if (u32.lt (u32 0) (record.get (local wrapper_check) error))
+									(then (return (local wrapper_check))))))))
+				(let-mut attached (bool false))
+				;; Determine attachment at most once while walking this sibling list.
+				(while (bool.not (i32.lt (local child_index) (i32 0)))
+					(body
+						(let child (slice.load (local nodes) (local child_index)))
+						;; Only nested forms have their own heads to check.
+						(if (u32.eq (record.get (local child) kind) (u32 40))
+							(then
+								(let child_head_index (call significant_source_node (borrow-shared (local nodes))
+									(record.get (local child) first_child)))
+								(let head (slice.load (local nodes) (local child_head_index)))
+								(let-mut name_start (record.get (local head) start))
+								(let first (slice.load (local source) (local name_start)))
+								;; The colon belongs to the entry tag, outside its identifier spelling.
+								(if (u8.eq (local first) (u8 58))
+									(then
+										;; Confirm that this direct sibling list is the wrapper's meta operand.
+										(if (bool.not (local attached))
+											(then
+												;; A colon elsewhere cannot designate a metadata entry.
+												(if (bool.not (call is_attached_meta
+														(borrow-shared (local source)) (borrow-shared (local nodes))
+														(local index) (local container)))
+													(then (return (call source_node_failure (u32 13) (local head)))))
+												(set (local attached) (bool true))))
+										(set (local name_start) (i32.add.wrapping (local name_start) (i32 1)))))
+								;; Report the complete head atom when its identifier spelling is invalid.
+								(if (bool.not (call is_identifier_head (borrow-shared (local source))
+										(local name_start) (record.get (local head) end)))
+									(then (return (call source_node_failure (u32 12) (local head)))))))
+						(set (local child_index) (call significant_source_node (borrow-shared (local nodes))
+							(record.get (local child) next_sibling)))))
+				(return (local checked)))))
+
+	(with-meta
+		(meta
+			(:doc "Validate the built tree's heads and metadata attachment while preserving every source row.")
+			(:expect parser.metadata_structure
+				(issue "https://github.com/wove-lang/wove/issues/46")))
+		(fn check_source_metadata
+			(params (source (shared-slice u8)) (checked FormCheck) (nodes (shared-slice SourceNode)))
+			(returns FormCheck)
+			(body
+				;; Failed tree construction keeps its original diagnostic.
+				(if (u32.lt (u32 0) (record.get (local checked) error))
+					(then (return (local checked))))
+				(let count (int.convert i32 (record.get (local checked) rows)))
+				(let-mut index (i32 0))
+				;; Each container owns a sibling list and checks its heads once.
+				(while (i32.lt (local index) (local count))
+					(body
+						(let node (slice.load (local nodes) (local index)))
+						(let kind (record.get (local node) kind))
+						;; The synthetic root and parenthesized forms are the only containers.
+						(if (bool.or (u32.eq (local kind) (u32 0)) (u32.eq (local kind) (u32 40)))
+							(then
+								(let result (call check_metadata_container
+									(borrow-shared (local source)) (borrow-shared (local nodes))
+									(local index) (local node) (local checked)))
+								;; Leave the rows intact and return the originating diagnostic.
+								(if (u32.lt (u32 0) (record.get (local result) error))
+									(then (return (local result))))))
+						(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+				(return (local checked)))))
+
+	(with-meta
 		(meta (:doc "Supply the seed entry point while the fixture provides input slices."))
 		(fn main
 			(params)
