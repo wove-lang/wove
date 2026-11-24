@@ -311,13 +311,16 @@ offset and returns true. An out-of-range ID or output span returns false
 and preserves the destination.
 
 The [C name generator](emit/text.wove) takes a `CNameRole`, a checked ID,
-and the source name's byte span. The seed represents the role enum with
-a record and named constructors. The generator writes
-`wg<role><id><suffix>`, where `wg` stands for Wove-generated and the
-third character identifies the role. The ID uses seven lowercase
+the source name's byte span, and a translation unit prefix. The seed represents
+the role enum with a record and named constructors. The default spelling is
+`wg<role><id><suffix>`, where `wg` stands for Wove-generated. The character
+after the prefix identifies the role. The ID uses seven lowercase
 Base32hex digits and starts with `0` or `1` because IDs are 31 bits.
 A suffix keeps ASCII letters, digits, and underscores. Other bytes
-become underscores.
+become underscores. Graph emission reserves a prefix against the selected
+native symbols before writing C. It uses the first available prefix from
+`wg`, `wwg`, `wwwg`, and so on, keeping the same roles, IDs, and suffixes.
+Native symbols and the ABI entry `main` retain their original spellings.
 
 | Tag | Role | ID | Suffix |
 | --- | --- | --- | --- |
@@ -385,9 +388,15 @@ or `"./project.h"` identifies one active bridge in a well-formed canonical file.
 Header lookup leaves Wove-file reachability unchanged. A selected declaration
 has `params` and `returns` forms with exact `bool`, `u8`, `i32`, or `u32` types.
 Parameter names must be unique within the signature. The alias occupies the
-importing file's function namespace. Its binding keeps
-the defining declaration and the raw header, native symbol, and signature
-spans in that file for C call emission in [issue #140](https://github.com/wove-lang/wove/issues/140).
+importing file's function namespace. Its binding keeps the defining declaration
+and the raw header, native symbol, and signature spans in that file.
+
+The scalar graph compiler checks each C call against the selected Wove
+signature and evaluates its arguments once from left to right. The emitted
+call uses the original native name. Each selected header contributes one
+include operand. Angle-bracket keys use system search. Bare or explicitly
+quoted project paths use quoted includes. The C compiler reads the native
+declarations from those headers.
 
 Each binding identifies the importing namespace and the name span in that
 file. Its target is the defining file identity and declaration node index
@@ -397,7 +406,7 @@ and add the identity of the file where they originated.
 | Code | Failure | Primary span |
 | --- | --- | --- |
 | 16 | Short graph storage | The next row's source node, when available |
-| 26 | Malformed use, selector, or declaration name | The originating form or operand |
+| 26 | Malformed use, selector, declaration name, or C header operand | The originating form or operand |
 | 27 | Missing active provider | The importing use |
 | 28 | Active import cycle | The closing use |
 | 29 | Unavailable function or type | The requested name |
