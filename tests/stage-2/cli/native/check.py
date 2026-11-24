@@ -23,7 +23,9 @@ def check_case(compiler, clang, fixtures, row):
 			path = root / destination
 			path.parent.mkdir(parents=True, exist_ok=True)
 			shutil.copyfile(fixtures / source, path)
-		result = subprocess.run([compiler, *json.loads(argv)], cwd=root, capture_output=True, timeout=30)
+		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
+			for argument in json.loads(argv)]
+		result = subprocess.run([compiler, *arguments], cwd=root, capture_output=True, timeout=30)
 		assert (result.returncode, result.stdout) == (int(status), b""), (label, result)
 		# cc retains C beside its requested target without creating the target itself.
 		assert not (root / target).exists(), (label, target)

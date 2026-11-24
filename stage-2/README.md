@@ -616,7 +616,8 @@ build/stage-2/wovec cc input.wove -o build/input
 clang -std=c11 build/.wovec-cache/default/input/bin/main.c -o build/input
 ```
 
-`cc` takes one explicit source and an explicit output target. It writes
+`cc` takes one explicit UTF-8 source path and an explicit output target
+with a basename. It writes
 `main.c` below `<target-parent>/.wovec-cache/<profile>/<target-name>/bin/`.
 For output that uses Wove runtime operations, compile with `-I runtime`
 and link `runtime/wove_runtime.c`. The command reads `wovec.jsonc` from its

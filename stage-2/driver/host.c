@@ -52,6 +52,17 @@ static bool component(const char *name) {
 		strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
 }
 
+// Locate the final component using the same spelling as retained path construction.
+static const char *target_basename(const char *target) {
+	const char *slash = strrchr(target, '/');
+	return slash == NULL ? target : slash + 1;
+}
+
+// Check the output operand before compilation can open the source.
+bool wove_cli_valid_target(const char *target) {
+	return component(target_basename(target));
+}
+
 // Reuse an existing directory or create a missing component.
 static bool ensure_directory(const char *path) {
 	// A successful mkdir establishes the component directly.
@@ -110,10 +121,9 @@ static bool write_unit(const char *path, const uint8_t *bytes, int32_t length) {
 // Publish one C unit atomically in the archive's retained target directory.
 int32_t wove_cli_publish(const char *target, const char *profile, uint32_t mode, const char *input,
 		const uint8_t *bytes, int32_t length) {
-	const char *slash = strrchr(target, '/');
-	const char *name = slash == NULL ? target : slash + 1;
-	const char *parent = slash == NULL ? "." : target;
-	const int prefix = slash == NULL ? 1 : (int)(slash - target);
+	const char *name = target_basename(target);
+	const char *parent = name == target ? "." : target;
+	const int prefix = name == target ? 1 : (int)(name - target - 1);
 	// Built-in modes use their archive directory. A named profile uses its own component.
 	if (profile[0] == '\0' || strcmp(profile, "default") == 0) {
 		profile = mode == 1 ? "debug" : mode == 2 ? "release" : "default";
@@ -145,7 +155,8 @@ int32_t wove_cli_text(uint32_t text, uint8_t *bytes, int32_t capacity) {
 	static const char *const messages[] = {
 		project_file, "invalid command arguments", "invalid project configuration",
 		"invalid Wove source", "could not read file", "could not publish retained C",
-		"cc requires one explicit source and an explicit output target"
+		"cc requires one explicit source and an explicit output target",
+		"source operand must be UTF-8", "invalid output target"
 	};
 	// The supplied view must fit the whole string without its terminator.
 	if (text >= sizeof messages / sizeof *messages) { return -1; }
