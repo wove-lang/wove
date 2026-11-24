@@ -81,6 +81,18 @@ void wvrt_array_drop(wvrt_array *wvrtbuffer) {
 	free(wvrtbuffer);
 }
 
+// Form a shared view relative to the first byte of the checked range.
+wvrt_slice wvrt_slice_range_u8(const void *wvrtitems, int32_t wvrtlength,
+	int32_t wvrtstart, int32_t wvrtend, wvrt_location wvrtsite) {
+	// Check both endpoints before subtracting or advancing the pointer.
+	if (wvrtstart < 0 || wvrtend < wvrtstart || wvrtend > wvrtlength) {
+		wvrt_trap(wvrtsite, "slice range out of bounds");
+	}
+	const uint8_t *wvrt_base = wvrtitems;
+	if (wvrtstart != 0) { wvrt_base += (size_t)wvrtstart; }
+	return (wvrt_slice){wvrt_base, wvrtend - wvrtstart, sizeof(uint8_t)};
+}
+
 // Validate the signed index before converting it to a byte offset.
 static size_t wvrt_slice_offset(int32_t wvrtlength, int32_t wvrtindex, wvrt_location wvrtsite) {
 	// Negative indices and the one-past endpoint cannot name a byte.
