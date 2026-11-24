@@ -1,0 +1,66 @@
+(module native_cli_diagnostics
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Map native command failures to the shared JSON diagnostic format and write one stderr record.`)
+
+	(use wove-file "../diagnostics/record.wove" (only diagnostic_argv diagnostic_source (type Diagnostic)))
+	(use wove-file "../diagnostics/json.wove" (only write_diagnostic_json))
+	(use c-header "./host.h" (only wove_cli_text wove_cli_stderr))
+
+	(fn report_diagnostic
+		(:doc `Size the output for worst-case JSON escaping and print only the serialized prefix.`)
+		(params (diagnostic Diagnostic) (text u32) (file (shared-slice u8)))
+		(returns i32)
+		(body
+			(let width (slice.len (local file)))
+			(let twice (i32.add.wrapping (local width) (local width)))
+			(let six (i32.add.wrapping (i32.add.wrapping (local twice) (local twice)) (local twice)))
+			(let-mut output (array.alloc u8 (i32.add.wrapping (local six) (i32 512))))
+			(let-mut message (array.alloc u8 (i32 64)))
+			(let-mut stack (array.alloc u8 (i32 2)))
+			(let count (call wove_cli_text (local text) (borrow-mut (local message)) (i32 64)))
+			(if
+				(:doc "A missing fixed message leaves no bytes to serialize.")
+				(i32.lt (local count) (i32 0))
+				(then (return (i32 1))))
+			(let result (call write_diagnostic_json (local diagnostic)
+				(borrow-shared (slice.range (local message) (i32 0) (local count))) (borrow-shared (local file))
+				(borrow-mut (local output)) (borrow-mut (local stack))))
+			(if
+				(:doc "Write a diagnostic only after the JSON writer completes it.")
+				(u32.eq (record.get (local result) error) (u32 0))
+				(then
+					(let written (record.get (local result) written))
+					(let status (call wove_cli_stderr (borrow-shared (slice.range (local output) (i32 0) (local written))) (local written)))
+					(if (i32.lt (local status) (i32 0)) (then (return (i32 2))))))
+			(return (i32 1))))
+
+	(fn report_argv
+		(:doc `Report an argv failure at the resolver's zero-based position.`)
+		(params (code u32) (index i32) (text u32))
+		(returns i32)
+		(body
+			(let no_file (array.alloc u8 (i32 0)))
+			(return (call report_diagnostic (call diagnostic_argv (local code) (local index))
+				(local text) (borrow-shared (local no_file))))))
+
+	(fn report_source
+		(:doc `Report a source failure with its path and original byte span.`)
+		(params (file (shared-slice u8)) (code u32) (start i32) (end i32) (text u32))
+		(returns i32)
+		(body (return (call report_diagnostic (call diagnostic_source (local code) (local start) (local end))
+			(local text) (borrow-shared (local file))))))
+
+	(fn report_project
+		(:doc `Report a JSONC or file error against the current project configuration name.`)
+		(params (code u32) (start i32) (end i32) (text u32))
+		(returns i32)
+		(body
+			(let-mut name (array.alloc u8 (i32 64)))
+			(let count (call wove_cli_text (u32 0) (borrow-mut (local name)) (i32 64)))
+			(if
+				(:doc "Keep the publication buffer bounded even if the host cannot supply the project name.")
+				(i32.lt (local count) (i32 0))
+				(then (return (i32 1))))
+			(return (call report_source (borrow-shared (slice.range (local name) (i32 0) (local count)))
+				(local code) (local start) (local end) (local text))))))

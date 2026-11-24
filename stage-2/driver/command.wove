@@ -1,0 +1,118 @@
+(module native_cli_command
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve a native invocation and run the single-source cc command.
+
+	Use the resolver's original argument rows to lend the source path,
+	output target, and profile to the driver. An optional wovec.jsonc
+	in the current directory contributes the selected project profile.`)
+
+	(use wove-file "./host.wove" (only))
+	(use wove-file "./diagnostics.wove" (only report_argv report_project))
+	(use wove-file "./source.wove" (only compile_input))
+	(use wove-file "../cli/argv.wove" (only (type ArgSpan)))
+	(use wove-file "../cli/command/args.wove" (only first_command_argument (type CommandArgument)))
+	(use wove-file "../cli/command/resolve.wove" (only resolve_command command_setting (type CommandInvocation)))
+	(use wove-file "../config/project.wove" (only (type ProjectSetting)))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use c-header "./host.h" (only wove_cli_project_size wove_cli_read_project))
+
+	(fn execute_cc
+		(:doc `Pass the resolved single source, explicit output, and validated profile to compilation.`)
+		(params (bytes (shared-slice u8)) (invocation CommandInvocation) (arguments (shared-slice CommandArgument))
+			(nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting)))
+		(returns i32)
+		(body
+			(let operands (record.get (local invocation) operands))
+			(let rows (record.get (local invocation) rows))
+			(if
+				(:doc "This driver entry needs a cc command and one explicit source operand.")
+				(bool.or (bool.not (u32.eq (record.get (local invocation) command) (u32 1)))
+					(i32.eq (local operands) (i32 0)))
+				(then (return (call report_argv (u32 12) (i32 0) (u32 6)))))
+			(let first (call first_command_argument (borrow-shared (local arguments)) (i32 0) (local rows) (i32 -1)))
+			(if
+				(:doc "Point at the first extra source operand when the caller supplies several.")
+				(i32.lt (i32 1) (local operands))
+				(then
+					(let extra (call first_command_argument (borrow-shared (local arguments))
+						(i32.add.wrapping (local first) (i32 1)) (local rows) (i32 -1)))
+					(return (call report_argv (u32 12)
+						(record.get (slice.load (local arguments) (local extra)) argv_index) (u32 6)))))
+			(let output (call command_setting (local invocation) (borrow-shared (local arguments))
+				(borrow-shared (local nodes)) (borrow-shared (local settings)) (u32 3) (i32 19)))
+			(if
+				(:doc "The target must come from an explicit build.output option such as -o.")
+				(bool.not (u32.eq (record.get (local output) origin) (u32 2)))
+				(then (return (call report_argv (u32 12) (i32 0) (u32 6)))))
+			(let checked (call first_command_argument (borrow-shared (local arguments)) (i32 0) (local rows) (i32 -5)))
+			(if
+				(:doc "A check-only invocation must never publish a C unit.")
+				(bool.and (bool.not (i32.lt (local checked) (i32 0)))
+					(u32.eq (record.get (slice.load (local arguments) (local checked)) scalar) (u32 1)))
+				(then (return (call report_argv (u32 12)
+					(record.get (slice.load (local arguments) (local checked)) argv_index) (u32 6)))))
+			(let input (slice.load (local arguments) (local first)))
+			(let target (slice.load (local arguments) (record.get (local output) row)))
+			(let profile (call first_command_argument (borrow-shared (local arguments)) (i32 0) (local rows) (i32 -2)))
+			(let-mut start (i32 0))
+			(let-mut end (i32 0))
+			(if
+				(:doc "An omitted profile names the default retained tree. A named profile was validated by resolve_command.")
+				(bool.not (i32.lt (local profile) (i32 0)))
+				(then
+					(let selection (slice.load (local arguments) (local profile)))
+					(set (local start) (record.get (local selection) start))
+					(set (local end) (record.get (local selection) end))))
+			(return (call compile_input
+				(borrow-shared (slice.range (local bytes) (record.get (local input) start) (record.get (local input) end)))
+				(borrow-shared (slice.range (local bytes) (record.get (local target) start) (record.get (local target) end)))
+				(borrow-shared (slice.range (local bytes) (local start) (local end))) (record.get (local invocation) mode)
+				(record.get (local input) argv_index) (record.get (local target) argv_index)))))
+
+	(fn run_native_cc
+		(:doc `Read the optional project and resolve the host argv before opening the requested source.`)
+		(params (bytes (shared-slice u8)) (argv (shared-slice ArgSpan)))
+		(returns i32)
+		(body
+			(let size (call wove_cli_project_size))
+			(if
+				(:doc "Only a genuinely absent project falls back to built-in defaults.")
+				(i32.lt (local size) (i32 -1))
+				(then (return (call report_project (u32 64) (i32 0) (i32 0) (u32 4)))))
+			(let has_config (bool.not (i32.lt (local size) (i32 0))))
+			(let-mut length (i32 0))
+			(if
+				(:doc "Size the Wove-owned config view from the optional file.")
+				(local has_config)
+				(then (set (local length) (local size))))
+			(let-mut config (array.alloc u8 (local length)))
+			(if
+				(:doc "Read the exact project bytes before passing them to the resolver.")
+				(local has_config)
+				(then
+					(let read (call wove_cli_read_project (borrow-mut (local config)) (local length)))
+					(if
+						(:doc "Read failures belong to the project file.")
+						(i32.lt (local read) (i32 0))
+						(then (return (call report_project (u32 64) (i32 0) (i32 0) (u32 4)))))))
+			(let capacity (i32.add.wrapping (local length) (i32 1)))
+			(let-mut nodes (array.alloc JsonNode (local capacity)))
+			(let-mut settings (array.alloc ProjectSetting (local capacity)))
+			(let-mut arguments (array.alloc CommandArgument (slice.len (local argv))))
+			(let invocation (call resolve_command (borrow-shared (local bytes)) (borrow-shared (local argv))
+				(borrow-shared (local config)) (local has_config)
+				(borrow-mut (local nodes)) (borrow-mut (local settings)) (borrow-mut (local arguments))))
+			(let error (record.get (local invocation) error))
+			(if
+				(:doc "Preserve either the argv index or the original JSONC span from command resolution.")
+				(u32.lt (u32 0) (local error))
+				(then
+					(if
+						(:doc "The resolver marks configuration errors with source 1.")
+						(u32.eq (record.get (local invocation) source) (u32 1))
+						(then (return (call report_project (local error) (record.get (local invocation) start)
+							(record.get (local invocation) end) (u32 2)))))
+					(return (call report_argv (local error) (record.get (local invocation) argv_index) (u32 1)))))
+			(return (call execute_cc (borrow-shared (local bytes)) (local invocation) (borrow-shared (local arguments))
+				(borrow-shared (local nodes)) (borrow-shared (local settings)))))))

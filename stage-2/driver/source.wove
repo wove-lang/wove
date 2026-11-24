@@ -1,0 +1,93 @@
+(module native_cli_source
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Read, check, and emit one explicit source through the native file bridges.
+
+	Build the source tree and select native declarations once. Measure
+	and write C with the shared emitter, keeping the file's original spans
+	on failure. Publish only a complete emitted translation unit.`)
+
+	(use wove-file "./diagnostics.wove" (only report_argv report_source))
+	(use wove-file "../source/scan.wove" (only admit_source check_source_form build_source_tree check_source_metadata (type SourceNode)))
+	(use wove-file "../source/module.wove" (only read_module (type ModuleRead) (type SelectedDeclaration)))
+	(use wove-file "../emit/c.wove" (only emit_module))
+	(use c-header "./host.h" (only wove_cli_input_size wove_cli_read_input wove_cli_valid_target wove_cli_publish))
+
+	(fn emit_input
+		(:doc `Retry a short emitter destination, retaining only the first complete unit.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
+			(target_index i32) (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
+			(declarations (shared-slice SelectedDeclaration)))
+		(returns i32)
+		(body
+			(let-mut capacity (i32 4096))
+			(while
+				(:doc "Bound buffer growth by the signed slice ABI.")
+				(bool true)
+				(body
+					(let-mut output (array.alloc u8 (local capacity)))
+					(let result (call emit_module (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local module) (borrow-shared (local declarations)) (i32 0) (i32 0) (borrow-mut (local output))))
+					(let error (record.get (local result) error))
+					(if
+						(:doc "Only a successful emitter can publish an artifact.")
+						(u32.eq (local error) (u32 0))
+						(then
+							(let written (record.get (local result) written))
+							(let published (call wove_cli_publish (borrow-shared (local target)) (borrow-shared (local profile))
+								(local mode) (borrow-shared (local path))
+								(borrow-shared (slice.range (local output) (i32 0) (local written))) (local written)))
+							(if
+								(:doc "Publication errors belong to the output operand.")
+								(i32.lt (local published) (i32 0))
+								(then (return (call report_argv (u32 65) (local target_index) (u32 5)))))
+							(return (i32 0))))
+					(if
+						(:doc "A source error or exhausted growth limit retains the emitter's span.")
+						(bool.or (bool.not (u32.eq (local error) (u32 16))) (i32.lt (i32 1073741823) (local capacity)))
+						(then (return (call report_source (borrow-shared (local path)) (local error)
+							(record.get (local result) start) (record.get (local result) end) (u32 3)))))
+					(set (local capacity) (i32.add.wrapping (local capacity) (local capacity)))))
+			(return (i32 1))))
+
+	(fn compile_input
+		(:doc `Validate both operands before reading the source and selecting the native module.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
+			(input_index i32) (target_index i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "Only a UTF-8 source path can appear in the JSON source location.")
+				(i32.lt (i32 -1) (call admit_source (borrow-shared (local path))))
+				(then (return (call report_argv (u32 3) (local input_index) (u32 7)))))
+			(if
+				(:doc "Reject a malformed output operand before opening the source.")
+				(bool.not (call wove_cli_valid_target (borrow-shared (local target))))
+				(then (return (call report_argv (u32 3) (local target_index) (u32 8)))))
+			(let length (call wove_cli_input_size (borrow-shared (local path))))
+			(if
+				(:doc "A missing or unreadable file has no source bytes yet.")
+				(i32.lt (local length) (i32 0))
+				(then (return (call report_source (borrow-shared (local path)) (u32 64) (i32 0) (i32 0) (u32 4)))))
+			(let-mut source (array.alloc u8 (local length)))
+			(let read (call wove_cli_read_input (borrow-shared (local path)) (borrow-mut (local source)) (local length)))
+			(if
+				(:doc "Keep a failed read at the input path.")
+				(i32.lt (local read) (i32 0))
+				(then (return (call report_source (borrow-shared (local path)) (u32 64) (i32 0) (i32 0) (u32 4)))))
+			(let checked (call check_source_form (borrow-shared (local source))))
+			(if
+				(:doc "Lexing and form errors already identify their original byte spans.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (call report_source (borrow-shared (local path)) (record.get (local checked) error)
+					(record.get (local checked) start) (record.get (local checked) end) (u32 3)))))
+			(let rows (int.convert i32 (record.get (local checked) rows)))
+			(let-mut nodes (array.alloc SourceNode (local rows)))
+			(let built (call build_source_tree (borrow-shared (local source)) (local checked) (borrow-mut (local nodes))))
+			(let metadata (call check_source_metadata (borrow-shared (local source)) (local built) (borrow-shared (local nodes))))
+			(let-mut declarations (array.alloc SelectedDeclaration (local rows)))
+			(let module (call read_module (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local metadata) (bool false) (borrow-mut (local declarations))))
+			(return (call emit_input (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+				(local mode) (local target_index) (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local module) (borrow-shared (local declarations)))))))
