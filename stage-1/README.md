@@ -5,7 +5,8 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Stage 1 seed
 
-The Python seed reads one module of tagged IR forms and emits C11 to stdout.
+The Python seed is an internal build tool for bootstrapping Stage 2.
+It reads one module of tagged IR forms and emits C11 to stdout.
 The subset covers functions that return `u8`, `i32`, `u32`, `bool`, or
 `void`, owned byte arrays, and call-scoped shared and exclusive slice
 borrows. Every path through a scalar function returns a value. A void
@@ -57,6 +58,15 @@ half-open range of a named byte buffer or slice. The seed evaluates the
 `0 <= start <= end <= source.len`. The helper sees the original
 storage starting at `start` and a length of `end - start`.
 Equal endpoints form an empty view, including at the end of the source.
+
+Guard module declarations with
+`(with-pragmas (pragmas (cfg bootstrap) (inline always)) target)`.
+A target can be a declaration or a `(decls ...)` group whose declarations
+share the enclosing module scope. Stage 1 always enables `bootstrap`.
+A target is included when all its `cfg` predicates are true, so
+`(cfg bootstrap)` selects its target and `(cfg (not bootstrap))` excludes it.
+Selection happens before name resolution and lowering. The seed ignores other
+tagged pragmas, including `inline`.
 
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.

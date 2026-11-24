@@ -3,6 +3,7 @@
 
 """Lower the first Wove ownership forms to C11."""
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 import os
 import re
@@ -598,16 +599,55 @@ class FunctionEmitter:
 		return self.lines
 
 
+# Stage 1 always selects the bootstrap implementation.
+def cfg_matches(node: Node) -> bool:
+	negated = isinstance(node, Form)
+	# The only compound predicate in the seed is (not bootstrap).
+	if negated:
+		node, = form(node, "not", 1).operands
+	# An unsupported predicate cannot silently select a different declaration.
+	if identifier(node) != "bootstrap":
+		raise SourceError(node.line)
+	return not negated
+
+
+# Flatten active groups in source order before declaring any names.
+def selected_declarations(nodes: tuple[Node, ...]) -> Iterator[Form]:
+	# Walk only the selected declaration tree so excluded bodies stay opaque.
+	for node in nodes:
+		declaration = form(node)
+		# A wrapper contributes its target only if every cfg allows bootstrapping.
+		if declaration.tag == "with-pragmas":
+			pragmas, target = form(declaration, arity=2).operands
+			enabled = True
+			# Read all cfg predicates even if an earlier one excludes the target.
+			for entry in form(pragmas, "pragmas").operands:
+				pragma = form(entry)
+				# Other tagged pragmas have no effect in the seed.
+				if pragma.tag == "cfg":
+					predicate, = form(pragma, arity=1).operands
+					enabled = cfg_matches(predicate) and enabled
+			# Resolve target declarations only after the whole guard passes.
+			if enabled:
+				yield from selected_declarations((target,))
+		# A selected group declares its items in the enclosing module.
+		elif declaration.tag == "decls":
+			yield from selected_declarations(declaration.operands)
+		# Pass selected declarations to signature validation unchanged.
+		else:
+			yield declaration
+
+
 # Emit a complete C translation unit after the entire module succeeds.
 def compile_source(source: str, filename: str) -> str:
 	module = form(parse(source), "module")
 	# The module name precedes its declarations.
 	if not module.operands:
 		raise SourceError(module.line)
-	name, *declarations = module.operands
-	identifier(name)
+	identifier(module.operands[0])
+	declarations = tuple(selected_declarations(module.operands[1:]))
 	functions = {}
-	# Collect all signatures before translating any function body.
+	# Collect only selected signatures before translating any function body.
 	for index, node in enumerate(declarations):
 		symbol, function = read_function(node, index)
 		# A top-level name identifies exactly one function.
