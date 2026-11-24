@@ -13,12 +13,14 @@ from syntax import Atom, Form, Node, SourceError, form, identifier, parse
 I32 = "i32"
 U8 = "u8"
 U32 = "u32"
+BOOL = "bool"
 VOID = "void"
 SCALAR_LIMITS = {
 	I32: (-(2**31), 2**31 - 1),
 	U8: (0, 255),
 	U32: (0, 2**32 - 1),
 }
+SCALAR_TYPES = (*SCALAR_LIMITS, BOOL)
 OWNED = "owned-array"
 SHARED = "shared-slice"
 MUT = "mut-slice"
@@ -26,6 +28,7 @@ C_TYPE = {
 	I32: "int32_t",
 	U8: "uint8_t",
 	U32: "uint32_t",
+	BOOL: "bool",
 	VOID: "void",
 	OWNED: "wvrt_array *",
 	SHARED: "wvrt_slice",
@@ -36,6 +39,14 @@ WRAPPING_OPS = {
 	"i32.sub.wrapping": (I32, "wvrt_i32_sub_wrapping"),
 	"u32.add.wrapping": (U32, "wvrt_u32_add_wrapping"),
 	"u32.sub.wrapping": (U32, "wvrt_u32_sub_wrapping"),
+}
+COMPARISON_OPS = {
+	"u8.eq": (U8, "=="),
+	"u8.lt": (U8, "<"),
+	"i32.eq": (I32, "=="),
+	"i32.lt": (I32, "<"),
+	"u32.eq": (U32, "=="),
+	"u32.lt": (U32, "<"),
 }
 
 
@@ -64,7 +75,7 @@ class Function:
 # Accept scalar inputs and the two byte slice parameter types.
 def parameter_type(node: Node) -> str:
 	# Scalar types are written as bare symbols.
-	if isinstance(node, Atom) and not node.quoted and node.text in SCALAR_LIMITS:
+	if isinstance(node, Atom) and not node.quoted and node.text in SCALAR_TYPES:
 		return node.text
 	view = form(node, arity=1)
 	# Slice parameters specify their loan kind and byte element type.
@@ -113,7 +124,7 @@ def read_function(node: Node, index: int) -> tuple[str, Function]:
 	result_node, = form(returns_node, "returns", 1).operands
 	result = identifier(result_node)
 	# Seed functions return a scalar or complete without a value.
-	if result != VOID and result not in SCALAR_LIMITS:
+	if result != VOID and result not in SCALAR_TYPES:
 		raise SourceError(result_node.line)
 	# Keep the C entry point on its existing zero-argument i32 ABI.
 	if name == "main" and (params or result != I32):
@@ -234,7 +245,7 @@ class FunctionEmitter:
 		values = []
 		# Each argument may acquire a loan that constrains later arguments.
 		for argument, (_, kind) in zip(args, callee.params):
-			value = self.typed(argument, kind) if kind in SCALAR_LIMITS else self.borrow(argument, kind)
+			value = self.typed(argument, kind) if kind in SCALAR_TYPES else self.borrow(argument, kind)
 			values.append(value.c)
 		expression = f"{callee.c_name}({', '.join(values)})"
 		# A void call is a statement and supplies no C value to a consumer.
@@ -250,6 +261,15 @@ class FunctionEmitter:
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
 		expr = form(node)
+		# A boolean literal carries the same type as a comparison result.
+		if expr.tag == BOOL:
+			literal, = form(expr, arity=1).operands
+			spelling = identifier(literal)
+			# Accept the two boolean spellings.
+			if spelling not in ("true", "false"):
+				raise SourceError(literal.line)
+			return Value(BOOL, spelling)
+
 		# Convert the decimal literal to a C-safe spelling.
 		if expr.tag in SCALAR_LIMITS:
 			literal, = form(expr, arity=1).operands
@@ -296,7 +316,7 @@ class FunctionEmitter:
 		if expr.tag == "local":
 			binding = self.local(expr, node.line)
 			# Array and slice places need an explicit operation.
-			if binding.value.kind not in SCALAR_LIMITS:
+			if binding.value.kind not in SCALAR_TYPES:
 				raise SourceError(node.line)
 			return binding.value
 
@@ -348,6 +368,15 @@ class FunctionEmitter:
 			first = self.typed(left, kind)
 			second = self.typed(right, kind)
 			return self.temporary(kind, f"{helper}({first.c}, {second.c})")
+
+		comparison = COMPARISON_OPS.get(expr.tag)
+		# Check both operand types before using the corresponding C comparison.
+		if comparison is not None:
+			kind, operator = comparison
+			left, right = form(expr, arity=2).operands
+			first = self.typed(left, kind)
+			second = self.typed(right, kind)
+			return self.temporary(BOOL, f"{first.c} {operator} {second.c}")
 
 		# Call lowering manages the lifetime of its argument loans.
 		if expr.tag == "call":

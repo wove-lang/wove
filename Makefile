@@ -42,7 +42,7 @@ $(STAGE1)/%: $(STAGE1)/%.fixture.o $(STAGE1)/runtime.o
 	$(CLANG) $(CFLAGS) $^ -o "$@"
 
 # Inspect the full scalar results in the generated translation unit.
-$(STAGE1)/scalar.round_trip $(STAGE1)/scalar.convert $(STAGE1)/scalar.wrapping: $(STAGE1)/%: \
+$(STAGE1)/scalar.round_trip $(STAGE1)/scalar.convert $(STAGE1)/scalar.wrapping $(STAGE1)/scalar.compare: $(STAGE1)/%: \
 	$(OWNERSHIP_TESTS)/%.probe.c $(STAGE1)/%.c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE1)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 

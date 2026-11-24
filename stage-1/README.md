@@ -1,12 +1,13 @@
 # Stage 1 seed
 
 The Python seed reads one module of tagged IR forms and emits C11 to stdout.
-The subset covers straight-line functions that return `u8`, `i32`, `u32`, or `void`,
-owned byte arrays, and call-scoped shared and exclusive slice borrows.
+The subset covers straight-line functions that return `u8`, `i32`, `u32`,
+`bool`, or `void`, owned byte arrays, and call-scoped shared and exclusive
+slice borrows.
 Scalar functions end in an explicit return. Void functions complete at the end
 of their body. A source rejection prints the filename and line.
 
-Write scalar literals as typed decimal nodes such as `(u32 4294967295)`.
+Write integer literals as typed decimal nodes such as `(u32 4294967295)`.
 The seed checks the range of each literal and preserves its exact type
 through local bindings, parameters, calls, and returns. Use
 `(int.convert i32 (local byte))` to explicitly convert between seed integers.
@@ -16,6 +17,10 @@ value is outside the selected type's range.
 `i32.add.wrapping`, `i32.sub.wrapping`, `u32.add.wrapping`, and
 `u32.sub.wrapping` compute modulo 2^32. Both operands and the result have
 the operation's named type.
+
+Write boolean literals as `(bool true)` or `(bool false)`. Equality and
+less-than forms such as `(u8.eq (local byte) (u8 40))` and `(i32.lt (i32 -1)
+(i32 0))` take two operands of the named integer type and return `bool`.
 
 `slice.load` reads a `u8` from either kind of byte slice. `slice.store` needs
 a mutable byte slice and writes to the owner's storage. Both take an `i32`
