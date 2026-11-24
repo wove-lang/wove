@@ -1,0 +1,108 @@
+<!--
+Copyright (c) 2026 wove contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
+# C standard library bridge corpus
+
+The fourteen Wove files mirror the archived directory at `8ac13c06`. They are
+standalone source for the bridge design. The build and active import graph
+exclude the corpus. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
+
+## Source forms
+
+- Each module contains a `bridge` with provider `c` and the original header
+  spelling, including its angle brackets. A bodyless `fn` records the Wove
+  parameter and return types. Its optional `(c-name "symbol")` records the
+  native spelling when it differs. An omitted archive result becomes
+  `(returns void)`. A fixed C operand uses `(const command i32 F_GETFD)`
+  inside `params`.
+- `(c-type "native spelling")` preserves the header type on an alias, record,
+  or enum. `shared-ref` and `mut-ref` borrow native scalar, record, or
+  resource storage. `shared-slice` and `mut-slice` represent borrowed spans.
+  An `optional` result containing an `owned-array` preserves null and
+  successful ownership separately. `fn-type` records a callback signature.
+- Native `const`, `let`, and `let-mut` distinguish header constants,
+  read-only values, and writable lvalues. A `cfg` directive stays on its
+  declaration or `decls` group, preserving the archive's selection order.
+- Each archived active `c_*` annotation is a directive under its
+  declaration's `:pragma`. Named arguments use forms such as
+  `(drop fclose)` and `(field d_name)` in their original argument order.
+  `disabled` has a documentation entry and no operands. Its text retains
+  the original comment delimiters, rationale, and declaration sketches.
+
+The current parser and renderer can read these forms structurally. The seed
+skips bridge members. Activating the corpus requires the declaration, type,
+selection, and lowering work below. [Seed bridge behavior](../../stage-1/README.md)
+
+## Active archive declarations
+
+| Header and declarations | Form or contract | Compiler behavior needed |
+| --- | --- | --- |
+| All fourteen headers and their active members | `(bridge c "<header>" …)`, bodyless `fn`, and `(c-name "symbol")` | Resolve a selected member from the declared header. Bind its Wove name and exact C name, discover macro or symbol availability in the selected target's header environment, check the native signature, and emit the right include, call, and link dependencies. |
+| `dirent.h` aliases for stream positions, GNU byte counts and offsets, `fcntl.h` typedefs, `math.h` floating and integer aliases, `signal.h` signal types, `spawn.h` attributes and actions, `stdio.h` file and position types, `sys/stat.h`, `sys/wait.h`, `time.h`, and `unistd.h` aliases | `(type Name (c-type "…"))` | Preserve the actual native spelling, nominal identity, pointer depth, signedness, size, and alignment. Native `long`, `size_t`, `pid_t`, and `long double` use the selected C ABI. |
+| `fcntl.h` `Lock`, `spawn.h` `Scheduling`, `sys/stat.h` `Timespec` and both `Stat` views, `sys/wait.h` `SignalInfo`, and `time.h` `Stamp` | `struct` with `c-type` and `fields` | Allocate and pass the entire native object with its padding and unexposed members. Check field access against the selected header. Honor the platform timestamp names and the child-status view of `siginfo_t`. |
+| `sys/wait.h` `IdType` and `time.h` `Clock` | `enum` with `c-type` and `members` | Bind the C enum or typedef and its selected header members with their native values and argument representation. |
+| `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdio.h`, `sys/stat.h`, `sys/wait.h`, and `unistd.h` constant declarations | `const` with an explicit type | Read header-derived values in the checked C constant context and retain their declared Wove types. Guarded alternatives such as `UTIME_NOW` and `UTIME_OMIT` use the selected platform width. |
+| `errno.h` `errno`, `math.h` `signgam` and floating values, `stdio.h` standard streams, `unistd.h` `optind`, `opterr`, `optopt`, and `environ` | Typed `let` and `let-mut` | Distinguish native lvalues, read-only header expressions, borrowed stream handles, and copied snapshots. Evaluate `errno` through the header lvalue even when it expands to a macro. |
+| `math.h` native math families, including `__fabsf16` and the Darwin half-width guard, and `sys/stat.h` Linux timestamp controls | `f16`, `f32`, `f64`, `i64`, and native `long double` | Check and lower the declared scalar types in arguments, results, constants, and out pointees. Preserve target floating representation and narrowing behavior. |
+| `dirent.h` raw reads and `fdclosedir`, guarded members in `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdlib.h`, `sys/stat.h`, and `unistd.h` | `(cfg (all …))`, `any`, `os`, `arch`, `os_min`, feature names | Evaluate the archived host predicates and feature selections against the chosen target and header mode before registering members. Enforce the guarded minimum deployment versions and bind only the selected layout or declaration. |
+| `fcntl.h` `fcntl_*` | `(const command i32 F_GETFD)` and `c-name` | Supply the header constant automatically in its original C position. The Wove caller supplies only the ordinary operands. |
+| Native pointer parameters across the corpus, including `math.h` `frexp`, `fcntl.h` lock operations, and `time.h` `clock_gettime` | `shared-ref`, `mut-ref`, typed and byte slices | Lower declared native pointees and maintain borrow lifetimes through the call. Allow writable out parameters only through the applicable mutable views. |
+
+### Archived bridge directives
+
+The port carries 532 active `c_*` directives and 23 `cfg` directives.
+The two commented `#[c_macro]` lines in `sys_wait.wove` remain in their
+verbatim disabled text. Counts below cover active declarations.
+
+| Directive and count | Header and affected declarations | Compiler behavior needed |
+| --- | --- | --- |
+| `c_array` · 7 | `dirent.h` `getdirentries{,64}`, `stdio.h` `fgets`, `sys/stat.h` `futimens` and `utimensat`, `unistd.h` `getgroups` and `pipe` | Check mutable or shared typed element extent before exposing the C pointer. Support literal and parameter lengths and compose the check with allowed null. |
+| `c_bytes` · 7 | `dirent.h` `getdents64`, `stdio.h` `fread` and `fwrite`, `unistd.h` `read`, `write`, `pread`, and `pwrite` | Check byte extent and the `size * count` product without overflow before forwarding storage. Preserve access direction. |
+| `c_callback` · 1 | `stdlib.h` `atexit` | Marshal `(fn-type (params) (returns void))` to a C-callable function pointer. The registered callable must remain valid through ordinary process exit. |
+| `c_cstr` · 54 | Text inputs in `dirent.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdio.h`, `stdlib.h`, `sys/stat.h`, and `unistd.h` | Materialize checked, NUL-terminated call-scoped C strings for the named views. Respect mutable text and combine null and snapshot contracts where declared. |
+| `c_cstr_raw` · 2 | `stdio.h` `fprintf`, `printf` | Preserve embedded NUL bytes in the temporary native format string and append a terminator. Keep the temporary alive through native vararg evaluation and the call. |
+| `c_cstrs` · 6 | `spawn.h` `posix_spawn` and `posix_spawnp`, `unistd.h` `execv`, `execve`, `execvp`, and `fexecve` | Build arrays of terminated native strings with a null pointer terminator, including for empty vectors. Keep the arrays and strings alive through return or process replacement. |
+| `c_init` · 2 | `spawn.h` `posix_spawn_file_actions_init` and `posix_spawnattr_init` | Borrow inactive native storage for initialization and enable destruction on successful initialization. |
+| `c_macro` · 123 | `assert.h` `assert`, `math.h` macro functions and read-only macro values, `sys/stat.h` `S_IS*` and `S_TYPEIS*`, `sys/wait.h` wait status macros | Bind the header macro, preserve argument widths, and evaluate Wove arguments once before expansion. Respect object-like expression and function-like macro behavior, including `NDEBUG`. |
+| `c_null` · 1 | `stdlib.h` `realpath` | Require null for `resolved`, selecting the allocating C path. Compose it with the snapshot and native release. |
+| `c_nullable` · 12 | `signal.h` `sigprocmask`, `pthread_sigmask`, `psignal`, `spawn.h` `posix_spawn{,p}`, `stdio.h` `freopen`, `fflush`, `perror`, `sys/stat.h` `futimens`, `utimensat`, `sys/wait.h` `wait`, `waitpid` | Accept null for exactly the named borrowed parameters and use the corresponding native null representation. |
+| `c_optional` · 289 | `math.h` optional functions, constants, and globals. The `fromfp`, `ufromfp`, `fromfpx`, and `ufromfpx` families use `__STDC_VERSION_MATH_H__`. The `totalorder` and `totalordermag` families use `pointer_parameters`. | Select header members by name and declaration kind. Apply the requested feature macro or native pointer signature probe and diagnose a requested unavailable member during binding. |
+| `c_owned` · 4 | `dirent.h` `Directory`, `stdio.h` `File`, `spawn.h` `Actions` and `Attributes` | Track owning native representations, moves, success state, and the exact destructor. Storage owners preserve initialized native storage and pointer owners preserve failure as null. |
+| `c_snapshot` · 9 | `dirent.h` `readdir{,64}`, `stdio.h` `fgets`, `stdlib.h` `getenv`, `mkdtemp`, `realpath`, `string.h` `strerror`, `unistd.h` `mkdtemp` and `environ` | Copy native text, an inline field, or a terminated vector before C can reuse its storage. Keep null distinct from an empty value. Invoke an explicit `drop` once when the native result owns storage. |
+| `c_variadic` · 15 | `fcntl.h` `open`, `openat`, and `fcntl_*`, `stdio.h` `fprintf` and `printf` | Preserve the native ellipsis and apply C default promotions to the declared or caller-supplied tail. The argument-free form supplies zero tail values. Retain the fixed header command and exact tail type for `fcntl`. |
+
+## Archived disabled material
+
+These portions were already comments in the archive. With the exception of
+the exact prototypes shown there, the comments are an inventory of
+interfaces and design constraints.
+
+| Header and archived declaration or family | Compiler behavior needed |
+| --- | --- |
+| `assert.h` `static_assert` | Support a declaration macro with a compile-time expression and diagnostic text. |
+| `dirent.h` `readdir_r`, `readdir64_r`, scan and comparator families, Darwin Blocks variants and Darwin `getdirentries` | Represent runtime-sized native storage and nullable aliases, owned result vectors, native-record callbacks and indirect borrows, and C Blocks. Gate the raw Darwin interface on its inode ABI. |
+| `fcntl.h` optional flags and Darwin or Linux native records and commands listed in the disabled note | Probe individual declarations in the selected feature namespace and describe platform-specific native records and typed command tails. |
+| `math.h` `FP_CONTRACT`, `FENV_ROUND`, decimal and `_FloatN` or `_FloatNx` families, Darwin compatibility names and `struct exception` | Support C translation directives and the relevant native floating identities, and provide the native record with its raw character pointer. `complex.h` has its own ABI. |
+| `signal.h` `SIG_DFL`, `SIG_IGN`, `SIG_ERR`, `signal`, `bsd_signal`, and `sigset` | Represent native function pointer values and sentinel constants with the correct C calling convention and lifetime. |
+| `signal.h` `Action`, `sigaction`, and its `SA_*` flags | Bind the native callback-bearing union and platform-typed flag members. |
+| `signal.h` `SS_ONSTACK`, `SS_DISABLE`, `Stack`, `sigaltstack`, `MINSIGSTKSZ`, and `SIGSTKSZ` | Track stack storage retained by the thread until disabled or exited. Read runtime-sized header values where required. |
+| `signal.h` `Value`, `Event`, `sigqueue`, `sigwaitinfo`, `sigtimedwait`, and the `SIGEV_*` and `SIGRT*` values | Model union payloads, richer siginfo views, queued or retained callback notifications, and runtime signal bounds. |
+| `signal.h` `pthread_kill` and the deprecated XSI/BSD group | Use an explicit native pthread handle contract and select supported legacy declarations and callback records by target. |
+| `spawn.h` chdir, inherited descriptor, scheduling and Darwin architecture or port extensions in the disabled note | Check individual SDK and libc availability. Model native output arrays and state retained by exception-port configuration. |
+| `stdio.h` and `stdlib.h` `NULL` | Bind a pointer-valued header constant with an explicit nullable native pointer contract. |
+| `stdio.h` `tmpnam` | Check caller storage against the actual header's `L_tmpnam` extent and track any result alias. |
+| `stdio.h` `setbuf`, `setvbuf` | Track buffer storage retained until the stream closes. |
+| `stdio.h` `sprintf`, `snprintf`, `fscanf`, `scanf`, and `sscanf` | Check format-directed output storage and writable arguments, including their extents and native types. |
+| `stdio.h` `vfprintf`, `vprintf`, `vsprintf`, `vsnprintf`, `vfscanf`, `vscanf`, and `vsscanf` | Represent native `va_list` storage and `va_copy` or `va_end` lifetime rules alongside the format contracts. |
+| `stdlib.h` `MB_CUR_MAX` and `strtold` | Read a locale-dependent native `size_t` expression at runtime. For `strtold`, preserve native `long double` and track an optional output pointer aliasing the input string. |
+| `sys/stat.h` timestamp aliases and host extensions | Represent overlapping timestamp aliases and add separate availability, ownership, and record contracts for host extensions. |
+| `sys/wait.h` `WCOREDUMP`, `WCORE_DUMPED`, `Usage`, `wait3`, and `wait4` | Select the optional macros and functions from the target header and check native `struct rusage` output storage. |
+| `unistd.h` `execl`, `execle`, and `execlp` | Marshal variable-length typed text tails with a terminating native null. |
+| `unistd.h` text and returned-alias families, `optarg`, and `getopt` | Check native character storage, termination and returned aliases. Track the retained or reordered argv vector and the lifetime of its borrowed text. |
+| `unistd.h` selector catalogs, `vfork`, and deprecated or removed APIs listed in the final note | Select host and header feature catalogs. Model the shared-address-space control flow of `vfork` before enabling it or any separately supported extension. |
+
+Each corpus file can be checked and round-tripped with the existing Stage 2
+source probe. This checks Wove structure and metadata layout independently
+of bridge activation. [Stage 2 source probe](../README.md)
