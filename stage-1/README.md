@@ -34,6 +34,13 @@ An outer binding is available after the branch when every continuing path
 still owns it. An omitted `else` contributes the incoming state.
 The seed rejects statements after a return or a branch whose arms both return.
 
+A `(while condition (body ...))` evaluates its boolean condition before
+each iteration. The body has its own scope on each pass. Outer owners
+available on entry must still be available on every path back to the
+condition. A return runs the usual cleanup for every scope it leaves.
+Use `(set (local name) value)` to assign an existing `let-mut` scalar.
+The new value has the same type as the binding.
+
 `slice.load` reads a `u8` from either kind of byte slice. `slice.store` needs
 a mutable byte slice and writes to the owner's storage. Both take an `i32`
 index and trap if it falls outside the slice.
