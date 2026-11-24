@@ -11,7 +11,7 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only (type ModuleRead) (type SelectedDeclaration)))
-	(use wove-file "../scalar/records.wove" (only count_records is_record_type is_readable_slice (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only count_records is_record_slice record_slice_element is_readable_slice is_writable_slice (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type write_member_name write_record_layouts))
 	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement)))
 	(use wove-file "../scalar/plan.wove"
@@ -96,11 +96,12 @@
 				(bool.or (u32.eq (local kind) (u32 2)) (call is_reborrow_keyword (local kind)))
 				(then
 					(let parameter (slice.load (local parameters) (record.get (local row) target)))
-					(let projection (bool.and (u32.eq (record.get (local row) type) (u32 34))
-						(u32.eq (record.get (local parameter) type) (u32 38))))
+					(let type (record.get (local row) type))
+					(let projection (bool.and (call is_writable_slice (record.get (local parameter) type))
+						(bool.and (call is_readable_slice (local type)) (bool.not (call is_writable_slice (local type))))))
 					(let-mut cursor (local offset))
 					(if
-						(:doc "A shared use of a mutable view projects the descriptor without touching the backing bytes.")
+						(:doc "A shared use of a mutable view projects only the descriptor.")
 						(local projection)
 						(then (set (local cursor) (call open_shared_projection (borrow-mut (local output)) (local cursor) (local writing)))))
 					(set (local cursor) (call write_parameter_name (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -242,8 +243,8 @@
 	(fn
 		(:doc `Read the descriptor length or pass the evaluated operands and original access span to the runtime.`)
 		write_slice_access
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (expression ScalarExpression)
-			(tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(expressions (shared-slice ScalarExpression)) (expression ScalarExpression) (tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let receiver (record.get (local expression) first))
@@ -255,6 +256,13 @@
 					(let cursor (call write_temporary_name (borrow-shared (local source)) (local receiver) (local tree_base)
 						(borrow-mut (local output)) (local offset) (local writing)))
 					(return (call write_slice_length (borrow-mut (local output)) (local cursor) (local writing)))))
+			(let type (record.get (slice.load (local expressions) (local receiver)) type))
+			(if
+				(:doc "A record access indexes the typed backing array after the span-aware bounds check.")
+				(call is_record_slice (local type))
+				(then (return (call write_record_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (local expression) (call record_slice_element (local type)) (local tree_base)
+					(borrow-mut (local output)) (local offset) (local writing)))))
 			(let index (record.get (slice.load (local nodes) (local receiver)) next_sibling))
 			(let open (call open_slice_access (borrow-mut (local output)) (local offset) (local kind) (local writing)))
 			(let view (call write_temporary_name (borrow-shared (local source)) (local receiver) (local tree_base)
@@ -275,25 +283,30 @@
 				(record.get (local expression) end) (local writing)))))
 
 	(fn
-		(:doc `Copy a record through the original descriptor after checking the element index.`)
-		write_record_slice_load
+		(:doc `Read or replace one record in the original storage after checking the index.`)
+		write_record_slice_access
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
-			(expression ScalarExpression) (tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
+			(expression ScalarExpression) (element u32) (tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let receiver (record.get (local expression) first))
 			(let index (record.get (slice.load (local nodes) (local receiver)) next_sibling))
+			(let store (u32.eq (record.get (local expression) kind) (u32 40)))
 			(let-mut cursor (local offset))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 40) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 40) (local writing)))
-			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 99) (local writing)))
-			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 111) (local writing)))
-			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 110) (local writing)))
-			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 115) (local writing)))
-			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 116) (local writing)))
-			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))
+			(if
+				(:doc "Read through a const element pointer. A store uses the checked writable pointer.")
+				(bool.not (local store))
+				(then
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 99) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 111) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 110) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 115) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 116) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))))
 			(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (record.get (local expression) type)
+				(borrow-shared (local records)) (local element)
 				(borrow-mut (local output)) (local cursor) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 42) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
@@ -312,7 +325,16 @@
 			(set (local cursor) (call close_runtime_call (borrow-mut (local output)) (local cursor)
 				(record.get (local expression) target) (record.get (local expression) start)
 				(record.get (local expression) end) (local writing)))
-			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 93) (local writing)))))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 93) (local writing)))
+			(if
+				(:doc "Assign the single evaluated value to the checked element.")
+				(local store)
+				(then
+					(let value (record.get (slice.load (local nodes) (local index)) next_sibling))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local value) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local writing)))))
+			(return (local cursor))))
 
 	(fn
 		(:doc `Construct the named native record using already evaluated field values.`)
@@ -403,17 +425,11 @@
 						(record.get (local expression) target) (record.get (local expression) start)
 						(record.get (local expression) end) (local writing)))))
 			(if
-				(:doc "A checked record load uses the native element layout and a signed index check.")
-				(bool.and (u32.eq (local kind) (u32 37)) (call is_record_type (record.get (local expression) type)))
-				(then (return (call write_record_slice_load (borrow-shared (local source)) (borrow-shared (local nodes))
-					(borrow-shared (local records)) (local expression) (local tree_base)
-					(borrow-mut (local output)) (local offset) (local writing)))))
-			(if
 				(:doc "A slice expression uses the already evaluated descriptor and any checked indices.")
 				(bool.or (u32.eq (local kind) (u32 36))
 					(bool.or (u32.eq (local kind) (u32 37)) (u32.eq (local kind) (u32 44))))
 				(then (return (call write_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local writing)))))
+					(borrow-shared (local records)) (borrow-shared (local expressions)) (local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local writing)))))
 			(let operator (call scalar_operator (local kind)))
 			(if
 				(:doc "Short-circuit evaluation has already stored the result for this value.")
@@ -636,11 +652,11 @@
 				(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
 			(if
-				(:doc "A store writes one checked runtime call as the complete statement.")
+				(:doc "A checked store writes one element as the complete statement.")
 				(u32.eq (local kind) (u32 40))
 				(then
 					(let next (call write_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local value) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+						(borrow-shared (local records)) (borrow-shared (local expressions)) (local value) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
 					(return (call c_byte (borrow-mut (local output)) (local next) (u8 59) (local writing)))))
 			(let previous_owner (record.get (local statement) previous_owner))
 			(if
@@ -961,7 +977,7 @@
 				"gh:wove-lang/wove:85" "gh:wove-lang/wove:90" "gh:wove-lang/wove:104"
 				"gh:wove-lang/wove:107" "gh:wove-lang/wove:110" "gh:wove-lang/wove:113"
 				"gh:wove-lang/wove:115" "gh:wove-lang/wove:125" "gh:wove-lang/wove:127"
-				"gh:wove-lang/wove:130"))
+				"gh:wove-lang/wove:130" "gh:wove-lang/wove:133"))
 		emit_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))
