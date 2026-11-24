@@ -12,6 +12,8 @@
 	(use wove-file "../source/module.wove" (only (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../scalar/records.wove" (only count_records is_record_slice record_slice_element is_readable_slice is_writable_slice array_owner_element (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type write_member_name write_record_layouts write_record_layout_argument))
+	(use wove-file "../scalar/owners.wove" (only is_native_owner))
+	(use wove-file "./owners.wove" (only write_native_destructor))
 	(use wove-file "./c_strings.wove" (only write_c_string_call))
 	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement)))
 	(use wove-file "../scalar/plan.wove"
@@ -625,6 +627,27 @@
 								(else (set (local index) (record.get (local node) parent))))))))
 			(return (local cursor))))
 
+	(fn open_owner_drop
+		(:doc `Open the drop call for a live local owner, skipping missing C handles.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (row ScalarStatement) (tree_base i32)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let type (record.get (local row) type))
+			(if
+				(:doc "Array allocations are released through the shared runtime.")
+				(bool.not (call is_native_owner (local type)))
+				(then (return (call open_array_drop (borrow-mut (local output)) (local offset) (local writing)))))
+			(let condition (call c_text_fragment (borrow-mut (local output)) (local offset) (u32 6) (local writing)))
+			(let name (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local row) target) (local tree_base) (borrow-mut (local output)) (local condition)
+				(local name_prefix) (local writing)))
+			(let close (call c_byte (borrow-mut (local output)) (local name) (u8 41) (local writing)))
+			(let discard (call c_text_fragment (borrow-mut (local output)) (local close) (u32 4) (local writing)))
+			(let destructor (call write_native_destructor (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local type) (borrow-mut (local output)) (local discard) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local destructor) (u8 40) (local writing)))))
+
 	(fn write_cleanup
 		(:doc `Release live owners in reverse declaration order at a return or block exit.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (statements (shared-slice ScalarStatement))
@@ -644,7 +667,8 @@
 						(bool.or (i32.lt (local move) (i32 0))
 							(bool.and (bool.not (i32.lt (local exit_row) (i32 0))) (i32.lt (local exit_row) (local move))))
 						(then
-							(set (local cursor) (call open_array_drop (borrow-mut (local output)) (local cursor) (local writing)))
+							(set (local cursor) (call open_owner_drop (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local row) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 							(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
 								(record.get (local row) target) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
@@ -685,7 +709,7 @@
 					(return (call c_byte (borrow-mut (local output)) (local next) (u8 59) (local writing)))))
 			(let previous_owner (record.get (local statement) previous_owner))
 			(if
-				(:doc "Save the return value before any buffer it reads is released.")
+				(:doc "Save the return value before releasing live owners.")
 				(bool.and (u32.eq (local kind) (u32 7)) (bool.not (i32.lt (local previous_owner) (i32 0))))
 				(then
 					(set (local cursor) (call write_temporary_declaration (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -718,7 +742,7 @@
 							(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 3) (local writing))))
 						(else
 							(if
-								(:doc "A declaration uses the exact fixed-width type of its checked initializer.")
+								(:doc "A declaration uses the exact C type of its checked initializer.")
 								(local declaring)
 								(then
 									(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))

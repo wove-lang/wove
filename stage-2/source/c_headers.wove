@@ -1,25 +1,28 @@
 (module source_c_headers
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Find active scalar C header declarations in the supplied Wove source table.
+	(:doc `Find active C header declarations in the supplied Wove source table.
 
 	Compare decoded header keys exactly. Keep the declaring file, original
 	tree row and raw spellings for later type checking and native emission.`)
 
 	(use wove-file "./scan.wove"
-		(only (type SourceNode) (type Token) check_source_form build_source_tree check_source_metadata is_head_start_byte))
+		(only (type SourceNode) (type Token) check_source_form build_source_tree check_source_metadata))
 	(use wove-file "./module.wove" (only (type SelectedDeclaration) form_parts read_module select_form))
 	(use wove-file "./imports.wove" (only import_keyword import_form))
 	(use wove-file "./paths.wove" (only (type SuppliedFile)))
 	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "./types.wove" (only source_builtin_type))
+	(use wove-file "./c_owners.wove" (only is_native_name check_c_owner))
 	(use wove-file "./c_strings.wove" (only is_c_string_slice read_c_string_contracts))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 
 	(struct HeaderMatch (fields (file i32) (node i32) (start i32) (end i32) (error u32)))
-	(struct CFunctionRead
+	(struct CMemberRead
 		(fields (declaration i32) (native_start i32) (native_end i32) (signature_start i32) (signature_end i32)
-			(start i32) (end i32) (error u32)))
+			(start i32) (end i32) (error u32) (owner_type i32) (drop_start i32) (drop_end i32)
+			(type_start i32) (type_end i32)))
+	(struct CMemberLookup (fields (declaration i32) (start i32) (end i32) (error u32)))
 
 	(fn header_match
 		(:doc `Record a header's defining file, declaration row, and original literal span.`)
@@ -170,38 +173,14 @@
 					(set (local file) (i32.add.wrapping (local file) (i32 1)))))
 			(return (call header_match (local defining_file) (local node) (local start) (local end) (u32 0)))))
 
-	(fn c_function_error
+	(fn c_member_error
 		(:doc `Package an unavailable or rejected declaration without publishing signature spans.`)
 		(params (start i32) (end i32) (error u32))
-		(returns CFunctionRead)
+		(returns CMemberRead)
 		(body
-			(return (record.make CFunctionRead (declaration (i32 -1)) (native_start (i32 -1)) (native_end (i32 -1))
-				(signature_start (i32 -1)) (signature_end (i32 -1)) (start (local start)) (end (local end)) (error (local error))))))
-
-	(fn is_native_name
-		(:doc `Recognize the portable ASCII identifier spelling that can be emitted as a C symbol.`)
-		(params (source (shared-slice u8)) (name SourceNode))
-		(returns bool)
-		(body
-			(let start (record.get (local name) start))
-			(let end (record.get (local name) end))
-			(if
-				(:doc "The native spelling starts with an ASCII letter or underscore.")
-				(bool.not (call is_head_start_byte (slice.load (local source) (local start))))
-				(then (return (bool false))))
-			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
-			(while
-				(:doc "The remaining bytes may also include ASCII decimal digits.")
-				(i32.lt (local cursor) (local end))
-				(body
-					(let byte (slice.load (local source) (local cursor)))
-					(if
-						(:doc "Any other byte makes this Wove spelling unsuitable as a native symbol.")
-						(bool.not (bool.or (call is_head_start_byte (local byte))
-							(bool.not (bool.or (u8.lt (local byte) (u8 48)) (u8.lt (u8 57) (local byte))))))
-						(then (return (bool false))))
-					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
-			(return (bool true))))
+			(return (record.make CMemberRead (declaration (i32 -1)) (native_start (i32 -1)) (native_end (i32 -1))
+				(signature_start (i32 -1)) (signature_end (i32 -1)) (start (local start)) (end (local end)) (error (local error))
+				(owner_type (i32 0)) (drop_start (i32 0)) (drop_end (i32 0)) (type_start (i32 0)) (type_end (i32 0))))))
 
 	(fn is_c_scalar
 		(:doc `Accept one of the exact scalar types supported by the Stage 2 value ABI.`)
@@ -212,28 +191,48 @@
 			(return (bool.or (u32.eq (local type) (u32 5))
 				(bool.and (u32.lt (u32 9) (local type)) (u32.lt (local type) (u32 13)))))))
 
+	(fn read_c_result_resource
+		(:doc `Resolve a non-scalar result in the defining bridge's type namespace.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32))
+		(returns CMemberRead)
+		(body
+			(if
+				(:doc "A scalar result has an empty resource contract.")
+				(call is_c_scalar (borrow-shared (local source)) (local node))
+				(then (return (call c_member_error (i32 0) (i32 0) (u32 0)))))
+			(let start (record.get (local node) start))
+			(let end (record.get (local node) end))
+			(let resource (call find_c_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local bridge) (borrow-shared (local source)) (local start) (local end)))
+			(if
+				(:doc "An unavailable resource result is diagnosed at the signature's type operand.")
+				(bool.and (u32.eq (record.get (local resource) error) (u32 0))
+					(i32.lt (record.get (local resource) declaration) (i32 0)))
+				(then (return (call c_member_error (local start) (local end) (u32 23)))))
+			(return (local resource))))
+
 	(fn read_c_function
 		(:doc `Check the selected foreign function's parameter and result forms and retain its exact signature.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(declaration i32) (name SourceNode) (form SourceNode) (params i32))
-		(returns CFunctionRead)
+			(declaration i32) (name SourceNode) (form SourceNode) (params i32) (bridge i32))
+		(returns CMemberRead)
 		(body
 			(let start (record.get (local form) start))
 			(let end (record.get (local form) end))
 			(if
 				(:doc "The defining name must be a portable C symbol.")
 				(bool.not (call is_native_name (borrow-shared (local source)) (local name)))
-				(then (return (call c_function_error (record.get (local name) start) (record.get (local name) end) (u32 26)))))
+				(then (return (call c_member_error (record.get (local name) start) (record.get (local name) end) (u32 26)))))
 			(if
 				(:doc "A foreign declaration needs params followed by returns.")
 				(i32.lt (local params) (i32 0))
-				(then (return (call c_function_error (local start) (local end) (u32 23)))))
+				(then (return (call c_member_error (local start) (local end) (u32 23)))))
 			(let params_node (slice.load (local nodes) (local params)))
 			(let returns (record.get (local params_node) next_sibling))
 			(if
 				(:doc "A missing returns form leaves the declaration incomplete.")
 				(i32.lt (local returns) (i32 0))
-				(then (return (call c_function_error (local start) (local end) (u32 23)))))
+				(then (return (call c_member_error (local start) (local end) (u32 23)))))
 			(let returns_node (slice.load (local nodes) (local returns)))
 			(let extra (record.get (local returns_node) next_sibling))
 			(if
@@ -241,30 +240,28 @@
 				(bool.not (i32.lt (local extra) (i32 0)))
 				(then
 					(let item (slice.load (local nodes) (local extra)))
-					(return (call c_function_error (record.get (local item) start) (record.get (local item) end) (u32 23)))))
+					(return (call c_member_error (record.get (local item) start) (record.get (local item) end) (u32 23)))))
 			(let form_params (call import_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local params_node) (u32 10)))
 			(let form_returns (call import_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local returns_node) (u32 11)))
 			(if
 				(:doc "Surface a malformed params form or directive at its original span.")
 				(u32.lt (u32 0) (record.get (local form_params) error))
-				(then (return (call c_function_error (record.get (local form_params) start) (record.get (local form_params) end)
+				(then (return (call c_member_error (record.get (local form_params) start) (record.get (local form_params) end)
 					(record.get (local form_params) error)))))
 			(if
 				(:doc "Surface a malformed returns form or directive at its original span.")
 				(u32.lt (u32 0) (record.get (local form_returns) error))
-				(then (return (call c_function_error (record.get (local form_returns) start) (record.get (local form_returns) end)
+				(then (return (call c_member_error (record.get (local form_returns) start) (record.get (local form_returns) end)
 					(record.get (local form_returns) error)))))
 			(let result (record.get (local form_returns) first))
 			(if
-				(:doc "The result form supplies one bare scalar type.")
+				(:doc "The result form supplies one scalar or named resource type.")
 				(bool.or (i32.lt (local result) (i32 0))
 					(bool.not (i32.lt (record.get (slice.load (local nodes) (local result)) next_sibling) (i32 0))))
-				(then (return (call c_function_error (record.get (local returns_node) start) (record.get (local returns_node) end) (u32 23)))))
-			(let result_type (slice.load (local nodes) (local result)))
-			(if
-				(:doc "Unsupported result types retain their own span.")
-				(bool.not (call is_c_scalar (borrow-shared (local source)) (local result_type)))
-				(then (return (call c_function_error (record.get (local result_type) start) (record.get (local result_type) end) (u32 23)))))
+				(then (return (call c_member_error (record.get (local returns_node) start) (record.get (local returns_node) end) (u32 23)))))
+			(let resource (call read_c_result_resource (borrow-shared (local source)) (borrow-shared (local nodes))
+				(slice.load (local nodes) (local result)) (local bridge)))
+			(if (u32.lt (u32 0) (record.get (local resource) error)) (then (return (local resource))))
 			(let first_parameter (record.get (local form_params) first))
 			(let-mut parameter (local first_parameter))
 			(let-mut count (i32 0))
@@ -279,19 +276,19 @@
 						(:doc "A missing or extra operand is diagnosed at the parameter form.")
 						(bool.or (i32.lt (local type) (i32 0))
 							(bool.not (i32.lt (record.get (slice.load (local nodes) (local type)) next_sibling) (i32 0))))
-						(then (return (call c_function_error (record.get (local item) start) (record.get (local item) end) (u32 23)))))
+						(then (return (call c_member_error (record.get (local item) start) (record.get (local item) end) (u32 23)))))
 					(let choice (call select_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local item) (local parts) (bool false)))
 					(if
 						(:doc "A parameter cannot apply declaration selection.")
 						(u32.lt (u32 0) (record.get (local choice) error))
-						(then (return (call c_function_error (record.get (local choice) start) (record.get (local choice) end)
+						(then (return (call c_member_error (record.get (local choice) start) (record.get (local choice) end)
 							(record.get (local choice) error)))))
 					(let type_node (slice.load (local nodes) (local type)))
 					(if
 						(:doc "Only scalar formals and shared byte slices have native bridge support.")
 						(bool.not (bool.or (call is_c_scalar (borrow-shared (local source)) (local type_node))
 							(call is_c_string_slice (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node))))
-						(then (return (call c_function_error (record.get (local type_node) start)
+						(then (return (call c_member_error (record.get (local type_node) start)
 							(record.get (local type_node) end) (u32 23)))))
 					(let name (slice.load (local nodes) (record.get (local parts) head)))
 					(let name_start (record.get (local name) start))
@@ -308,7 +305,7 @@
 								(call same_bytes (borrow-shared (local source))
 									(record.get (local previous_name) start) (record.get (local previous_name) end)
 									(borrow-shared (local source)) (local name_start) (local name_end))
-								(then (return (call c_function_error (local name_start) (local name_end) (u32 33)))))
+								(then (return (call c_member_error (local name_start) (local name_end) (u32 33)))))
 							(set (local earlier) (record.get (local previous) next_sibling))))
 					(set (local parameter) (record.get (local item) next_sibling))
 					(set (local count) (i32.add.wrapping (local count) (i32 1)))))
@@ -319,38 +316,45 @@
 			(if
 				(:doc "Keep a bad conversion at its original defining span.")
 				(u32.lt (u32 0) (record.get (local contracts) error))
-				(then (return (call c_function_error (record.get (local contracts) start) (record.get (local contracts) end)
+				(then (return (call c_member_error (record.get (local contracts) start) (record.get (local contracts) end)
 					(record.get (local contracts) error)))))
-			(return (record.make CFunctionRead (declaration (local declaration))
+			(return (record.make CMemberRead (declaration (local declaration))
 				(native_start (record.get (local name) start)) (native_end (record.get (local name) end))
 				(signature_start (record.get (local params_node) start)) (signature_end (record.get (local returns_node) end))
-				(start (local start)) (end (local end)) (error (u32 0))))))
+				(start (local start)) (end (local end)) (error (u32 0))
+				(owner_type (record.get (local resource) owner_type))
+				(drop_start (record.get (local resource) drop_start)) (drop_end (record.get (local resource) drop_end))
+				(type_start (record.get (local resource) type_start)) (type_end (record.get (local resource) type_end))))))
 
-	(fn find_c_function
-		(:doc `Resolve the original function name within a matched header's active members.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (header HeaderMatch)
+	(fn find_c_member
+		(:doc `Find an active member in the requested namespace under the defining bridge.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (bridge_row i32) (tag u32)
 			(spelling (shared-slice u8)) (start i32) (end i32))
-		(returns CFunctionRead)
+		(returns CMemberLookup)
 		(body
-			(let bridge (slice.load (local nodes) (record.get (local header) node)))
+			(let bridge (slice.load (local nodes) (local bridge_row)))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local bridge)))
 			(let provider (slice.load (local nodes) (record.get (local parts) operands)))
 			(let literal (slice.load (local nodes) (record.get (local provider) next_sibling)))
 			(let-mut member (record.get (local literal) next_sibling))
 			(let-mut found (i32 -1))
 			(while
-				(:doc "An active function with the selected spelling contributes one definition.")
+				(:doc "An active member with the selected spelling contributes one definition.")
 				(bool.not (i32.lt (local member) (i32 0)))
 				(body
 					(let item (slice.load (local nodes) (local member)))
 					(let form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
 					(let head (record.get (local form) head))
-					(let name (record.get (local form) name))
+					(let-mut name (record.get (local form) name))
 					(if
-						(:doc "Function selection leaves unrelated and unsupported declarations out of the scalar binding.")
+						(:doc "A bridge type stores its name as the first ordinary operand.")
+						(u32.eq (local tag) (u32 6))
+						(then (set (local name) (record.get (local form) operands))))
+					(if
+						(:doc "Only members with the requested tag participate in the lookup.")
 						(bool.and (bool.not (i32.lt (local head) (i32 0)))
 							(bool.and (bool.not (i32.lt (local name) (i32 0)))
-								(u32.eq (call import_keyword (borrow-shared (local source)) (slice.load (local nodes) (local head))) (u32 1))))
+								(u32.eq (call import_keyword (borrow-shared (local source)) (slice.load (local nodes) (local head))) (local tag))))
 						(then
 							(let named (slice.load (local nodes) (local name)))
 							(let from (record.get (local named) start))
@@ -366,8 +370,8 @@
 									(if
 										(:doc "Keep malformed selection metadata at its defining span.")
 										(u32.lt (u32 0) (record.get (local choice) error))
-										(then (return (call c_function_error (record.get (local choice) start)
-											(record.get (local choice) end) (record.get (local choice) error)))))
+										(then (return (record.make CMemberLookup (declaration (i32 -1)) (start (record.get (local choice) start))
+												(end (record.get (local choice) end)) (error (record.get (local choice) error))))))
 									(if
 										(:doc "Excluded members never reserve the spelling.")
 										(record.get (local choice) active)
@@ -375,15 +379,64 @@
 											(if
 												(:doc "A duplicate active definition would make this selection ambiguous.")
 												(bool.not (i32.lt (local found) (i32 0)))
-												(then (return (call c_function_error (local from) (local to) (u32 30)))))
+												(then (return (record.make CMemberLookup (declaration (i32 -1)) (start (local from))
+												(end (local to)) (error (u32 30))))))
 											(set (local found) (local member))))))))
 					(set (local member) (record.get (local item) next_sibling))))
+			(return (record.make CMemberLookup (declaration (local found)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+
+	(fn find_c_type
+		(:doc `Resolve a selected pointer-backed type and retain its native annotation and destructor spans.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (bridge i32)
+			(spelling (shared-slice u8)) (start i32) (end i32))
+		(returns CMemberRead)
+		(body
+			(let found (call find_c_member (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local bridge) (u32 6) (borrow-shared (local spelling)) (local start) (local end)))
+			(let declaration (record.get (local found) declaration))
+			(if
+				(:doc "Propagate a failed lookup or leave the requested name unavailable.")
+				(i32.lt (local declaration) (i32 0))
+				(then (return (call c_member_error (record.get (local found) start) (record.get (local found) end)
+					(record.get (local found) error)))))
+			(let node (slice.load (local nodes) (local declaration)))
+			(let checked (call check_c_owner (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(if
+				(:doc "The contract's invalid annotation lives in the defining source.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (call c_member_error (record.get (local checked) start) (record.get (local checked) end)
+					(record.get (local checked) error)))))
+			(let native (slice.load (local nodes) (record.get (local checked) native)))
+			(let drop (slice.load (local nodes) (record.get (local checked) drop)))
+			(return (record.make CMemberRead (declaration (local declaration))
+				(native_start (record.get (local native) start)) (native_end (record.get (local native) end))
+				(signature_start (record.get (local node) start)) (signature_end (record.get (local node) end))
+				(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))
+				(owner_type (local declaration)) (drop_start (record.get (local drop) start)) (drop_end (record.get (local drop) end))
+				(type_start (record.get (local native) start)) (type_end (record.get (local native) end))))))
+
+	(fn find_c_declaration
+		(:doc `Resolve and check a C header's selected function or named pointer type.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (header HeaderMatch)
+			(spelling (shared-slice u8)) (start i32) (end i32) (namespace u32))
+		(returns CMemberRead)
+		(body
+			(let bridge (record.get (local header) node))
+			(if
+				(:doc "Each namespace selects only declarations of its own kind.")
+				(u32.eq (local namespace) (u32 1))
+				(then (return (call find_c_type (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local bridge) (borrow-shared (local spelling)) (local start) (local end)))))
+			(let found (call find_c_member (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local bridge) (u32 1) (borrow-shared (local spelling)) (local start) (local end)))
+			(let index (record.get (local found) declaration))
 			(if
 				(:doc "An unavailable declaration is diagnosed by the importer at the requested name.")
-				(i32.lt (local found) (i32 0))
-				(then (return (call c_function_error (i32 0) (i32 0) (u32 0)))))
-			(let item (slice.load (local nodes) (local found)))
+				(i32.lt (local index) (i32 0))
+				(then (return (call c_member_error (record.get (local found) start) (record.get (local found) end)
+					(record.get (local found) error)))))
+			(let item (slice.load (local nodes) (local index)))
 			(let signature (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
 			(return (call read_c_function (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local found) (slice.load (local nodes) (record.get (local signature) name)) (local item)
-				(record.get (local signature) operands))))))
+				(local index) (slice.load (local nodes) (record.get (local signature) name)) (local item)
+				(record.get (local signature) operands) (local bridge))))))
