@@ -74,6 +74,63 @@ void wvrt_cstr_drop(char *wvrtstorage) {
 	free(wvrtstorage);
 }
 
+// Report a host argument conversion failure before calling the Wove entry.
+static int wvrt_host_arguments_error(void) {
+	fputs("runtime error: could not capture host arguments\n", stderr);
+	return EXIT_FAILURE;
+}
+
+// Pack the user's original argument bytes and lend them and their spans to Wove.
+int wvrt_run_host_entry(int argc, char **argv, size_t span_size,
+	void (*write_span)(void *, int32_t, int32_t, int32_t), int32_t (*entry)(wvrt_slice, wvrt_slice)) {
+	// Both lengths must fit in the runtime's signed slice domain.
+	if (argc < 0 || (argc > 0 && (uintmax_t)(argc - 1) > INT32_MAX) || span_size == 0) {
+		return wvrt_host_arguments_error();
+	}
+	const int32_t count = argc == 0 ? 0 : (int32_t)(argc - 1);
+	// The host supplies only the executable name in the usual empty case.
+	if (count == 0) {
+		return entry((wvrt_slice){NULL, 0, sizeof(uint8_t)}, (wvrt_slice){NULL, 0, span_size});
+	}
+	// Check the span extent before allocating its record storage.
+	if (argv == NULL || (uintmax_t)count > SIZE_MAX / span_size) {
+		return wvrt_host_arguments_error();
+	}
+	size_t length = 0;
+	// Measure the byte arena without counting the executable name or C terminators.
+	for (int32_t index = 0; index < count; ++index) {
+		if (argv[index + 1] == NULL) { return wvrt_host_arguments_error(); }
+		const size_t width = strlen(argv[index + 1]);
+		// Keep every half-open end representable as a Wove i32 and a host allocation offset.
+		if ((uintmax_t)width > INT32_MAX - (uintmax_t)length || width > SIZE_MAX - length) {
+			return wvrt_host_arguments_error();
+		}
+		length += width;
+	}
+	uint8_t *bytes = length == 0 ? NULL : malloc(length);
+	void *spans = malloc((size_t)count * span_size);
+	// Release whichever allocation succeeded when the other fails.
+	if ((length > 0 && bytes == NULL) || spans == NULL) {
+		free(spans);
+		free(bytes);
+		return wvrt_host_arguments_error();
+	}
+	size_t offset = 0;
+	// Equal endpoints preserve an empty argument as a distinct row.
+	for (int32_t index = 0; index < count; ++index) {
+		const char *argument = argv[index + 1];
+		const size_t width = strlen(argument);
+		if (width > 0) { memcpy(bytes + offset, argument, width); }
+		write_span(spans, index, (int32_t)offset, (int32_t)(offset + width));
+		offset += width;
+	}
+	const int32_t status = entry((wvrt_slice){bytes, (int32_t)length, sizeof(uint8_t)},
+		(wvrt_slice){spans, count, span_size});
+	free(spans);
+	free(bytes);
+	return status;
+}
+
 // Preserve C object alignment, including native types with extended alignment.
 // The caller owns failure handling, so a newly acquired foreign resource can be closed.
 static void *wvrt_calloc(size_t wvrtcount, size_t wvrtsize, size_t wvrtalignment) {
