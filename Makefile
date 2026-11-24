@@ -26,7 +26,7 @@ SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove st
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(addprefix stage-2/,emit/c.wove emit/runtime.wove emit/c_strings.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
-	scalar/syntax.wove scalar/flow.wove scalar/plan.wove scalar/graph.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
+	scalar/syntax.wove scalar/flow.wove scalar/host_entry.wove scalar/plan.wove scalar/graph.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_DIGITS := stage-2/hashing/digits.wove
 HASHING_BITS := stage-2/hashing/bits.wove
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_DIGITS) $(HASHING_BITS)
@@ -52,7 +52,7 @@ CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove $(VALUE_TEXT_MODULE
 CLI_FIXTURES := tests/stage-2/cli
 CLI_CASES := $(CLI_FIXTURES)/cases.tsv
 CLI_OPTION_PROGRAMS := $(addprefix $(STAGE2)/cli/,options options_errors)
-CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors) $(CLI_OPTION_PROGRAMS)
+CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors host_entry) $(CLI_OPTION_PROGRAMS)
 CONFIG_FIXTURES := tests/stage-2/config
 CONFIG_PROGRAM := $(STAGE2)/config/project
 CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove project.wove schema.wove values.wove)

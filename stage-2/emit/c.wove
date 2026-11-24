@@ -20,13 +20,21 @@
 		(only read_module_declarations plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
 	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword (type ScalarOperator)))
 	(use wove-file "./runtime.wove"
-		(only write_runtime_header open_conversion open_slice_access open_shared_projection write_slice_length close_runtime_call
+		(only write_runtime_header open_host_entry open_conversion open_slice_access open_shared_projection write_slice_length close_runtime_call
 			open_slice_offset write_slice_items open_array_allocation open_array_drop open_array_borrow))
 	(use wove-file "./text.wove" (only c_byte c_span c_text_fragment c_cast c_u64_cast c_i32_bias write_c_name c_decimal_digits
 			function_name_role parameter_name_role local_name_role write_temporary_name))
 
 	(struct EmitResult
 		(fields (written i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
+
+	(fn uses_host_entry
+		(:doc `A checked root with two borrowed parameters needs the host argv wrapper.`)
+		(:pragma (inline always))
+		(params (function ScalarFunction))
+		(returns bool)
+		(body (return (bool.and (record.get (local function) entry)
+			(i32.lt (i32 0) (record.get (local function) arity))))))
 
 	(fn write_function_name
 		(:doc `Write the ABI entry or a stable name from a defining function row.`)
@@ -35,8 +43,8 @@
 		(returns u32)
 		(body
 			(if
-				(:doc "The runtime calls the entry by its conventional C name.")
-				(record.get (local function) entry)
+				(:doc "A parameterless entry keeps its conventional C name. The host wrapper calls a generated function.")
+				(bool.and (record.get (local function) entry) (bool.not (call uses_host_entry (local function))))
 				(then (return (call c_text_fragment (borrow-mut (local output)) (local offset) (u32 1) (local writing)))))
 			(let name (slice.load (local nodes) (record.get (local function) name)))
 			(if
@@ -785,8 +793,8 @@
 		(body
 			(let-mut result (record.get (local function) result))
 			(if
-				(:doc "The ABI entry has a C int result even though Wove requires i32.")
-				(record.get (local function) entry)
+				(:doc "The direct C entry uses int. A body behind the host wrapper keeps its i32 result.")
+				(bool.and (record.get (local function) entry) (bool.not (call uses_host_entry (local function))))
 				(then (set (local result) (u32 0))))
 			(let-mut cursor (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (local result) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
@@ -885,6 +893,24 @@
 									(set (local index) (record.get (slice.load (local statements) (local block)) first))))))))
 			(return (local cursor))))
 
+	(fn write_host_wrapper
+		(:doc `Bind the host C entry to the checked body and the exact generated span type.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function ScalarFunction)
+			(parameters (shared-slice ScalarParameter)) (records (shared-slice ScalarRecord))
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let span (slice.load (local parameters) (i32.add.wrapping (record.get (local function) params) (i32 1))))
+			(let cursor (call open_host_entry (borrow-mut (local output)) (local offset) (local writing)))
+			(let entry (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local function) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(let comma (call c_byte (borrow-mut (local output)) (local entry) (u8 44) (local writing)))
+			(let type (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (call record_slice_element (record.get (local span) type))
+				(borrow-mut (local output)) (local comma) (local name_prefix) (local writing)))
+			(let close (call c_byte (borrow-mut (local output)) (local type) (u8 41) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local close) (u8 10) (local writing)))))
+
 	(fn write_definition
 		(:doc `Write a checked function definition and its statements in source order.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function ScalarFunction)
@@ -913,7 +939,14 @@
 				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
-			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))
+			(if
+				(:doc "Only a native entry that requests the argv views gets the host ABI wrapper.")
+				(call uses_host_entry (local function))
+				(then (return (call write_host_wrapper (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local function) (borrow-shared (local parameters)) (borrow-shared (local records))
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(return (local cursor))))
 
 	(fn uses_runtime
 		(:doc `Detect whether a checked expression or a signature needs the shared C runtime.`)

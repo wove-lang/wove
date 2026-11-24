@@ -174,11 +174,23 @@ and the selected declaration indices. It checks scalar functions that
 return a value on every path. Helpers can accept and return `i32`, `u8`,
 `u32`, and `bool`. Expressions support exact-type literals, binding reads,
 and direct calls. A local declared with `let` or `let-mut` takes its
-`i32`, `u8`, or `u32` type from its initializer and comes into scope
-afterwards. A `set` requires an existing `let-mut` binding and a value
-of that binding's exact type. The selected `main`
-has the ABI signature `int main(void)`. Forward calls use checked
-prototypes, and nested calls evaluate from left to right.
+scalar type from its initializer and comes into scope afterwards. A `set`
+requires an existing `let-mut` binding and a value of that binding's exact
+type. Forward calls use checked prototypes, and nested calls evaluate from
+left to right.
+
+An executable's `main` returns `i32`. A parameterless entry uses the ABI
+`int main(void)`. In native mode, `main` may receive a `(shared-slice u8)`
+followed by a `(shared-slice ArgSpan)`. The span record has `start` and `end`
+fields of type `i32` in that order. A type alias retains the defining record
+identity for calls to the [typed argv parser](cli/argv.wove).
+
+The native argv wrapper receives `int argc, char **argv`. It skips the
+executable name and copies the original argument bytes without their C
+terminators. Each user argument has a half-open span in source order.
+The first row is index zero. Empty arguments have equal endpoints, and
+zero user arguments supply two empty views. Wove borrows both views for
+the entry call. The wrapper releases the backing storage on return.
 
 A module-local `(struct Token (fields (kind u32) (start i32)))` defines
 a named, copyable record. Fields can use `bool`, `u8`, `i32`, or `u32`.
@@ -514,7 +526,7 @@ compare successful values with Stage 1, and check the prefix on failure.
 
 Prefix a selection, compilation, or caller inspection command with
 `--mode bootstrap` or `--mode native` to choose its mode. The probe defaults
-to bootstrap mode. Both modes in this slice emit a parameterless C entry.
+to bootstrap mode. Native mode also accepts the two-parameter argv entry.
 
 Use `--module FILE [START END [DECL_CAPACITY]]` to select a checked module.
 The first row contains the selected count, start, end, error, line, and

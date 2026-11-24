@@ -15,6 +15,7 @@ def read_cases(manifest):
 	arguments = []
 	expected = []
 	label = None
+	prefix = False
 	native = None
 	# A case header starts a new argv and stdout expectation.
 	for line in manifest.read_text(encoding="utf-8").splitlines():
@@ -24,11 +25,12 @@ def read_cases(manifest):
 		fields = payload.split("\t")
 		if kind == "case":
 			if label is not None:
-				yield label, arguments, expected, native
+				yield label, arguments, expected, prefix, native
 			label, entry, capacity, *options = fields
 			command = options[0] if options else "--graph"
 			arguments = [command, entry, capacity, *options[1:]]
 			expected = []
+			prefix = False
 			native = None
 		elif kind == "mode" and label is not None:
 			arguments[:0] = ["--mode", payload]
@@ -37,21 +39,27 @@ def read_cases(manifest):
 			arguments.extend((identity, virtual_path, source))
 		elif kind == "native" and label is not None:
 			status, *flags = fields
-			native = int(status), flags, b""
+			native = flags, [(int(status), [], b"")]
 		# Runtime traps use the same native recipe with exact stderr.
 		elif kind == "native-trap" and label is not None:
 			diagnostic, *flags = fields
-			native = 1, flags, json.loads(diagnostic).encode("utf-8")
-		elif kind == "expect" and label is not None:
+			native = flags, [(1, [], json.loads(diagnostic).encode("utf-8"))]
+		# Additional vectors reuse the compiled artifact and preserve empty arguments.
+		elif kind == "native-argv" and native is not None:
+			status, argv = fields
+			native[1].append((int(status), json.loads(argv), b""))
+		# A native behavior case may assert just the probe’s leading rows.
+		elif kind in {"expect", "expect-prefix"} and label is not None:
+			prefix = prefix or kind == "expect-prefix"
 			expected.append(payload)
 		else:
 			raise ValueError(f"invalid graph manifest record {kind}")
 	if label is not None:
-		yield label, arguments, expected, native
+		yield label, arguments, expected, prefix, native
 
 
 # Compile and run an emitted translation unit with the same compiler settings as the rest of the suite.
-def check_native(probe, label, emitted, expected, fixture_flags, diagnostic):
+def check_native(probe, label, emitted, fixture_flags, executions):
 	header, _, source = emitted.partition("\n")
 	count = int(header.split()[1])
 	assert len(source.encode()) == count, (label, header)
@@ -66,17 +74,21 @@ def check_native(probe, label, emitted, expected, fixture_flags, diagnostic):
 		generated.write_text(source, encoding="utf-8")
 		command = [*compiler, "-std=c11", *flags, "-I", "runtime", *fixture_flags, str(generated), runtime, "-o", str(program)]
 		subprocess.run(command, check=True, timeout=30)
-		result = subprocess.run([program], capture_output=True, timeout=30)
-		assert result.returncode == expected and not result.stdout and result.stderr == diagnostic, (label, result)
+		# Reuse the compiled fixture for every supplied argument vector.
+		for expected, argv, diagnostic in executions:
+			result = subprocess.run([program, *argv], capture_output=True, timeout=30)
+			assert (result.returncode, result.stdout, result.stderr) == (expected, b"", diagnostic), (label, result)
 
 
 # Run each supplied graph through the seed-built executable.
 def check_manifest(probe, manifest):
 	# The fixture owns the graph, consumer mode, expected output, and optional native result.
-	for label, arguments, expected, native in read_cases(Path(manifest)):
+	for label, arguments, expected, prefix, native in read_cases(Path(manifest)):
 		run = subprocess.run([probe, *arguments], capture_output=True, text=True, timeout=30)
 		status = int(expected[0].startswith("error "))
 		actual = run.stdout.splitlines()
+		if prefix:
+			actual = actual[:len(expected)]
 		if run.returncode != status or run.stderr or actual != expected:
 			print(f"{label}: expected status {status}, got {run.returncode}", file=sys.stderr)
 			print("expected:\n" + "\n".join(expected), file=sys.stderr)
