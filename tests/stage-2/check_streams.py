@@ -139,9 +139,21 @@ def check_forms(executable, directory, manifest):
 		assert status == int(expected[3] != 0), label
 
 
+# Compare every tree row, including all three links and the parent's coordinates.
+def check_trees(executable, directory, manifest):
+	source = directory / "tree.wove"
+	for label, raw, base, end, capacity, *fields in fixture_rows(manifest):
+		source.write_bytes(bytes.fromhex(raw))
+		expected = [tuple(map(int, row.split())) for row in fields]
+		bounds = (int(base), int(end), int(capacity))
+		rows, status = probe_rows(executable, "--tree", source, bounds)
+		assert rows == expected, (label, rows, expected)
+		assert status == int(expected[0][3] != 0), label
+
+
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	executable, layouts, diagnostics, forms, *sources = map(Path, sys.argv[1:])
+	executable, layouts, diagnostics, forms, trees, *sources = map(Path, sys.argv[1:])
 	for source in sources:
 		compare_stream(executable, source)
 
@@ -150,6 +162,7 @@ def main():
 		check_layouts(executable, directory, layouts)
 		check_diagnostics(executable, directory, diagnostics)
 		check_forms(executable, directory, forms)
+		check_trees(executable, directory, trees)
 
 
 if __name__ == "__main__":

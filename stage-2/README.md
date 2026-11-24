@@ -3,7 +3,7 @@ Copyright (c) 2026 wove contributors
 SPDX-License-Identifier: MIT OR Apache-2.0
 -->
 
-# Stage 2 source scanner and form checker
+# Stage 2 source scanner and tree reader
 
 Call `source_diagnostic` once on the shared byte slice before tokenization.
 The admission check covers the entire view, including bytes in comments and
@@ -80,6 +80,20 @@ admission errors retain codes 1–5. Structural checks use the following codes.
 | 9 | Unclosed form | The innermost unmatched opener |
 | 10 | Extra input after the root | The first extra significant token |
 
+`build_source_tree` takes the same admitted source view, its successful
+`FormCheck`, and a writable `(mut-slice SourceNode)`. It checks capacity
+before writing. On success it fills exactly the counted rows in source
+order and returns the original check. Short storage returns code 11
+with the real root's span.
+
+Row 0 is the synthetic source root and covers the entire view. Node kinds
+are 0 for that root, 40 for a parenthesized form, 1 for a bare atom, 2 for a
+quoted atom, and 59 for a comment. Each row carries a half-open byte span
+and `parent`, `first_child`, and `next_sibling` indices. An absent link is
+`-1`. A form spans both parentheses. Its tag is the first child after
+skipping any preceding comment rows. Atom and comment spellings are
+available from the original source bytes.
+
 `make stage-2` emits C with the Python seed and links the scanner with
 its [source fixture](../tests/stage-2/source_scan.probe.c) and the shared
 runtime. Run `make test-stage-2` to exercise those inputs and compare full
@@ -95,3 +109,8 @@ is relative to the selected view and the coordinates use the whole file.
 Use `--form FILE [START END]` to check structure. The single result row
 contains the row count, start, end, error, line, and column. The same
 view-relative spans and file coordinates apply.
+
+Use `--tree FILE [START END [TREE_CAPACITY]]` to build a tree. It emits the
+form check result followed by the populated nodes. When supplied, the
+capacity is an element count. The fixture verifies that spare storage
+retains its original bytes.

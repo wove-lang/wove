@@ -6,61 +6,74 @@
 	(struct SourceDiagnostic (fields (error u32) (start i32) (end i32)))
 	(struct SourcePosition (fields (line u32) (column u32)))
 	(struct FormCheck (fields (rows u32) (start i32) (end i32) (error u32)))
-
-	;; Match the seed's ASCII separators, U+0009–U+000D and U+001C–U+0020.
-	(fn is_ascii_whitespace
-		(params (byte u8))
-		(returns bool)
-		(body
-			;; Test the two half-open ranges directly in the raw bytes.
-			(return (bool.or
-				(bool.and (bool.not (u8.lt (local byte) (u8 9))) (u8.lt (local byte) (u8 14)))
-				(bool.and (bool.not (u8.lt (local byte) (u8 28))) (u8.lt (local byte) (u8 33)))))))
-
-	;; Parentheses are both atom boundaries and one-byte tokens.
-	(fn is_parenthesis
-		(params (byte u8))
-		(returns bool)
-		(body
-			(return (bool.or (u8.eq (local byte) (u8 40)) (u8.eq (local byte) (u8 41))))))
-
-	;; Leave comment markers and quote delimiters for their own token scan.
-	(fn is_semicolon_or_quote
-		(params (byte u8))
-		(returns bool)
-		(body
-			(return (bool.or (u8.eq (local byte) (u8 59)) (u8.eq (local byte) (u8 34))))))
-
-	;; Resume at the supplied cursor and leave the first non-whitespace byte unconsumed.
-	(fn skip_whitespace
-		(params (source (shared-slice u8)) (start i32))
-		(returns i32)
-		(body
-			(let end (slice.len (local source)))
-			(let-mut cursor (local start))
-			;; The end cursor needs no byte load.
-			(while (i32.lt (local cursor) (local end))
-				(body
-					(let byte (slice.load (local source) (local cursor)))
-					(let width (call whitespace_width (borrow-shared (local source)) (local cursor) (local byte)))
-					;; Preserve the offset of the first byte that can start a token.
-					(if (i32.eq (local width) (i32 0))
-						(then (return (local cursor))))
-					(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))
-			(return (local cursor))))
-
-	;; Find the first significant byte or the end of this view.
-	(fn source_offset
-		(params (source (shared-slice u8)))
-		(returns i32)
-		(body
-			(return (call skip_whitespace (borrow-shared (local source)) (i32 0)))))
+	(struct SourceNode
+		(fields (kind u32) (start i32) (end i32) (parent i32) (first_child i32) (next_sibling i32)))
 
 	(with-meta
 		(meta
+			(:doc "Match the seed's ASCII separators, U+0009–U+000D and U+001C–U+0020.")
+			(:pragma (inline always)))
+		(fn is_ascii_whitespace
+			(params (byte u8))
+			(returns bool)
+			(body
+				;; Test the two half-open ranges directly in the raw bytes.
+				(return (bool.or
+					(bool.and (bool.not (u8.lt (local byte) (u8 9))) (u8.lt (local byte) (u8 14)))
+					(bool.and (bool.not (u8.lt (local byte) (u8 28))) (u8.lt (local byte) (u8 33))))))))
+
+	(with-meta
+		(meta
+			(:doc "Parentheses are both atom boundaries and one-byte tokens.")
+			(:pragma (inline always)))
+		(fn is_parenthesis
+			(params (byte u8))
+			(returns bool)
+			(body
+				(return (bool.or (u8.eq (local byte) (u8 40)) (u8.eq (local byte) (u8 41)))))))
+
+	(with-meta
+		(meta
+			(:doc "Leave comment markers and quote delimiters for their own token scan.")
+			(:pragma (inline always)))
+		(fn is_semicolon_or_quote
+			(params (byte u8))
+			(returns bool)
+			(body
+				(return (bool.or (u8.eq (local byte) (u8 59)) (u8.eq (local byte) (u8 34)))))))
+
+	(with-meta
+		(meta (:doc "Resume at the supplied cursor and leave the first non-whitespace byte unconsumed."))
+		(fn skip_whitespace
+			(params (source (shared-slice u8)) (start i32))
+			(returns i32)
+			(body
+				(let end (slice.len (local source)))
+				(let-mut cursor (local start))
+				;; The end cursor needs no byte load.
+				(while (i32.lt (local cursor) (local end))
+					(body
+						(let byte (slice.load (local source) (local cursor)))
+						(let width (call whitespace_width (borrow-shared (local source)) (local cursor) (local byte)))
+						;; Preserve the offset of the first byte that can start a token.
+						(if (i32.eq (local width) (i32 0))
+							(then (return (local cursor))))
+						(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))
+				(return (local cursor)))))
+
+	(with-meta
+		(meta (:doc "Find the first significant byte or the end of this view."))
+		(fn source_offset
+			(params (source (shared-slice u8)))
+			(returns i32)
+			(body
+				(return (call skip_whitespace (borrow-shared (local source)) (i32 0))))))
+
+	(with-meta
+		(meta
+			(:doc "Classify the first significant byte for callers that only need its original byte kind.")
 			(:expect bootstrap.scan_source_byte
 				(issue "https://github.com/wove-lang/wove/issues/13")))
-		;; Classify the first significant byte for callers that only need its original byte kind.
 		(fn source_kind
 			(params (source (shared-slice u8)))
 			(returns u32)
@@ -75,139 +88,153 @@
 					(then (return (int.convert u32 (local byte)))))
 				(return (u32 1)))))
 
-	;; Find the exclusive end of an atom whose first byte has already been accepted.
-	(fn bare_atom_end
-		(params (source (shared-slice u8)) (next i32))
-		(returns i32)
-		(body
-			(let length (slice.len (local source)))
-			(let-mut cursor (local next))
-			;; The view can end immediately after the last atom byte.
-			(while (i32.lt (local cursor) (local length))
-				(body
-					(let byte (slice.load (local source) (local cursor)))
-					;; Stop before the first byte of any separator or token delimiter.
-					(if (bool.or
-							(bool.or
-								(call is_parenthesis (local byte))
-								(call is_semicolon_or_quote (local byte)))
-							(i32.lt (i32 0)
-								(call whitespace_width (borrow-shared (local source)) (local cursor) (local byte))))
-						(then (return (local cursor))))
-					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
-			(return (local cursor))))
-
-	;; Keep line comments bounded by physical CR and LF bytes.
-	(fn is_line_ending
-		(params (byte u8))
-		(returns bool)
-		(body
-			(return (bool.or (u8.eq (local byte) (u8 13)) (u8.eq (local byte) (u8 10))))))
-
-	;; Scan comment text from just past the opening semicolons.
-	(fn line_comment_end
-		(params (source (shared-slice u8)) (text_start i32))
-		(returns i32)
-		(body
-			(let length (slice.len (local source)))
-			(let-mut cursor (local text_start))
-			;; A comment can run to the end of the view, even with no text.
-			(while (i32.lt (local cursor) (local length))
-				(body
-					(let byte (slice.load (local source) (local cursor)))
-					;; Leave the line ending outside the raw span for whitespace scanning.
-					(if (call is_line_ending (local byte))
-						(then (return (local cursor))))
-					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
-			(return (local cursor))))
-
-	;; Recognize the JSON short escapes after their opening backslash.
-	(fn is_short_escape
-		(params (byte u8))
-		(returns bool)
-		(body
-			;; Accept escaped punctuation and the five named control characters.
-			(return (bool.or
-				(bool.or
-					(u8.eq (local byte) (u8 34))
-					(bool.or (u8.eq (local byte) (u8 92)) (u8.eq (local byte) (u8 47))))
-				(bool.or
-					(bool.or (u8.eq (local byte) (u8 98)) (u8.eq (local byte) (u8 102)))
-					(bool.or
-						(u8.eq (local byte) (u8 110))
-						(bool.or (u8.eq (local byte) (u8 114)) (u8.eq (local byte) (u8 116)))))))))
-
-	;; Accept ASCII digits and both cases of A through F in Unicode escapes.
-	(fn is_hex_digit
-		(params (byte u8))
-		(returns bool)
-		(body
-			;; Use half-open byte ranges for decimal, uppercase, and lowercase digits.
-			(return (bool.or
-				(bool.and (bool.not (u8.lt (local byte) (u8 48))) (u8.lt (local byte) (u8 58)))
-				(bool.or
-					(bool.and (bool.not (u8.lt (local byte) (u8 65))) (u8.lt (local byte) (u8 71)))
-					(bool.and (bool.not (u8.lt (local byte) (u8 97))) (u8.lt (local byte) (u8 103))))))))
-
-	;; Keep the raw extent of a lexical error for the caller.
-	(fn lexical_error
-		(params (code u32) (start i32) (end i32))
-		(returns Token)
-		(body
-			(return (record.make Token
-				(kind (u32 3)) (error (local code)) (start (local start)) (end (local end))))))
-
-	;; Validate quoted bytes while preserving the full spelling for the parser.
-	(fn scan_quoted
-		(params (source (shared-slice u8)) (start i32))
-		(returns Token)
-		(body
-			(let length (slice.len (local source)))
-			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
-			;; Read only bytes inside the supplied view, including while scanning escapes.
-			(while (i32.lt (local cursor) (local length))
-				(body
-					(let byte (slice.load (local source) (local cursor)))
-					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
-					;; An unescaped quote completes the span just after the closing byte.
-					(if (u8.eq (local byte) (u8 34))
-						(then
-							(return (record.make Token (kind (u32 2)) (error (u32 0)) (start (local start)) (end (local cursor))))))
-					;; Raw ASCII control bytes end the error span just after the offending byte.
-					(if (u8.lt (local byte) (u8 32))
-						(then (return (call lexical_error (u32 4) (local start) (local cursor)))))
-					;; A backslash consumes its escape bytes before the next quote check.
-					(if (u8.eq (local byte) (u8 92))
-						(then
-							;; A trailing backslash reaches the view end without an escape byte.
-							(if (i32.eq (local cursor) (local length))
-								(then (return (call lexical_error (u32 3) (local start) (local length)))))
-							(let escape (slice.load (local source) (local cursor)))
-							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
-							;; A Unicode escape must supply exactly four hex digits.
-							(if (u8.eq (local escape) (u8 117))
-								(then
-									(let-mut digits (i32 0))
-									;; Check each digit before advancing to the next byte.
-									(while (i32.lt (local digits) (i32 4))
-										(body
-											;; A clipped escape reports the view end.
-											(if (i32.eq (local cursor) (local length))
-												(then (return (call lexical_error (u32 3) (local start) (local length)))))
-											(let digit (slice.load (local source) (local cursor)))
-											(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
-											;; Include the first invalid digit in the error span.
-											(if (bool.not (call is_hex_digit (local digit)))
-												(then (return (call lexical_error (u32 3) (local start) (local cursor)))))
-											(set (local digits) (i32.add.wrapping (local digits) (i32 1))))))
-								(else
-									;; Every other escape must belong to the short escape set.
-									(if (bool.not (call is_short_escape (local escape)))
-										(then (return (call lexical_error (u32 3) (local start) (local cursor)))))))))))
-			(return (call lexical_error (u32 2) (local start) (local length)))))
+	(with-meta
+		(meta (:doc "Find the exclusive end of an atom whose first byte has already been accepted."))
+		(fn bare_atom_end
+			(params (source (shared-slice u8)) (next i32))
+			(returns i32)
+			(body
+				(let length (slice.len (local source)))
+				(let-mut cursor (local next))
+				;; The view can end immediately after the last atom byte.
+				(while (i32.lt (local cursor) (local length))
+					(body
+						(let byte (slice.load (local source) (local cursor)))
+						;; Stop before the first byte of any separator or token delimiter.
+						(if (bool.or
+								(bool.or
+									(call is_parenthesis (local byte))
+									(call is_semicolon_or_quote (local byte)))
+								(i32.lt (i32 0)
+									(call whitespace_width (borrow-shared (local source)) (local cursor) (local byte))))
+							(then (return (local cursor))))
+						(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+				(return (local cursor)))))
 
 	(with-meta
 		(meta
+			(:doc "Keep line comments bounded by physical CR and LF bytes.")
+			(:pragma (inline always)))
+		(fn is_line_ending
+			(params (byte u8))
+			(returns bool)
+			(body
+				(return (bool.or (u8.eq (local byte) (u8 13)) (u8.eq (local byte) (u8 10)))))))
+
+	(with-meta
+		(meta (:doc "Scan comment text from just past the opening semicolons."))
+		(fn line_comment_end
+			(params (source (shared-slice u8)) (text_start i32))
+			(returns i32)
+			(body
+				(let length (slice.len (local source)))
+				(let-mut cursor (local text_start))
+				;; A comment can run to the end of the view, even with no text.
+				(while (i32.lt (local cursor) (local length))
+					(body
+						(let byte (slice.load (local source) (local cursor)))
+						;; Leave the line ending outside the raw span for whitespace scanning.
+						(if (call is_line_ending (local byte))
+							(then (return (local cursor))))
+						(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+				(return (local cursor)))))
+
+	(with-meta
+		(meta
+			(:doc "Recognize the JSON short escapes after their opening backslash.")
+			(:pragma (inline always)))
+		(fn is_short_escape
+			(params (byte u8))
+			(returns bool)
+			(body
+				;; Accept escaped punctuation and the five named control characters.
+				(return (bool.or
+					(bool.or
+						(u8.eq (local byte) (u8 34))
+						(bool.or (u8.eq (local byte) (u8 92)) (u8.eq (local byte) (u8 47))))
+					(bool.or
+						(bool.or (u8.eq (local byte) (u8 98)) (u8.eq (local byte) (u8 102)))
+						(bool.or
+							(u8.eq (local byte) (u8 110))
+							(bool.or (u8.eq (local byte) (u8 114)) (u8.eq (local byte) (u8 116))))))))))
+
+	(with-meta
+		(meta
+			(:doc "Accept ASCII digits and both cases of A through F in Unicode escapes.")
+			(:pragma (inline always)))
+		(fn is_hex_digit
+			(params (byte u8))
+			(returns bool)
+			(body
+				;; Use half-open byte ranges for decimal, uppercase, and lowercase digits.
+				(return (bool.or
+					(bool.and (bool.not (u8.lt (local byte) (u8 48))) (u8.lt (local byte) (u8 58)))
+					(bool.or
+						(bool.and (bool.not (u8.lt (local byte) (u8 65))) (u8.lt (local byte) (u8 71)))
+						(bool.and (bool.not (u8.lt (local byte) (u8 97))) (u8.lt (local byte) (u8 103)))))))))
+
+	(with-meta
+		(meta (:doc "Keep the raw extent of a lexical error for the caller."))
+		(fn lexical_error
+			(params (code u32) (start i32) (end i32))
+			(returns Token)
+			(body
+				(return (record.make Token
+					(kind (u32 3)) (error (local code)) (start (local start)) (end (local end)))))))
+
+	(with-meta
+		(meta (:doc "Validate quoted bytes while preserving the full spelling for the parser."))
+		(fn scan_quoted
+			(params (source (shared-slice u8)) (start i32))
+			(returns Token)
+			(body
+				(let length (slice.len (local source)))
+				(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+				;; Read only bytes inside the supplied view, including while scanning escapes.
+				(while (i32.lt (local cursor) (local length))
+					(body
+						(let byte (slice.load (local source) (local cursor)))
+						(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+						;; An unescaped quote completes the span just after the closing byte.
+						(if (u8.eq (local byte) (u8 34))
+							(then
+								(return (record.make Token (kind (u32 2)) (error (u32 0)) (start (local start)) (end (local cursor))))))
+						;; Raw ASCII control bytes end the error span just after the offending byte.
+						(if (u8.lt (local byte) (u8 32))
+							(then (return (call lexical_error (u32 4) (local start) (local cursor)))))
+						;; A backslash consumes its escape bytes before the next quote check.
+						(if (u8.eq (local byte) (u8 92))
+							(then
+								;; A trailing backslash reaches the view end without an escape byte.
+								(if (i32.eq (local cursor) (local length))
+									(then (return (call lexical_error (u32 3) (local start) (local length)))))
+								(let escape (slice.load (local source) (local cursor)))
+								(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+								;; A Unicode escape must supply exactly four hex digits.
+								(if (u8.eq (local escape) (u8 117))
+									(then
+										(let-mut digits (i32 0))
+										;; Check each digit before advancing to the next byte.
+										(while (i32.lt (local digits) (i32 4))
+											(body
+												;; A clipped escape reports the view end.
+												(if (i32.eq (local cursor) (local length))
+													(then (return (call lexical_error (u32 3) (local start) (local length)))))
+												(let digit (slice.load (local source) (local cursor)))
+												(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+												;; Include the first invalid digit in the error span.
+												(if (bool.not (call is_hex_digit (local digit)))
+													(then (return (call lexical_error (u32 3) (local start) (local cursor)))))
+												(set (local digits) (i32.add.wrapping (local digits) (i32 1))))))
+									(else
+										;; Every other escape must belong to the short escape set.
+										(if (bool.not (call is_short_escape (local escape)))
+											(then (return (call lexical_error (u32 3) (local start) (local cursor)))))))))))
+				(return (call lexical_error (u32 2) (local start) (local length))))))
+
+	(with-meta
+		(meta
+			(:doc "Scan one raw token in a view already checked by admit_source.")
 			(:expect lexer.token_span
 				(issue "https://github.com/wove-lang/wove/issues/29"))
 			(:expect lexer.line_comment
@@ -218,7 +245,6 @@
 				(issue "https://github.com/wove-lang/wove/issues/33"))
 			(:expect lexer.stream_parity
 				(issue "https://github.com/wove-lang/wove/issues/34")))
-		;; Scan one raw token in a view already checked by admit_source.
 		(fn scan_token
 			(params (source (shared-slice u8)) (cursor i32))
 			(returns Token)
@@ -258,62 +284,67 @@
 				(let end (call bare_atom_end (borrow-shared (local source)) (local next)))
 				(return (record.make Token (kind (u32 1)) (error (u32 0)) (start (local start)) (end (local end)))))))
 
-	;; Classify an ASCII byte or a legal lead byte by the width of its scalar.
-	(fn utf8_width
-		(params (lead u8))
-		(returns i32)
-		(body
-			;; ASCII scalars occupy a single byte.
-			(if (u8.lt (local lead) (u8 128))
-				(then (return (i32 1))))
-			;; Continuations and the overlong two-byte prefixes cannot start a scalar.
-			(if (u8.lt (local lead) (u8 194))
-				(then (return (i32 0))))
-			;; C2 through DF are the legal two-byte leads.
-			(if (u8.lt (local lead) (u8 224))
-				(then (return (i32 2))))
-			;; E0 through EF start three-byte scalars.
-			(if (u8.lt (local lead) (u8 240))
-				(then (return (i32 3))))
-			;; F4 is the last lead that can encode a Unicode scalar.
-			(if (u8.lt (local lead) (u8 245))
-				(then (return (i32 4))))
-			(return (i32 0))))
-
-	;; A continuation byte has prefix 10 in binary.
-	(fn is_utf8_continuation
-		(params (byte u8))
-		(returns bool)
-		(body
-			(return (bool.and (bool.not (u8.lt (local byte) (u8 128))) (u8.lt (local byte) (u8 192))))))
-
-	;; Apply the extra restrictions on the first continuation byte.
-	(fn valid_utf8_second
-		(params (lead u8) (second u8))
-		(returns bool)
-		(body
-			;; Every multibyte scalar needs a continuation at this position.
-			(if (bool.not (call is_utf8_continuation (local second)))
-				(then (return (bool false))))
-			;; E0 requires a high second byte to avoid a three-byte overlong form.
-			(if (u8.eq (local lead) (u8 224))
-				(then (return (bool.not (u8.lt (local second) (u8 160))))))
-			;; ED must stop below the surrogate range.
-			(if (u8.eq (local lead) (u8 237))
-				(then (return (u8.lt (local second) (u8 160)))))
-			;; F0 requires a high second byte to avoid a four-byte overlong form.
-			(if (u8.eq (local lead) (u8 240))
-				(then (return (bool.not (u8.lt (local second) (u8 144))))))
-			;; F4 must stop at U+10FFFF.
-			(if (u8.eq (local lead) (u8 244))
-				(then (return (u8.lt (local second) (u8 144)))))
-			(return (bool true))))
+	(with-meta
+		(meta (:doc "Classify an ASCII byte or a legal lead byte by the width of its scalar."))
+		(fn utf8_width
+			(params (lead u8))
+			(returns i32)
+			(body
+				;; ASCII scalars occupy a single byte.
+				(if (u8.lt (local lead) (u8 128))
+					(then (return (i32 1))))
+				;; Continuations and the overlong two-byte prefixes cannot start a scalar.
+				(if (u8.lt (local lead) (u8 194))
+					(then (return (i32 0))))
+				;; C2 through DF are the legal two-byte leads.
+				(if (u8.lt (local lead) (u8 224))
+					(then (return (i32 2))))
+				;; E0 through EF start three-byte scalars.
+				(if (u8.lt (local lead) (u8 240))
+					(then (return (i32 3))))
+				;; F4 is the last lead that can encode a Unicode scalar.
+				(if (u8.lt (local lead) (u8 245))
+					(then (return (i32 4))))
+				(return (i32 0)))))
 
 	(with-meta
 		(meta
+			(:doc "A continuation byte has prefix 10 in binary.")
+			(:pragma (inline always)))
+		(fn is_utf8_continuation
+			(params (byte u8))
+			(returns bool)
+			(body
+				(return (bool.and (bool.not (u8.lt (local byte) (u8 128))) (u8.lt (local byte) (u8 192)))))))
+
+	(with-meta
+		(meta (:doc "Apply the extra restrictions on the first continuation byte."))
+		(fn valid_utf8_second
+			(params (lead u8) (second u8))
+			(returns bool)
+			(body
+				;; Every multibyte scalar needs a continuation at this position.
+				(if (bool.not (call is_utf8_continuation (local second)))
+					(then (return (bool false))))
+				;; E0 requires a high second byte to avoid a three-byte overlong form.
+				(if (u8.eq (local lead) (u8 224))
+					(then (return (bool.not (u8.lt (local second) (u8 160))))))
+				;; ED must stop below the surrogate range.
+				(if (u8.eq (local lead) (u8 237))
+					(then (return (u8.lt (local second) (u8 160)))))
+				;; F0 requires a high second byte to avoid a four-byte overlong form.
+				(if (u8.eq (local lead) (u8 240))
+					(then (return (bool.not (u8.lt (local second) (u8 144))))))
+				;; F4 must stop at U+10FFFF.
+				(if (u8.eq (local lead) (u8 244))
+					(then (return (u8.lt (local second) (u8 144)))))
+				(return (bool true)))))
+
+	(with-meta
+		(meta
+			(:doc "Admit a source once before tokenization and report the start of its first malformed sequence.")
 			(:expect lexer.utf8_admission
 				(issue "https://github.com/wove-lang/wove/issues/32")))
-		;; Admit a source once before tokenization and report the start of its first malformed sequence.
 		(fn admit_source
 			(params (source (shared-slice u8)))
 			(returns i32)
@@ -331,186 +362,192 @@
 						(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))
 				(return (i32 -1)))))
 
-	;; Return the byte width of a seed separator at the cursor, or zero.
-	(fn whitespace_width
-		(params (source (shared-slice u8)) (cursor i32) (lead u8))
-		(returns i32)
-		(body
-			;; ASCII uses the seed's two contiguous separator ranges.
-			(if (u8.lt (local lead) (u8 128))
-				(then
-					;; Return a single-byte width for either ASCII range.
-					(if (call is_ascii_whitespace (local lead))
-						(then (return (i32 1))))
-					(return (i32 0))))
-			(let remaining (i32.sub.wrapping (slice.len (local source)) (local cursor)))
-			;; U+0085 and U+00A0 are the only two-byte separators.
-			(if (u8.eq (local lead) (u8 194))
-				(then
-					;; Keep the second-byte load inside this view.
-					(if (i32.lt (local remaining) (i32 2))
-						(then (return (i32 0))))
-					(let second (slice.load (local source) (i32.add.wrapping (local cursor) (i32 1))))
-					;; The C2 prefix has two accepted suffixes.
-					(if (bool.or (u8.eq (local second) (u8 133)) (u8.eq (local second) (u8 160)))
-						(then (return (i32 2))))
-					(return (i32 0))))
-			;; Three-byte separators start with E1, E2, or E3 and need both suffix bytes.
-			(if (bool.or
-					(i32.lt (local remaining) (i32 3))
-					(bool.or (u8.lt (local lead) (u8 225)) (u8.lt (u8 227) (local lead))))
-				(then (return (i32 0))))
-			(let second (slice.load (local source) (i32.add.wrapping (local cursor) (i32 1))))
-			(let third (slice.load (local source) (i32.add.wrapping (local cursor) (i32 2))))
-			;; E1 9A 80 is U+1680.
-			(if (u8.eq (local lead) (u8 225))
-				(then
-					;; U+1680 occupies all three bytes.
-					(if (bool.and (u8.eq (local second) (u8 154)) (u8.eq (local third) (u8 128)))
-						(then (return (i32 3))))
-					(return (i32 0))))
-			;; E3 80 80 is U+3000.
-			(if (u8.eq (local lead) (u8 227))
-				(then
-					;; The E3 prefix has one accepted suffix.
-					(if (bool.and (u8.eq (local second) (u8 128)) (u8.eq (local third) (u8 128)))
-						(then (return (i32 3))))
-					(return (i32 0))))
-			;; E2 81 9F is U+205F.
-			(if (bool.and (u8.eq (local second) (u8 129)) (u8.eq (local third) (u8 159)))
-				(then (return (i32 3))))
-			;; E2 80 covers U+2000 through U+200A, U+2028, U+2029, and U+202F.
-			(if (bool.and
-					(u8.eq (local second) (u8 128))
-					(bool.or
-						(bool.and (bool.not (u8.lt (local third) (u8 128))) (u8.lt (local third) (u8 139)))
+	(with-meta
+		(meta (:doc "Return the byte width of a seed separator at the cursor, or zero."))
+		(fn whitespace_width
+			(params (source (shared-slice u8)) (cursor i32) (lead u8))
+			(returns i32)
+			(body
+				;; ASCII uses the seed's two contiguous separator ranges.
+				(if (u8.lt (local lead) (u8 128))
+					(then
+						;; Return a single-byte width for either ASCII range.
+						(if (call is_ascii_whitespace (local lead))
+							(then (return (i32 1))))
+						(return (i32 0))))
+				(let remaining (i32.sub.wrapping (slice.len (local source)) (local cursor)))
+				;; U+0085 and U+00A0 are the only two-byte separators.
+				(if (u8.eq (local lead) (u8 194))
+					(then
+						;; Keep the second-byte load inside this view.
+						(if (i32.lt (local remaining) (i32 2))
+							(then (return (i32 0))))
+						(let second (slice.load (local source) (i32.add.wrapping (local cursor) (i32 1))))
+						;; The C2 prefix has two accepted suffixes.
+						(if (bool.or (u8.eq (local second) (u8 133)) (u8.eq (local second) (u8 160)))
+							(then (return (i32 2))))
+						(return (i32 0))))
+				;; Three-byte separators start with E1, E2, or E3 and need both suffix bytes.
+				(if (bool.or
+						(i32.lt (local remaining) (i32 3))
+						(bool.or (u8.lt (local lead) (u8 225)) (u8.lt (u8 227) (local lead))))
+					(then (return (i32 0))))
+				(let second (slice.load (local source) (i32.add.wrapping (local cursor) (i32 1))))
+				(let third (slice.load (local source) (i32.add.wrapping (local cursor) (i32 2))))
+				;; E1 9A 80 is U+1680.
+				(if (u8.eq (local lead) (u8 225))
+					(then
+						;; U+1680 occupies all three bytes.
+						(if (bool.and (u8.eq (local second) (u8 154)) (u8.eq (local third) (u8 128)))
+							(then (return (i32 3))))
+						(return (i32 0))))
+				;; E3 80 80 is U+3000.
+				(if (u8.eq (local lead) (u8 227))
+					(then
+						;; The E3 prefix has one accepted suffix.
+						(if (bool.and (u8.eq (local second) (u8 128)) (u8.eq (local third) (u8 128)))
+							(then (return (i32 3))))
+						(return (i32 0))))
+				;; E2 81 9F is U+205F.
+				(if (bool.and (u8.eq (local second) (u8 129)) (u8.eq (local third) (u8 159)))
+					(then (return (i32 3))))
+				;; E2 80 covers U+2000 through U+200A, U+2028, U+2029, and U+202F.
+				(if (bool.and
+						(u8.eq (local second) (u8 128))
 						(bool.or
-							(bool.or (u8.eq (local third) (u8 168)) (u8.eq (local third) (u8 169)))
-							(u8.eq (local third) (u8 175)))))
-				(then (return (i32 3))))
-			(return (i32 0))))
+							(bool.and (bool.not (u8.lt (local third) (u8 128))) (u8.lt (local third) (u8 139)))
+							(bool.or
+								(bool.or (u8.eq (local third) (u8 168)) (u8.eq (local third) (u8 169)))
+								(u8.eq (local third) (u8 175)))))
+					(then (return (i32 3))))
+				(return (i32 0)))))
 
-	;; Expose admission failures in the same diagnostic code space as lexical errors.
-	(fn source_diagnostic
-		(params (source (shared-slice u8)))
-		(returns SourceDiagnostic)
-		(body
-			(let start (call admit_source (borrow-shared (local source))))
-			;; Successful admission carries no primary span.
-			(if (i32.lt (local start) (i32 0))
-				(then
-					(return (record.make SourceDiagnostic (error (u32 0)) (start (i32 0)) (end (i32 0))))))
-			;; Anchor malformed UTF-8 at its lead byte, even when the sequence is clipped.
-			(let end (i32.add.wrapping (local start) (i32 1)))
-			(return (record.make SourceDiagnostic (error (u32 5)) (start (local start)) (end (local end))))))
+	(with-meta
+		(meta (:doc "Expose admission failures in the same diagnostic code space as lexical errors."))
+		(fn source_diagnostic
+			(params (source (shared-slice u8)))
+			(returns SourceDiagnostic)
+			(body
+				(let start (call admit_source (borrow-shared (local source))))
+				;; Successful admission carries no primary span.
+				(if (i32.lt (local start) (i32 0))
+					(then
+						(return (record.make SourceDiagnostic (error (u32 0)) (start (i32 0)) (end (i32 0))))))
+				;; Anchor malformed UTF-8 at its lead byte, even when the sequence is clipped.
+				(let end (i32.add.wrapping (local start) (i32 1)))
+				(return (record.make SourceDiagnostic (error (u32 5)) (start (local start)) (end (local end)))))))
 
-	;; Map a view-relative span start to its coordinates in the parent source.
-	(fn source_position
-		(params (parent (shared-slice u8)) (view_start i32) (span_start i32))
-		(returns SourcePosition)
-		(body
-			(let target (i32.add.wrapping (local view_start) (local span_start)))
-			(let-mut cursor (i32 0))
-			(let-mut line (u32 1))
-			(let-mut column (u32 1))
-			(let-mut previous_cr (bool false))
-			;; Only bytes before the requested start can advance its coordinates.
-			(while (i32.lt (local cursor) (local target))
-				(body
-					(let byte (slice.load (local parent) (local cursor)))
-					;; Count each physical line break once, including a CRLF pair.
-					(if (call is_line_ending (local byte))
-						(then
-							;; An LF paired with the previous CR continues the same break.
-							(if (bool.or (u8.eq (local byte) (u8 13)) (bool.not (local previous_cr)))
-								(then (set (local line) (u32.add.wrapping (local line) (u32 1)))))
-							(set (local column) (u32 1))
-							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1))))
-						(else
-							(let-mut width (call valid_utf8_width (borrow-shared (local parent)) (local cursor) (local byte)))
-							;; Count malformed bytes individually to preserve subsequent line breaks.
-							(if (i32.eq (local width) (i32 0))
-								(then (set (local width) (i32 1))))
-							(let remaining (i32.sub.wrapping (local target) (local cursor)))
-							;; An offset inside a scalar still belongs to that scalar's column.
-							(if (i32.lt (local remaining) (local width))
-								(then (set (local cursor) (local target)))
-								(else
-									(set (local column) (u32.add.wrapping (local column) (u32 1)))
-									(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))))
-					(set (local previous_cr) (u8.eq (local byte) (u8 13)))))
-			(return (record.make SourcePosition (line (local line)) (column (local column))))))
+	(with-meta
+		(meta (:doc "Map a view-relative span start to its coordinates in the parent source."))
+		(fn source_position
+			(params (parent (shared-slice u8)) (view_start i32) (span_start i32))
+			(returns SourcePosition)
+			(body
+				(let target (i32.add.wrapping (local view_start) (local span_start)))
+				(let-mut cursor (i32 0))
+				(let-mut line (u32 1))
+				(let-mut column (u32 1))
+				(let-mut previous_cr (bool false))
+				;; Only bytes before the requested start can advance its coordinates.
+				(while (i32.lt (local cursor) (local target))
+					(body
+						(let byte (slice.load (local parent) (local cursor)))
+						;; Count each physical line break once, including a CRLF pair.
+						(if (call is_line_ending (local byte))
+							(then
+								;; An LF paired with the previous CR continues the same break.
+								(if (bool.or (u8.eq (local byte) (u8 13)) (bool.not (local previous_cr)))
+									(then (set (local line) (u32.add.wrapping (local line) (u32 1)))))
+								(set (local column) (u32 1))
+								(set (local cursor) (i32.add.wrapping (local cursor) (i32 1))))
+							(else
+								(let-mut width (call valid_utf8_width (borrow-shared (local parent)) (local cursor) (local byte)))
+								;; Count malformed bytes individually to preserve subsequent line breaks.
+								(if (i32.eq (local width) (i32 0))
+									(then (set (local width) (i32 1))))
+								(let remaining (i32.sub.wrapping (local target) (local cursor)))
+								;; An offset inside a scalar still belongs to that scalar's column.
+								(if (i32.lt (local remaining) (local width))
+									(then (set (local cursor) (local target)))
+									(else
+										(set (local column) (u32.add.wrapping (local column) (u32 1)))
+										(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))))
+						(set (local previous_cr) (u8.eq (local byte) (u8 13)))))
+				(return (record.make SourcePosition (line (local line)) (column (local column)))))))
 
-	;; Return the complete UTF-8 scalar width or zero for a malformed sequence.
-	(fn valid_utf8_width
-		(params (source (shared-slice u8)) (cursor i32) (lead u8))
-		(returns i32)
-		(body
-			(let width (call utf8_width (local lead)))
-			(let remaining (i32.sub.wrapping (slice.len (local source)) (local cursor)))
-			;; Reject truncation before adding the width or reading any suffix bytes.
-			(if (bool.or (i32.eq (local width) (i32 0)) (i32.lt (local remaining) (local width)))
-				(then (return (i32 0))))
-			;; ASCII needs no continuation loads.
-			(if (i32.eq (local width) (i32 1))
-				(then (return (i32 1))))
-			(let second_index (i32.add.wrapping (local cursor) (i32 1)))
-			(let second (slice.load (local source) (local second_index)))
-			;; Apply the lead-specific lower and upper bounds on the second byte.
-			(if (bool.not (call valid_utf8_second (local lead) (local second)))
-				(then (return (i32 0))))
-			(let end (i32.add.wrapping (local cursor) (local width)))
-			(let-mut tail (i32.add.wrapping (local second_index) (i32 1)))
-			;; Check each remaining continuation within the verified span.
-			(while (i32.lt (local tail) (local end))
-				(body
-					(let byte (slice.load (local source) (local tail)))
-					;; Reject the whole scalar if a tail byte is not a continuation.
-					(if (bool.not (call is_utf8_continuation (local byte)))
-						(then (return (i32 0))))
-					(set (local tail) (i32.add.wrapping (local tail) (i32 1)))))
-			(return (local width))))
+	(with-meta
+		(meta (:doc "Return the complete UTF-8 scalar width or zero for a malformed sequence."))
+		(fn valid_utf8_width
+			(params (source (shared-slice u8)) (cursor i32) (lead u8))
+			(returns i32)
+			(body
+				(let width (call utf8_width (local lead)))
+				(let remaining (i32.sub.wrapping (slice.len (local source)) (local cursor)))
+				;; Reject truncation before adding the width or reading any suffix bytes.
+				(if (bool.or (i32.eq (local width) (i32 0)) (i32.lt (local remaining) (local width)))
+					(then (return (i32 0))))
+				;; ASCII needs no continuation loads.
+				(if (i32.eq (local width) (i32 1))
+					(then (return (i32 1))))
+				(let second_index (i32.add.wrapping (local cursor) (i32 1)))
+				(let second (slice.load (local source) (local second_index)))
+				;; Apply the lead-specific lower and upper bounds on the second byte.
+				(if (bool.not (call valid_utf8_second (local lead) (local second)))
+					(then (return (i32 0))))
+				(let end (i32.add.wrapping (local cursor) (local width)))
+				(let-mut tail (i32.add.wrapping (local second_index) (i32 1)))
+				;; Check each remaining continuation within the verified span.
+				(while (i32.lt (local tail) (local end))
+					(body
+						(let byte (slice.load (local source) (local tail)))
+						;; Reject the whole scalar if a tail byte is not a continuation.
+						(if (bool.not (call is_utf8_continuation (local byte)))
+							(then (return (i32 0))))
+						(set (local tail) (i32.add.wrapping (local tail) (i32 1)))))
+				(return (local width)))))
 
-	;; Carry the first failure's original span back through the form check.
-	(fn form_failure
-		(params (error u32) (start i32) (end i32))
-		(returns FormCheck)
-		(body
-			(return (record.make FormCheck
-				(rows (u32 0)) (start (local start)) (end (local end)) (error (local error))))))
+	(with-meta
+		(meta (:doc "Carry the first failure's original span back through the form check."))
+		(fn form_failure
+			(params (error u32) (start i32) (end i32))
+			(returns FormCheck)
+			(body
+				(return (record.make FormCheck
+					(rows (u32 0)) (start (local start)) (end (local end)) (error (local error)))))))
 
-	;; Locate the last opener at the final depth of a stream that reached EOF.
-	(fn unclosed_form_start
-		(params (source (shared-slice u8)) (final_depth i32))
-		(returns i32)
-		(body
-			(let length (slice.len (local source)))
-			(let-mut cursor (i32 0))
-			(let-mut depth (i32 0))
-			(let-mut opener (i32 0))
-			;; Rescan only after the first pass proves the tokens reach EOF.
-			(while (i32.lt (local cursor) (local length))
-				(body
-					(let token (call scan_token (borrow-shared (local source)) (local cursor)))
-					(let kind (record.get (local token) kind))
-					(set (local cursor) (record.get (local token) end))
-					;; The innermost unclosed form is the final opener at final_depth.
-					(if (u32.eq (local kind) (u32 40))
-						(then
-							(set (local depth) (i32.add.wrapping (local depth) (i32 1)))
-							;; Replace a candidate that may already have closed.
-							(if (i32.eq (local depth) (local final_depth))
-								(then (set (local opener) (record.get (local token) start))))))
-					;; Close the innermost form before classifying the next token.
-					(if (u32.eq (local kind) (u32 41))
-						(then (set (local depth) (i32.sub.wrapping (local depth) (i32 1)))))))
-			(return (local opener))))
+	(with-meta
+		(meta (:doc "Locate the last opener at the final depth of a stream that reached EOF."))
+		(fn unclosed_form_start
+			(params (source (shared-slice u8)) (final_depth i32))
+			(returns i32)
+			(body
+				(let length (slice.len (local source)))
+				(let-mut cursor (i32 0))
+				(let-mut depth (i32 0))
+				(let-mut opener (i32 0))
+				;; Rescan only after the first pass proves the tokens reach EOF.
+				(while (i32.lt (local cursor) (local length))
+					(body
+						(let token (call scan_token (borrow-shared (local source)) (local cursor)))
+						(let kind (record.get (local token) kind))
+						(set (local cursor) (record.get (local token) end))
+						;; The innermost unclosed form is the final opener at final_depth.
+						(if (u32.eq (local kind) (u32 40))
+							(then
+								(set (local depth) (i32.add.wrapping (local depth) (i32 1)))
+								;; Replace a candidate that may already have closed.
+								(if (i32.eq (local depth) (local final_depth))
+									(then (set (local opener) (record.get (local token) start))))))
+						;; Close the innermost form before classifying the next token.
+						(if (u32.eq (local kind) (u32 41))
+							(then (set (local depth) (i32.sub.wrapping (local depth) (i32 1)))))))
+				(return (local opener)))))
 
 	(with-meta
 		(meta
+			(:doc "Validate one tagged root and count the rows needed to materialize its source tree.")
 			(:expect parser.source_form
 				(issue "https://github.com/wove-lang/wove/issues/43")))
-		;; Validate one tagged root and count the rows needed to materialize its source tree.
 		(fn check_source_form
 			(params (source (shared-slice u8)))
 			(returns FormCheck)
@@ -585,9 +622,124 @@
 				(return (record.make FormCheck
 					(rows (local rows)) (start (local root_start)) (end (local root_end)) (error (u32 0)))))))
 
-	;; Supply the seed entry point while the fixture provides input slices.
-	(fn main
-		(params)
-		(returns i32)
-		(body
-			(return (i32 0)))))
+	(with-meta
+		(meta (:doc "Initialize a row with its parent and empty child and sibling links."))
+		(fn new_source_node
+			(params (kind u32) (start i32) (end i32) (parent i32))
+			(returns SourceNode)
+			(body
+				(return (record.make SourceNode
+					(kind (local kind)) (start (local start)) (end (local end)) (parent (local parent))
+					(first_child (i32 -1)) (next_sibling (i32 -1)))))))
+
+	(with-meta
+		(meta (:doc "Replace a row's end and outgoing links while keeping its identity and parent."))
+		(fn revise_source_node
+			(params (node SourceNode) (end i32) (first_child i32) (next_sibling i32))
+			(returns SourceNode)
+			(body
+				(return (record.make SourceNode
+					(kind (record.get (local node) kind))
+					(start (record.get (local node) start))
+					(end (local end))
+					(parent (record.get (local node) parent))
+					(first_child (local first_child))
+					(next_sibling (local next_sibling)))))))
+
+	(with-meta
+		(meta (:doc "Append a child in source order using the open parent's end field to track its last child."))
+		(fn append_source_child
+			(params (nodes (mut-slice SourceNode)) (parent i32) (index i32) (child SourceNode))
+			(returns void)
+			(body
+				(let container (slice.load (local nodes) (local parent)))
+				(let tail (record.get (local container) end))
+				(let-mut first (record.get (local container) first_child))
+				;; A first child sets the container entry point; later children extend the sibling chain.
+				(if (i32.lt (local tail) (i32 0))
+					(then (set (local first) (local index)))
+					(else
+						(let sibling (slice.load (local nodes) (local tail)))
+						(slice.store (local nodes) (local tail)
+							(call revise_source_node (local sibling)
+								(record.get (local sibling) end)
+								(record.get (local sibling) first_child)
+								(local index)))))
+				(slice.store (local nodes) (local parent)
+					(call revise_source_node (local container) (local index) (local first)
+						(record.get (local container) next_sibling)))
+				(slice.store (local nodes) (local index) (local child)))))
+
+	(with-meta
+		(meta (:doc "Finalize the byte span once an open container has received all of its children."))
+		(fn seal_source_node
+			(params (nodes (mut-slice SourceNode)) (index i32) (node SourceNode) (end i32))
+			(returns void)
+			(body
+				(slice.store (local nodes) (local index)
+					(call revise_source_node (local node) (local end)
+						(record.get (local node) first_child)
+						(record.get (local node) next_sibling))))))
+
+	(with-meta
+		(meta
+			(:doc "Materialize the checked view as a source-ordered tree in the caller's record slice.")
+			(:expect parser.flat_source_tree
+				(issue "https://github.com/wove-lang/wove/issues/45")))
+		(fn build_source_tree
+			(params (source (shared-slice u8)) (checked FormCheck) (nodes (mut-slice SourceNode)))
+			(returns FormCheck)
+			(body
+				;; Leave storage alone when the same view failed its form check.
+				(if (u32.lt (u32 0) (record.get (local checked) error))
+					(then (return (local checked))))
+				(let capacity (int.convert u32 (slice.len (local nodes))))
+				;; The row count from admission guarantees room for every write below.
+				(if (u32.lt (local capacity) (record.get (local checked) rows))
+					(then
+						(return (call form_failure (u32 11)
+							(record.get (local checked) start) (record.get (local checked) end)))))
+				(let length (slice.len (local source)))
+				(slice.store (local nodes) (i32 0) (call new_source_node (u32 0) (i32 0) (i32 -1) (i32 -1)))
+				(let-mut cursor (i32 0))
+				(let-mut parent (i32 0))
+				(let-mut next_index (i32 1))
+				;; An open form's parent link acts as the stack for the admitted token stream.
+				(while (i32.lt (local cursor) (local length))
+					(body
+						(let token (call scan_token (borrow-shared (local source)) (local cursor)))
+						(let kind (record.get (local token) kind))
+						(let end (record.get (local token) end))
+						(set (local cursor) (local end))
+						;; The closer seals its form rather than occupying its own row.
+						(if (u32.eq (local kind) (u32 41))
+							(then
+								(let open_node (slice.load (local nodes) (local parent)))
+								(call seal_source_node (borrow-mut (local nodes)) (local parent) (local open_node) (local end))
+								(set (local parent) (record.get (local open_node) parent))))
+						;; Each opener, operand, and comment appends one child row.
+						(if (bool.not (bool.or (u32.eq (local kind) (u32 0)) (u32.eq (local kind) (u32 41))))
+							(then
+								(let is_form (u32.eq (local kind) (u32 40)))
+								(let-mut node_end (local end))
+								;; An open form starts with no last child until a token is appended.
+								(if (local is_form)
+									(then (set (local node_end) (i32 -1))))
+								(let child (call new_source_node (local kind) (record.get (local token) start)
+									(local node_end) (local parent)))
+								(call append_source_child (borrow-mut (local nodes)) (local parent) (local next_index) (local child))
+								;; Subsequent tokens belong to the new form until its closer.
+								(if (local is_form)
+									(then (set (local parent) (local next_index))))
+								(set (local next_index) (i32.add.wrapping (local next_index) (i32 1)))))))
+				(let root (slice.load (local nodes) (i32 0)))
+				(call seal_source_node (borrow-mut (local nodes)) (i32 0) (local root) (local length))
+				(return (local checked)))))
+
+	(with-meta
+		(meta (:doc "Supply the seed entry point while the fixture provides input slices."))
+		(fn main
+			(params)
+			(returns i32)
+			(body
+				(return (i32 0))))))

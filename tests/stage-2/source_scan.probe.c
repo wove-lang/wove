@@ -19,9 +19,11 @@
 #define source_diagnostic wv_seed_fn_19
 #define source_position wv_seed_fn_20
 #define check_source_form wv_seed_fn_24
+#define build_source_tree wv_seed_fn_29
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
+typedef wv_seed_record_4 SourceNode;
 
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
 _Static_assert(_Generic(&source_kind, uint32_t (*)(wvrt_slice): 1, default: 0), "source kind type");
@@ -370,6 +372,50 @@ static int dump_form(wvrt_slice parent, wvrt_slice input, int32_t start) {
 	return result.wv_field_3 == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// Emit a completed node's links with the position of its first byte in the parent.
+static void write_source_node(wvrt_slice parent, int32_t view_start, uint32_t index, SourceNode node) {
+	const wv_seed_record_2 position = source_position(parent, view_start, node.wv_field_1);
+	printf("%" PRIu32 "\t%" PRIu32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32
+		"\t%" PRIu32 "\t%" PRIu32 "\n", index, node.wv_field_0, node.wv_field_1, node.wv_field_2,
+		node.wv_field_3, node.wv_field_4, node.wv_field_5, position.wv_field_0, position.wv_field_1);
+}
+
+// Build into the caller's buffer and verify that all unused storage retains its sentinel.
+static int dump_tree(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity) {
+	const FormCheck checked = check_source_form(input);
+	if (capacity < 0) {
+		capacity = (int32_t)checked.wv_field_0;
+	}
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_array *storage = wvrt_array_new(capacity, sizeof(SourceNode), _Alignof(SourceNode), site);
+	unsigned char *bytes = storage->wvrt_items;
+	size_t size = (size_t)capacity * sizeof(SourceNode);
+	memset(bytes, 0xa5, size);
+	const wvrt_mut_slice nodes = {bytes, capacity, sizeof(SourceNode)};
+	const FormCheck built = build_source_tree(input, checked, nodes);
+	uint32_t used = built.wv_field_3 == 0 ? built.wv_field_0 : 0;
+	if (used > (uint32_t)capacity) {
+		fputs("source tree returned more rows than fit in storage\n", stderr);
+		wvrt_array_drop(storage);
+		return EXIT_FAILURE;
+	}
+	for (size_t offset = (size_t)used * sizeof(SourceNode); offset < size; ++offset) {
+		if (bytes[offset] != 0xa5) {
+			fputs("source tree modified unused storage\n", stderr);
+			wvrt_array_drop(storage);
+			return EXIT_FAILURE;
+		}
+	}
+
+	write_span(parent, start, built.wv_field_0, built.wv_field_1, built.wv_field_2, built.wv_field_3);
+	const SourceNode *rows = storage->wvrt_items;
+	for (uint32_t index = 0; index < used; ++index) {
+		write_source_node(parent, start, index, rows[index]);
+	}
+	wvrt_array_drop(storage);
+	return built.wv_field_3 == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 // Load the bytes unchanged so newline and UTF-8 offsets survive into the probe.
 static uint8_t *read_source(const char *filename, int32_t *length) {
 	FILE *input = fopen(filename, "rb");
@@ -407,8 +453,9 @@ static bool read_offset(const char *text, int32_t *offset) {
 static int source_mode(int argc, char **argv) {
 	const bool tokens = strcmp(argv[1], "--tokens") == 0;
 	const bool form = strcmp(argv[1], "--form") == 0;
-	if ((argc != 3 && argc != 5) || (!tokens && !form)) {
-		fputs("usage: source_scan [--tokens | --form] FILE [START END]\n", stderr);
+	const bool tree = strcmp(argv[1], "--tree") == 0;
+	if ((argc != 3 && argc != 5 && !(tree && argc == 6)) || (!tokens && !form && !tree)) {
+		fputs("usage: source_scan [--tokens | --form | --tree] FILE [START END [TREE_CAPACITY]]\n", stderr);
 		return EXIT_FAILURE;
 	}
 
@@ -420,15 +467,26 @@ static int source_mode(int argc, char **argv) {
 	}
 	int32_t start = 0;
 	int32_t end = length;
-	if (argc == 5 && (!read_offset(argv[3], &start) || !read_offset(argv[4], &end) || start > end || end > length)) {
+	if (argc >= 5 && (!read_offset(argv[3], &start) || !read_offset(argv[4], &end) || start > end || end > length)) {
 		fputs("invalid source view\n", stderr);
+		free(bytes);
+		return EXIT_FAILURE;
+	}
+	int32_t capacity = -1;
+	if (argc == 6 && !read_offset(argv[5], &capacity)) {
+		fputs("invalid source tree capacity\n", stderr);
 		free(bytes);
 		return EXIT_FAILURE;
 	}
 	const wvrt_slice parent = {bytes, length, sizeof(uint8_t)};
 	const wvrt_location site = {__FILE__, __LINE__, 1};
 	const wvrt_slice view = wvrt_slice_range_u8(bytes, length, start, end, site);
-	int status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
+	int status;
+	if (tree) {
+		status = dump_tree(parent, view, start, capacity);
+	} else {
+		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
+	}
 	free(bytes);
 	return status;
 }

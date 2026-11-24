@@ -34,7 +34,7 @@ stage-2: $(SOURCE_SCAN)
 test-stage-2: stage-2
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
-		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
+		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv tests/stage-2/source_trees.tsv \
 		stage-2/*.wove tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
