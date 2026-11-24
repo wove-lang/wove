@@ -10,6 +10,8 @@
 	(use wove-file "./module.wove" (only form_parts is_three_bytes source_keyword (type FormParts)))
 	(use wove-file "./types.wove" (only source_builtin_type))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../c/arguments.wove"
+		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode))
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32)))
 	(struct CArguments (fields (strings i32) (bytes i32) (start i32) (end i32) (error u32)))
@@ -41,7 +43,7 @@
 			(return (u32 0))))
 
 	(fn c_argument_directive
-		(:doc `Return 1 for checked C strings, 2 for raw C strings, 3 for c_bytes, and zero otherwise.`)
+		(:doc `Map a recognized pragma to its native argument mode. Other directives leave the ABI unchanged.`)
 		(params (source (shared-slice u8)) (head SourceNode))
 		(returns u8)
 		(body
@@ -54,25 +56,25 @@
 						(bool.and (call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3))
 							(u8 121) (u8 116) (u8 101))
 							(call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 115)))))
-				(then (return (u8 3))))
+				(then (return (call c_bytes_mode))))
 			(if
 				(:doc "The complete common spelling fits in either supported directive.")
 				(bool.not (bool.and (bool.or (i32.eq (local width) (i32 6)) (i32.eq (local width) (i32 10)))
 					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 99) (u8 95) (u8 99))
 						(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3))
 							(u8 115) (u8 116) (u8 114)))))
-				(then (return (u8 0))))
+				(then (return (call c_value_mode))))
 			(if
 				(:doc "The shorter spelling ends after c_cstr.")
 				(i32.eq (local width) (i32 6))
-				(then (return (u8 1))))
+				(then (return (call c_checked_string_mode))))
 			(if
 				(:doc "Raw conversion requires the complete _raw suffix.")
 				(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 95))
 					(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 7))
 						(u8 114) (u8 97) (u8 119)))
-				(then (return (u8 2))))
-			(return (u8 0))))
+				(then (return (call c_raw_string_mode))))
+			(return (call c_value_mode))))
 
 	(fn c_argument_error
 		(:doc `Point an invalid native argument contract at its original source span.`)
@@ -102,24 +104,24 @@
 			(start (record.get (local site) start)) (end (record.get (local site) end))))))
 
 	(fn accepts_c_formal
-		(:doc `Check shared string, byte-buffer, or scalar integer formal types.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (type SourceNode) (role u8))
+		(:doc `Check a view against its contract mode. Value mode here identifies an integer extent operand.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (type SourceNode) (mode u8))
 		(returns bool)
 		(body
 			(if
 				(:doc "Extent operands need one of the supported integer types.")
-				(u8.eq (local role) (u8 4))
+				(call is_c_value_mode (local mode))
 				(then
 					(let scalar (call source_builtin_type (borrow-shared (local source)) (local type)))
 					(return (bool.or (u32.eq (local scalar) (u32 5))
 						(bool.or (u32.eq (local scalar) (u32 10)) (u32.eq (local scalar) (u32 11)))))))
 			(let view (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
 			(return (bool.or (u32.eq (local view) (u32 34))
-				(bool.and (u8.eq (local role) (u8 3)) (u32.eq (local view) (u32 38)))))))
+				(bool.and (call is_c_bytes_mode (local mode)) (u32.eq (local view) (u32 38)))))))
 
 	(fn find_c_formal
 		(:doc `Resolve an exact formal name and check the type required by its contract role.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (name SourceNode) (role u8))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (name SourceNode) (mode u8))
 		(returns CFormal)
 		(body
 			(if
@@ -144,7 +146,7 @@
 							(let type (slice.load (local nodes) (record.get (local parts) operands)))
 							(if
 								(:doc "An incompatible formal points to its declared type.")
-								(bool.not (call accepts_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (local role)))
+								(bool.not (call accepts_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (local mode)))
 								(then (return (call c_formal (i32 -1) (local type)))))
 							(return (call c_formal (local index) (local name)))))
 					(set (local parameter) (record.get (local node) next_sibling))
@@ -161,7 +163,7 @@
 			(let prior_mode (record.get (local prior) mode))
 			(if
 				(:doc "Different modes or extent operands conflict at the later data name.")
-				(u8.lt (u8 0) (local prior_mode))
+				(bool.not (call is_c_value_mode (local prior_mode)))
 				(then
 					(if
 						(:doc "A repeated contract contributes no additional converted formal.")
@@ -174,7 +176,7 @@
 				(record.make CArgument (mode (local mode)) (size (local size)) (count (local count))))
 			(if
 				(:doc "Each bounded pointer contributes one extent check.")
-				(u8.eq (local mode) (u8 3))
+				(call is_c_bytes_mode (local mode))
 				(then (return (call checked_c_arguments (i32 0) (i32 1)))))
 			(return (call checked_c_arguments (i32 1) (i32 0)))))
 
@@ -197,7 +199,7 @@
 					(bool.not (i32.lt (record.get (slice.load (local nodes) (local third)) next_sibling) (i32 0))))
 				(then (return (call c_argument_error_at (local directive)))))
 			(let view (call find_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local first) (local data) (u8 3)))
+				(local first) (local data) (call c_bytes_mode)))
 			(if
 				(:doc "Preserve the byte view's lookup or type diagnostic.")
 				(i32.lt (record.get (local view) position) (i32 0))
@@ -209,7 +211,7 @@
 				(bool.not (i32.lt (local third) (i32 0)))
 				(then
 					(let found (call find_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local first) (slice.load (local nodes) (local second)) (u8 4)))
+						(local first) (slice.load (local nodes) (local second)) (call c_value_mode)))
 					(if
 						(:doc "Report an invalid size at its name or formal type.")
 						(i32.lt (record.get (local found) position) (i32 0))
@@ -217,13 +219,13 @@
 					(set (local size) (record.get (local found) position))
 					(set (local count_node) (local third))))
 			(let count (call find_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local first) (slice.load (local nodes) (local count_node)) (u8 4)))
+				(local first) (slice.load (local nodes) (local count_node)) (call c_value_mode)))
 			(if
 				(:doc "Report an invalid count at its name or formal type.")
 				(i32.lt (record.get (local count) position) (i32 0))
 				(then (return (call c_argument_error (record.get (local count) start) (record.get (local count) end)))))
 			(return (call reserve_c_argument (borrow-mut (local contracts)) (local view)
-				(u8 3) (local size) (record.get (local count) position)))))
+				(call c_bytes_mode) (local size) (record.get (local count) position)))))
 
 	(fn read_c_string_list
 		(:doc `Bind a checked or raw C-string conversion to each named shared byte view.`)
@@ -268,7 +270,7 @@
 			(let mode (call c_argument_directive (borrow-shared (local source)) (slice.load (local nodes) (local head))))
 			(if
 				(:doc "Other directives leave these argument contracts untouched.")
-				(u8.eq (local mode) (u8 0))
+				(call is_c_value_mode (local mode))
 				(then (return (call checked_c_arguments (i32 0) (i32 0)))))
 			(let begin (record.get (local parts) operands))
 			(if
@@ -277,7 +279,7 @@
 				(then (return (call c_argument_error_at (local node)))))
 			(if
 				(:doc "A byte view with an extent uses the storage it already borrows.")
-				(u8.eq (local mode) (u8 3))
+				(call is_c_bytes_mode (local mode))
 				(then (return (call read_c_byte_extent (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local first) (local node) (local begin) (borrow-mut (local contracts))))))
 			(return (call read_c_string_list (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -333,7 +335,7 @@
 					(let type (slice.load (local nodes) (record.get (local parts) operands)))
 					(if
 						(:doc "An unannotated byte view is unavailable in a native signature.")
-						(bool.and (u8.eq (record.get (slice.load (local contracts) (local index)) mode) (u8 0))
+						(bool.and (call is_c_value_mode (record.get (slice.load (local contracts) (local index)) mode))
 							(u32.lt (u32 0) (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type))))
 						(then (return (call c_argument_error_at (local type)))))
 					(set (local parameter) (record.get (local node) next_sibling))
