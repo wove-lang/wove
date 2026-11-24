@@ -66,12 +66,12 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 # Keep required providers in the build graph even when a source file is missing.
 ROUND_TRIP_PROVIDERS := $(addprefix $(OWNERSHIP_TESTS)/imports/,left.wove right.wove nested/shared.wove)
 RUNTIME_LOCATION_PROVIDER := $(OWNERSHIP_TESTS)/slice.load_negative.wove
-IMPORT_PROVIDERS := $(SOURCE_SCAN_MODULE) $(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER)
 $(STAGE1)/imports.round_trip.c: $(ROUND_TRIP_PROVIDERS)
 $(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
 
-# Force the seed to report missing providers that Make can skip under .SECONDARY.
-.PHONY: $(filter-out $(wildcard $(IMPORT_PROVIDERS)),$(IMPORT_PROVIDERS))
+# Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
+REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER)
+.PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
 
 $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
