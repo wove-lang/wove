@@ -30,7 +30,7 @@ def seed_stream(view):
 			continue
 		start = offsets[match.start()]
 		end = offsets[match.end()]
-		yield KINDS[match.lastgroup], start, end, match[0].encode("utf-8")
+		yield KINDS[match.lastgroup], start, end, view[start:end]
 	yield 0, len(view), len(view), b""
 
 
@@ -88,7 +88,6 @@ def compare_stream(executable, path, bounds=()):
 		kind, start, stop, spelling = expected
 		expected_row = (kind, start, stop, 0, *position(source, base + start))
 		assert actual == expected_row, (path, index, actual, expected_row)
-		assert view[start:stop] == spelling, (path, index, spelling)
 		if kind != 0:
 			spellings.append((kind, spelling))
 	return spellings

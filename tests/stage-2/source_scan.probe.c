@@ -14,14 +14,14 @@
 // Match the seed's generated names to the scanner declarations.
 #define source_offset wv_seed_fn_5
 #define source_kind wv_seed_fn_6
-#define scan_token wv_seed_fn_13
-#define admit_source wv_seed_fn_17
-#define source_diagnostic wv_seed_fn_19
-#define source_position wv_seed_fn_20
-#define check_source_form wv_seed_fn_24
-#define build_source_tree wv_seed_fn_29
-#define check_source_metadata wv_seed_fn_38
-#define render_source_tree wv_seed_fn_40
+#define scan_token wv_seed_fn_14
+#define admit_source wv_seed_fn_18
+#define source_diagnostic wv_seed_fn_20
+#define source_position wv_seed_fn_21
+#define check_source_form wv_seed_fn_25
+#define build_source_tree wv_seed_fn_30
+#define check_source_metadata wv_seed_fn_39
+#define render_source_tree wv_seed_fn_41
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;

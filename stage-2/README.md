@@ -16,9 +16,9 @@ the slice length is valid. The runtime rejects cursors outside that range.
 Each `Token` carries a `u32` kind and an `i32` half-open span, `[start, end)`,
 relative to the supplied slice. The scanner uses the seed's whitespace set
 for both skipping separators and ending bare atoms. Separators consume their
-UTF-8 byte widths. A bare atom also stops at a parenthesis, a semicolon, or a
-double quote. Atom kind is 1, opening and closing parenthesis
-kinds are 40 and 41. An unquoted semicolon produces a one-byte lexical
+UTF-8 byte widths. A bare atom also stops at a parenthesis, semicolon,
+double quote, or backtick. Bare atoms have kind 1. Opening and closing
+parentheses use kinds 40 and 41. An unquoted semicolon produces a one-byte lexical
 error of kind 3. End of input has kind 0 and both offsets equal to the slice
 length.
 
@@ -29,6 +29,14 @@ missing quote gives error kind 3. The error starts at the opening quote and
 ends just after the offending byte or at the view end on truncation.
 
 Quoted tokens can contain semicolons, including the literal text `;;`.
+
+A raw backtick string also has kind 2. A doubled backtick belongs to the
+string and a single backtick closes it. Use the opening byte to distinguish
+the string spellings. The span keeps both delimiters, all doubled backticks,
+and the original physical line endings. The scanner preserves literal
+backslashes, quotes, and semicolons inside backticks. If the view ends
+before a closing backtick, the error span starts at the opener and ends at
+the view boundary.
 
 The `error` field of a token is zero on success. Error tokens use kind 3
 and carry a primary span with a numeric failure code.
@@ -104,9 +112,9 @@ order, parent link, spelling, and original byte span.
 `render_source_tree` takes the original byte view, its built and validated
 shared node slice, and a writable byte slice. It walks the tree links in
 source order and copies each token's raw bytes, including parentheses,
-metadata entries, and quoted escapes. It adds one space between tokens
-except immediately inside parentheses. Layout around the outermost tokens
-is discarded.
+metadata entries, quoted escapes, and physical line endings inside raw
+strings. It adds one space between tokens except immediately inside
+parentheses. Layout around the outermost tokens is discarded.
 
 The result contains the number of bytes written and an error code. Code 0
 means the emitted prefix contains the entire source. Code 16 means the next
