@@ -81,6 +81,29 @@ void wvrt_array_drop(wvrt_array *wvrtbuffer) {
 	free(wvrtbuffer);
 }
 
+// Validate the signed index before converting it to a byte offset.
+static size_t wvrt_slice_offset(int32_t wvrtlength, int32_t wvrtindex, wvrt_location wvrtsite) {
+	// Negative indices and the one-past endpoint cannot name a byte.
+	if (wvrtindex < 0 || wvrtindex >= wvrtlength) {
+		wvrt_trap(wvrtsite, "slice index out of bounds");
+	}
+	return (size_t)wvrtindex;
+}
+
+// Read one byte through a shared or mutable view of the original storage.
+uint8_t wvrt_slice_load_u8(const void *wvrtitems, int32_t wvrtlength, int32_t wvrtindex,
+	wvrt_location wvrtsite) {
+	size_t wvrt_offset = wvrt_slice_offset(wvrtlength, wvrtindex, wvrtsite);
+	return ((const uint8_t *)wvrtitems)[wvrt_offset];
+}
+
+// Update the original storage after checking the mutable view's byte index.
+void wvrt_slice_store_u8(void *wvrtitems, int32_t wvrtlength, int32_t wvrtindex,
+	uint8_t wvrtvalue, wvrt_location wvrtsite) {
+	size_t wvrt_offset = wvrt_slice_offset(wvrtlength, wvrtindex, wvrtsite);
+	((uint8_t *)wvrtitems)[wvrt_offset] = wvrtvalue;
+}
+
 // Add modulo 2^32 and turn the upper half into an in-range signed value.
 int32_t wvrt_i32_add_wrapping(int32_t wvrtleft, int32_t wvrtright) {
 	uint32_t wvrt_bits = (uint32_t)wvrtleft + (uint32_t)wvrtright;
