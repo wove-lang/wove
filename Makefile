@@ -54,9 +54,15 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
-# Rebuild imported fixtures when any of their provider sources change.
-$(STAGE1)/imports.round_trip.c: $(wildcard $(OWNERSHIP_TESTS)/imports/*.wove $(OWNERSHIP_TESTS)/imports/nested/*.wove)
-$(STAGE1)/imports.runtime_location.c: $(OWNERSHIP_TESTS)/slice.load_negative.wove
+# Keep required providers in the build graph even when a source file is missing.
+ROUND_TRIP_PROVIDERS := $(addprefix $(OWNERSHIP_TESTS)/imports/,left.wove right.wove nested/shared.wove)
+RUNTIME_LOCATION_PROVIDER := $(OWNERSHIP_TESTS)/slice.load_negative.wove
+IMPORT_PROVIDERS := $(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER)
+$(STAGE1)/imports.round_trip.c: $(ROUND_TRIP_PROVIDERS)
+$(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
+
+# Force the seed to report missing providers that Make can skip under .SECONDARY.
+.PHONY: $(filter-out $(wildcard $(IMPORT_PROVIDERS)),$(IMPORT_PROVIDERS))
 
 $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
