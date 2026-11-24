@@ -27,8 +27,8 @@
 #define read_module wv_seed_fn_74
 #define emit_module wv_seed_fn_92
 #define resolve_graph wv_seed_fn_105
-#define inspect_callers wv_seed_fn_188
-#define run_scalar_graph wv_seed_fn_201
+#define inspect_callers wv_seed_fn_190
+#define run_scalar_graph wv_seed_fn_203
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -46,8 +46,8 @@ typedef wv_seed_record_19 GraphSelector;
 typedef wv_seed_record_20 GraphResult;
 typedef wv_seed_record_31 CallSite;
 typedef wv_seed_record_23 SuppliedFile;
-typedef wv_seed_record_39 CallerInspection;
-typedef wv_seed_record_43 GraphOutput;
+typedef wv_seed_record_40 CallerInspection;
+typedef wv_seed_record_44 GraphOutput;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");

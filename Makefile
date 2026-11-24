@@ -13,6 +13,7 @@ COMPILER_ROOT := stage-2/wovec.wove
 SOURCE_SCAN_MODULE := stage-2/source/scan.wove
 UTF8_MODULE := stage-2/text/utf8.wove
 QUOTED_TEXT_MODULE := stage-2/text/quoted.wove
+VALUE_TEXT_MODULES := stage-2/text/bytes.wove stage-2/text/decimal.wove
 SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
 SOURCE_MODULE_READER := stage-2/source/module.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
@@ -30,7 +31,7 @@ JSON_CASES := $(JSON_FIXTURES)/cases.tsv
 JSON_WRITER_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors)
 JSON_READER_PROGRAMS := $(addprefix $(STAGE2)/json/,reader reader_errors)
 JSON_PROGRAMS := $(JSON_WRITER_PROGRAMS) $(JSON_READER_PROGRAMS) $(STAGE2)/json/utf8
-CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove stage-2/source/paths.wove
+CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove $(VALUE_TEXT_MODULES)
 CLI_FIXTURES := tests/stage-2/cli
 CLI_CASES := $(CLI_FIXTURES)/cases.tsv
 CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors)
@@ -69,7 +70,7 @@ test-stage-2: stage-2 $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) \
-		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
+		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv
@@ -89,7 +90,7 @@ test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 
 # Translate the compiler root and regenerate C when any source module changes.
 $(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
-	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) \
+	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
@@ -146,7 +147,7 @@ $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
 REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
-	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) \
+	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(ROUND_TRIP_PROVIDERS) \
 	$(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
