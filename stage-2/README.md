@@ -610,6 +610,24 @@ gives the output count, defining file identity, and file-relative span.
 The [scalar graph fixtures](../tests/stage-2/scalar_graphs.tsv) check the
 native result, defining symbols, repeated imports, and original call spans.
 
+## Native tool capture
+
+[Process capture](io/process.wove) runs one executable and returns its exit
+status, the number of bytes written to a caller-owned stdout view, and an
+overflow flag. Pass an executable name or path and a packed byte view of
+NUL-terminated user arguments. An empty view supplies no user arguments.
+Consecutive NULs preserve empty arguments. The executable name or path
+becomes `argv[0]` and a bare name uses `PATH`.
+
+The view length is the capture limit. The host bridge writes only the
+captured prefix, drains any excess stdout, and reaps the child. A zero-length
+view can still report overflow. On hosts without `pipe2`, the bridge opens
+a private FIFO under `TMPDIR` or `/tmp` and removes it before launch. Stdin
+and stderr are inherited. The status is the normal exit code, 128 plus the
+terminating signal, or -1 on host failure. Consumers link
+[the POSIX bridge](io/process.c) and make its header available to the
+generated C translation unit.
+
 ## Native single-source compilation
 
 Run `make stage-2` to build `build/stage-2/wovec`. The seed-built Stage 2

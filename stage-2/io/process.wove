@@ -1,0 +1,61 @@
+(module process_capture
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Run one tool with an explicit argument vector and bounded stdout capture.
+
+	The executable becomes argv[0]. The argument view contains zero or more
+	user arguments, each terminated by one NUL byte. Consecutive terminators
+	preserve empty arguments. A name without a slash is resolved through PATH.
+
+	The caller owns the output view. Only its populated prefix changes.
+	Stderr and stdin are inherited, and the tool is reaped before return.`)
+
+	(use wove-file "../hashing/bits.wove" (only shift_word))
+	(use c-header "./process.h" (only wove_process_capture))
+
+	(bridge c-header "./process.h"
+		(fn wove_process_capture
+			(:doc `Write stdout directly into caller storage and return length and overflow in five result bytes.`)
+			(:pragma (c_bytes program program_length) (c_bytes arguments arguments_length)
+				(c_bytes output capacity) (c_bytes result result_length))
+			(params (program (shared-slice u8)) (program_length i32)
+				(arguments (shared-slice u8)) (arguments_length i32)
+				(output (mut-slice u8)) (capacity i32) (result (mut-slice u8)) (result_length i32))
+			(returns i32)))
+
+	(struct
+		(:doc `The status is the exit code, 128 plus the terminating signal, or -1 on host failure.`)
+		ProcessCapture
+		(fields (status i32) (length i32) (overflow bool)))
+
+	(fn decode_capture
+		(:doc `Decode the bridge's little-endian prefix length, which fits the signed view length.`)
+		(params (status i32) (result (shared-slice u8)))
+		(returns ProcessCapture)
+		(body
+			(let-mut length (u32 0))
+			(let-mut index (i32 3))
+			(while
+				(:doc `Append one byte at a time, starting with the most significant byte.`)
+				(bool.not (i32.lt (local index) (i32 0)))
+				(body
+					(set (local length) (u32.add.wrapping (call shift_word (local length) (i32 8))
+						(int.convert u32 (slice.load (local result) (local index)))))
+					(set (local index) (i32.sub.wrapping (local index) (i32 1)))))
+			(return (record.make ProcessCapture
+				(status (local status))
+				(length (int.convert i32 (local length)))
+				(overflow (u8.eq (slice.load (local result) (i32 4)) (u8 1)))))))
+
+	(fn run_process_capture
+		(:doc `Capture at most output.len bytes, setting overflow when any further bytes were drained.`)
+		(:expect (issues "gh:wove-lang/wove:175"))
+		(params (program (shared-slice u8)) (arguments (shared-slice u8)) (output (mut-slice u8)))
+		(returns ProcessCapture)
+		(body
+			(let capacity (slice.len (local output)))
+			(let-mut result (array.alloc u8 (i32 5)))
+			(let status (call wove_process_capture (borrow-shared (local program)) (slice.len (local program))
+				(borrow-shared (local arguments)) (slice.len (local arguments))
+				(borrow-mut (local output)) (local capacity) (borrow-mut (local result)) (i32 5)))
+			(return (call decode_capture (local status) (borrow-shared (local result)))))))
