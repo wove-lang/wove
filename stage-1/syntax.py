@@ -35,9 +35,11 @@ class Form:
 
 Node = Atom | Form
 
+# A raw literal cannot close on the first byte of a doubled backtick.
 TOKEN = re.compile(
 	r'(?P<space>\s+)|(?P<open>\()|(?P<close>\))|'
-	r'(?P<string>"(?:\\[^\n]|[^"\\\n])*")|(?P<atom>[^\s();"]+)|(?P<invalid>.)'
+	r'(?P<string>"(?:\\[^\n]|[^"\\\n])*"|`(?:``|[^`])*`(?!`))|'
+	r'(?P<atom>[^\s();"`]+)|(?P<invalid>.)'
 )
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 TAG = re.compile(":?" + IDENTIFIER.pattern)
@@ -71,6 +73,8 @@ def read_form(children: list[Node], line: int) -> Form:
 
 # Read one IR tree and record each form's opening line.
 def parse(source: str) -> Form:
+	# Keep logical lines and raw string values consistent with file input.
+	source = source.replace("\r\n", "\n").replace("\r", "\n")
 	stack: list[tuple[int, list[Node]]] = [(1, [])]
 	line = 1
 	# Fold tokens into the current form while tracking source lines.
@@ -92,7 +96,11 @@ def parse(source: str) -> Form:
 				raise SourceError(line)
 			start, children = stack.pop()
 			node = read_form(children, start)
-		# Keep string values distinct from symbols.
+		# Raw strings collapse doubled backticks and retain the remaining text.
+		elif kind == "string" and token.startswith("`"):
+			node = Atom(token[1:-1].replace("``", "`"), line, quoted=True)
+			line += token.count("\n")
+		# Double-quoted strings continue to decode JSON escapes.
 		elif kind == "string":
 			# Decode escapes before storing the string value.
 			try:

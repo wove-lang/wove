@@ -85,6 +85,13 @@ tags and their payloads use the same prefix. A colon-tagged form after an
 operand is a source error, as are the retired `with-meta`, `meta`, and `;;`
 spellings. Quoted text can contain semicolons.
 
+A single backtick opens or closes a raw string. Inside the string, a doubled
+backtick produces one backtick. Other characters and indentation are kept
+literally, including backslashes, quotes, and semicolons. Physical CRLF and
+lone CR become LF in the value. Use raw strings anywhere a double-quoted
+string is accepted. A backtick ends a bare atom. An unterminated string
+reports its opening line.
+
 Stage 1 selects module roots, declarations, and `(decls ...)` groups before
 name resolution. It always enables `bootstrap`. All `cfg` predicates on a
 form must pass, and a `(test)` marker in any `:pragma` entry excludes the
