@@ -162,10 +162,13 @@ before the error. Earlier tree errors keep their original spans and codes.
 | 21 | Invalid selection directive | The offending directive or predicate |
 
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
-and the selected declaration indices. It checks local scalar functions
-with one return expression. Helpers can accept and return `i32`, `u8`,
-`u32`, and `bool`. Expressions support exact-type literals, parameter
-reads, and direct calls. The selected `main` has the ABI signature
+and the selected declaration indices. It checks straight-line scalar
+functions ending in a return. Helpers can accept and return `i32`, `u8`,
+`u32`, and `bool`. Expressions support exact-type literals, binding reads,
+and direct calls. An `i32` local declared with `let` or `let-mut` comes
+into scope after its initializer. A `set` requires an existing `let-mut`
+binding and a value of that binding's exact type. The selected `main`
+has the ABI signature
 `int main(void)`. Forward calls use checked prototypes, and nested calls
 evaluate from left to right.
 
@@ -191,6 +194,7 @@ become underscores.
 | --- | --- | --- | --- |
 | `f` | Function | Stable declaration hash | Function name |
 | `p` | Parameter | Zero-based position in its signature | Parameter name |
+| `l` | Local | Declared name's original file-local tree row | Local name |
 | `t` | Nested call temporary | Original expression's source-tree row index | Empty |
 
 For this single-module slice, hash the declared module name, the four-byte
@@ -212,9 +216,10 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | 24 | Unsupported body or incompatible expression type | The offending statement or expression |
 | 25 | Invalid scalar literal | The value or malformed literal form |
 | 32 | Stable declaration identity collision | The later function name |
-| 33 | Duplicate function or parameter | The later name |
-| 34 | Unavailable function or parameter | The requested name or incomplete reference |
+| 33 | Duplicate function, parameter, or local | The later name |
+| 34 | Unavailable function or binding | The requested name or incomplete reference |
 | 35 | Wrong call arity | The call expression |
+| 37 | Assignment to an immutable binding | The target name |
 
 The [caller inspector](source/callers.wove) uses the checked scalar plan
 from before C emission. Each call records its caller and callee as a
