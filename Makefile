@@ -30,11 +30,12 @@ HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex)
 JSON_WRITER_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove \
 	$(UTF8_MODULE) $(BYTE_TEXT_MODULE) $(DECIMAL_WRITER)
 JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove $(QUOTED_TEXT_MODULE) $(UTF8_MODULE)
+JSON_FRAME_MODULE := stage-2/json/frame.wove
 JSON_FIXTURES := tests/stage-2/json
 JSON_CASES := $(JSON_FIXTURES)/cases.tsv
 JSON_WRITER_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors)
 JSON_READER_PROGRAMS := $(addprefix $(STAGE2)/json/,reader reader_errors)
-JSON_PROGRAMS := $(JSON_WRITER_PROGRAMS) $(JSON_READER_PROGRAMS) $(STAGE2)/json/utf8
+JSON_PROGRAMS := $(JSON_WRITER_PROGRAMS) $(JSON_READER_PROGRAMS) $(STAGE2)/json/utf8 $(STAGE2)/json/frame
 CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove $(VALUE_TEXT_MODULES)
 CLI_FIXTURES := tests/stage-2/cli
 CLI_CASES := $(CLI_FIXTURES)/cases.tsv
@@ -48,7 +49,7 @@ COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
 CLANG_FIXTURES := tests/stage-2/clang
 CLANG_PROBE := $(STAGE2)/clang/probe
-CLANG_SOURCES := $(addprefix stage-2/clang/,source.wove frame.wove fields.wove index.wove values.wove)
+CLANG_SOURCES := $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
@@ -88,7 +89,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
-		$(CLANG_SOURCES) \
+		$(JSON_FRAME_MODULE) $(CLANG_SOURCES) \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv
@@ -109,7 +110,7 @@ test-stage-2-config: $(CONFIG_PROGRAM)
 
 # Check generated C input and captured JSON separately from native command launching.
 test-stage-2-clang: $(CLANG_PROBE) $(CLANG_TEMPLATE)
-	$(PYTHON) "$(CLANG_FIXTURES)/check.py" "$(CLANG_PROBE)" "$(CLANG)" "$(CLANG_TEMPLATE)"
+	sh "$(CLANG_FIXTURES)/check.sh" "$(CLANG_PROBE)" "$(CLANG_TEMPLATE)" "$(CLANG_FIXTURES)/cases.tsv" $(CLANG)
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
@@ -146,6 +147,7 @@ $(JSON_PROGRAMS): $(STAGE2)/json/%: $(JSON_FIXTURES)/%.wove $(SEED) $(STAGE1)/ru
 # Track each standalone JSON fixture's shared text inputs.
 $(JSON_WRITER_PROGRAMS): $(JSON_WRITER_SOURCES)
 $(JSON_READER_PROGRAMS): $(JSON_READER_SOURCES)
+$(STAGE2)/json/frame: $(JSON_FRAME_MODULE) $(JSON_READER_SOURCES)
 $(STAGE2)/json/utf8: $(UTF8_MODULE)
 
 # Build each argv fixture with its own test entry and the seed.
@@ -175,7 +177,7 @@ $(COMMAND_PROGRAM): $(CLI_FIXTURES)/command.probe.c $(COMMAND_PROGRAM).c $(STAGE
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Bring only the JSON and byte helpers into the standalone probe fixture.
-$(CLANG_PROBE).c: $(CLANG_FIXTURES)/probe.wove $(CLANG_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED)
+$(CLANG_PROBE).c: $(CLANG_FIXTURES)/probe.wove $(CLANG_SOURCES) $(JSON_FRAME_MODULE) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
