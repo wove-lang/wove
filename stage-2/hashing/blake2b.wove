@@ -1,0 +1,224 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Hash incremental raw bytes or framed fields with unkeyed sequential BLAKE2b-256.
+
+	Allocate blake2b_state_width elements of type Blake2bWord from
+	blake2b/word.wove and call blake2b_init before updating. The state
+	contains eight chaining words, sixteen pending message words, two
+	byte-counter words in low-to-high order, and the pending byte count.
+	Each word uses two u32 limbs. Finish reads the state through a shared
+	view so callers can take more digests and continue updating.`)
+	blake2b
+
+	(use wove-file "./blake2b/word.wove" (only (type Blake2bWord) word word_add word_less word_xor
+		word_append_byte write_word))
+	(use wove-file "./blake2b/compress.wove" (only blake2b_iv blake2b_compress))
+	(use wove-file "./base32hex/digest.wove" (only digest_base32hex digest_base32hex_width))
+
+	(struct PendingPosition (fields (slot i32) (byte i32)))
+
+	(fn
+		(:doc "Return the number of Blake2bWord elements required for one incremental state.")
+		blake2b_state_width
+		(params)
+		(returns i32)
+		(body (return (i32 27))))
+
+	(fn
+		(:doc "Initialize caller-owned storage for an unkeyed sequential hash with a 32-byte digest.")
+		blake2b_init
+		(params (state (mut-slice Blake2bWord)))
+		(returns void)
+		(body
+			(slice.store (local state) (i32 0)
+				(call word_xor (call blake2b_iv (i32 0)) (call word (u32 16842784) (u32 0))))
+			(let-mut index (i32 1))
+			(while
+				(:doc "The parameter block modifies only the first IV word.")
+				(i32.lt (local index) (i32 8))
+				(body
+					(slice.store (local state) (local index) (call blake2b_iv (local index)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(while
+				(:doc "Reset the pending block and byte counters even when reusing storage.")
+				(i32.lt (local index) (call blake2b_state_width))
+				(body
+					(slice.store (local state) (local index) (call word (u32 0) (u32 0)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn
+		(:doc "Add a block's unpadded byte length to the cumulative 128-bit counter.")
+		advance_count
+		(params (state (mut-slice Blake2bWord)) (length i32))
+		(returns void)
+		(body
+			(let low (slice.load (local state) (i32 24)))
+			(let next (call word_add (local low) (call word (int.convert u32 (local length)) (u32 0))))
+			(if
+				(:doc "An unsigned wrap in the low word carries into the high word.")
+				(call word_less (local next) (local low))
+				(then
+					(slice.store (local state) (i32 25)
+						(call word_add (slice.load (local state) (i32 25)) (call word (u32 1) (u32 0))))))
+			(slice.store (local state) (i32 24) (local next))))
+
+	(fn
+		(:doc "Locate the next pending word slot and little-endian byte within that word.")
+		pending_position
+		(params (used i32))
+		(returns PendingPosition)
+		(body
+			(let-mut slot (i32 8))
+			(let-mut byte (local used))
+			(while
+				(:doc "Each complete pending word accounts for eight bytes.")
+				(i32.lt (i32 7) (local byte))
+				(body
+					(set (local slot) (i32.add.wrapping (local slot) (i32 1)))
+					(set (local byte) (i32.sub.wrapping (local byte) (i32 8)))))
+			(return (record.make PendingPosition (slot (local slot)) (byte (local byte))))))
+
+	(fn
+		(:doc "Read a partially filled message word, or start a fresh zero word at a word boundary.")
+		pending_word
+		(params (state (shared-slice Blake2bWord)) (slot i32) (byte i32))
+		(returns Blake2bWord)
+		(body
+			(if
+				(:doc "Clear the new word so its unfilled bytes remain zero for final padding.")
+				(i32.eq (local byte) (i32 0))
+				(then (return (call word (u32 0) (u32 0)))))
+			(return (slice.load (local state) (local slot)))))
+
+	(fn
+		(:doc `Feed raw bytes into an initialized state.
+
+		A full block stays pending until another byte arrives so an exact
+		multiple of 128 is marked final without an extra block.`)
+		(:expect
+			(tests "stage-2/hashing/blake2b/cases.tsv")
+			(issues "gh:wove-lang/wove:172"))
+		blake2b_update
+		(params (state (mut-slice Blake2bWord)) (bytes (shared-slice u8)))
+		(returns void)
+		(body
+			(let length (slice.len (local bytes)))
+			(if
+				(:doc "An empty update leaves every state slot unchanged.")
+				(i32.eq (local length) (i32 0))
+				(then (return)))
+			(let-mut used (int.convert i32 (record.get (slice.load (local state) (i32 26)) low)))
+			(let pending (call pending_position (local used)))
+			(let-mut slot (record.get (local pending) slot))
+			(let-mut byte (record.get (local pending) byte))
+			(let-mut at (i32 0))
+			(while
+				(:doc "A byte only makes the preceding block nonfinal once it is known to exist.")
+				(i32.lt (local at) (local length))
+				(body
+					(if
+						(:doc "Compress the preceding full block before storing the next byte.")
+						(i32.eq (local used) (i32 128))
+						(then
+							(call advance_count (borrow-mut (local state)) (i32 128))
+							(call blake2b_compress (borrow-mut (local state)) (bool false))
+							(set (local used) (i32 0))
+							(set (local slot) (i32 8))
+							(set (local byte) (i32 0))))
+					(let previous (call pending_word (borrow-shared (local state)) (local slot) (local byte)))
+					(slice.store (local state) (local slot)
+						(call word_append_byte (local previous) (local byte) (slice.load (local bytes) (local at))))
+					(set (local used) (i32.add.wrapping (local used) (i32 1)))
+					(set (local at) (i32.add.wrapping (local at) (i32 1)))
+					(set (local byte) (i32.add.wrapping (local byte) (i32 1)))
+					(if
+						(:doc "After writing byte seven, the next byte starts a new message word.")
+						(i32.eq (local byte) (i32 8))
+						(then
+							(set (local slot) (i32.add.wrapping (local slot) (i32 1)))
+							(set (local byte) (i32 0))))))
+			(slice.store (local state) (i32 26) (call word (int.convert u32 (local used)) (u32 0)))))
+
+	(fn
+		(:doc "Feed one numeric field as eight little-endian bytes, without a length prefix.")
+		blake2b_number
+		(params (state (mut-slice Blake2bWord)) (value Blake2bWord))
+		(returns void)
+		(body
+			(let-mut bytes (array.alloc u8 (i32 8)))
+			(call write_word (borrow-mut (local bytes)) (i32 0) (local value))
+			(call blake2b_update (borrow-mut (local state)) (borrow-shared (local bytes)))))
+
+	(fn
+		(:doc "Feed a byte field preceded by its length as an eight-byte little-endian number.")
+		blake2b_field
+		(params (state (mut-slice Blake2bWord)) (bytes (shared-slice u8)))
+		(returns void)
+		(body
+			(call blake2b_number (borrow-mut (local state)) (call word (int.convert u32 (slice.len (local bytes))) (u32 0)))
+			(call blake2b_update (borrow-mut (local state)) (borrow-shared (local bytes)))))
+
+	(fn
+		(:doc "Finalize a writable copy and serialize the first four chaining words in little-endian order.")
+		finalize_copy
+		(params (state (shared-slice Blake2bWord)) (copy (mut-slice Blake2bWord)) (output (mut-slice u8)))
+		(returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Take a value copy of the state words, including any pending block.")
+				(i32.lt (local index) (call blake2b_state_width))
+				(body
+					(slice.store (local copy) (local index) (slice.load (local state) (local index)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(let used (int.convert i32 (record.get (slice.load (local copy) (i32 26)) low)))
+			(let pending (call pending_position (local used)))
+			(set (local index) (record.get (local pending) slot))
+			(if
+				(:doc "The unfilled suffix of a partial word is already zero.")
+				(i32.lt (i32 0) (record.get (local pending) byte))
+				(then (set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(while
+				(:doc "Pad the remaining whole words without adding any bytes to the counter.")
+				(i32.lt (local index) (i32 24))
+				(body
+					(slice.store (local copy) (local index) (call word (u32 0) (u32 0)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(call advance_count (borrow-mut (local copy)) (local used))
+			(call blake2b_compress (borrow-mut (local copy)) (bool true))
+			(call write_word (borrow-mut (local output)) (i32 0) (slice.load (local copy) (i32 0)))
+			(call write_word (borrow-mut (local output)) (i32 8) (slice.load (local copy) (i32 1)))
+			(call write_word (borrow-mut (local output)) (i32 16) (slice.load (local copy) (i32 2)))
+			(call write_word (borrow-mut (local output)) (i32 24) (slice.load (local copy) (i32 3)))))
+
+	(fn
+		(:doc "Write 32 raw digest bytes without consuming the state. Return false if the output is short.")
+		blake2b_digest
+		(params (state (shared-slice Blake2bWord)) (output (mut-slice u8)))
+		(returns bool)
+		(body
+			(if
+				(:doc "A short destination must stay intact.")
+				(i32.lt (slice.len (local output)) (i32 32))
+				(then (return (bool false))))
+			(let-mut copy (array.alloc Blake2bWord (call blake2b_state_width)))
+			(call finalize_copy (borrow-shared (local state)) (borrow-mut (local copy)) (borrow-mut (local output)))
+			(return (bool true))))
+
+	(fn
+		(:doc "Write the 52-byte uppercase Base32hex digest without consuming the state.")
+		blake2b_finish
+		(params (state (shared-slice Blake2bWord)) (output (mut-slice u8)))
+		(returns bool)
+		(body
+			(if
+				(:doc "Check the output length before computing the raw digest.")
+				(i32.lt (slice.len (local output)) (call digest_base32hex_width))
+				(then (return (bool false))))
+			(let-mut bytes (array.alloc u8 (i32 32)))
+			(if
+				(:doc "Pass the exact 32 digest bytes to the encoder.")
+				(call blake2b_digest (borrow-shared (local state)) (borrow-mut (local bytes)))
+				(then (return (call digest_base32hex (borrow-shared (local bytes)) (borrow-mut (local output))))))
+			(return (bool false)))))

@@ -1,0 +1,177 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Implement the BLAKE2b word operations with two wrapping u32 limbs.")
+	blake2b_word
+
+	(use wove-file "../fnv1a.wove" (only top_bit shift_word))
+
+	(struct Blake2bWord (fields (low u32) (high u32)))
+	(struct LimbSplit (fields (head u32) (tail u32)))
+
+	(fn
+		(:doc "Construct a word from its low and high 32-bit limbs.")
+		word
+		(params (low u32) (high u32))
+		(returns Blake2bWord)
+		(body (return (record.make Blake2bWord (low (local low)) (high (local high))))))
+
+	(fn
+		(:doc "Add two words modulo 2^64 with carry from the low limb.")
+		word_add
+		(params (left Blake2bWord) (right Blake2bWord))
+		(returns Blake2bWord)
+		(body
+			(let low (u32.add.wrapping (record.get (local left) low) (record.get (local right) low)))
+			(let-mut high (u32.add.wrapping (record.get (local left) high) (record.get (local right) high)))
+			(if
+				(:doc "A low result below either operand indicates one carry.")
+				(u32.lt (local low) (record.get (local left) low))
+				(then (set (local high) (u32.add.wrapping (local high) (u32 1)))))
+			(return (call word (local low) (local high)))))
+
+	(fn
+		(:doc "Compare unsigned words with the high limb taking precedence.")
+		word_less
+		(params (left Blake2bWord) (right Blake2bWord))
+		(returns bool)
+		(body
+			(let left_high (record.get (local left) high))
+			(let right_high (record.get (local right) high))
+			(return (bool.or (u32.lt (local left_high) (local right_high))
+				(bool.and (u32.eq (local left_high) (local right_high))
+					(u32.lt (record.get (local left) low) (record.get (local right) low)))))))
+
+	(fn
+		(:doc "Build the XOR of two limbs a bit at a time from most significant to least.")
+		limb_xor
+		(params (left u32) (right u32))
+		(returns u32)
+		(body
+			(let-mut a (local left))
+			(let-mut b (local right))
+			(let-mut result (u32 0))
+			(let-mut bits (i32 32))
+			(while
+				(:doc "The top bits differ exactly when their unsigned high-half tests differ.")
+				(i32.lt (i32 0) (local bits))
+				(body
+					(let-mut digit (u32 0))
+					(if
+						(:doc "Append a one only when exactly one input bit is set.")
+						(bool.not (u32.eq (call top_bit (local a)) (call top_bit (local b))))
+						(then (set (local digit) (u32 1))))
+					(set (local result) (u32.add.wrapping (u32.add.wrapping (local result) (local result)) (local digit)))
+					(set (local a) (u32.add.wrapping (local a) (local a)))
+					(set (local b) (u32.add.wrapping (local b) (local b)))
+					(set (local bits) (i32.sub.wrapping (local bits) (i32 1)))))
+			(return (local result))))
+
+	(fn
+		(:doc "XOR corresponding limbs without carrying between them.")
+		word_xor
+		(params (left Blake2bWord) (right Blake2bWord))
+		(returns Blake2bWord)
+		(body
+			(return (call word
+				(call limb_xor (record.get (local left) low) (record.get (local right) low))
+				(call limb_xor (record.get (local left) high) (record.get (local right) high))))))
+
+	(fn
+		(:doc "Extract the given number of top bits and shift the remaining bits to the top.")
+		split_limb
+		(params (value u32) (count i32))
+		(returns LimbSplit)
+		(body
+			(let-mut head (u32 0))
+			(let-mut tail (local value))
+			(let-mut remaining (local count))
+			(while
+				(:doc "Each doubling advances the remaining bits and appends the removed bit to the head.")
+				(i32.lt (i32 0) (local remaining))
+				(body
+					(set (local head) (u32.add.wrapping (u32.add.wrapping (local head) (local head))
+						(call top_bit (local tail))))
+					(set (local tail) (u32.add.wrapping (local tail) (local tail)))
+					(set (local remaining) (i32.sub.wrapping (local remaining) (i32 1)))))
+			(return (record.make LimbSplit (head (local head)) (tail (local tail))))))
+
+	(fn
+		(:doc "Rotate right by 24 or 16 bits using 8 or 16 retained bits per limb, respectively.")
+		word_rotate_cross
+		(params (value Blake2bWord) (retained i32))
+		(returns Blake2bWord)
+		(body
+			(let low (call split_limb (record.get (local value) low) (local retained)))
+			(let high (call split_limb (record.get (local value) high) (local retained)))
+			(return (call word
+				(u32.add.wrapping (record.get (local low) head) (record.get (local high) tail))
+				(u32.add.wrapping (record.get (local high) head) (record.get (local low) tail))))))
+
+	(fn
+		(:doc "Rotate right by 32 bits by exchanging the two limbs.")
+		word_rotate_32
+		(params (value Blake2bWord))
+		(returns Blake2bWord)
+		(body (return (call word (record.get (local value) high) (record.get (local value) low)))))
+
+	(fn
+		(:doc "Rotate right by 63 bits by moving the top bit of each limb into the bottom of the other.")
+		word_rotate_63
+		(params (value Blake2bWord))
+		(returns Blake2bWord)
+		(body
+			(let a (record.get (local value) low))
+			(let b (record.get (local value) high))
+			(return (call word
+				(u32.add.wrapping (u32.add.wrapping (local a) (local a)) (call top_bit (local b)))
+				(u32.add.wrapping (u32.add.wrapping (local b) (local b)) (call top_bit (local a)))))))
+
+	(fn
+		(:doc "Place a byte in a vacant little-endian byte position from 0 through 7.")
+		word_append_byte
+		(params (value Blake2bWord) (position i32) (byte u8))
+		(returns Blake2bWord)
+		(body
+			(let in_low (i32.lt (local position) (i32 4)))
+			(let-mut index (local position))
+			(if
+				(:doc "The high limb restarts its byte positions at zero.")
+				(bool.not (local in_low))
+				(then (set (local index) (i32.sub.wrapping (local index) (i32 4)))))
+			(let twice (i32.add.wrapping (local index) (local index)))
+			(let four (i32.add.wrapping (local twice) (local twice)))
+			(let byte_bits (call shift_word (int.convert u32 (local byte)) (i32.add.wrapping (local four) (local four))))
+			(let low (record.get (local value) low))
+			(let high (record.get (local value) high))
+			(if
+				(:doc "Vacant bits permit wrapping addition as insertion.")
+				(local in_low)
+				(then (return (call word (u32.add.wrapping (local low) (local byte_bits)) (local high)))))
+			(return (call word (local low) (u32.add.wrapping (local high) (local byte_bits))))))
+
+	(fn
+		(:doc "Write four bytes of a limb in little-endian order.")
+		write_limb
+		(params (output (mut-slice u8)) (start i32) (value u32))
+		(returns void)
+		(body
+			(let-mut tail (local value))
+			(let-mut at (i32.add.wrapping (local start) (i32 3)))
+			(while
+				(:doc "Read the most significant remaining byte and fill the output from right to left.")
+				(bool.not (i32.lt (local at) (local start)))
+				(body
+					(let part (call split_limb (local tail) (i32 8)))
+					(slice.store (local output) (local at) (int.convert u8 (record.get (local part) head)))
+					(set (local tail) (record.get (local part) tail))
+					(set (local at) (i32.sub.wrapping (local at) (i32 1)))))))
+
+	(fn
+		(:doc "Write the low limb before the high limb in the archived numeric byte format.")
+		write_word
+		(params (output (mut-slice u8)) (start i32) (value Blake2bWord))
+		(returns void)
+		(body
+			(call write_limb (borrow-mut (local output)) (local start) (record.get (local value) low))
+			(call write_limb (borrow-mut (local output)) (i32.add.wrapping (local start) (i32 4)) (record.get (local value) high)))))
