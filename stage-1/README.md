@@ -1,3 +1,8 @@
+<!--
+Copyright (c) 2026 wove contributors
+SPDX-License-Identifier: MIT OR Apache-2.0
+-->
+
 # Stage 1 seed
 
 The Python seed reads one module of tagged IR forms and emits C11 to stdout.
