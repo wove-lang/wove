@@ -1,7 +1,7 @@
 (module
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Resolve the selected single-module scalar functions before C emission.
+	(:doc `Resolve selected scalar functions and calls before C emission.
 
 	Collect signatures first, then check each return expression against the
 	function and parameter tables. Function rows keep original declaration
@@ -13,13 +13,15 @@
 	(use wove-file "../source/scan.wove" (only is_identifier_head (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts select_form (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../source/paths.wove" (only same_bytes))
+	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_return scalar_type decimal_scalar (type EntryRead)))
 
 	(struct ScalarFunction
 		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
-			(expression i32) (identity u32) (entry bool)))
+			(expression i32) (identity u32) (entry bool)
+			(file i32) (tree_base i32) (tree_limit i32) (source_base i32)))
 	(struct ScalarParameter (fields (name i32) (type u32) (position i32)))
 	(struct ScalarExpression
 		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool)))
@@ -32,6 +34,10 @@
 		come from the compilation's file table or the single-file caller.`)
 		CallSite
 		(fields (caller_file i32) (caller i32) (callee_file i32) (callee i32) (start i32) (end i32)))
+
+	(struct FunctionScope
+		(fields (file i32) (tree_base i32) (tree_limit i32) (source_base i32) (module_id u32) (entry_module bool)))
+	(struct BodyPlan (fields (count i32) (file i32) (start i32) (end i32) (error u32)))
 
 	(fn
 		(:doc `Carry an original source diagnostic through the signature reader.`)
@@ -227,6 +233,75 @@
 			(return (i32 -1))))
 
 	(fn
+		(:doc `Register one defining function and its parameters in the checked program tables.
+
+		Names and source spans address the supplied source view. Across files,
+		the canonical file and tree base recover the original declaration row.`)
+		register_function
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32) (scope FunctionScope)
+			(functions (mut-slice ScalarFunction)) (index i32) (parameters (mut-slice ScalarParameter)) (next_param i32))
+		(returns EntryRead)
+		(body
+			(let node (slice.load (local nodes) (local declaration)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let name (record.get (local parts) operands))
+			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+			(if
+				(:doc "This translation unit accepts local functions as its selected declarations.")
+				(bool.or (bool.not (u32.eq (local tag) (u32 1))) (i32.lt (local name) (i32 0)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 22)))))
+			(let spelling (slice.load (local nodes) (local name)))
+			(if
+				(:doc "Function names use the checked Wove identifier alphabet.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
+				(then (return (call entry_at (local spelling) (i32 -1) (u32 22)))))
+			(let identity (call function_identity (borrow-shared (local source))
+				(record.get (local spelling) start) (record.get (local spelling) end) (record.get (local scope) module_id)))
+			(let-mut previous (i32 0))
+			(while
+				(:doc "Reject a stable hash collision even if readable suffixes differ.")
+				(i32.lt (local previous) (local index))
+				(body
+					(let earlier (slice.load (local functions) (local previous)))
+					(if
+						(:doc "Equal IDs can come from a duplicate spelling or a collision between distinct names.")
+						(u32.eq (local identity) (record.get (local earlier) identity))
+						(then
+							(let prior (slice.load (local nodes) (record.get (local earlier) name)))
+							(if
+								(:doc "A repeated name is a source-level binding conflict.")
+								(bool.and (i32.eq (record.get (local scope) file) (record.get (local earlier) file))
+								(call same_name (borrow-shared (local source)) (local spelling) (local prior)))
+								(then (return (call entry_at (local spelling) (i32 -1) (u32 33)))))
+							(return (call entry_at (local spelling) (i32 -1) (u32 32)))))
+					(set (local previous) (i32.add.wrapping (local previous) (i32 1)))))
+			(let entry (bool.and (record.get (local scope) entry_module)
+				(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)) (u32 2))))
+			(let signature (call read_signature (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local spelling) (local entry)))
+			(if
+				(:doc "A malformed signature keeps its originating span.")
+				(u32.lt (u32 0) (record.get (local signature) error))
+				(then (return (record.make EntryRead (operand (i32 -1))
+					(start (record.get (local signature) start)) (end (record.get (local signature) end))
+					(error (record.get (local signature) error))))))
+			(let checked (call read_parameters (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local signature) params) (borrow-mut (local parameters)) (local next_param)))
+			(if
+				(:doc "Pass through the parameter list's first failure.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (local checked))))
+			(let limit (record.get (local checked) operand))
+			(slice.store (local functions) (local index)
+				(record.make ScalarFunction (declaration (local declaration)) (name (local name))
+					(params (local next_param)) (arity (i32.sub.wrapping (local limit) (local next_param)))
+					(result (record.get (local signature) result)) (expression (record.get (local signature) expression))
+					(identity (local identity)) (entry (local entry))
+					(file (record.get (local scope) file)) (tree_base (record.get (local scope) tree_base))
+					(tree_limit (record.get (local scope) tree_limit)) (source_base (record.get (local scope) source_base))))
+			(return (call entry_at (local node) (local limit) (u32 0)))))
+
+	(fn
 		(:doc `Register selected signatures and reject duplicate or colliding identities.
 
 		Classify main as the ABI entry in an executable root. Library functions
@@ -234,12 +309,15 @@
 		read_functions
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (functions (mut-slice ScalarFunction))
-			(parameters (mut-slice ScalarParameter)) (entry_module bool))
+			(parameters (mut-slice ScalarParameter)) (file i32) (entry_module bool))
 		(returns EntryRead)
 		(body
-			(let scope (slice.load (local nodes) (record.get (local module) name)))
+			(let module_name (slice.load (local nodes) (record.get (local module) name)))
 			(let module_id (call module_identity (borrow-shared (local source))
-				(record.get (local scope) start) (record.get (local scope) end)))
+				(record.get (local module_name) start) (record.get (local module_name) end)))
+			(let scope (record.make FunctionScope (file (local file)) (tree_base (i32 0))
+				(tree_limit (slice.len (local nodes))) (source_base (i32 0)) (module_id (local module_id))
+				(entry_module (local entry_module))))
 			(let-mut index (i32 0))
 			(let-mut next_param (i32 0))
 			(let-mut main (i32 -1))
@@ -248,65 +326,19 @@
 				(i32.lt (local index) (record.get (local module) count))
 				(body
 					(let declaration (record.get (slice.load (local declarations) (local index)) node))
-					(let node (slice.load (local nodes) (local declaration)))
-					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-					(let name (record.get (local parts) operands))
-					(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+					(let registered (call register_function (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local declaration) (local scope) (borrow-mut (local functions)) (local index)
+						(borrow-mut (local parameters)) (local next_param)))
 					(if
-						(:doc "This translation unit accepts local functions as its selected declarations.")
-						(bool.or (bool.not (u32.eq (local tag) (u32 1))) (i32.lt (local name) (i32 0)))
-						(then (return (call entry_at (local node) (i32 -1) (u32 22)))))
-					(let spelling (slice.load (local nodes) (local name)))
-					(if
-						(:doc "Function names use the checked Wove identifier alphabet.")
-						(bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
-						(then (return (call entry_at (local spelling) (i32 -1) (u32 22)))))
-					(let identity (call function_identity (borrow-shared (local source))
-						(record.get (local spelling) start) (record.get (local spelling) end) (local module_id)))
-					(let-mut previous (i32 0))
-					(while
-						(:doc "Reject a stable hash collision even if readable suffixes differ.")
-						(i32.lt (local previous) (local index))
-						(body
-							(let earlier (slice.load (local functions) (local previous)))
-							(if
-								(:doc "Equal IDs can come from a duplicate spelling or a collision between distinct names.")
-								(u32.eq (local identity) (record.get (local earlier) identity))
-								(then
-									(let prior (slice.load (local nodes) (record.get (local earlier) name)))
-									(if
-										(:doc "A repeated name is a source-level binding conflict.")
-										(call same_name (borrow-shared (local source)) (local spelling) (local prior))
-										(then (return (call entry_at (local spelling) (i32 -1) (u32 33)))))
-									(return (call entry_at (local spelling) (i32 -1) (u32 32)))))
-							(set (local previous) (i32.add.wrapping (local previous) (i32 1)))))
-					(let entry (bool.and (local entry_module)
-						(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)) (u32 2))))
-					(let signature (call read_signature (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local node) (local spelling) (local entry)))
-					(if
-						(:doc "A malformed signature keeps its originating span.")
-						(u32.lt (u32 0) (record.get (local signature) error))
-						(then (return (record.make EntryRead (operand (i32 -1))
-							(start (record.get (local signature) start)) (end (record.get (local signature) end))
-							(error (record.get (local signature) error))))))
-					(let checked (call read_parameters (borrow-shared (local source)) (borrow-shared (local nodes))
-						(record.get (local signature) params) (borrow-mut (local parameters)) (local next_param)))
-					(if
-						(:doc "Pass through the parameter list's first failure.")
-						(u32.lt (u32 0) (record.get (local checked) error))
-						(then (return (local checked))))
-					(let limit (record.get (local checked) operand))
-					(slice.store (local functions) (local index)
-						(record.make ScalarFunction (declaration (local declaration)) (name (local name))
-							(params (local next_param)) (arity (i32.sub.wrapping (local limit) (local next_param)))
-							(result (record.get (local signature) result)) (expression (record.get (local signature) expression))
-							(identity (local identity)) (entry (local entry))))
+						(:doc "Keep the rejected signature or declaration's original span.")
+						(u32.lt (u32 0) (record.get (local registered) error))
+						(then (return (local registered))))
+					(let function (slice.load (local functions) (local index)))
 					(if
 						(:doc "Remember the selected C entry independently of declaration order.")
-						(local entry)
+						(record.get (local function) entry)
 						(then (set (local main) (local declaration))))
-					(set (local next_param) (local limit))
+					(set (local next_param) (record.get (local registered) operand))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(if
 				(:doc "The executable root must define the ABI entry.")
@@ -399,15 +431,69 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
+		(:doc `Resolve a file-local spelling to its defining scalar function.
+
+		The graph binding records the defining file and an original tree row.
+		The scalar table keeps exactly one registered signature for that pair.`)
+		find_graph_function
+		(params (arena (shared-slice u8)) (functions (shared-slice ScalarFunction))
+			(bindings (shared-slice GraphBinding)) (owner i32) (base i32)
+			(spelling (shared-slice u8)) (start i32) (end i32))
+		(returns i32)
+		(body
+			(let chosen (call find_binding (borrow-shared (local arena)) (borrow-shared (local spelling))
+				(local start) (local end) (borrow-shared (local bindings)) (slice.len (local bindings))
+				(local owner) (bool false) (local base)))
+			(if
+				(:doc "An unavailable name reports back to the referencing file.")
+				(i32.lt (local chosen) (i32 0))
+				(then (return (i32 -1))))
+			(let binding (slice.load (local bindings) (local chosen)))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Find the canonical declaration rather than an alias's binding row.")
+				(i32.lt (local index) (slice.len (local functions)))
+				(body
+					(let function (slice.load (local functions) (local index)))
+					(if
+						(:doc "Compare the defining file and the declaration row within that file.")
+						(bool.and
+							(i32.eq (record.get (local binding) file) (record.get (local function) file))
+							(i32.eq (record.get (local binding) declaration)
+								(i32.sub.wrapping (record.get (local function) declaration) (record.get (local function) tree_base))))
+						(then (return (local index))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (i32 -1))))
+
+	(fn
+		(:doc `Look up a direct call in its caller's namespace or the single-file function table.`)
+		resolve_call_target
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction))
+			(bindings (shared-slice GraphBinding)) (caller ScalarFunction) (name SourceNode))
+		(returns i32)
+		(body
+			(let start (record.get (local name) start))
+			(let end (record.get (local name) end))
+			(if
+				(:doc "A supplied graph already provides the file's selected name bindings.")
+				(i32.lt (i32 0) (slice.len (local bindings)))
+				(then (return (call find_graph_function (borrow-shared (local source))
+					(borrow-shared (local functions)) (borrow-shared (local bindings))
+					(record.get (local caller) file) (record.get (local caller) source_base)
+					(borrow-shared (local source)) (local start) (local end)))))
+			(return (call find_function (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local source)) (local start) (local end)))))
+
+	(fn
 		(:doc `Resolve a direct call and seed each argument with its formal scalar type.
 
 		The verified call row is keyed by the original call node and refers to
 		the defining function row. Its operands retain their original links.`)
 		plan_call
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
-			(operand i32) (type u32) (index i32)
+			(operand i32) (type u32) (index i32) (caller ScalarFunction)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(expressions (mut-slice ScalarExpression)))
+			(bindings (shared-slice GraphBinding)) (expressions (mut-slice ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(if
@@ -416,12 +502,11 @@
 				(then (return (call entry_at (local node) (i32 -1) (u32 34)))))
 			(let name (slice.load (local nodes) (local operand)))
 			(if
-				(:doc "A direct call names a local function with a bare identifier.")
+				(:doc "A direct call names a function binding with a bare identifier.")
 				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
 				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
-			(let target (call find_function (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local functions)) (borrow-shared (local source))
-				(record.get (local name) start) (record.get (local name) end)))
+			(let target (call resolve_call_target (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local bindings)) (local caller) (local name)))
 			(if
 				(:doc "The ABI entry is a host entry point and is unavailable to direct Wove calls.")
 				(bool.or (i32.lt (local target) (i32 0))
@@ -459,7 +544,8 @@
 		plan_expression
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(index i32) (type u32) (functions (shared-slice ScalarFunction))
-			(parameters (shared-slice ScalarParameter)) (expressions (mut-slice ScalarExpression)))
+			(parameters (shared-slice ScalarParameter)) (bindings (shared-slice GraphBinding))
+			(expressions (mut-slice ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(let node (slice.load (local nodes) (local index)))
@@ -486,22 +572,37 @@
 				(:doc "A call resolves in the selected function table.")
 				(u32.eq (local tag) (u32 9))
 				(then (return (call plan_call (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local operand) (local type) (local index)
-					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-mut (local expressions))))))
+					(local node) (local operand) (local type) (local index) (local caller)
+					(borrow-shared (local functions)) (borrow-shared (local parameters))
+					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
 			(return (call plan_literal (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local operand) (local type) (local index) (borrow-mut (local expressions))))))
 
 	(fn
-		(:doc `Capture the defining source rows and the file-relative span of a resolved local call.`)
-		local_call_site
-		(params (caller ScalarFunction) (callee ScalarFunction) (node SourceNode) (file i32) (view_start i32))
+		(:doc `Report a body diagnostic in the caller's view, independently of arena packing.`)
+		body_error
+		(params (caller ScalarFunction) (start i32) (end i32) (error u32))
+		(returns BodyPlan)
+		(body
+			(let base (record.get (local caller) source_base))
+			(return (record.make BodyPlan (count (i32 0)) (file (record.get (local caller) file))
+				(start (i32.sub.wrapping (local start) (local base))) (end (i32.sub.wrapping (local end) (local base)))
+				(error (local error))))))
+
+	(fn
+		(:doc `Capture each endpoint's original tree row and the half-open span in the calling file.`)
+		resolved_call_site
+		(params (caller ScalarFunction) (callee ScalarFunction) (node SourceNode) (view_start i32))
 		(returns CallSite)
 		(body
+			(let base (record.get (local caller) source_base))
 			(return (record.make CallSite
-				(caller_file (local file)) (caller (record.get (local caller) declaration))
-				(callee_file (local file)) (callee (record.get (local callee) declaration))
-				(start (i32.add.wrapping (local view_start) (record.get (local node) start)))
-				(end (i32.add.wrapping (local view_start) (record.get (local node) end)))))))
+				(caller_file (record.get (local caller) file))
+				(caller (i32.sub.wrapping (record.get (local caller) declaration) (record.get (local caller) tree_base)))
+				(callee_file (record.get (local callee) file))
+				(callee (i32.sub.wrapping (record.get (local callee) declaration) (record.get (local callee) tree_base)))
+				(start (i32.add.wrapping (local view_start) (i32.sub.wrapping (record.get (local node) start) (local base))))
+				(end (i32.add.wrapping (local view_start) (i32.sub.wrapping (record.get (local node) end) (local base))))))))
 
 	(fn
 		(:doc `Resolve every scalar expression in source order without walking the native call stack.
@@ -509,13 +610,15 @@
 		A call seeds its direct argument rows before they are reached. Source
 		rows with type zero are outside the expression plan, such as metadata,
 		literal payloads, and called-name atoms. Start with zeroed plan storage.
-		Read the returned call-site count only after successful checking. Supply
-		a file identity and a view start whose full source range fits in i32.`)
+		Read the returned call-site count only after successful checking. A
+		single-file view start must fit in i32 with the full view length.
+		Use zero when the supplied arena already holds whole source files.`)
 		plan_bodies
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (file i32) (view_start i32))
-		(returns EntryRead)
+			(bindings (shared-slice GraphBinding)) (expressions (mut-slice ScalarExpression))
+			(sites (mut-slice CallSite)) (view_start i32))
+		(returns BodyPlan)
 		(body
 			(let-mut site_count (i32 0))
 			(let-mut function (i32 0))
@@ -532,7 +635,7 @@
 					(let-mut index (local root))
 					(while
 						(:doc "Every source row inside the return expression follows its parent in the tree table.")
-						(bool.and (i32.lt (local index) (slice.len (local nodes)))
+						(bool.and (i32.lt (local index) (record.get (local caller) tree_limit))
 							(i32.lt (record.get (slice.load (local nodes) (local index)) start) (local end)))
 						(body
 							(let type (record.get (slice.load (local expressions) (local index)) type))
@@ -542,11 +645,12 @@
 								(then
 									(let checked (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
 										(local caller) (local index) (local type) (borrow-shared (local functions))
-										(borrow-shared (local parameters)) (borrow-mut (local expressions))))
+										(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-mut (local expressions))))
 									(if
 										(:doc "Preserve source spans from the first failing signature or expression.")
 										(u32.lt (u32 0) (record.get (local checked) error))
-										(then (return (local checked))))
+										(then (return (call body_error (local caller) (record.get (local checked) start)
+												(record.get (local checked) end) (record.get (local checked) error)))))
 									(let expression (slice.load (local expressions) (local index)))
 									(if
 										(:doc "Record every resolved call before lowering, using its defining declaration row.")
@@ -556,11 +660,12 @@
 											(if
 												(:doc "A short call-site table reports the first unwritable call.")
 												(bool.not (i32.lt (local site_count) (slice.len (local sites))))
-												(then (return (call entry_at (local node) (i32 -1) (u32 16)))))
+												(then (return (call body_error (local caller) (record.get (local node) start)
+													(record.get (local node) end) (u32 16)))))
 											(let callee (slice.load (local functions) (record.get (local expression) target)))
 											(slice.store (local sites) (local site_count)
-												(call local_call_site (local caller) (local callee) (local node) (local file) (local view_start)))
+												(call resolved_call_site (local caller) (local callee) (local node) (local view_start)))
 											(set (local site_count) (i32.add.wrapping (local site_count) (i32 1)))))))
 							(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 					(set (local function) (i32.add.wrapping (local function) (i32 1)))))
-			(return (record.make EntryRead (operand (local site_count)) (start (i32 0)) (end (i32 0)) (error (u32 0)))))))
+			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0)))))))

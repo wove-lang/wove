@@ -242,6 +242,21 @@ and add the identity of the file where they originated.
 | 30 | Conflicting binding | The new local name |
 | 31 | Excluded entry module | The entry module |
 
+The [scalar graph compiler](emit/graph.wove) consumes the resolver's
+active modules and populated bindings. It checks all reached scalar
+signatures and resolves every direct call in the caller's file before
+emitting C. A definition has one symbol across aliases and diamond
+edges. Its graph symbol uses the defining file's canonical virtual
+path and declared module name for the namespace. Library functions
+named `main` have ordinary scalar signatures. The root's `main` keeps
+the executable ABI.
+
+The graph caller inspector uses the same checked plan. Query a name
+through a file's local bindings to inspect its defining declaration.
+Every call site keeps the original file and declaration identities
+of both endpoints. Diagnostic spans use the file where the failure
+originated.
+
 `make stage-2` translates [the compiler root](wovec.wove) with the Python seed
 and links `build/stage-1/wovec` with Clang and the shared runtime. The root
 imports `admit_source` and `scan_token` from [the scanner](source/scan.wove).
@@ -320,3 +335,14 @@ original file-relative span. A function with no incoming calls has
 `(:callers)`. The [caller fixtures](../tests/stage-2/source_callers.tsv)
 check repeated sites, an empty result, bootstrap selection, and file offsets
 after layout and module-name changes.
+
+Use `--emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...` to emit
+one C translation unit from a supplied scalar graph. Use
+`--graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...`
+to inspect the definition selected by `NAME` in the supplied `FILE` row.
+`ENTRY` and the query's `FILE` are virtual path row indices.
+`SCRATCH` bounds the import-resolution tables. Output capacity counts
+bytes for emission and call sites for inspection. The success header
+gives the output count, defining file identity, and file-relative span.
+The [scalar graph fixtures](../tests/stage-2/scalar_graphs.tsv) check the
+native result, defining symbols, repeated imports, and original call spans.

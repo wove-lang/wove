@@ -1,0 +1,157 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Check, emit, and inspect a resolved scalar source graph.
+
+	Build the same scalar plan for both consumers. An emission produces one
+	C translation unit across the reached files. An inspection resolves the
+	requested spelling in its file and reads the defining declaration's callers.`)
+	emit_graph
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../source/callers.wove" (only copy_inspected_callers))
+	(use wove-file "../scalar/plan.wove"
+		(only find_graph_function plan_bodies (type ScalarFunction) (type ScalarParameter)
+			(type ScalarExpression) (type CallSite)))
+	(use wove-file "../scalar/graph.wove" (only layout_trees count_definitions prepare_graph (type ScalarTree)))
+	(use wove-file "./c.wove" (only write_translation_unit))
+
+	(struct GraphOutput (fields (count i32) (declaration i32) (file i32) (start i32) (end i32) (error u32)))
+
+	(fn
+		(:doc `Package an output count, inspected declaration, or original source diagnostic.`)
+		graph_output
+		(params (count i32) (declaration i32) (file i32) (start i32) (end i32) (error u32))
+		(returns GraphOutput)
+		(body
+			(return (record.make GraphOutput (count (local count)) (declaration (local declaration))
+				(file (local file)) (start (local start)) (end (local end)) (error (local error))))))
+
+	(fn
+		(:doc `Measure and emit the checked graph as a complete C translation unit.`)
+		write_graph_c
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction))
+			(parameters (shared-slice ScalarParameter)) (expressions (shared-slice ScalarExpression))
+			(root i32) (tree ScalarTree) (source_base i32) (entry i32) (output (mut-slice u8)))
+		(returns GraphOutput)
+		(body
+			(let measured (call write_translation_unit (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local expressions)) (borrow-mut (local output)) (bool false)))
+			(if
+				(:doc "Keep the destination untouched when the full unit cannot fit.")
+				(u32.lt (int.convert u32 (slice.len (local output))) (local measured))
+				(then
+					(let node (slice.load (local nodes) (local entry)))
+					(return (call graph_output (i32 0) (i32 -1) (local root)
+						(i32.sub.wrapping (record.get (local node) start) (local source_base))
+						(i32.sub.wrapping (record.get (local node) end) (local source_base)) (u32 16)))))
+			(let written (call write_translation_unit (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local expressions)) (borrow-mut (local output)) (bool true)))
+			(return (call graph_output (int.convert i32 (local written)) (i32 -1) (local root)
+				(record.get (local tree) start) (record.get (local tree) end) (u32 0)))))
+
+	(fn
+		(:doc `Inspect the defining declaration reached by a name in the requested file's namespace.`)
+		inspect_graph_name
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (trees (shared-slice ScalarTree))
+			(nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction)) (bindings (shared-slice GraphBinding))
+			(sites (shared-slice CallSite)) (count i32) (path i32) (name (shared-slice u8)) (output (mut-slice CallSite)))
+		(returns GraphOutput)
+		(body
+			(if
+				(:doc "An unknown path row has no source to attach to the diagnostic.")
+				(bool.not (i32.lt (local path) (slice.len (local files))))
+				(then (return (call graph_output (i32 0) (i32 -1) (i32 -1) (i32 0) (i32 0) (u32 36)))))
+			(let file (record.get (slice.load (local files) (local path)) identity))
+			(let input (slice.load (local files) (local file)))
+			(let target (call find_graph_function (borrow-shared (local arena)) (borrow-shared (local functions))
+				(borrow-shared (local bindings)) (local file) (record.get (local input) source_start)
+				(borrow-shared (local name)) (i32 0) (slice.len (local name))))
+			(if
+				(:doc "An unavailable or inactive name reports the requesting module's span.")
+				(i32.lt (local target) (i32 0))
+				(then
+					(let tree (slice.load (local trees) (local file)))
+					(return (call graph_output (i32 0) (i32 -1) (local file)
+						(record.get (local tree) start) (record.get (local tree) end) (u32 36)))))
+			(let result (call copy_inspected_callers (borrow-shared (local nodes)) (borrow-shared (local functions))
+				(local target) (borrow-shared (local sites)) (local count) (i32 0) (borrow-mut (local output))))
+			(return (call graph_output (record.get (local result) count) (record.get (local result) declaration)
+				(record.get (local result) file) (record.get (local result) start) (record.get (local result) end)
+				(record.get (local result) error)))))
+
+	(fn
+		(:doc `Consume the successful graph resolver's active modules and populated binding prefix.
+
+		Use the canonical root identity for ABI main. A negative query path
+		selects C emission, otherwise inspect the given name through the path
+		row's local bindings. Both destinations remain untouched on failure.`)
+		(:expect bootstrap.cross_file_scalar_calls
+			(issue "https://github.com/wove-lang/wove/issues/71"))
+		run_scalar_graph
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
+			(bindings (shared-slice GraphBinding)) (root i32) (query_path i32) (name (shared-slice u8))
+			(output (mut-slice u8)) (callers (mut-slice CallSite)))
+		(returns GraphOutput)
+		(body
+			(let-mut trees (array.alloc ScalarTree (slice.len (local files))))
+			(let layout (call layout_trees (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-mut (local trees))))
+			(if
+				(:doc "Any view or table sizing failure belongs to the original file.")
+				(u32.lt (u32 0) (record.get (local layout) error))
+				(then (return (call graph_output (i32 0) (i32 -1) (record.get (local layout) file)
+					(record.get (local layout) start) (record.get (local layout) end) (record.get (local layout) error)))))
+			(let rows (record.get (local layout) rows))
+			(let-mut nodes (array.alloc SourceNode (local rows)))
+			(let-mut functions (array.alloc ScalarFunction (call count_definitions (borrow-shared (local bindings)))))
+			(let-mut parameters (array.alloc ScalarParameter (local rows)))
+			(let signatures (call prepare_graph (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-shared (local trees)) (local root)
+				(borrow-mut (local nodes)) (borrow-mut (local functions)) (borrow-mut (local parameters))))
+			(if
+				(:doc "Every reached signature must be valid before resolving cross-file calls.")
+				(u32.lt (u32 0) (record.get (local signatures) error))
+				(then (return (call graph_output (i32 0) (i32 -1) (record.get (local signatures) file)
+					(record.get (local signatures) start) (record.get (local signatures) end)
+					(record.get (local signatures) error)))))
+			(let-mut expressions (array.alloc ScalarExpression (local rows)))
+			(let-mut sites (array.alloc CallSite (local rows)))
+			(let checked (call plan_bodies (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
+				(borrow-mut (local expressions)) (borrow-mut (local sites)) (i32 0)))
+			(if
+				(:doc "Body failures keep the caller's file and source span before any output is written.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (call graph_output (i32 0) (i32 -1) (record.get (local checked) file)
+					(record.get (local checked) start) (record.get (local checked) end) (record.get (local checked) error)))))
+			(if
+				(:doc "An inspection queries the shared plan through the requesting file's binding table.")
+				(bool.not (i32.lt (local query_path) (i32 0)))
+				(then (return (call inspect_graph_name (borrow-shared (local arena)) (borrow-shared (local files))
+					(borrow-shared (local trees)) (borrow-shared (local nodes)) (borrow-shared (local functions))
+					(borrow-shared (local bindings)) (borrow-shared (local sites)) (record.get (local checked) count)
+					(local query_path) (borrow-shared (local name)) (borrow-mut (local callers))))))
+			(return (call emit_checked_graph (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local trees)) (borrow-shared (local nodes)) (borrow-shared (local functions))
+				(borrow-shared (local parameters)) (borrow-shared (local expressions)) (local root)
+				(record.get (local signatures) entry) (borrow-mut (local output))))))
+
+	(fn
+		(:doc `Supply the root file's checked tree span and arena base to the C writer.`)
+		emit_checked_graph
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (trees (shared-slice ScalarTree))
+			(nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction))
+			(parameters (shared-slice ScalarParameter)) (expressions (shared-slice ScalarExpression))
+			(root i32) (entry i32) (output (mut-slice u8)))
+		(returns GraphOutput)
+		(body
+			(let input (slice.load (local files) (local root)))
+			(return (call write_graph_c (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local expressions))
+				(local root) (slice.load (local trees) (local root)) (record.get (local input) source_start)
+				(local entry) (borrow-mut (local output)))))))

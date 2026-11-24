@@ -15,7 +15,8 @@ SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
 SOURCE_MODULE_READER := stage-2/source/module.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
 SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove
-C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove scalar/syntax.wove scalar/plan.wove emit/text.wove emit/names.wove)
+C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove emit/graph.wove emit/names.wove emit/text.wove \
+	scalar/syntax.wove scalar/plan.wove scalar/graph.wove)
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -52,7 +53,8 @@ test-stage-2: stage-2
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
-	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/source_graphs.tsv
+	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
+		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
