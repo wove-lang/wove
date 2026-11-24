@@ -21,6 +21,10 @@ HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex)
+JSON_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove $(SOURCE_SCAN_MODULE)
+JSON_FIXTURES := tests/stage-2/json
+JSON_CASES := $(JSON_FIXTURES)/cases.tsv
+JSON_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors)
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -34,7 +38,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
 
-.PHONY: all stage-1 stage-2 test test-stage-2
+.PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -47,7 +51,7 @@ stage-2: $(BOOTSTRAP_COMPILER) $(SOURCE_SCAN)
 # Preserve quoting in compiler settings until the runner splits them into arguments.
 test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
-test-stage-2: stage-2 $(HASHING_PROGRAMS)
+test-stage-2: stage-2 $(HASHING_PROGRAMS) test-stage-2-json
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -60,6 +64,10 @@ test-stage-2: stage-2 $(HASHING_PROGRAMS)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/hashing" "$(HASHING_CASES)"
+
+# Run the standalone JSON utilities with the same manifest runner as the seed.
+test-stage-2-json: $(JSON_PROGRAMS)
+	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/json" "$(JSON_CASES)"
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
@@ -82,6 +90,12 @@ $(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(STAGE1)/wovec.c $(STAGE1)/ru
 
 # Build utility-only Wove programs with the ordinary Python seed and runtime.
 $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(HASHING_SOURCES) $(SEED) $(STAGE1)/runtime.o
+	mkdir -p "$(@D)"
+	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
+
+# Build JSON fixtures separately from the Stage 2 compiler entry.
+$(JSON_PROGRAMS): $(STAGE2)/json/%: $(JSON_FIXTURES)/%.wove $(JSON_SOURCES) $(SEED) $(STAGE1)/runtime.o
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"

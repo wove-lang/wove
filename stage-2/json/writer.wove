@@ -1,0 +1,308 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Write one compact JSON value into caller-owned bytes.
+
+	Start with json_writer and thread its returned state through each call
+	with the same output and nesting slices. The nesting slice uses one byte
+	per open container. Call json_finish before reading the output. On
+	success written is the byte length without a terminator. Discard the
+	output on failure.
+
+	Errors are sticky. Code 1 means output capacity, 2 means nesting
+	capacity, 3 means an invalid sequence of calls, and 4 means invalid UTF-8.`)
+	json_writer_module
+
+	(use wove-file "./text.wove" (only json_byte json_keyword json_quoted json_signed json_unsigned))
+
+	(struct JsonWriter (fields (written i32) (depth i32) (error u32)))
+
+	(fn
+		(:doc "Start a fresh writer at byte zero with no open containers.")
+		json_writer
+		(params)
+		(returns JsonWriter)
+		(body (return (record.make JsonWriter (written (i32 0)) (depth (i32 0)) (error (u32 0))))))
+
+	(fn
+		(:doc "Keep the current counters when recording a failure.")
+		writer_error
+		(params (writer JsonWriter) (error u32))
+		(returns JsonWriter)
+		(body
+			(return (record.make JsonWriter
+				(written (record.get (local writer) written))
+				(depth (record.get (local writer) depth))
+				(error (local error))))))
+
+	(fn
+		(:doc "Commit an emission cursor or translate its failure to a writer error.")
+		writer_offset
+		(params (writer JsonWriter) (next i32))
+		(returns JsonWriter)
+		(body
+			(if
+				(:doc "The string emitter rejects malformed UTF-8 with its own sentinel.")
+				(i32.eq (local next) (i32 -2))
+				(then (return (call writer_error (local writer) (u32 4)))))
+			(if
+				(:doc "A negative cursor marks the first byte that did not fit.")
+				(i32.lt (local next) (i32 0))
+				(then (return (call writer_error (local writer) (u32 1)))))
+			(return (record.make JsonWriter (written (local next))
+				(depth (record.get (local writer) depth)) (error (u32 0))))))
+
+	(fn
+		(:doc "A root value needs no prefix. An array value may follow a comma, and an object value must follow a key.")
+		start_value
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)))
+		(returns JsonWriter)
+		(body
+			(if
+				(:doc "A failed operation prevents all later output and stack changes.")
+				(bool.not (u32.eq (record.get (local writer) error) (u32 0)))
+				(then (return (local writer))))
+			(let depth (record.get (local writer) depth))
+			(let offset (record.get (local writer) written))
+			(if
+				(:doc "Only one value is allowed at the root.")
+				(i32.eq (local depth) (i32 0))
+				(then
+					(if
+						(:doc "A nonempty output at depth zero already contains a root value.")
+						(i32.eq (local offset) (i32 0))
+						(then (return (local writer))))
+					(return (call writer_error (local writer) (u32 3)))))
+			(let top (i32.sub.wrapping (local depth) (i32 1)))
+			(let frame (slice.load (local stack) (local top)))
+			(if
+				(:doc "A value consumes the pending object key, which already emitted its colon.")
+				(u8.eq (local frame) (u8 4))
+				(then
+					(slice.store (local stack) (local top) (u8 3))
+					(return (local writer))))
+			(if
+				(:doc "An empty array has no comma before its first value.")
+				(u8.eq (local frame) (u8 0))
+				(then
+					(slice.store (local stack) (local top) (u8 1))
+					(return (local writer))))
+			(if
+				(:doc "A nonempty array separates its values with a comma.")
+				(u8.eq (local frame) (u8 1))
+				(then
+					(return (call writer_offset (local writer)
+						(call json_byte (borrow-mut (local output)) (local offset) (u8 44))))))
+			(return (call writer_error (local writer) (u32 3)))))
+
+	(fn
+		(:doc "Open an object or array as the next value. Frames 0 and 1 are empty and nonempty arrays, 2 and 3 are empty and nonempty objects, and 4 awaits an object value.")
+		begin_container
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)) (opener u8) (frame u8))
+		(returns JsonWriter)
+		(body
+			(let state (call start_value (local writer) (borrow-mut (local output)) (borrow-mut (local stack))))
+			(if
+				(:doc "A rejected value cannot open another frame.")
+				(bool.not (u32.eq (record.get (local state) error) (u32 0)))
+				(then (return (local state))))
+			(let depth (record.get (local state) depth))
+			(if
+				(:doc "The caller supplies one frame slot per open container.")
+				(bool.not (i32.lt (local depth) (slice.len (local stack))))
+				(then (return (call writer_error (local state) (u32 2)))))
+			(let next (call json_byte (borrow-mut (local output)) (record.get (local state) written) (local opener)))
+			(if
+				(:doc "Only a written delimiter opens a new frame.")
+				(i32.lt (local next) (i32 0))
+				(then (return (call writer_error (local state) (u32 1)))))
+			(slice.store (local stack) (local depth) (local frame))
+			(return (record.make JsonWriter (written (local next))
+				(depth (i32.add.wrapping (local depth) (i32 1))) (error (u32 0))))))
+
+	(fn
+		(:doc "Start an object in the current value position.")
+		json_begin_object
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)))
+		(returns JsonWriter)
+		(body (return (call begin_container (local writer) (borrow-mut (local output)) (borrow-mut (local stack)) (u8 123) (u8 2)))))
+
+	(fn
+		(:doc "Start an array in the current value position.")
+		json_begin_array
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)))
+		(returns JsonWriter)
+		(body (return (call begin_container (local writer) (borrow-mut (local output)) (borrow-mut (local stack)) (u8 91) (u8 0)))))
+
+	(fn
+		(:doc "Close the requested container only when its frame allows a closing delimiter.")
+		end_container
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (shared-slice u8))
+			(closer u8) (empty u8) (nonempty u8))
+		(returns JsonWriter)
+		(body
+			(if
+				(:doc "Preserve the existing failure before inspecting the nesting stack.")
+				(bool.not (u32.eq (record.get (local writer) error) (u32 0)))
+				(then (return (local writer))))
+			(let depth (record.get (local writer) depth))
+			(if
+				(:doc "At the root there is no opener to match.")
+				(i32.eq (local depth) (i32 0))
+				(then (return (call writer_error (local writer) (u32 3)))))
+			(let top (i32.sub.wrapping (local depth) (i32 1)))
+			(let frame (slice.load (local stack) (local top)))
+			(if
+				(:doc "Closing a different container or leaving a key without a value is invalid.")
+				(bool.not (bool.or (u8.eq (local frame) (local empty)) (u8.eq (local frame) (local nonempty))))
+				(then (return (call writer_error (local writer) (u32 3)))))
+			(let next (call json_byte (borrow-mut (local output)) (record.get (local writer) written) (local closer)))
+			(if
+				(:doc "A failed closing delimiter keeps its frame open.")
+				(i32.lt (local next) (i32 0))
+				(then (return (call writer_error (local writer) (u32 1)))))
+			(return (record.make JsonWriter (written (local next)) (depth (local top)) (error (u32 0))))))
+
+	(fn
+		(:doc "Close the current complete object.")
+		json_end_object
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (shared-slice u8)))
+		(returns JsonWriter)
+		(body (return (call end_container (local writer) (borrow-mut (local output)) (borrow-shared (local stack)) (u8 125) (u8 2) (u8 3)))))
+
+	(fn
+		(:doc "Close the current array.")
+		json_end_array
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (shared-slice u8)))
+		(returns JsonWriter)
+		(body (return (call end_container (local writer) (borrow-mut (local output)) (borrow-shared (local stack)) (u8 93) (u8 0) (u8 1)))))
+
+	(fn
+		(:doc "Write a string key and colon in the current object and require its next value.")
+		json_key
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)) (text (shared-slice u8)))
+		(returns JsonWriter)
+		(body
+			(if
+				(:doc "Preserve the first error and avoid touching either buffer.")
+				(bool.not (u32.eq (record.get (local writer) error) (u32 0)))
+				(then (return (local writer))))
+			(let depth (record.get (local writer) depth))
+			(if
+				(:doc "Keys exist only inside an object.")
+				(i32.eq (local depth) (i32 0))
+				(then (return (call writer_error (local writer) (u32 3)))))
+			(let top (i32.sub.wrapping (local depth) (i32 1)))
+			(let frame (slice.load (local stack) (local top)))
+			(if
+				(:doc "A key opens a member only before the first member or after a complete member.")
+				(bool.not (bool.or (u8.eq (local frame) (u8 2)) (u8.eq (local frame) (u8 3))))
+				(then (return (call writer_error (local writer) (u32 3)))))
+			(let-mut next (record.get (local writer) written))
+			(if
+				(:doc "Only members after the first need a comma.")
+				(u8.eq (local frame) (u8 3))
+				(then (set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 44)))))
+			(set (local next) (call json_quoted (borrow-mut (local output)) (local next) (borrow-shared (local text))))
+			(if
+				(:doc "A failed key cannot advance the object into its value state.")
+				(i32.lt (local next) (i32 0))
+				(then (return (call writer_offset (local writer) (local next)))))
+			(set (local next) (call json_byte (borrow-mut (local output)) (local next) (u8 58)))
+			(if
+				(:doc "A complete key includes the colon before its value.")
+				(bool.not (i32.lt (local next) (i32 0)))
+				(then (slice.store (local stack) (local top) (u8 4))))
+			(return (call writer_offset (local writer) (local next)))))
+
+	(fn
+		(:doc "Write a quoted UTF-8 string in the current value position.")
+		json_string
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)) (text (shared-slice u8)))
+		(returns JsonWriter)
+		(body
+			(let state (call start_value (local writer) (borrow-mut (local output)) (borrow-mut (local stack))))
+			(if
+				(:doc "Emit the value only after its position is accepted.")
+				(bool.not (u32.eq (record.get (local state) error) (u32 0)))
+				(then (return (local state))))
+			(return (call writer_offset (local state)
+				(call json_quoted (borrow-mut (local output)) (record.get (local state) written) (borrow-shared (local text)))))))
+
+	(fn
+		(:doc "Write a signed decimal integer in the current value position.")
+		json_i32
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)) (value i32))
+		(returns JsonWriter)
+		(body
+			(let state (call start_value (local writer) (borrow-mut (local output)) (borrow-mut (local stack))))
+			(if
+				(:doc "Emit the value only after its position is accepted.")
+				(bool.not (u32.eq (record.get (local state) error) (u32 0)))
+				(then (return (local state))))
+			(return (call writer_offset (local state)
+				(call json_signed (borrow-mut (local output)) (record.get (local state) written) (local value))))))
+
+	(fn
+		(:doc "Write an unsigned decimal integer in the current value position.")
+		json_u32
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)) (value u32))
+		(returns JsonWriter)
+		(body
+			(let state (call start_value (local writer) (borrow-mut (local output)) (borrow-mut (local stack))))
+			(if
+				(:doc "Emit the value only after its position is accepted.")
+				(bool.not (u32.eq (record.get (local state) error) (u32 0)))
+				(then (return (local state))))
+			(return (call writer_offset (local state)
+				(call json_unsigned (borrow-mut (local output)) (record.get (local state) written) (local value))))))
+
+	(fn
+		(:doc "Write true or false in the current value position.")
+		json_bool
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)) (value bool))
+		(returns JsonWriter)
+		(body
+			(let state (call start_value (local writer) (borrow-mut (local output)) (borrow-mut (local stack))))
+			(if
+				(:doc "Emit the value only after its position is accepted.")
+				(bool.not (u32.eq (record.get (local state) error) (u32 0)))
+				(then (return (local state))))
+			(let-mut first (u8 102))
+			(if
+				(:doc "Select the true keyword when the input is true.")
+				(local value)
+				(then (set (local first) (u8 116))))
+			(return (call writer_offset (local state)
+				(call json_keyword (borrow-mut (local output)) (record.get (local state) written) (local first))))))
+
+	(fn
+		(:doc "Write null in the current value position.")
+		json_null
+		(params (writer JsonWriter) (output (mut-slice u8)) (stack (mut-slice u8)))
+		(returns JsonWriter)
+		(body
+			(let state (call start_value (local writer) (borrow-mut (local output)) (borrow-mut (local stack))))
+			(if
+				(:doc "Emit the value only after its position is accepted.")
+				(bool.not (u32.eq (record.get (local state) error) (u32 0)))
+				(then (return (local state))))
+			(return (call writer_offset (local state)
+				(call json_keyword (borrow-mut (local output)) (record.get (local state) written) (u8 110))))))
+
+	(fn
+		(:doc "Require exactly one complete value and return its written length or the first error.")
+		json_finish
+		(params (writer JsonWriter))
+		(returns JsonWriter)
+		(body
+			(if
+				(:doc "A previous failure takes precedence over an incomplete document.")
+				(bool.not (u32.eq (record.get (local writer) error) (u32 0)))
+				(then (return (local writer))))
+			(if
+				(:doc "Success requires some output and no remaining open containers.")
+				(bool.or (i32.eq (record.get (local writer) written) (i32 0))
+					(bool.not (i32.eq (record.get (local writer) depth) (i32 0))))
+				(then (return (call writer_error (local writer) (u32 3)))))
+			(return (local writer)))))
