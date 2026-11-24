@@ -28,7 +28,7 @@ C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove emit/runtime.wove emit/gra
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
-HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex)
+HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
 JSON_WRITER_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove \
 	$(UTF8_MODULE) $(BYTE_TEXT_MODULE) $(DECIMAL_WRITER)
 JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove $(QUOTED_TEXT_MODULE) $(UTF8_MODULE)
@@ -95,7 +95,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
-		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) \
+		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) stage-2/hashing/base16.wove \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
 		$(JSON_FRAME_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
@@ -153,7 +153,7 @@ $(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(STAGE1)/wovec.c $(STAGE1)/ru
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE1)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Build utility-only Wove programs with the ordinary Python seed and runtime.
-$(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(HASHING_SOURCES) $(SEED) $(STAGE1)/runtime.o
+$(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove stage-2/hashing/%.wove $(SEED) $(STAGE1)/runtime.o
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
