@@ -18,8 +18,8 @@ SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
 SOURCE_MODULE_READER := stage-2/source/module.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
 SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove
-C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove emit/graph.wove emit/names.wove emit/text.wove \
-	scalar/syntax.wove scalar/flow.wove scalar/plan.wove scalar/graph.wove)
+C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove emit/convert.wove emit/graph.wove emit/names.wove emit/text.wove \
+	scalar/syntax.wove scalar/flow.wove scalar/plan.wove scalar/graph.wove json/text.wove)
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
@@ -62,6 +62,7 @@ stage-2: $(BOOTSTRAP_COMPILER) $(SOURCE_SCAN)
 # Preserve quoting in compiler settings until the runner splits them into arguments.
 test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: stage-2 $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"

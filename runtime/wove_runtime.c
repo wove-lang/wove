@@ -4,6 +4,7 @@
 #include "wove_runtime.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,14 +117,46 @@ void wvrt_slice_store_u8(void *wvrtitems, int32_t wvrtlength, int32_t wvrtindex,
 	((uint8_t *)wvrtitems)[wvrt_offset] = wvrtvalue;
 }
 
+// All supported integers fit in the common signed domain, including high-bit u32 values.
+static bool wvrt_int_fits(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax) {
+	return wvrtmin <= wvrtvalue && wvrtvalue <= wvrtmax;
+}
+
 // Check an integer in the common signed domain before the caller casts it.
 int64_t wvrt_int_convert(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax,
 	wvrt_location wvrtsite) {
-	// All seed integers fit in int64_t, so this comparison preserves their signs and high bits.
-	if (wvrtvalue < wvrtmin || wvrtvalue > wvrtmax) {
+	// Report Stage 1 failures in the seed's original filename and coordinate format.
+	if (!wvrt_int_fits(wvrtvalue, wvrtmin, wvrtmax)) {
 		wvrt_trap(wvrtsite, "integer conversion out of range");
 	}
 	return wvrtvalue;
+}
+
+// Check Stage 2 conversions before the target-specific wrapper narrows the value.
+static int64_t wvrt_int_at_span(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Source identity and offsets describe the conversion in its original file.
+	if (!wvrt_int_fits(wvrtvalue, wvrtmin, wvrtmax)) {
+		fprintf(stderr, "file %" PRId32 " bytes [%" PRId32 ",%" PRId32 "): "
+			"runtime error: integer conversion out of range\n", wvrtfile, wvrtstart, wvrtend);
+		exit(EXIT_FAILURE);
+	}
+	return wvrtvalue;
+}
+
+// Narrow to an unsigned byte only after checking its exact limits.
+uint8_t wvrt_int_to_u8(int64_t wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return (uint8_t)wvrt_int_at_span(wvrtvalue, 0, UINT8_MAX, wvrtfile, wvrtstart, wvrtend);
+}
+
+// Preserve all representable signed 32-bit values.
+int32_t wvrt_int_to_i32(int64_t wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return (int32_t)wvrt_int_at_span(wvrtvalue, INT32_MIN, INT32_MAX, wvrtfile, wvrtstart, wvrtend);
+}
+
+// Check unsigned 32-bit bounds in the wider signed domain.
+uint32_t wvrt_int_to_u32(int64_t wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return (uint32_t)wvrt_int_at_span(wvrtvalue, 0, UINT32_MAX, wvrtfile, wvrtstart, wvrtend);
 }
 
 // Reduce the unsigned sum to its low 32 bits.

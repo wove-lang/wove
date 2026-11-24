@@ -266,6 +266,7 @@ def check_compilations(executable, directory, manifest, clang):
 	generated = directory / "emitted.c"
 	program = directory / "emitted"
 	harness = manifest.with_name("emitted_main.probe.c")
+	runtime = os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")
 	for label, raw, base, end, capacity, fields, expected, mode, value in fixture_rows(manifest):
 		# File references keep larger compilation examples readable.
 		source.write_bytes(Path(raw[1:]).read_bytes() if raw.startswith("@") else bytes.fromhex(raw))
@@ -282,7 +283,7 @@ def check_compilations(executable, directory, manifest, clang):
 			continue
 
 		generated.write_bytes(emitted)
-		command = [*clang, str(generated), "-o", str(program)]
+		command = [*clang, "-I", "runtime", str(generated), runtime, "-o", str(program)]
 		# Rename the emitted entry when a native probe needs its own main.
 		if mode == "probe":
 			probe, value = value.split(maxsplit=1)
@@ -290,10 +291,16 @@ def check_compilations(executable, directory, manifest, clang):
 		elif mode == "value":
 			command.extend(("-Dmain=wove_emitted_main", str(harness)))
 		else:
-			assert mode == "exit", label
+			assert mode in ("exit", "trap"), label
 		subprocess.run(command, check=True, timeout=30)
 		result = subprocess.run([program], capture_output=True, check=False, timeout=30)
+		# Trap fixtures provide an exact runtime diagnostic at the originating site.
+		if mode == "trap":
+			assert result.returncode == 1 and not result.stdout, (label, result)
+			assert result.stderr == (value + "\n").encode(), (label, result.stderr)
+			continue
 		assert not result.stderr, (label, result.stderr)
+		# Probes expose values beyond the process exit status width.
 		if mode in ("value", "probe"):
 			assert result.returncode == 0 and result.stdout == (value + "\n").encode(), (label, result)
 		else:

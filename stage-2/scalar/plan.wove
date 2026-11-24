@@ -27,7 +27,13 @@
 			(first_statement i32) (identity u32) (entry bool)
 			(file i32) (tree_base i32) (tree_limit i32) (source_base i32)))
 	(struct ScalarParameter (fields (name i32) (type u32) (position i32)))
-	(struct ScalarExpression
+	(struct
+		(:doc `A checked expression at its source row.
+
+		Literals carry significant digit offsets in the arena. Conversions
+		carry the original file identity in target, its half-open byte span
+		in start and end, and the value operand row in first.`)
+		ScalarExpression
 		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool)))
 	(struct ScalarSignature (fields (params i32) (result u32) (first_statement i32) (start i32) (end i32) (error u32)))
 
@@ -360,15 +366,15 @@
 	(fn
 		(:doc `Match a checked value to its exact expected type.
 
-		A zero expectation is the root of an integer initializer. Its
-		type comes from the literal, binding, operator, or call result.`)
+		Expectation 1 infers one of the supported integer types from the
+		expression. Zero is reserved for rows outside expression checking.`)
 		value_matches_type
 		(params (expected u32) (actual u32))
 		(returns bool)
 		(body
 			(if
-				(:doc "An initializer can infer any of the supported integer widths.")
-				(u32.eq (local expected) (u32 0))
+				(:doc "An integer initializer or conversion operand can infer its width.")
+				(u32.eq (local expected) (u32 1))
 				(then (return (bool.or (u32.eq (local actual) (u32 5))
 					(bool.or (u32.eq (local actual) (u32 10)) (u32.eq (local actual) (u32 11)))))))
 			(return (u32.eq (local expected) (local actual)))))
@@ -767,12 +773,52 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
+		(:doc `Check a conversion target, seed its integer operand, and retain the original trap site.`)
+		plan_conversion
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(first i32) (index i32) (expected u32) (caller ScalarFunction) (view_start i32)
+			(expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A conversion needs a target type followed by one value.")
+				(i32.lt (local first) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let target_node (slice.load (local nodes) (local first)))
+			(let value (record.get (local target_node) next_sibling))
+			(if
+				(:doc "Missing or extra operands report at the conversion form.")
+				(bool.or (i32.lt (local value) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local value)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let target_type (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local first)))
+			(if
+				(:doc "Point at the target spelling when it names an unsupported type.")
+				(bool.not (call value_matches_type (u32 1) (local target_type)))
+				(then (return (call entry_at (local target_node) (i32 -1) (u32 24)))))
+			(if
+				(:doc "The selected type determines the result used by the enclosing expression.")
+				(bool.not (call value_matches_type (local expected) (local target_type)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(slice.store (local expressions) (local value)
+				(call expression_row (u32 0) (u32 1) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
+			(let source_base (record.get (local caller) source_base))
+			(let start (i32.add.wrapping (local view_start)
+				(i32.sub.wrapping (record.get (local node) start) (local source_base))))
+			(let end (i32.add.wrapping (local view_start)
+				(i32.sub.wrapping (record.get (local node) end) (local source_base))))
+			(slice.store (local expressions) (local index)
+				(call expression_row (u32 33) (local target_type) (record.get (local caller) file)
+					(local value) (local start) (local end) (bool false)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
 		(:doc `Check the scalar expression at a source row and keep its actual type.`)
 		plan_expression
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(index i32) (expected u32) (statement i32) (functions (shared-slice ScalarFunction))
 			(parameters (shared-slice ScalarParameter)) (bindings (shared-slice GraphBinding))
-			(statements (shared-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)))
+			(statements (shared-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)) (view_start i32))
 		(returns EntryRead)
 		(body
 			(let node (slice.load (local nodes) (local index)))
@@ -789,7 +835,8 @@
 				(:doc "Check the type named by a literal or operator. Reads and calls resolve their types below.")
 				(bool.not
 					(bool.or (call value_matches_type (local expected) (local actual))
-						(bool.or (u32.eq (local tag) (u32 8)) (u32.eq (local tag) (u32 9)))))
+						(bool.or (u32.eq (local tag) (u32 33))
+							(bool.or (u32.eq (local tag) (u32 8)) (u32.eq (local tag) (u32 9))))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) (u32 24)))
 			(if
@@ -810,6 +857,12 @@
 					(local node) (local operand) (local expected) (local index) (local caller)
 					(borrow-shared (local functions)) (borrow-shared (local parameters))
 					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A checked conversion takes its result type from its target operand.")
+				(u32.eq (local tag) (u32 33))
+				(then (return (call plan_conversion (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local operand) (local index) (local expected) (local caller) (local view_start)
+					(borrow-mut (local expressions))))))
 			(if
 				(:doc "An operator checks its arity and types all operand rows.")
 				(u32.lt (u32 0) (local operator_result))
@@ -847,9 +900,9 @@
 	(fn
 		(:doc `Check a statement's value tree in source order.
 
-		Calls and operators seed their operand rows before they are reached.
-		The root can infer its integer type. Only explicitly typed operands
-		are checked below it. Append calls to the caller's checked prefix.`)
+		Calls, operators, and conversions seed their operand rows before
+		they are reached. A seeded value either has an exact expectation
+		or infers its integer type. Append calls to the caller's checked prefix.`)
 		plan_value
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(root i32) (expected u32) (statement i32) (functions (shared-slice ScalarFunction))
@@ -871,13 +924,13 @@
 				(body
 					(let type (record.get (slice.load (local expressions) (local index)) type))
 					(if
-						(:doc "Always check the root. Only verified operand rows have an expected type below it.")
-						(bool.or (i32.eq (local index) (local root)) (u32.lt (u32 0) (local type)))
+						(:doc "Unseeded rows have no expectation and sit outside the value tree.")
+						(u32.lt (u32 0) (local type))
 						(then
 							(let checked (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local caller) (local index) (local type) (local statement) (borrow-shared (local functions))
 								(borrow-shared (local parameters)) (borrow-shared (local bindings))
-								(borrow-shared (local statements)) (borrow-mut (local expressions))))
+								(borrow-shared (local statements)) (borrow-mut (local expressions)) (local view_start)))
 							(if
 								(:doc "Preserve source spans from the first failing signature or expression.")
 								(u32.lt (u32 0) (record.get (local checked) error))
@@ -980,7 +1033,7 @@
 			(let value (record.get (local statement) value))
 			(let-mut first (i32 -1))
 			(let-mut target (record.get (local binding) operand))
-			(let-mut expected (u32 0))
+			(let-mut expected (u32 1))
 			(if
 				(:doc "An assignment uses the exact type and name of the binding checked earlier.")
 				(u32.eq (local kind) (u32 17))

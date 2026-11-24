@@ -51,13 +51,15 @@ def check_native(probe, label, emitted, expected):
 	assert len(source.encode()) == count, (label, header)
 	compiler = shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang"))
 	flags = shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))
+	runtime = os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")
 	# Keep generated C and executables scoped to this fixture run.
 	with TemporaryDirectory(prefix="graph-", dir=Path(probe).parent) as path:
 		directory = Path(path)
 		generated = directory / "emitted.c"
 		program = directory / "emitted"
 		generated.write_text(source, encoding="utf-8")
-		subprocess.run([*compiler, "-std=c11", *flags, str(generated), "-o", str(program)], check=True, timeout=30)
+		command = [*compiler, "-std=c11", *flags, "-I", "runtime", str(generated), runtime, "-o", str(program)]
+		subprocess.run(command, check=True, timeout=30)
 		result = subprocess.run([program], capture_output=True, timeout=30)
 		assert result.returncode == expected and not result.stdout and not result.stderr, (label, result)
 
