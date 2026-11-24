@@ -27,8 +27,8 @@
 #define read_module wv_seed_fn_74
 #define emit_module wv_seed_fn_97
 #define resolve_graph wv_seed_fn_110
-#define inspect_callers wv_seed_fn_252
-#define run_scalar_graph wv_seed_fn_265
+#define inspect_callers wv_seed_fn_254
+#define run_scalar_graph wv_seed_fn_270
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -824,8 +824,9 @@ static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t
 		const int32_t start = row.wv_field_1;
 		const int32_t end = row.wv_field_2;
 		const char *name = (const char *)arena + files[owner].wv_field_3 + start;
-		printf("binding %" PRId32 " %.*s %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
-			owner, (int)(end - start), name, row.wv_field_3, row.wv_field_4, start, end);
+		const char *kind = row.wv_field_5 == 0 ? "binding" : "type-binding";
+		printf("%s %" PRId32 " %.*s %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
+			kind, owner, (int)(end - start), name, row.wv_field_3, row.wv_field_4, start, end);
 	}
 }
 

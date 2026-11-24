@@ -10,11 +10,13 @@
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts select_form (type SelectedDeclaration)))
+	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
+	(use wove-file "../source/imports.wove" (only is_reserved_type_name))
 	(use wove-file "../emit/names.wove" (only record_identity))
 	(use wove-file "./syntax.wove"
 		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type (type EntryRead)))
 
-	(struct ScalarRecord (fields (name i32) (file i32) (identity u32) (first i32) (count i32)))
+	(struct ScalarRecord (fields (name i32) (file i32) (identity u32) (first i32) (count i32) (declaration i32)))
 	(struct ScalarMember (fields (ordinal i32) (type u32)))
 
 	(fn
@@ -72,33 +74,59 @@
 			(return (local records))))
 
 	(fn
-		(:doc `Find a named record in the defining file's type namespace.`)
+		(:doc `Resolve a local or imported record spelling to its defining layout.
+
+		A graph maps the spelling to a canonical file and file-local
+		declaration row. A single-file caller uses its local type table.`)
 		find_record
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
-			(file i32) (name SourceNode))
+			(bindings (shared-slice GraphBinding)) (file i32) (source_base i32) (name SourceNode))
 		(returns i32)
 		(body
+			(let-mut owner (local file))
+			(let-mut declaration (i32 -1))
+			(if
+				(:doc "Read aliases and local type names from the graph's type namespace.")
+				(i32.lt (i32 0) (slice.len (local bindings)))
+				(then
+					(let index (call find_binding (borrow-shared (local source)) (borrow-shared (local source))
+						(record.get (local name) start) (record.get (local name) end)
+						(borrow-shared (local bindings)) (slice.len (local bindings))
+						(local file) (bool false) (local source_base) (u32 1)))
+					(if
+						(:doc "A type name is available only after a successful local binding.")
+						(i32.lt (local index) (i32 0))
+						(then (return (i32 -1))))
+					(let binding (slice.load (local bindings) (local index)))
+					(set (local owner) (record.get (local binding) file))
+					(set (local declaration) (record.get (local binding) declaration))))
+			(let has_declaration (bool.not (i32.lt (local declaration) (i32 0))))
 			(let-mut index (i32 0))
 			(while
-				(:doc "Only the populated prefix can contain a definition.")
+				(:doc "Each defining record occupies one row, independent of how many aliases refer to it.")
 				(i32.lt (local index) (slice.len (local records)))
 				(body
 					(let record (slice.load (local records) (local index)))
 					(let declared (record.get (local record) name))
 					(if (i32.eq (local declared) (i32 0)) (then (return (i32 -1))))
 					(if
-						(:doc "Compare the exact source spelling in the owning file.")
-						(bool.and (i32.eq (local file) (record.get (local record) file))
-							(call same_name (borrow-shared (local source)) (local name) (slice.load (local nodes) (local declared))))
+						(:doc "Match the defining row in a graph or the original spelling in a single file.")
+						(bool.and (i32.eq (local owner) (record.get (local record) file))
+							(bool.or
+								(bool.and (local has_declaration)
+									(i32.eq (local declaration) (record.get (local record) declaration)))
+								(bool.and (bool.not (local has_declaration))
+									(call same_name (borrow-shared (local source)) (local name)
+										(slice.load (local nodes) (local declared))))))
 						(then (return (local index))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (i32 -1))))
 
 	(fn
-		(:doc `Resolve a scalar or file-local record by the signature's original type spelling.`)
+		(:doc `Resolve a scalar or visible record by the signature's original type spelling.`)
 		copyable_type
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(records (shared-slice ScalarRecord)) (file i32) (index i32))
+			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)) (file i32) (source_base i32) (index i32))
 		(returns u32)
 		(body
 			(let scalar (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local index)))
@@ -112,9 +140,9 @@
 				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
 				(then (return (u32 0))))
 			(let found (call find_record (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (local file) (local name)))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local name)))
 			(if
-				(:doc "Only active definitions from this file resolve in a signature.")
+				(:doc "A signature needs a type bound in the current file.")
 				(i32.lt (local found) (i32 0))
 				(then (return (u32 0))))
 			(return (call record_type (local found)))))
@@ -123,12 +151,12 @@
 		(:doc `Read a copyable parameter type or byte slice, retaining any type operand diagnostic.`)
 		read_parameter_type
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(records (shared-slice ScalarRecord)) (file i32) (index i32))
+			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)) (file i32) (source_base i32) (index i32))
 		(returns EntryRead)
 		(body
 			(let node (slice.load (local nodes) (local index)))
 			(let value (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (local file) (local index)))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local index)))
 			(if
 				(:doc "A value parameter keeps its exact scalar or record type.")
 				(u32.lt (u32 0) (local value))
@@ -221,7 +249,7 @@
 		(:doc `Register one selected type after checking its scalar fields and stable identity.`)
 		register_record
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32)
-			(file i32) (module u32) (records (mut-slice ScalarRecord)) (index i32))
+			(file i32) (base i32) (module u32) (records (mut-slice ScalarRecord)) (index i32))
 		(returns EntryRead)
 		(body
 			(let node (slice.load (local nodes) (local declaration)))
@@ -241,8 +269,8 @@
 			(if
 				(:doc "Reserve the supported native type spellings.")
 				(bool.or (bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
-					(bool.or (u32.lt (u32 0) (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)))
-						(call is_byte_view_type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)))))
+					(call is_reserved_type_name (borrow-shared (local source))
+						(record.get (local spelling) start) (record.get (local spelling) end)))
 				(then (return (call entry_at (local spelling) (i32 -1) (u32 22)))))
 			(let identity (call record_identity (borrow-shared (local source)) (record.get (local spelling) start)
 				(record.get (local spelling) end) (local module)))
@@ -299,7 +327,7 @@
 					(set (local field) (record.get (local member) next_sibling))))
 			(slice.store (local records) (local index)
 				(record.make ScalarRecord (name (local name)) (file (local file)) (identity (local identity))
-					(first (local first)) (count (local count))))
+					(first (local first)) (count (local count)) (declaration (i32.sub.wrapping (local declaration) (local base)))))
 			(return (call entry_at (local node) (i32.add.wrapping (local index) (i32 1)) (u32 0)))))
 
 	(fn
@@ -325,7 +353,7 @@
 						(u32.eq (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)) (u32 48))
 						(then
 							(let checked (call register_record (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local form) (local file) (local module) (borrow-mut (local records)) (local next)))
+								(local form) (local file) (local base) (local module) (borrow-mut (local records)) (local next)))
 							(if
 								(:doc "Preserve the original invalid type or field span.")
 								(u32.lt (u32 0) (record.get (local checked) error))
