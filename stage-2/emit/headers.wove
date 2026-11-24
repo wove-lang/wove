@@ -1,0 +1,254 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Prepare the selected C headers for a graph translation unit.
+
+	Decode the declarations once, preserve system and project lookup,
+	and keep one row per emitted include operand in selection order.`)
+	emit_headers
+
+	(use wove-file "../c/headers.wove" (only c_header_form))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/module.wove" (only is_three_bytes))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../source/scan.wove" (only is_head_byte (type Token)))
+	(use wove-file "../source/strings.wove" (only decode_string))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "./text.wove" (only c_byte c_include_prefix c_span))
+
+	(struct CInclude (fields (start i32) (end i32) (delimiter u8)))
+	(struct IncludeCapacity (fields (bytes i32) (rows i32)))
+	(struct Includes
+		(fields (count i32) (length i32) (file i32) (start i32) (end i32) (error u32) (stdint bool) (runtime bool)))
+
+	(fn
+		(:doc `Identify the first binding that selects a particular bridge header literal.`)
+		first_header_binding
+		(params (bindings (shared-slice GraphBinding)) (index i32) (binding GraphBinding))
+		(returns bool)
+		(body
+			(if
+				(:doc "Only C header bindings contribute include operands.")
+				(bool.not (u32.eq (record.get (local binding) provider) (u32 8)))
+				(then (return (bool false))))
+			(let-mut previous (i32 0))
+			(while
+				(:doc "Aliases and functions from the same bridge share one header literal.")
+				(i32.lt (local previous) (local index))
+				(body
+					(let earlier (slice.load (local bindings) (local previous)))
+					(if
+						(:doc "Use the defining file and its original literal offset.")
+						(bool.and (u32.eq (record.get (local earlier) provider) (u32 8))
+							(bool.and (i32.eq (record.get (local earlier) file) (record.get (local binding) file))
+								(i32.eq (record.get (local earlier) header_start) (record.get (local binding) header_start))))
+						(then (return (bool false))))
+					(set (local previous) (i32.add.wrapping (local previous) (i32 1)))))
+			(return (bool true))))
+
+	(fn
+		(:doc `Size include rows and bound their decoded storage by the original literal widths.`)
+		include_capacity
+		(params (bindings (shared-slice GraphBinding)))
+		(returns IncludeCapacity)
+		(body
+			(let-mut length (i32 0))
+			(let-mut count (i32 0))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Count each literal once regardless of the number of selected functions and aliases.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(let row (slice.load (local bindings) (local index)))
+					(if
+						(:doc "Decoded path bytes always fit in the literal's original byte width.")
+						(call first_header_binding (borrow-shared (local bindings)) (local index) (local row))
+						(then
+							(let width (i32.sub.wrapping (record.get (local row) header_end) (record.get (local row) header_start)))
+							(if
+								(:doc "Overlapping supplied views can make the aggregate wider than a signed slice length.")
+								(i32.lt (i32.sub.wrapping (i32 2147483647) (local length)) (local width))
+								(then (return (record.make IncludeCapacity (bytes (i32 -1)) (rows (i32 0))))))
+							(set (local length) (i32.add.wrapping (local length) (local width)))
+							(set (local count) (i32.add.wrapping (local count) (i32 1)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (record.make IncludeCapacity (bytes (local length)) (rows (local count))))))
+
+	(fn
+		(:doc `Identify the two headers the C writer can also add automatically.`)
+		implicit_header_kind
+		(params (path (shared-slice u8)) (start i32) (end i32) (delimiter u8))
+		(returns u32)
+		(body
+			(let width (i32.sub.wrapping (local end) (local start)))
+			(if
+				(:doc "The generated fixed-width types use the system header stdint.h.")
+				(bool.and (u8.eq (local delimiter) (u8 60)) (bool.and (i32.eq (local width) (i32 8))
+					(bool.and (call is_three_bytes (borrow-shared (local path)) (local start) (u8 115) (u8 116) (u8 100))
+						(bool.and
+							(call is_three_bytes (borrow-shared (local path)) (i32.add.wrapping (local start) (i32 3)) (u8 105) (u8 110) (u8 116))
+							(bool.and (call is_head_byte (borrow-shared (local path)) (local start) (i32 6) (u8 46))
+								(call is_head_byte (borrow-shared (local path)) (local start) (i32 7) (u8 104)))))))
+				(then (return (u32 1))))
+			(if
+				(:doc "The runtime writer uses the project include wove_runtime.h.")
+				(bool.and (u8.eq (local delimiter) (u8 34)) (bool.and (i32.eq (local width) (i32 14))
+					(bool.and
+						(call is_three_bytes (borrow-shared (local path)) (local start) (u8 119) (u8 111) (u8 118))
+						(bool.and
+							(call is_three_bytes (borrow-shared (local path)) (i32.add.wrapping (local start) (i32 3)) (u8 101) (u8 95) (u8 114))
+							(bool.and
+								(call is_three_bytes (borrow-shared (local path)) (i32.add.wrapping (local start) (i32 6)) (u8 117) (u8 110) (u8 116))
+								(bool.and
+									(call is_three_bytes (borrow-shared (local path)) (i32.add.wrapping (local start) (i32 9)) (u8 105) (u8 109) (u8 101))
+									(bool.and (call is_head_byte (borrow-shared (local path)) (local start) (i32 12) (u8 46))
+										(call is_head_byte (borrow-shared (local path)) (local start) (i32 13) (u8 104)))))))))
+				(then (return (u32 2))))
+			(return (u32 0))))
+
+	(fn
+		(:doc `Add a checked include operand, combining equivalent bare and quoted project paths.`)
+		add_include
+		(params (path (shared-slice u8)) (start i32) (end i32) (delimiter u8) (previous Includes)
+			(bytes (mut-slice u8)) (headers (mut-slice CInclude)))
+		(returns Includes)
+		(body
+			(let count (record.get (local previous) count))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Only exact paths with the same include lookup rules share a row.")
+				(i32.lt (local index) (local count))
+				(body
+					(let prior (slice.load (local headers) (local index)))
+					(if
+						(:doc "A bare project path and its explicitly quoted form emit the same include.")
+						(bool.and (u8.eq (record.get (local prior) delimiter) (local delimiter))
+							(call same_bytes (borrow-shared (local bytes))
+								(record.get (local prior) start) (record.get (local prior) end)
+								(borrow-shared (local path)) (local start) (local end)))
+						(then (return (local previous))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(let offset (record.get (local previous) length))
+			(let limit (call c_span (borrow-shared (local path)) (local start) (local end)
+				(borrow-mut (local bytes)) (int.convert u32 (local offset)) (bool true)))
+			(let length (int.convert i32 (local limit)))
+			(slice.store (local headers) (local count)
+				(record.make CInclude (start (local offset)) (end (local length)) (delimiter (local delimiter))))
+			(let implicit (call implicit_header_kind (borrow-shared (local path)) (local start) (local end) (local delimiter)))
+			(return (record.make Includes (count (i32.add.wrapping (local count) (i32 1))) (length (local length))
+				(file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0))
+				(stdint (bool.or (record.get (local previous) stdint) (u32.eq (local implicit) (u32 1))))
+				(runtime (bool.or (record.get (local previous) runtime) (u32.eq (local implicit) (u32 2))))))))
+
+	(fn
+		(:doc `Check and trim the delimiters off a decoded header before recording its path.`)
+		add_decoded_include
+		(params (path (shared-slice u8)) (binding GraphBinding) (previous Includes)
+			(bytes (mut-slice u8)) (headers (mut-slice CInclude)))
+		(returns Includes)
+		(body
+			(let form (call c_header_form (borrow-shared (local path))))
+			(if
+				(:doc "A malformed operand points at the original declaring literal.")
+				(u32.eq (local form) (u32 0))
+				(then (return (record.make Includes (count (i32 0)) (length (i32 0))
+					(file (record.get (local binding) file)) (start (record.get (local binding) header_start))
+					(end (record.get (local binding) header_end)) (error (u32 26))
+					(stdint (bool false)) (runtime (bool false))))))
+			(let-mut start (i32 0))
+			(let-mut end (slice.len (local path)))
+			(let-mut delimiter (u8 34))
+			(if
+				(:doc "An angle-bracket header keeps its system search mode.")
+				(u8.eq (slice.load (local path) (i32 0)) (u8 60))
+				(then (set (local delimiter) (u8 60))))
+			(if
+				(:doc "The include writer will add the checked form's delimiters.")
+				(u32.eq (local form) (u32 2))
+				(then
+					(set (local start) (i32 1))
+					(set (local end) (i32.sub.wrapping (local end) (i32 1)))))
+			(return (call add_include (borrow-shared (local path)) (local start) (local end) (local delimiter) (local previous)
+				(borrow-mut (local bytes)) (borrow-mut (local headers))))))
+
+	(fn
+		(:doc `Package the initialized include prefix and the compiler headers it already contains.`)
+		include_plan
+		(params (count i32) (length i32) (stdint bool) (runtime bool))
+		(returns Includes)
+		(body
+			(return (record.make Includes (count (local count)) (length (local length)) (file (i32 -1))
+				(start (i32 0)) (end (i32 0)) (error (u32 0)) (stdint (local stdint)) (runtime (local runtime))))))
+
+	(fn
+		(:doc `Prepare and validate one include per selected header before writing any C.`)
+		prepare_includes
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(bytes (mut-slice u8)) (headers (mut-slice CInclude)))
+		(returns Includes)
+		(body
+			(let-mut count (i32 0))
+			(let-mut length (i32 0))
+			(let-mut stdint (bool false))
+			(let-mut runtime (bool false))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Visit distinct bridge literals in resolved selection order.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(let row (slice.load (local bindings) (local index)))
+					(if
+						(:doc "Use the key in the defining file, independent of import and alias spelling.")
+						(call first_header_binding (borrow-shared (local bindings)) (local index) (local row))
+						(then
+							(let base (record.get (slice.load (local files) (record.get (local row) file)) source_start))
+							(let start (i32.add.wrapping (local base) (record.get (local row) header_start)))
+							(let end (i32.add.wrapping (local base) (record.get (local row) header_end)))
+							(let-mut path (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+							(let decoded (call decode_string (borrow-shared (local arena))
+								(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
+								(borrow-mut (local path))))
+							(let previous (call include_plan (local count) (local length) (local stdint) (local runtime)))
+							(let plan (call add_decoded_include
+								(borrow-shared (slice.range (local path) (i32 0) (record.get (local decoded) written)))
+								(local row) (local previous) (borrow-mut (local bytes)) (borrow-mut (local headers))))
+							(if
+								(:doc "Propagate an invalid header operand without exposing partial C.")
+								(u32.lt (u32 0) (record.get (local plan) error))
+								(then (return (local plan))))
+							(set (local count) (record.get (local plan) count))
+							(set (local length) (record.get (local plan) length))
+							(set (local stdint) (record.get (local plan) stdint))
+							(set (local runtime) (record.get (local plan) runtime))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call include_plan (local count) (local length) (local stdint) (local runtime)))))
+
+	(fn
+		(:doc `Measure and write the same include prefix, retaining system or project lookup.`)
+		write_includes
+		(params (bytes (shared-slice u8)) (headers (shared-slice CInclude)) (count i32)
+			(output (mut-slice u8)) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (u32 0))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Emit one complete preprocessing directive for each planned include.")
+				(i32.lt (local index) (local count))
+				(body
+					(let row (slice.load (local headers) (local index)))
+					(let open (record.get (local row) delimiter))
+					(let-mut close (u8 34))
+					(if
+						(:doc "Angle brackets select system search while quotes preserve project lookup.")
+						(u8.eq (local open) (u8 60))
+						(then (set (local close) (u8 62))))
+					(set (local cursor) (call c_include_prefix (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (local open) (local writing)))
+					(set (local cursor) (call c_span (borrow-shared (local bytes))
+						(record.get (local row) start) (record.get (local row) end)
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (local close) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (local cursor)))))

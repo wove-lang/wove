@@ -34,8 +34,8 @@ def read_cases(manifest):
 			identity, virtual_path, source = fields
 			arguments.extend((identity, virtual_path, source))
 		elif kind == "native" and label is not None:
-			status, = fields
-			native = int(status)
+			status, *flags = fields
+			native = int(status), flags
 		elif kind == "expect" and label is not None:
 			expected.append(payload)
 		else:
@@ -45,7 +45,7 @@ def read_cases(manifest):
 
 
 # Compile and run an emitted translation unit with the same compiler settings as the rest of the suite.
-def check_native(probe, label, emitted, expected):
+def check_native(probe, label, emitted, expected, fixture_flags):
 	header, _, source = emitted.partition("\n")
 	count = int(header.split()[1])
 	assert len(source.encode()) == count, (label, header)
@@ -58,7 +58,7 @@ def check_native(probe, label, emitted, expected):
 		generated = directory / "emitted.c"
 		program = directory / "emitted"
 		generated.write_text(source, encoding="utf-8")
-		command = [*compiler, "-std=c11", *flags, "-I", "runtime", str(generated), runtime, "-o", str(program)]
+		command = [*compiler, "-std=c11", *flags, "-I", "runtime", *fixture_flags, str(generated), runtime, "-o", str(program)]
 		subprocess.run(command, check=True, timeout=30)
 		result = subprocess.run([program], capture_output=True, timeout=30)
 		assert result.returncode == expected and not result.stdout and not result.stderr, (label, result)
@@ -77,7 +77,7 @@ def check_manifest(probe, manifest):
 			print(f"actual:\n{run.stdout}{run.stderr}", file=sys.stderr)
 			return 1
 		if native is not None:
-			check_native(probe, label, run.stdout, native)
+			check_native(probe, label, run.stdout, *native)
 	return 0
 
 

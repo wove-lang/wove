@@ -385,9 +385,15 @@ or `"./project.h"` identifies one active bridge in a well-formed canonical file.
 Header lookup leaves Wove-file reachability unchanged. A selected declaration
 has `params` and `returns` forms with exact `bool`, `u8`, `i32`, or `u32` types.
 Parameter names must be unique within the signature. The alias occupies the
-importing file's function namespace. Its binding keeps
-the defining declaration and the raw header, native symbol, and signature
-spans in that file for C call emission in [issue #140](https://github.com/wove-lang/wove/issues/140).
+importing file's function namespace. Its binding keeps the defining declaration
+and the raw header, native symbol, and signature spans in that file.
+
+The scalar graph compiler checks each C call against the selected Wove
+signature and evaluates its arguments once from left to right. The emitted
+call uses the original native name. Each selected header contributes one
+include operand. Angle-bracket keys use system search. Bare or explicitly
+quoted project paths use quoted includes. The C compiler reads the native
+declarations from those headers.
 
 Each binding identifies the importing namespace and the name span in that
 file. Its target is the defining file identity and declaration node index
@@ -397,7 +403,7 @@ and add the identity of the file where they originated.
 | Code | Failure | Primary span |
 | --- | --- | --- |
 | 16 | Short graph storage | The next row's source node, when available |
-| 26 | Malformed use, selector, or declaration name | The originating form or operand |
+| 26 | Malformed use, selector, declaration name, or C header operand | The originating form or operand |
 | 27 | Missing active provider | The importing use |
 | 28 | Active import cycle | The closing use |
 | 29 | Unavailable function or type | The requested name |

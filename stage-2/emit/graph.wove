@@ -17,8 +17,9 @@
 	(use wove-file "../scalar/plan.wove"
 		(only plan_bodies (type ScalarFunction) (type ScalarParameter)
 			(type ScalarExpression) (type CallSite)))
-	(use wove-file "../scalar/graph.wove" (only layout_trees count_definitions prepare_graph (type ScalarTree)))
+	(use wove-file "../scalar/graph.wove" (only layout_trees signature_capacity prepare_graph (type ScalarTree)))
 	(use wove-file "./c.wove" (only write_translation_unit))
+	(use wove-file "./headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
 
 	(struct GraphOutput
 		(fields (count i32) (declaration i32) (file i32) (start i32) (end i32) (error u32)
@@ -37,15 +38,38 @@
 	(fn
 		(:doc `Measure and emit the checked graph as a complete C translation unit.`)
 		write_graph_c
-		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction))
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(trees (shared-slice ScalarTree)) (nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction))
 			(parameters (shared-slice ScalarParameter)) (statements (shared-slice ScalarStatement))
 			(records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression))
-			(root i32) (tree ScalarTree) (source_base i32) (entry i32) (output (mut-slice u8)))
+			(root i32) (entry i32) (output (mut-slice u8)))
 		(returns GraphOutput)
 		(body
+			(let tree (slice.load (local trees) (local root)))
+			(let source_base (record.get (slice.load (local files) (local root)) source_start))
+			(let capacity (call include_capacity (borrow-shared (local bindings))))
+			(if
+				(:doc "The aggregate include storage must fit in the signed slice length.")
+				(i32.lt (record.get (local capacity) bytes) (i32 0))
+				(then (return (call graph_output (i32 0) (i32 -1) (local root)
+					(record.get (local tree) start) (record.get (local tree) end) (u32 16)))))
+			(let-mut paths (array.alloc u8 (record.get (local capacity) bytes)))
+			(let-mut includes (array.alloc CInclude (record.get (local capacity) rows)))
+			(let headers (call prepare_includes (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (borrow-mut (local paths)) (borrow-mut (local includes))))
+			(if
+				(:doc "A malformed header operand belongs to the original bridge declaration.")
+				(u32.lt (u32 0) (record.get (local headers) error))
+				(then (return (call graph_output (i32 0) (i32 -1) (record.get (local headers) file)
+					(record.get (local headers) start) (record.get (local headers) end) (record.get (local headers) error)))))
+			(let count (record.get (local headers) count))
+			(let prefix (call write_includes (borrow-shared (local paths)) (borrow-shared (local includes))
+				(local count) (borrow-mut (local output)) (bool false)))
 			(let measured (call write_translation_unit (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (bool false)))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+				(borrow-mut (local output)) (local prefix)
+				(record.get (local headers) stdint) (record.get (local headers) runtime) (bool false)))
 			(if
 				(:doc "Keep the destination untouched when the full unit cannot fit.")
 				(u32.lt (int.convert u32 (slice.len (local output))) (local measured))
@@ -54,9 +78,13 @@
 					(return (call graph_output (i32 0) (i32 -1) (local root)
 						(i32.sub.wrapping (record.get (local node) start) (local source_base))
 						(i32.sub.wrapping (record.get (local node) end) (local source_base)) (u32 16)))))
+			(let first (call write_includes (borrow-shared (local paths)) (borrow-shared (local includes))
+				(local count) (borrow-mut (local output)) (bool true)))
 			(let written (call write_translation_unit (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (bool true)))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+				(borrow-mut (local output)) (local first)
+				(record.get (local headers) stdint) (record.get (local headers) runtime) (bool true)))
 			(return (call graph_output (int.convert i32 (local written)) (i32 -1) (local root)
 				(record.get (local tree) start) (record.get (local tree) end) (u32 0)))))
 
@@ -68,7 +96,7 @@
 		row's local bindings. Both destinations remain untouched on failure.`)
 		(:expect
 			(tests "stage-2/scalar_graphs.tsv")
-			(issues "gh:wove-lang/wove:71" "gh:wove-lang/wove:129"))
+			(issues "gh:wove-lang/wove:71" "gh:wove-lang/wove:129" "gh:wove-lang/wove:140"))
 		run_scalar_graph
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
 			(bindings (shared-slice GraphBinding)) (root i32) (query_path i32) (name (shared-slice u8))
@@ -77,7 +105,7 @@
 		(body
 			(let-mut trees (array.alloc ScalarTree (slice.len (local files))))
 			(let layout (call layout_trees (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local modules)) (borrow-mut (local trees))))
+				(borrow-shared (local modules)) (borrow-shared (local bindings)) (borrow-mut (local trees))))
 			(if
 				(:doc "Any view or table sizing failure belongs to the original file.")
 				(u32.lt (u32 0) (record.get (local layout) error))
@@ -85,7 +113,7 @@
 					(record.get (local layout) start) (record.get (local layout) end) (record.get (local layout) error)))))
 			(let rows (record.get (local layout) rows))
 			(let-mut nodes (array.alloc SourceNode (local rows)))
-			(let-mut functions (array.alloc ScalarFunction (call count_definitions (borrow-shared (local bindings)))))
+			(let-mut functions (array.alloc ScalarFunction (call signature_capacity (borrow-shared (local bindings)))))
 			(let-mut parameters (array.alloc ScalarParameter (local rows)))
 			(let-mut records (array.alloc ScalarRecord (local rows)))
 			(let signatures (call prepare_graph (borrow-shared (local arena)) (borrow-shared (local files))
@@ -123,23 +151,8 @@
 					(return (call graph_output (record.get (local result) count) (record.get (local result) declaration)
 						(record.get (local result) file) (record.get (local result) start) (record.get (local result) end)
 						(record.get (local result) error)))))
-			(return (call emit_checked_graph (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local trees)) (borrow-shared (local nodes)) (borrow-shared (local functions))
-				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions)) (local root)
-				(record.get (local signatures) entry) (borrow-mut (local output))))))
-
-	(fn
-		(:doc `Supply the root file's checked tree span and arena base to the C writer.`)
-		emit_checked_graph
-		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (trees (shared-slice ScalarTree))
-			(nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction))
-			(parameters (shared-slice ScalarParameter)) (statements (shared-slice ScalarStatement))
-			(records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression))
-			(root i32) (entry i32) (output (mut-slice u8)))
-		(returns GraphOutput)
-		(body
-			(let input (slice.load (local files) (local root)))
-			(return (call write_graph_c (borrow-shared (local arena)) (borrow-shared (local nodes))
-				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
-				(local root) (slice.load (local trees) (local root)) (record.get (local input) source_start)
-				(local entry) (borrow-mut (local output)))))))
+			(return (call write_graph_c (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (borrow-shared (local trees))
+				(borrow-shared (local nodes)) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+				(local root) (record.get (local signatures) entry) (borrow-mut (local output)))))))

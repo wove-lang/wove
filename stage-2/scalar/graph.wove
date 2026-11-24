@@ -16,7 +16,9 @@
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity hash_spelling))
 	(use wove-file "./records.wove" (only register_module_records (type ScalarRecord)))
-	(use wove-file "./plan.wove" (only register_function (type ScalarFunction) (type ScalarParameter) (type FunctionScope)))
+	(use wove-file "./plan.wove"
+		(only register_function read_parameters (type ScalarFunction) (type ScalarParameter) (type FunctionScope)))
+	(use wove-file "./syntax.wove" (only scalar_type (type EntryRead)))
 
 	(struct ScalarTree (fields (base i32) (rows i32) (start i32) (end i32)))
 	(struct TreeLayout (fields (rows i32) (file i32) (start i32) (end i32) (error u32)))
@@ -24,12 +26,24 @@
 		(fields (functions i32) (params i32) (records i32) (entry i32) (file i32) (start i32) (end i32) (error u32)))
 
 	(fn
-		(:doc `Keep the span of every reached module and reserve tree rows for active files.`)
+		(:doc `Keep reached module spans and reserve trees for active Wove files and selected C providers.`)
 		layout_trees
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
-			(modules (shared-slice GraphModule)) (trees (mut-slice ScalarTree)))
+			(modules (shared-slice GraphModule)) (bindings (shared-slice GraphBinding)) (trees (mut-slice ScalarTree)))
 		(returns TreeLayout)
 		(body
+			(let-mut binding (i32 0))
+			(while
+				(:doc "Mark bridge providers in the zeroed tree table until their row counts are measured.")
+				(i32.lt (local binding) (slice.len (local bindings)))
+				(body
+					(let selected (slice.load (local bindings) (local binding)))
+					(if
+						(:doc "A C provider can participate in signature checking through a bridge alone.")
+						(u32.eq (record.get (local selected) provider) (u32 8))
+						(then (slice.store (local trees) (record.get (local selected) file)
+							(record.make ScalarTree (base (i32 0)) (rows (i32 -1)) (start (i32 0)) (end (i32 0))))))
+					(set (local binding) (i32.add.wrapping (local binding) (i32 1)))))
 			(let-mut file (i32 0))
 			(let-mut total (i32 0))
 			(while
@@ -37,9 +51,10 @@
 				(i32.lt (local file) (slice.len (local files)))
 				(body
 					(let module (slice.load (local modules) (local file)))
+					(let foreign (i32.lt (record.get (slice.load (local trees) (local file)) rows) (i32 0)))
 					(if
-						(:doc "A successful walk marks each reached canonical file complete.")
-						(u32.eq (record.get (local module) state) (u32 2))
+						(:doc "Visit completed Wove files and files with a selected bridge definition.")
+						(bool.or (u32.eq (record.get (local module) state) (u32 2)) (local foreign))
 						(then
 							(let input (slice.load (local files) (local file)))
 							(let checked (call check_source_form
@@ -55,8 +70,8 @@
 									(start (local start)) (end (local end)) (error (local error))))))
 							(let-mut count (i32 0))
 							(if
-								(:doc "Only active modules reserve space in the scalar tree.")
-								(record.get (local module) active)
+								(:doc "Reserve space once for each active Wove file or C provider.")
+								(bool.or (record.get (local module) active) (local foreign))
 								(then
 									(let rows (record.get (local checked) rows))
 									(if
@@ -73,23 +88,49 @@
 				(start (i32 0)) (end (i32 0)) (error (u32 0))))))
 
 	(fn
-		(:doc `Count one signature row per definition, independent of the number of its imported aliases.`)
-		count_definitions
+		(:doc `Identify the first alias that selects this native declaration in the graph.`)
+		first_bridge_binding
+		(params (bindings (shared-slice GraphBinding)) (index i32) (binding GraphBinding))
+		(returns bool)
+		(body
+			(if
+				(:doc "Wove definitions have their own signature pass.")
+				(bool.not (u32.eq (record.get (local binding) provider) (u32 8)))
+				(then (return (bool false))))
+			(let-mut cursor (i32 0))
+			(while
+				(:doc "An earlier C binding with the same file and declaration is another alias.")
+				(i32.lt (local cursor) (local index))
+				(body
+					(let earlier (slice.load (local bindings) (local cursor)))
+					(if
+						(:doc "Use the original declaration identity across importing files.")
+						(bool.and (u32.eq (record.get (local earlier) provider) (u32 8))
+							(bool.and (i32.eq (record.get (local earlier) file) (record.get (local binding) file))
+								(i32.eq (record.get (local earlier) declaration) (record.get (local binding) declaration))))
+						(then (return (bool false))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (bool true))))
+
+	(fn
+		(:doc `Count one signature row per Wove or selected C definition.`)
+		signature_capacity
 		(params (bindings (shared-slice GraphBinding)))
 		(returns i32)
 		(body
 			(let-mut count (i32 0))
 			(let-mut index (i32 0))
 			(while
-				(:doc "A local definition's owning namespace is its defining file.")
+				(:doc "Every alias shares the signature row of its defining declaration.")
 				(i32.lt (local index) (slice.len (local bindings)))
 				(body
 					(let row (slice.load (local bindings) (local index)))
 					(if
-						(:doc "Cyclic and self imports have already been rejected by graph resolution.")
-						(bool.and (u32.eq (record.get (local row) provider) (u32 3))
-							(bool.and (u32.eq (record.get (local row) namespace) (u32 0))
-								(i32.eq (record.get (local row) owner) (record.get (local row) file))))
+						(:doc "Match the ordinary Wove registration and the selected C signature pass.")
+						(bool.or (call first_bridge_binding (borrow-shared (local bindings)) (local index) (local row))
+							(bool.and (u32.eq (record.get (local row) provider) (u32 3))
+								(bool.and (u32.eq (record.get (local row) namespace) (u32 0))
+									(i32.eq (record.get (local row) owner) (record.get (local row) file)))))
 						(then (set (local count) (i32.add.wrapping (local count) (i32 1)))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (local count))))
@@ -240,7 +281,7 @@
 		so signature checking can follow selection order after all layouts exist.`)
 		prepare_graph_file
 		(params (arena (shared-slice u8)) (source (shared-slice u8)) (input SuppliedFile) (tree ScalarTree)
-			(file i32) (flat (mut-slice SourceNode)) (selected (mut-slice SelectedDeclaration)) (views (mut-slice ModuleRead))
+			(file i32) (active bool) (flat (mut-slice SourceNode)) (selected (mut-slice SelectedDeclaration)) (views (mut-slice ModuleRead))
 			(records (mut-slice ScalarRecord)) (next_record i32))
 		(returns GraphSignatures)
 		(body
@@ -249,6 +290,19 @@
 				(start (record.get (local tree) start)) (end (record.get (local tree) end)) (error (u32 0))))
 			(let-mut nodes (array.alloc SourceNode (local rows)))
 			(let built (call build_source_tree (borrow-shared (local source)) (local checked) (borrow-mut (local nodes))))
+			(if
+				(:doc "A provider contributes a tree only after it has been built successfully.")
+				(u32.lt (u32 0) (record.get (local built) error))
+				(then (return (call signatures_result (i32 0) (i32 0) (local next_record) (i32 -1) (local file)
+					(record.get (local built) start) (record.get (local built) end) (record.get (local built) error)))))
+			(let base (record.get (local tree) base))
+			(let source_base (record.get (local input) source_start))
+			(call copy_tree (borrow-shared (local nodes)) (borrow-mut (local flat)) (local base) (local source_base))
+			(if
+				(:doc "A bridge-only provider supplies its checked tree and contributes no local Wove declarations.")
+				(bool.not (local active))
+				(then (return (call signatures_result (i32 0) (i32 0) (local next_record) (i32 -1) (i32 -1)
+					(i32 0) (i32 0) (u32 0)))))
 			(let-mut declarations (array.alloc SelectedDeclaration (local rows)))
 			(let module (call read_module (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local built) (borrow-mut (local declarations))))
@@ -257,9 +311,6 @@
 				(u32.lt (u32 0) (record.get (local module) error))
 				(then (return (call signatures_result (i32 0) (i32 0) (local next_record) (i32 -1) (local file)
 					(record.get (local module) start) (record.get (local module) end) (record.get (local module) error)))))
-			(let base (record.get (local tree) base))
-			(let source_base (record.get (local input) source_start))
-			(call copy_tree (borrow-shared (local nodes)) (borrow-mut (local flat)) (local base) (local source_base))
 			(let module_id (call graph_module_key (borrow-shared (local arena)) (borrow-shared (local flat))
 				(local module) (local input) (local base)))
 			(let layouts (call register_module_records (borrow-shared (local arena)) (borrow-shared (local flat))
@@ -318,6 +369,86 @@
 				(i32 0) (i32 0) (u32 0)))))
 
 	(fn
+		(:doc `Register a checked C bridge signature using the same parameter rows as Wove functions.`)
+		register_bridge_signature
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32) (scope FunctionScope)
+			(functions (mut-slice ScalarFunction)) (index i32) (parameters (mut-slice ScalarParameter)) (next_param i32)
+			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)))
+		(returns EntryRead)
+		(body
+			(let node (slice.load (local nodes) (local declaration)))
+			(let name (record.get (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node)) operands))
+			(let list (slice.load (local nodes) (record.get (slice.load (local nodes) (local name)) next_sibling)))
+			(let result_form (slice.load (local nodes) (record.get (local list) next_sibling)))
+			(let result (record.get (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local result_form)) operands))
+			(let first (record.get (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local list)) operands))
+			(let checked (call read_parameters (borrow-shared (local arena)) (borrow-shared (local nodes)) (local first)
+				(borrow-mut (local parameters)) (local next_param) (borrow-shared (local records))
+				(borrow-shared (local bindings)) (local scope)))
+			(if
+				(:doc "Retain the original span if shared parameter validation fails.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (local checked))))
+			(let limit (record.get (local checked) operand))
+			(slice.store (local functions) (local index)
+				(record.make ScalarFunction (declaration (local declaration)) (name (local name))
+					(params (local next_param)) (arity (i32.sub.wrapping (local limit) (local next_param)))
+					(result (call scalar_type (borrow-shared (local arena)) (borrow-shared (local nodes)) (local result)))
+					(first_statement (i32 -1)) (identity (u32 0)) (entry (bool false))
+					(file (record.get (local scope) file)) (tree_base (record.get (local scope) tree_base))
+					(tree_limit (record.get (local scope) tree_limit)) (source_base (record.get (local scope) source_base))))
+			(return (local checked))))
+
+	(fn
+		(:doc `Append one native signature per selected defining declaration after the Wove signatures.`)
+		register_graph_bridges
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (trees (shared-slice ScalarTree))
+			(nodes (shared-slice SourceNode)) (bindings (shared-slice GraphBinding))
+			(functions (mut-slice ScalarFunction)) (parameters (mut-slice ScalarParameter))
+			(records (shared-slice ScalarRecord)) (wove GraphSignatures))
+		(returns GraphSignatures)
+		(body
+			(let-mut next_function (record.get (local wove) functions))
+			(let-mut next_param (record.get (local wove) params))
+			(let records_count (record.get (local wove) records))
+			(let entry (record.get (local wove) entry))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Multiple local bindings can refer to the same signature, including across importers.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(let binding (slice.load (local bindings) (local index)))
+					(if
+						(:doc "Only the first selection of a C definition registers its signature.")
+						(call first_bridge_binding (borrow-shared (local bindings)) (local index) (local binding))
+						(then
+							(let file (record.get (local binding) file))
+							(let tree (slice.load (local trees) (local file)))
+							(let base (record.get (local tree) base))
+							(let source_base (record.get (slice.load (local files) (local file)) source_start))
+							(let scope (record.make FunctionScope (file (local file)) (tree_base (local base))
+								(tree_limit (i32.add.wrapping (local base) (record.get (local tree) rows)))
+								(source_base (local source_base)) (module_id (u32 0)) (entry_module (bool false))))
+							(let checked (call register_bridge_signature (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(i32.add.wrapping (local base) (record.get (local binding) declaration)) (local scope)
+								(borrow-mut (local functions)) (local next_function)
+								(borrow-mut (local parameters)) (local next_param)
+								(borrow-shared (local records)) (borrow-shared (local bindings))))
+							(if
+								(:doc "Bridge signature spans belong to the provider, even if it has no Wove-file imports.")
+								(u32.lt (u32 0) (record.get (local checked) error))
+								(then (return (call signatures_result (local next_function) (local next_param)
+									(local records_count) (local entry) (local file)
+									(i32.sub.wrapping (record.get (local checked) start) (local source_base))
+									(i32.sub.wrapping (record.get (local checked) end) (local source_base))
+									(record.get (local checked) error)))))
+							(set (local next_function) (i32.add.wrapping (local next_function) (i32 1)))
+							(set (local next_param) (record.get (local checked) operand))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call signatures_result (local next_function) (local next_param) (local records_count)
+				(local entry) (i32 -1) (i32 0) (i32 0) (u32 0)))))
+
+	(fn
 		(:doc `Collect every defining layout before any reached function signature uses it.`)
 		prepare_graph
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
@@ -333,15 +464,16 @@
 				(:doc "Use one layout per definition in the canonical file table.")
 				(i32.lt (local file) (slice.len (local files)))
 				(body
+					(let tree (slice.load (local trees) (local file)))
 					(if
-						(:doc "An inactive or unreachable file contributes no layouts or selected declarations.")
-						(record.get (slice.load (local modules) (local file)) active)
+						(:doc "Build every reserved tree and collect Wove declarations only in active modules.")
+						(i32.lt (i32 0) (record.get (local tree) rows))
 						(then
 							(let input (slice.load (local files) (local file)))
 							(let checked (call prepare_graph_file (borrow-shared (local arena))
 								(borrow-shared (slice.range (local arena) (record.get (local input) source_start)
 									(record.get (local input) source_end)))
-								(local input) (slice.load (local trees) (local file)) (local file)
+								(local input) (local tree) (local file) (record.get (slice.load (local modules) (local file)) active)
 								(borrow-mut (local nodes)) (borrow-mut (local selected)) (borrow-mut (local views))
 								(borrow-mut (local records)) (local next_record)))
 							(if
@@ -350,7 +482,14 @@
 								(then (return (local checked))))
 							(set (local next_record) (record.get (local checked) records))))
 					(set (local file) (i32.add.wrapping (local file) (i32 1)))))
-			(return (call register_graph_signatures (borrow-shared (local arena)) (borrow-shared (local files))
+			(let wove (call register_graph_signatures (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings)) (local root)
 				(borrow-shared (local nodes)) (borrow-shared (local selected)) (borrow-shared (local views))
-				(borrow-mut (local functions)) (borrow-mut (local parameters)) (borrow-shared (local records)) (local next_record))))))
+				(borrow-mut (local functions)) (borrow-mut (local parameters)) (borrow-shared (local records)) (local next_record)))
+			(if
+				(:doc "Keep the first Wove signature error before registering native targets.")
+				(u32.lt (u32 0) (record.get (local wove) error))
+				(then (return (local wove))))
+			(return (call register_graph_bridges (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local trees)) (borrow-shared (local nodes)) (borrow-shared (local bindings))
+				(borrow-mut (local functions)) (borrow-mut (local parameters)) (borrow-shared (local records)) (local wove))))))

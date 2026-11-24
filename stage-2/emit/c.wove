@@ -20,7 +20,7 @@
 	(use wove-file "./runtime.wove"
 		(only write_runtime_header open_conversion open_slice_access open_shared_projection write_slice_length close_runtime_call
 			open_slice_offset write_slice_items open_array_allocation open_array_drop open_array_borrow))
-	(use wove-file "./text.wove" (only c_byte c_text_fragment c_cast c_u64_cast c_i32_bias write_c_name c_decimal_digits
+	(use wove-file "./text.wove" (only c_byte c_span c_text_fragment c_cast c_u64_cast c_i32_bias write_c_name c_decimal_digits
 			function_name_role parameter_name_role local_name_role temporary_name_role))
 
 	(struct EmitResult
@@ -38,6 +38,12 @@
 				(record.get (local function) entry)
 				(then (return (call c_text_fragment (borrow-mut (local output)) (local offset) (u32 1) (local writing)))))
 			(let name (slice.load (local nodes) (record.get (local function) name)))
+			(if
+				(:doc "A C bridge call uses the spelling declared in its native header.")
+				(i32.lt (record.get (local function) first_statement) (i32 0))
+				(then (return (call c_span (borrow-shared (local source))
+					(record.get (local name) start) (record.get (local name) end)
+					(borrow-mut (local output)) (local offset) (local writing)))))
 			(return (call write_c_name (borrow-mut (local output)) (local offset) (local writing) (call function_name_role)
 				(record.get (local function) identity) (borrow-shared (local source))
 				(record.get (local name) start) (record.get (local name) end)))))
@@ -922,10 +928,11 @@
 		write_translation_unit
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(statements (shared-slice ScalarStatement)) (records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (writing bool))
+			(statements (shared-slice ScalarStatement)) (records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression))
+			(output (mut-slice u8)) (offset u32) (has_stdint bool) (has_runtime bool) (writing bool))
 		(returns u32)
 		(body
-			(let-mut cursor (u32 0))
+			(let-mut cursor (local offset))
 			(let count (slice.len (local functions)))
 			(let has_records (bool.and (i32.lt (i32 0) (slice.len (local records)))
 				(bool.not (i32.eq (record.get (slice.load (local records) (i32 0)) name) (i32 0)))))
@@ -935,13 +942,18 @@
 			(if
 				(:doc "The shared runtime header provides the fixed-width types too.")
 				(call uses_runtime (borrow-shared (local expressions)) (borrow-shared (local parameters)))
-				(then (set (local cursor) (call write_runtime_header (borrow-mut (local output)) (local cursor) (local writing))))
+				(then
+					(if
+						(:doc "A selected bridge include can already provide the runtime header.")
+						(bool.not (local has_runtime))
+						(then (set (local cursor) (call write_runtime_header (borrow-mut (local output)) (local cursor) (local writing))))))
 				(else
 					(if
 						(:doc "Include fixed-width types for helpers, compound bodies, or a wrapping expression in a lone return.")
-						(bool.or (bool.or (local has_records) (i32.lt (i32 1) (local count)))
-							(bool.or (bool.not (u32.eq (record.get (local first_statement) kind) (u32 7)))
-								(u32.eq (record.get (call scalar_operator (record.get (local first_value) kind)) result) (u32 5))))
+						(bool.and (bool.not (local has_stdint))
+							(bool.or (bool.or (local has_records) (i32.lt (i32 1) (local count)))
+								(bool.or (bool.not (u32.eq (record.get (local first_statement) kind) (u32 7)))
+									(u32.eq (record.get (call scalar_operator (record.get (local first_value) kind)) result) (u32 5)))))
 						(then (set (local cursor)
 							(call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 0) (local writing)))))))
 			(set (local cursor) (call write_record_layouts (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -953,8 +965,9 @@
 				(body
 					(let function (slice.load (local functions) (local index)))
 					(if
-						(:doc "Only the helpers can be direct call targets.")
-						(bool.not (record.get (local function) entry))
+						(:doc "Local helpers need a prototype. The entry and bridge declarations have their own ABI.")
+						(bool.and (bool.not (record.get (local function) entry))
+							(bool.not (i32.lt (record.get (local function) first_statement) (i32 0))))
 						(then
 							(set (local cursor) (call write_signature (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local function) (borrow-shared (local parameters)) (borrow-shared (local records)) (bool true)
@@ -967,10 +980,16 @@
 				(:doc "Every selected declaration receives one definition with the verified signature.")
 				(i32.lt (local index) (local count))
 				(body
-					(set (local cursor) (call write_definition (borrow-shared (local source)) (borrow-shared (local nodes))
-						(slice.load (local functions) (local index)) (borrow-shared (local functions))
-						(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
-						(borrow-mut (local output)) (local cursor) (local writing)))
+					(let function (slice.load (local functions) (local index)))
+					(if
+						(:doc "Only Wove definitions have a body to write in this translation unit.")
+						(bool.not (i32.lt (record.get (local function) first_statement) (i32 0)))
+						(then
+							(set (local cursor) (call write_definition (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local function) (borrow-shared (local functions))
+								(borrow-shared (local parameters)) (borrow-shared (local statements))
+								(borrow-shared (local records)) (borrow-shared (local expressions))
+								(borrow-mut (local output)) (local cursor) (local writing)))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (local cursor))))
 
@@ -1046,7 +1065,7 @@
 			(let measured (call write_translation_unit (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
-				(borrow-mut (local output)) (bool false)))
+				(borrow-mut (local output)) (u32 0) (bool false) (bool false) (bool false)))
 			(if
 				(:doc "A short destination reports the entry span and keeps every output byte intact.")
 				(u32.lt (int.convert u32 (slice.len (local output))) (local measured))
@@ -1057,5 +1076,5 @@
 			(let written (call write_translation_unit (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
-				(borrow-mut (local output)) (bool true)))
+				(borrow-mut (local output)) (u32 0) (bool false) (bool false) (bool true)))
 			(return (call emit_result (int.convert i32 (local written)) (local start) (local end) (u32 0))))))
