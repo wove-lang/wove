@@ -1,7 +1,7 @@
 # Copyright (c) 2026 wove contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-"""Emit C11 for one Stage 1 source file."""
+"""Emit C11 for a Stage 1 root and its local imports."""
 
 from pathlib import Path
 import sys
@@ -12,7 +12,7 @@ from syntax import SourceError
 
 # Use stdout for generated C and report source failures by line.
 def main() -> int:
-	# The seed translates one source file per invocation.
+	# The invocation names the executable root of the source graph.
 	if len(sys.argv) != 2:
 		print("usage: wovec.py SOURCE", file=sys.stderr)
 		return 1
@@ -22,7 +22,7 @@ def main() -> int:
 		output = compile_source(Path(filename).read_text(encoding="utf-8"), filename)
 	# Show the line of a rejected source operation.
 	except SourceError as error:
-		print(f"{filename}:{error.line}", file=sys.stderr)
+		print(f"{error.filename or filename}:{error.line}", file=sys.stderr)
 		return 1
 	# Forward file and encoding errors from the source reader.
 	except (OSError, UnicodeError) as error:

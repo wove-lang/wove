@@ -11,9 +11,10 @@ import re
 
 
 class SourceError(Exception):
-	# Keep the source line available to the CLI.
-	def __init__(self, line: int):
+	# Keep the source line and, once known, its defining file available to the CLI.
+	def __init__(self, line: int, filename: str | None = None):
 		self.line = line
+		self.filename = filename
 		super().__init__(line)
 
 

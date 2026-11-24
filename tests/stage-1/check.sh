@@ -26,6 +26,7 @@ check_status() {
 check_rejected() {
 	fixture=$1
 	line=$2
+	origin=$3
 	status=0
 	"$python" stage-1/wovec.py "$fixture" > "$build/rejected.c" 2> "$build/rejected.stderr" || status=$?
 	# A rejected source must exit with the seed error status and leave stdout empty.
@@ -33,13 +34,13 @@ check_rejected() {
 		printf '%s did not reject cleanly\n' "$fixture" >&2
 		exit 1
 	fi
-	printf '%s:%s\n' "$fixture" "$line" > "$build/expected.stderr"
+	printf '%s:%s\n' "$origin" "$line" > "$build/expected.stderr"
 	diff -u "$build/expected.stderr" "$build/rejected.stderr"
 }
 
 # A runtime failure must report the expected trap at the specified line.
 check_trap() {
-	fixture=$1
+	origin=$1
 	line=$2
 	program=$3
 	diagnostic=$4
@@ -50,12 +51,12 @@ check_trap() {
 		printf '%s completed, expected a runtime trap\n' "$program" >&2
 		exit 1
 	fi
-	printf '%s:%s:1: runtime error: %s\n' "$fixture" "$line" "$diagnostic" > "$build/expected.stderr"
+	printf '%s:%s:1: runtime error: %s\n' "$origin" "$line" "$diagnostic" > "$build/expected.stderr"
 	diff -u "$build/expected.stderr" "$build/trap.stderr"
 }
 
 # Evaluate the fixture list supplied by Make.
-while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
+while read -r mode source expected origin extra <&3 || [ -n "${mode:-}" ]; do
 	# Allow blank lines and comments between cases.
 	case "$mode" in
 		""|\#*) continue ;;
@@ -75,6 +76,15 @@ while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 	esac
 
 	program="$build/${source%.wove}"
+	# Diagnostic cases can point to a provider reached from the entry fixture.
+	location="$fixtures/${origin:-$source}"
+	# Exit-status cases do not have a source location to compare.
+	case "$mode:$origin" in
+		run:?*|tracked:?*)
+			printf 'unexpected diagnostic source in %s for %s\n' "$manifest" "$source" >&2
+			exit 1
+			;;
+	esac
 	# Run the requested check and compare the result from the manifest.
 	case "$mode" in
 		# Compare the fixture exit status with the ordinary runtime.
@@ -88,19 +98,19 @@ while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 			;;
 		# Check that the source fails on the specified line.
 		reject)
-			check_rejected "$fixtures/$source" "$expected"
+			check_rejected "$fixtures/$source" "$expected" "$location"
 			;;
 		# Check the exact diagnostic from a runtime bounds trap.
 		bounds-trap)
-			check_trap "$fixtures/$source" "$expected" "$program" "slice index out of bounds"
+			check_trap "$location" "$expected" "$program" "slice index out of bounds"
 			;;
 		# Check the exact diagnostic from a failed integer conversion.
 		conversion-trap)
-			check_trap "$fixtures/$source" "$expected" "$program" "integer conversion out of range"
+			check_trap "$location" "$expected" "$program" "integer conversion out of range"
 			;;
 		# Check a range was rejected before the helper ran.
 		range-trap)
-			check_trap "$fixtures/$source" "$expected" "$program" "slice range out of bounds"
+			check_trap "$location" "$expected" "$program" "slice range out of bounds"
 			;;
 		# Reject unknown modes so every listed fixture is exercised.
 		*)
