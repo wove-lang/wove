@@ -11,6 +11,7 @@
 	(use wove-file "../source/module.wove" (only is_three_bytes form_parts select_form))
 
 	(struct EntryRead (fields (operand i32) (start i32) (end i32) (error u32)))
+	(struct StatementRead (fields (kind u32) (binding i32) (value i32) (start i32) (end i32) (error u32)))
 	(struct DecimalSpelling (fields (digits i32) (negative bool)))
 
 	(fn
@@ -18,7 +19,8 @@
 
 		Return 1 through 9 for fn, main, params, returns, i32, body, return,
 		local, and call. Return 10 through 14 for u8, u32, bool, true, and
-		false. Other nodes and absent indices return 0.`)
+		false. Return 15 through 17 for let, let-mut, and set. Other nodes
+		and absent indices return 0.`)
 		entry_keyword
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (index i32))
 		(returns u32)
@@ -174,6 +176,26 @@
 									(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 115))
 									(call is_head_byte (borrow-shared (local source)) (local start) (i32 4) (u8 101)))))))
 				(then (return (u32 14))))
+			(if
+				(:doc "Let and let-mut share a prefix but require their full spelling.")
+				(bool.and (bool.or (i32.eq (local width) (i32 3)) (i32.eq (local width) (i32 7)))
+					(call is_three_bytes (borrow-shared (local source)) (local start) (u8 108) (u8 101) (u8 116)))
+				(then
+					(if
+						(:doc "The short spelling declares an immutable local.")
+						(i32.eq (local width) (i32 3))
+						(then (return (u32 15))))
+					(if
+						(:doc "The -mut suffix declares a writable local.")
+						(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 45))
+							(call is_three_bytes (borrow-shared (local source))
+								(i32.add.wrapping (local start) (i32 4)) (u8 109) (u8 117) (u8 116)))
+						(then (return (u32 16))))))
+			(if
+				(:doc "Match the entire set keyword.")
+				(bool.and (i32.eq (local width) (i32 3))
+					(call is_three_bytes (borrow-shared (local source)) (local start) (u8 115) (u8 101) (u8 116)))
+				(then (return (u32 17))))
 			(return (u32 0))))
 
 	(fn
@@ -209,45 +231,55 @@
 			(return (call entry_at (local node) (record.get (local parts) operands) (u32 0)))))
 
 	(fn
-		(:doc `Find the expression in the scalar body's single return statement.`)
-		read_return
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (body_node SourceNode))
-		(returns EntryRead)
+		(:doc `Keep the original syntax diagnostic when no statement can be read.`)
+		statement_error
+		(params (problem EntryRead))
+		(returns StatementRead)
 		(body
-			(let body (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local body_node) (u32 6) (u32 24)))
+			(return (record.make StatementRead (kind (u32 0)) (binding (i32 -1)) (value (i32 -1))
+				(start (record.get (local problem) start)) (end (record.get (local problem) end))
+				(error (record.get (local problem) error))))))
+
+	(fn
+		(:doc `Read each scalar statement's value and, where present, its binding operand.`)
+		read_statement
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns StatementRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+			(let returning (u32.eq (local tag) (u32 7)))
 			(if
-				(:doc "Report a malformed body at its own span.")
-				(u32.lt (u32 0) (record.get (local body) error))
-				(then (return (local body))))
-			(let statement (record.get (local body) operand))
+				(:doc "Reject unsupported statements at their complete originating span.")
+				(bool.and (bool.not (local returning))
+					(bool.or (u32.lt (local tag) (u32 15)) (u32.lt (u32 17) (local tag))))
+				(then (return (call statement_error (call entry_at (local node) (i32 -1) (u32 24))))))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) (u32 24)))
 			(if
-				(:doc "The body needs a return statement.")
-				(i32.lt (local statement) (i32 0))
-				(then (return (call entry_at (local body_node) (i32 -1) (u32 24)))))
-			(let return_node (slice.load (local nodes) (local statement)))
-			(let returned (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local return_node) (u32 7) (u32 24)))
+				(:doc "Known selection pragmas cannot alter a statement.")
+				(u32.lt (u32 0) (record.get (local form) error))
+				(then (return (call statement_error (local form)))))
+			(let next (record.get (local node) next_sibling))
 			(if
-				(:doc "Only a return statement is supported in this entry.")
-				(u32.lt (u32 0) (record.get (local returned) error))
-				(then (return (local returned))))
-			(let extra_statement (record.get (local return_node) next_sibling))
+				(:doc "Point at the first statement after the terminal return.")
+				(bool.and (local returning) (bool.not (i32.lt (local next) (i32 0))))
+				(then (return (call statement_error
+					(call entry_at (slice.load (local nodes) (local next)) (i32 -1) (u32 24))))))
+			(let-mut value (record.get (local form) operand))
+			(let-mut binding (i32 -1))
 			(if
-				(:doc "Point at the first additional statement after return.")
-				(bool.not (i32.lt (local extra_statement) (i32 0)))
-				(then (return (call entry_at (slice.load (local nodes) (local extra_statement)) (i32 -1) (u32 24)))))
-			(let expression (record.get (local returned) operand))
+				(:doc "A declaration or assignment supplies a name or target before its value.")
+				(bool.and (bool.not (local returning)) (bool.not (i32.lt (local value) (i32 0))))
+				(then
+					(set (local binding) (local value))
+					(set (local value) (record.get (slice.load (local nodes) (local binding)) next_sibling))))
 			(if
-				(:doc "The return requires a value.")
-				(i32.lt (local expression) (i32 0))
-				(then (return (call entry_at (local return_node) (i32 -1) (u32 24)))))
-			(let expression_node (slice.load (local nodes) (local expression)))
-			(if
-				(:doc "The return accepts exactly one expression.")
-				(bool.not (i32.lt (record.get (local expression_node) next_sibling) (i32 0)))
-				(then (return (call entry_at (local return_node) (i32 -1) (u32 24)))))
-			(return (call entry_at (local expression_node) (local expression) (u32 0)))))
+				(:doc "Every statement requires exactly one value in its final operand.")
+				(bool.or (i32.lt (local value) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local value)) next_sibling) (i32 0))))
+				(then (return (call statement_error (call entry_at (local node) (i32 -1) (u32 24))))))
+			(return (record.make StatementRead (kind (local tag)) (binding (local binding)) (value (local value))
+				(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))))))
 
 	(fn
 		(:doc `Return an exact scalar type keyword or zero when the atom names another construct.`)
