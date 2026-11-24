@@ -27,8 +27,8 @@
 #define read_module wv_seed_fn_74
 #define emit_module wv_seed_fn_96
 #define resolve_graph wv_seed_fn_109
-#define inspect_callers wv_seed_fn_219
-#define run_scalar_graph wv_seed_fn_232
+#define inspect_callers wv_seed_fn_223
+#define run_scalar_graph wv_seed_fn_236
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -302,6 +302,14 @@ static void write_span(wvrt_slice parent, int32_t view_start, uint32_t value, in
 	const wv_seed_record_2 position = source_position(parent, view_start, start);
 	printf("%" PRIu32 "\t%" PRId32 "\t%" PRId32 "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\n",
 		value, start, end, error, position.wv_field_0, position.wv_field_1);
+}
+
+// Report a body diagnostic's related span in the same source and coordinate space.
+static void write_related_span(wvrt_slice parent, int32_t view_start, int32_t file, int32_t start, int32_t end) {
+	if (start < 0) { return; }
+	const wv_seed_record_2 position = source_position(parent, view_start, start);
+	printf("related\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRIu32 "\t%" PRIu32 "\n",
+		file, start, end, position.wv_field_0, position.wv_field_1);
 }
 
 // Check UTF-8 once, then advance by each token's exclusive end.
@@ -610,6 +618,7 @@ static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t ca
 		const int32_t count = result.wv_field_0;
 		if (output_intact(bytes, capacity, count)) {
 			write_span(parent, start, (uint32_t)count, result.wv_field_1, result.wv_field_2, result.wv_field_3);
+			write_related_span(parent, start, 0, result.wv_field_4, result.wv_field_5);
 			const size_t emitted = fwrite(bytes + 1, 1, (size_t)count, stdout);
 			status = result.wv_field_3 == 0 && emitted == (size_t)count ? EXIT_SUCCESS : EXIT_FAILURE;
 		}
@@ -697,6 +706,7 @@ static int dump_callers(wvrt_slice parent, wvrt_slice input, int32_t start, cons
 			fputs("caller inspection modified unused output rows\n", stderr);
 		} else {
 			write_span(parent, start, (uint32_t)count, result.wv_field_2, result.wv_field_3, result.wv_field_4);
+			write_related_span(parent, start, result.wv_field_5, result.wv_field_6, result.wv_field_7);
 			if (result.wv_field_4 == 0) {
 				write_callers((CallerSources){input, source.nodes, NULL}, result.wv_field_5,
 					result.wv_field_0, count, storage->wvrt_items);
@@ -821,7 +831,7 @@ static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t
 
 // Report a graph diagnostic in the original file's own byte and coordinate space.
 static void write_graph_error(wvrt_slice arena, const SuppliedFile *files, uint32_t error,
-		int32_t file, int32_t start, int32_t end) {
+		int32_t file, int32_t start, int32_t end, int32_t related_start, int32_t related_end) {
 	// Path row failures can occur before there is a source file for the diagnostic.
 	if (file < 0) {
 		printf("error %" PRIu32 " -1 0 0 0 0\n", error);
@@ -833,6 +843,7 @@ static void write_graph_error(wvrt_slice arena, const SuppliedFile *files, uint3
 	const wv_seed_record_2 position = source_position(source, 0, start);
 	printf("error %" PRIu32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRIu32 " %" PRIu32 "\n",
 		error, file, start, end, position.wv_field_0, position.wv_field_1);
+	write_related_span(source, 0, file, related_start, related_end);
 }
 
 // Compile or inspect a resolved graph and check that the chosen destination remains bounded.
@@ -870,7 +881,7 @@ static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice modules, 
 			fputs("scalar graph modified unused caller rows\n", stderr);
 		} else if (result.wv_field_5 != 0) {
 			write_graph_error(arena, files.wvrt_items, result.wv_field_5, result.wv_field_2,
-				result.wv_field_3, result.wv_field_4);
+				result.wv_field_3, result.wv_field_4, result.wv_field_6, result.wv_field_7);
 		} else {
 			printf("ok %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
 				written, result.wv_field_2, result.wv_field_3, result.wv_field_4);
@@ -934,7 +945,7 @@ static int graph_mode(int argc, char **argv) {
 	int status = EXIT_FAILURE;
 	// Every consumer requires successful import selection and canonical binding resolution.
 	if (result.wv_field_5 != 0) {
-		write_graph_error(arena, files, result.wv_field_5, result.wv_field_2, result.wv_field_3, result.wv_field_4);
+		write_graph_error(arena, files, result.wv_field_5, result.wv_field_2, result.wv_field_3, result.wv_field_4, -1, -1);
 	} else if (emit || inspect) {
 		status = finish_graph(arena, supplied, (wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},
 			(wvrt_slice){bindings->wvrt_items, result.wv_field_1, sizeof(GraphBinding)}, files[entry].wv_field_0,

@@ -17,7 +17,7 @@
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
-	(use wove-file "./flow.wove" (only block_statement after_block (type ScalarStatement)))
+	(use wove-file "./flow.wove" (only block_statement moved_owner after_block (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type read_parameter_type decimal_scalar scalar_operator
 			is_byte_view_type is_reborrow_keyword (type ScalarOperator) (type EntryRead) (type StatementRead)))
@@ -49,7 +49,8 @@
 
 	(struct FunctionScope
 		(fields (file i32) (tree_base i32) (tree_limit i32) (source_base i32) (module_id u32) (entry_module bool)))
-	(struct BodyPlan (fields (count i32) (file i32) (start i32) (end i32) (error u32)))
+	(struct BodyPlan
+		(fields (count i32) (file i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
 
 	(fn
 		(:doc `Carry an original source diagnostic through the signature reader.`)
@@ -208,7 +209,7 @@
 						(u32.lt (u32 0) (record.get (local selection) error))
 						(then (return (record.make EntryRead (operand (i32 -1))
 							(start (record.get (local selection) start)) (end (record.get (local selection) end))
-							(error (record.get (local selection) error))))))
+							(error (record.get (local selection) error)) (related (i32 -1))))))
 					(let checked (call read_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
 					(if
 						(:doc "Keep unsupported types and malformed type syntax at their original spans.")
@@ -227,7 +228,7 @@
 							(position (i32.sub.wrapping (local written) (local start)))))
 					(set (local written) (i32.add.wrapping (local written) (i32 1)))
 					(set (local index) (record.get (local node) next_sibling))))
-			(return (record.make EntryRead (operand (local written)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+			(return (record.make EntryRead (operand (local written)) (start (i32 0)) (end (i32 0)) (error (u32 0)) (related (i32 -1))))))
 
 	(fn
 		(:doc `Look up a checked function by a byte span from either the source or an inspection query.`)
@@ -303,7 +304,7 @@
 				(u32.lt (u32 0) (record.get (local signature) error))
 				(then (return (record.make EntryRead (operand (i32 -1))
 					(start (record.get (local signature) start)) (end (record.get (local signature) end))
-					(error (record.get (local signature) error))))))
+					(error (record.get (local signature) error)) (related (i32 -1))))))
 			(let checked (call read_parameters (borrow-shared (local source)) (borrow-shared (local nodes))
 				(record.get (local signature) params) (borrow-mut (local parameters)) (local next_param)))
 			(if
@@ -364,13 +365,13 @@
 				(bool.and (local entry_module) (i32.lt (local main) (i32 0)))
 				(then (return (call entry_at
 					(slice.load (local nodes) (record.get (slice.load (local functions) (i32 0)) name)) (i32 -1) (u32 22)))))
-			(return (record.make EntryRead (operand (local main)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+			(return (record.make EntryRead (operand (local main)) (start (i32 0)) (end (i32 0)) (error (u32 0)) (related (i32 -1))))))
 
 	(fn
 		(:doc `Match a checked value to its exact expected type.
 
 		Expectations 1 and 42 infer an integer type. Only the latter can
-		also introduce an owned array through an allocation. A shared view
+		also introduce an owner through an allocation or move. A shared view
 		can read from either slice access mode. Zero marks unvisited rows.`)
 		value_matches_type
 		(params (expected u32) (actual u32))
@@ -543,8 +544,15 @@
 				(then
 					(let declaration (slice.load (local statements) (local binding)))
 					(let actual (record.get (local declaration) type))
+					(let transfer (record.get (local declaration) move_site))
 					(if
-						(:doc "Only an explicit call reborrow can use an array owner.")
+						(:doc "The original name remains resolvable so its transfer can be reported.")
+						(bool.not (i32.lt (local transfer) (i32 0)))
+						(then (return (record.make EntryRead (operand (i32 -1))
+							(start (record.get (local node) start)) (end (record.get (local node) end))
+							(error (u32 39)) (related (local transfer))))))
+					(if
+						(:doc "Reborrows and moves are the explicit ways to use an owner.")
 						(bool.not (bool.or (call value_matches_type (local type) (local actual))
 							(bool.and (local reborrow) (u32.eq (local actual) (u32 41)))))
 						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
@@ -557,7 +565,7 @@
 					(let target (record.get (local declaration) target))
 					(slice.store (local expressions) (local index)
 						(call expression_row (u32 6) (local actual) (local target) (i32 -1) (i32 0) (i32 0) (bool false)))
-					(return (call entry_at (local node) (local index) (u32 0)))))
+					(return (call entry_at (local node) (local binding) (u32 0)))))
 			(let target (call find_function_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (borrow-shared (local parameters)) (local name)))
 			(if
@@ -895,6 +903,20 @@
 			(return (bool false))))
 
 	(fn
+		(:doc `Use the full borrow or move span when a diagnostic carries an earlier transfer.`)
+		at_owner_use
+		(params (problem EntryRead) (use SourceNode))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "Other errors keep their original operand spans.")
+				(i32.lt (record.get (local problem) related) (i32 0))
+				(then (return (local problem))))
+			(return (record.make EntryRead (operand (i32 -1))
+				(start (record.get (local use) start)) (end (record.get (local use) end))
+				(error (record.get (local problem) error)) (related (record.get (local problem) related))))))
+
+	(fn
 		(:doc `Resolve a named byte view in the access mode of its operation or call loan.`)
 		plan_view
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
@@ -937,9 +959,9 @@
 				(local reference) (record.get (local form) operand) (local expected) (local index) (local caller) (local statement)
 				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
 			(if
-				(:doc "Keep a local lookup or access-mode error at the named source.")
+				(:doc "A use-after-move error identifies the attempted borrow.")
 				(u32.lt (u32 0) (record.get (local checked) error))
-				(then (return (local checked))))
+				(then (return (call at_owner_use (local checked) (local node)))))
 			(let resolved (slice.load (local expressions) (local index)))
 			(let target (record.get (local resolved) target))
 			(let actual (record.get (local resolved) type))
@@ -1135,7 +1157,29 @@
 			(let base (record.get (local caller) source_base))
 			(return (record.make BodyPlan (count (i32 0)) (file (record.get (local caller) file))
 				(start (i32.sub.wrapping (local start) (local base))) (end (i32.sub.wrapping (local end) (local base)))
-				(error (local error))))))
+				(error (local error)) (related_start (i32 -1)) (related_end (i32 -1))))))
+
+	(fn
+		(:doc `Convert a checked expression diagnostic and related move to original view offsets.`)
+		expression_error
+		(params (caller ScalarFunction) (nodes (shared-slice SourceNode)) (problem EntryRead))
+		(returns BodyPlan)
+		(body
+			(let start (record.get (local problem) start))
+			(let end (record.get (local problem) end))
+			(let related (record.get (local problem) related))
+			(let error (record.get (local problem) error))
+			(if
+				(:doc "Most expression errors only carry their primary span.")
+				(i32.lt (local related) (i32 0))
+				(then (return (call body_error (local caller) (local start) (local end) (local error)))))
+			(let base (record.get (local caller) source_base))
+			(let transfer (slice.load (local nodes) (local related)))
+			(return (record.make BodyPlan (count (i32 0)) (file (record.get (local caller) file))
+				(start (i32.sub.wrapping (local start) (local base))) (end (i32.sub.wrapping (local end) (local base)))
+				(error (local error))
+				(related_start (i32.sub.wrapping (record.get (local transfer) start) (local base)))
+				(related_end (i32.sub.wrapping (record.get (local transfer) end) (local base)))))))
 
 	(fn
 		(:doc `Capture each endpoint's original tree row and the half-open span in the calling file.`)
@@ -1153,6 +1197,56 @@
 				(end (i32.add.wrapping (local view_start) (i32.sub.wrapping (record.get (local node) end) (local base))))))))
 
 	(fn
+		(:doc `Transfer a local owner into a new declaration in the same lexical block.
+
+		The initializer reuses the original pointer. Mark its defining
+		statement only after both the source and the transfer are checked.`)
+		plan_move
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
+			(root i32) (statement i32) (parameters (shared-slice ScalarParameter))
+			(statements (mut-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)) (site_count i32))
+		(returns BodyPlan)
+		(body
+			(let move (slice.load (local nodes) (local root)))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local move) (u32 43) (u32 24)))
+			(if
+				(:doc "Preserve the syntax or metadata diagnostic on the move.")
+				(u32.lt (u32 0) (record.get (local form) error))
+				(then (return (call body_error (local caller) (record.get (local form) start) (record.get (local form) end)
+					(record.get (local form) error)))))
+			(let operand (record.get (local form) operand))
+			(if
+				(:doc "A transfer takes exactly one owner reference.")
+				(bool.or (i32.lt (local operand) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local operand)) next_sibling) (i32 0))))
+				(then (return (call body_error (local caller) (record.get (local move) start) (record.get (local move) end) (u32 24)))))
+			(let reference (slice.load (local nodes) (local operand)))
+			(let local_form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) (u32 8) (u32 24)))
+			(if
+				(:doc "Only a local reference can name the source of a transfer.")
+				(u32.lt (u32 0) (record.get (local local_form) error))
+				(then (return (call body_error (local caller) (record.get (local local_form) start) (record.get (local local_form) end)
+					(record.get (local local_form) error)))))
+			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local reference) (record.get (local local_form) operand) (u32 41) (local root) (local caller) (local statement)
+				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+			(if
+				(:doc "A repeated transfer points at the attempted move and the move that consumed its source.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (call expression_error (local caller) (borrow-shared (local nodes))
+					(call at_owner_use (local checked) (local move))))))
+			(let from (record.get (local checked) operand))
+			(let declaration (slice.load (local nodes) (local from)))
+			(let receiver (slice.load (local nodes) (local statement)))
+			(if
+				(:doc "Moving an outer owner into a nested block requires ownership joins.")
+				(bool.not (i32.eq (record.get (local declaration) parent) (record.get (local receiver) parent)))
+				(then (return (call body_error (local caller) (record.get (local move) start) (record.get (local move) end) (u32 24)))))
+			(slice.store (local statements) (local from) (call moved_owner (slice.load (local statements) (local from)) (local root)))
+			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0))
+				(error (u32 0)) (related_start (i32 -1)) (related_end (i32 -1))))))
+
+	(fn
 		(:doc `Check a statement's value tree in source order.
 
 		Compound operations seed their operands before they are reached.
@@ -1162,10 +1256,23 @@
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(root i32) (expected u32) (statement i32) (functions (shared-slice ScalarFunction))
 			(parameters (shared-slice ScalarParameter)) (bindings (shared-slice GraphBinding))
-			(statements (shared-slice ScalarStatement)) (expressions (mut-slice ScalarExpression))
+			(statements (mut-slice ScalarStatement)) (expressions (mut-slice ScalarExpression))
 			(sites (mut-slice CallSite)) (site_start i32) (view_start i32))
 		(returns BodyPlan)
 		(body
+			(if
+				(:doc "Only a declaration initializer can perform a local ownership transfer.")
+				(u32.eq (local expected) (u32 42))
+				(then
+					(let node (slice.load (local nodes) (local root)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+					(if
+						(:doc "A move changes the source binding after resolving the initializer.")
+						(u32.eq (local tag) (u32 43))
+						(then (return (call plan_move (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local caller) (local root) (local statement) (borrow-shared (local parameters))
+							(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start)))))))
 			(let-mut site_count (local site_start))
 			(let end (record.get (slice.load (local nodes) (local root)) end))
 			(slice.store (local expressions) (local root)
@@ -1187,10 +1294,9 @@
 								(borrow-shared (local parameters)) (borrow-shared (local bindings))
 								(borrow-shared (local statements)) (borrow-mut (local expressions)) (local view_start)))
 							(if
-								(:doc "Preserve source spans from the first failing signature or expression.")
+								(:doc "Preserve the first failing expression's source spans.")
 								(u32.lt (u32 0) (record.get (local checked) error))
-								(then (return (call body_error (local caller) (record.get (local checked) start)
-										(record.get (local checked) end) (record.get (local checked) error)))))
+								(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))
 							(let expression (slice.load (local expressions) (local index)))
 							(if
 								(:doc "Record every resolved call before lowering, using its defining declaration row.")
@@ -1207,7 +1313,8 @@
 										(call resolved_call_site (local caller) (local callee) (local node) (local view_start)))
 									(set (local site_count) (i32.add.wrapping (local site_count) (i32 1)))))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
-			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0))
+				(error (u32 0)) (related_start (i32 -1)) (related_end (i32 -1))))))
 
 	(fn
 		(:doc `Check one required block and the optional else of an if before typing the condition.`)
@@ -1320,7 +1427,7 @@
 				(then (set (local expected) (u32 40))))
 			(let checked (call plan_value (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (local value) (local expected) (local index) (borrow-shared (local functions))
-				(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local statements))
+				(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-mut (local statements))
 				(borrow-mut (local expressions)) (borrow-mut (local sites)) (local site_count) (local view_start)))
 			(if
 				(:doc "Abort before publishing a binding whose value fails checking.")
@@ -1330,7 +1437,7 @@
 				(record.make ScalarStatement (kind (local kind)) (target (local target)) (value (local value))
 					(type (record.get (slice.load (local expressions) (local value)) type))
 					(first (local first)) (previous_owner (local previous_owner))
-					(falls_through (bool.not (u32.eq (local kind) (u32 7))))))
+					(falls_through (bool.not (u32.eq (local kind) (u32 7)))) (move_site (i32 -1))))
 			(return (local checked))))
 
 	(fn
@@ -1420,7 +1527,8 @@
 					(let node (slice.load (local nodes) (local outer)))
 					(return (call body_error (local caller) (record.get (local node) start)
 						(record.get (local node) end) (u32 24)))))
-			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0))
+				(error (u32 0)) (related_start (i32 -1)) (related_end (i32 -1))))))
 
 	(fn
 		(:doc `Check each selected function and retain the resolved calls in source order.
@@ -1450,4 +1558,5 @@
 						(then (return (local checked))))
 					(set (local site_count) (record.get (local checked) count))
 					(set (local function) (i32.add.wrapping (local function) (i32 1)))))
-			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0)))))))
+			(return (record.make BodyPlan (count (local site_count)) (file (i32 -1)) (start (i32 0)) (end (i32 0))
+				(error (u32 0)) (related_start (i32 -1)) (related_end (i32 -1)))))))
