@@ -114,6 +114,90 @@
 					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
 			(return (local cursor))))
 
+	;; Recognize the JSON short escapes after their opening backslash.
+	(fn is_short_escape
+		(params (byte u8))
+		(returns bool)
+		(body
+			;; Accept escaped punctuation and the five named control characters.
+			(return (bool.or
+				(bool.or
+					(u8.eq (local byte) (u8 34))
+					(bool.or (u8.eq (local byte) (u8 92)) (u8.eq (local byte) (u8 47))))
+				(bool.or
+					(bool.or (u8.eq (local byte) (u8 98)) (u8.eq (local byte) (u8 102)))
+					(bool.or
+						(u8.eq (local byte) (u8 110))
+						(bool.or (u8.eq (local byte) (u8 114)) (u8.eq (local byte) (u8 116)))))))))
+
+	;; Accept ASCII digits and both cases of A through F in Unicode escapes.
+	(fn is_hex_digit
+		(params (byte u8))
+		(returns bool)
+		(body
+			;; Use half-open byte ranges for decimal, uppercase, and lowercase digits.
+			(return (bool.or
+				(bool.and (bool.not (u8.lt (local byte) (u8 48))) (u8.lt (local byte) (u8 58)))
+				(bool.or
+					(bool.and (bool.not (u8.lt (local byte) (u8 65))) (u8.lt (local byte) (u8 71)))
+					(bool.and (bool.not (u8.lt (local byte) (u8 97))) (u8.lt (local byte) (u8 103))))))))
+
+	;; Keep the raw extent of a lexical error for the caller.
+	(fn lexical_error
+		(params (start i32) (end i32))
+		(returns Token)
+		(body
+			(return (record.make Token (kind (u32 3)) (start (local start)) (end (local end))))))
+
+	;; Validate quoted bytes while preserving the full spelling for the parser.
+	(fn scan_quoted
+		(params (source (shared-slice u8)) (start i32))
+		(returns Token)
+		(body
+			(let length (slice.len (local source)))
+			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+			;; Read only bytes inside the supplied view, including while scanning escapes.
+			(while (i32.lt (local cursor) (local length))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+					;; An unescaped quote completes the span just after the closing byte.
+					(if (u8.eq (local byte) (u8 34))
+						(then
+							(return (record.make Token (kind (u32 2)) (start (local start)) (end (local cursor))))))
+					;; Raw ASCII control bytes end the error span just after the offending byte.
+					(if (u8.lt (local byte) (u8 32))
+						(then (return (call lexical_error (local start) (local cursor)))))
+					;; A backslash consumes its escape bytes before the next quote check.
+					(if (u8.eq (local byte) (u8 92))
+						(then
+							;; A trailing backslash reaches the view end without an escape byte.
+							(if (i32.eq (local cursor) (local length))
+								(then (return (call lexical_error (local start) (local length)))))
+							(let escape (slice.load (local source) (local cursor)))
+							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+							;; A Unicode escape must supply exactly four hex digits.
+							(if (u8.eq (local escape) (u8 117))
+								(then
+									(let-mut digits (i32 0))
+									;; Check each digit before advancing to the next byte.
+									(while (i32.lt (local digits) (i32 4))
+										(body
+											;; A clipped escape reports the view end.
+											(if (i32.eq (local cursor) (local length))
+												(then (return (call lexical_error (local start) (local length)))))
+											(let digit (slice.load (local source) (local cursor)))
+											(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+											;; Include the first invalid digit in the error span.
+											(if (bool.not (call is_hex_digit (local digit)))
+												(then (return (call lexical_error (local start) (local cursor)))))
+											(set (local digits) (i32.add.wrapping (local digits) (i32 1))))))
+								(else
+									;; Every other escape must belong to the short escape set.
+									(if (bool.not (call is_short_escape (local escape)))
+										(then (return (call lexical_error (local start) (local cursor)))))))))))
+			(return (call lexical_error (local start) (local length)))))
+
 	;; Scan one raw token and return its half-open byte span in the supplied view.
 	(fn scan_token
 		(params (source (shared-slice u8)) (cursor i32))
@@ -122,6 +206,8 @@
 			(issue "https://github.com/wove-lang/wove/issues/29"))
 		(expect lexer.line_comment
 			(issue "https://github.com/wove-lang/wove/issues/30"))
+		(expect lexer.quoted_string
+			(issue "https://github.com/wove-lang/wove/issues/31"))
 		(body
 			(let start (call skip_whitespace (borrow-shared (local source)) (local cursor)))
 			(let length (slice.len (local source)))
@@ -148,10 +234,12 @@
 					(let text_start (i32.add.wrapping (local next) (i32 1)))
 					(let end (call line_comment_end (borrow-shared (local source)) (local text_start)))
 					(return (record.make Token (kind (u32 59)) (start (local start)) (end (local end))))))
-			;; Consume a lone semicolon or quote so the next scan can make progress.
-			(if (call is_semicolon_or_quote (local byte))
-				(then
-					(return (record.make Token (kind (u32 3)) (start (local start)) (end (local next))))))
+			;; The opening quote selects the string scanner before interpreting any content.
+			(if (u8.eq (local byte) (u8 34))
+				(then (return (call scan_quoted (borrow-shared (local source)) (local start)))))
+			;; A semicolon that did not open a comment is a one-byte error.
+			(if (u8.eq (local byte) (u8 59))
+				(then (return (call lexical_error (local start) (local next)))))
 			(let end (call bare_atom_end (borrow-shared (local source)) (local next)))
 			(return (record.make Token (kind (u32 1)) (start (local start)) (end (local end))))))
 

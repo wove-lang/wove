@@ -13,7 +13,7 @@
 // Match the seed's generated names to the scanner declarations.
 #define source_offset wv_seed_fn_4
 #define source_kind wv_seed_fn_5
-#define scan_token wv_seed_fn_9
+#define scan_token wv_seed_fn_13
 
 typedef wv_seed_record_0 Token;
 
@@ -59,7 +59,7 @@ typedef struct {
 static const uint8_t token_stream[] = " (fn -42)";
 static const uint8_t token_parent[] = "x (fn -42)y";
 static const uint8_t semicolon[] = ";";
-static const uint8_t delimiters[] = "a;b\"c(d)";
+static const uint8_t delimiters[] = "a;b\"c\"d(e)";
 
 static const TokenSpan stream_tokens[] = {
 	{40, 1, 2}, {1, 2, 4}, {1, 5, 8}, {41, 8, 9}, {0, 9, 9},
@@ -67,8 +67,8 @@ static const TokenSpan stream_tokens[] = {
 static const TokenSpan atom_tokens[] = {{1, 0, 3}, {0, 3, 3}};
 static const TokenSpan semicolon_tokens[] = {{3, 0, 1}, {0, 1, 1}};
 static const TokenSpan delimiter_tokens[] = {
-	{1, 0, 1}, {3, 1, 2}, {1, 2, 3}, {3, 3, 4}, {1, 4, 5},
-	{40, 5, 6}, {1, 6, 7}, {41, 7, 8}, {0, 8, 8},
+	{1, 0, 1}, {3, 1, 2}, {1, 2, 3}, {2, 3, 6}, {1, 6, 7},
+	{40, 7, 8}, {1, 8, 9}, {41, 9, 10}, {0, 10, 10},
 };
 
 static const uint8_t comments_lf[] = ";; (\" \n(fn;; ) \"\nx)\n;; tail ";
@@ -98,6 +98,42 @@ static const struct {
 		crlf_tokens, sizeof(crlf_tokens) / sizeof(crlf_tokens[0])},
 	{"CR comments", {comments_cr, sizeof(comments_cr) - 1, sizeof(uint8_t)},
 		single_line_ending_tokens, sizeof(single_line_ending_tokens) / sizeof(single_line_ending_tokens[0])},
+};
+
+static const uint8_t quoted_stream[] = "\"\"(\"(; ;; )\"\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u0030\\uAbCd5\")x";
+static const uint8_t quoted_parent[] = "p \"x\\u0030\"q";
+static const uint8_t bad_escape[] = "\"a\\q)";
+static const uint8_t bad_hex[] = "\"\\u03G8)";
+static const uint8_t short_hex_quote[] = "\"\\u03\")";
+static const uint8_t short_hex[] = "\"\\u03";
+static const uint8_t string_lf[] = "\"a\n)";
+static const uint8_t string_cr[] = "\"a\r)";
+static const uint8_t string_tab[] = "\"a\t)";
+static const uint8_t unterminated_string[] = "\"xyz";
+static const uint8_t trailing_escape[] = "\"xyz\\";
+static const uint8_t lone_quote[] = "\"";
+static const uint8_t string_nul[] = {'"', 'a', 0, ')'};
+
+static const TokenSpan quoted_tokens[] = {
+	{2, 0, 2}, {40, 2, 3}, {2, 3, 12}, {2, 12, 43}, {41, 43, 44}, {1, 44, 45}, {0, 45, 45},
+};
+
+static const struct {
+	const char *label;
+	wvrt_slice input;
+	int32_t end;
+} string_errors[] = {
+	{"invalid short escape", {bad_escape, sizeof(bad_escape) - 1, sizeof(uint8_t)}, 4},
+	{"non-hex Unicode digit", {bad_hex, sizeof(bad_hex) - 1, sizeof(uint8_t)}, 6},
+	{"closing quote within Unicode escape", {short_hex_quote, sizeof(short_hex_quote) - 1, sizeof(uint8_t)}, 6},
+	{"Unicode escape ends at EOF", {short_hex, sizeof(short_hex) - 1, sizeof(uint8_t)}, 5},
+	{"raw LF in string", {string_lf, sizeof(string_lf) - 1, sizeof(uint8_t)}, 3},
+	{"raw CR in string", {string_cr, sizeof(string_cr) - 1, sizeof(uint8_t)}, 3},
+	{"raw tab in string", {string_tab, sizeof(string_tab) - 1, sizeof(uint8_t)}, 3},
+	{"unterminated string", {unterminated_string, sizeof(unterminated_string) - 1, sizeof(uint8_t)}, 4},
+	{"trailing backslash", {trailing_escape, sizeof(trailing_escape) - 1, sizeof(uint8_t)}, 5},
+	{"lone quote", {lone_quote, sizeof(lone_quote) - 1, sizeof(uint8_t)}, 1},
+	{"raw NUL in string", {string_nul, sizeof(string_nul), sizeof(uint8_t)}, 3},
 };
 
 // Compare the full offset and kind returned by the compiled Wove scanner.
@@ -209,5 +245,19 @@ int main(void) {
 	check_token("comment opener at EOF", empty_comment, 0, (TokenSpan){59, 0, 2});
 	wvrt_slice clipped_comment = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 6, site);
 	check_token("view ends inside comment", clipped_comment, 0, (TokenSpan){59, 0, 5});
+	wvrt_slice quoted = {quoted_stream, sizeof(quoted_stream) - 1, sizeof(uint8_t)};
+	check_tokens("quoted token stream", quoted, quoted_tokens, sizeof(quoted_tokens) / sizeof(quoted_tokens[0]));
+	for (size_t i = 0; i < sizeof(string_errors) / sizeof(string_errors[0]); ++i) {
+		check_token(string_errors[i].label, string_errors[i].input, 0, (TokenSpan){3, 0, string_errors[i].end});
+	}
+	wvrt_slice recovery = {bad_escape, sizeof(bad_escape) - 1, sizeof(uint8_t)};
+	check_token("resume after invalid escape", recovery, 4, (TokenSpan){41, 4, 5});
+
+	wvrt_slice quoted_view = wvrt_slice_range_u8(quoted_parent, sizeof(quoted_parent) - 1, 1, 11, site);
+	check_token("quoted subrange", quoted_view, 0, (TokenSpan){2, 1, 10});
+	wvrt_slice clipped_hex = wvrt_slice_range_u8(quoted_parent, sizeof(quoted_parent) - 1, 1, 8, site);
+	check_token("subrange ends inside Unicode escape", clipped_hex, 0, (TokenSpan){3, 1, 7});
+	wvrt_slice clipped_quote = wvrt_slice_range_u8(quoted_parent, sizeof(quoted_parent) - 1, 1, 10, site);
+	check_token("closing quote outside subrange", clipped_quote, 0, (TokenSpan){3, 1, 9});
 	return wove_fixture_main();
 }
