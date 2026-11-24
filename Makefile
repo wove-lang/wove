@@ -3,6 +3,8 @@
 
 PYTHON ?= python3
 CLANG ?= clang
+GCC ?= gcc
+GCC_CXX ?= g++
 CFLAGS ?= -O2 -Wall -Wextra
 BUILD_DIR ?= build
 
@@ -54,6 +56,7 @@ CLANG_FIXTURES := tests/stage-2/clang
 CLANG_PROBE := $(STAGE2)/clang/probe
 CLANG_SOURCES := $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
+GCC_FIXTURES := tests/stage-2/gcc
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -68,6 +71,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	}' "$(OWNERSHIP_CASES)")
 
 .PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
+.PHONY: test-stage-2-gcc test-stage-2-gcc-live
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -82,7 +86,7 @@ test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
+test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -118,6 +122,14 @@ test-stage-2-config: $(CONFIG_PROGRAM)
 # Check generated C input and captured JSON separately from native command launching.
 test-stage-2-clang: $(CLANG_PROBE) $(CLANG_TEMPLATE)
 	sh "$(CLANG_FIXTURES)/check.sh" "$(CLANG_PROBE)" "$(CLANG_TEMPLATE)" "$(CLANG_FIXTURES)/cases.tsv" $(CLANG)
+
+# Check an archived-format GCC capture through the shared AST lookup fixture.
+test-stage-2-gcc: $(CLANG_PROBE)
+	sh "$(CLANG_FIXTURES)/check.sh" "$(CLANG_PROBE)" "$(CLANG_TEMPLATE)" "$(GCC_FIXTURES)/cases.tsv"
+
+# Build and load the plugin only on hosts with matching GNU GCC plugin headers.
+test-stage-2-gcc-live: $(CLANG_PROBE) $(CLANG_TEMPLATE)
+	sh "$(GCC_FIXTURES)/check-live.sh" "$(CLANG_PROBE)" "$(CLANG_TEMPLATE)" stage-2/gcc/inspect.cc "$(GCC)" "$(GCC_CXX)"
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"

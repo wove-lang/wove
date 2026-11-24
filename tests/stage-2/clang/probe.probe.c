@@ -71,14 +71,15 @@ static int run_source(char **argv) {
 }
 
 // Pass the capture and the manifest's expected coordinates to the Wove assertions.
-static int run_index(char **argv) {
+static int run_index(int argc, char **argv) {
 	const wvrt_slice input = read_input(argv[2]);
 	const wv_seed_record_0 expected = {
 		(uint32_t)strtoul(argv[7], NULL, 10), atoi(argv[8]), atoi(argv[9]), atoi(argv[10]),
 		atoi(argv[11]), atoi(argv[12]), (uint32_t)strtoul(argv[13], NULL, 10),
 		atoi(argv[14]), atoi(argv[15]), (uint32_t)strtoul(argv[16], NULL, 10)
 	};
-	const int result = check_ast(input, atoi(argv[3]), text(argv[4]), text(argv[5]), text(argv[6]), expected);
+	const wvrt_slice expected_text = text(argc == 18 ? argv[17] : "-");
+	const int result = check_ast(input, atoi(argv[3]), text(argv[4]), text(argv[5]), text(argv[6]), expected, expected_text);
 	free((void *)input.wvrt_items);
 	return result;
 }
@@ -89,9 +90,9 @@ int main(int argc, char **argv) {
 	if (argc == 10 && strcmp(argv[1], "source") == 0) {
 		return run_source(argv);
 	}
-	// Index cases include expected probe, declaration, and document spans.
-	if (argc == 17 && strcmp(argv[1], "index") == 0) {
-		return run_index(argv);
+	// Index cases may give the original probe text alongside span and word expectations.
+	if ((argc == 17 || argc == 18) && strcmp(argv[1], "index") == 0) {
+		return run_index(argc, argv);
 	}
 	fprintf(stderr, "Expected source or index fixture arguments\n");
 	return EXIT_FAILURE;
