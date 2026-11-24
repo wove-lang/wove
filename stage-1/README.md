@@ -28,6 +28,12 @@ Write boolean literals as `(bool true)` or `(bool false)`. Equality and
 less-than forms such as `(u8.eq (local byte) (u8 40))` and `(i32.lt (i32 -1)
 (i32 0))` take two operands of the named integer type and return `bool`.
 
+`(bool.and left right)` and `(bool.or left right)` evaluate the left
+operand first. They evaluate the right operand once when the left operand is
+true for `bool.and` or false for `bool.or`. The seed type-checks both operands
+as `bool` in every case. `(bool.not value)` negates one boolean. All three
+operations return `bool`.
+
 An `if` statement takes a boolean condition, a `(then ...)` block, and an
 optional `(else ...)` block. Only the selected block executes. Each arm
 releases its local owners on exit, and a return releases all enclosing scopes.
