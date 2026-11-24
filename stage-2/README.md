@@ -147,8 +147,11 @@ fields to the end. All indices refer to existing tree rows.
 
 `read_module` reads the name slot and writes the original indices of selected
 declarations into a caller-provided record slice.
-It applies bootstrap `cfg` and `test` selection to the module, its groups, and
-its declarations. It flattens active `decls` in source order. An excluded
+The caller chooses bootstrap or native mode. `(cfg bootstrap)` selects in
+bootstrap mode and `(cfg (not bootstrap))` selects in native mode. The same
+rules apply to the module, its groups, and its declarations. A `(test)`
+directive excludes its target in either mode. The reader flattens active
+`decls` in source order. An excluded
 module succeeds with its name and zero declarations. Unknown metadata and
 unknown directive payloads stay opaque. Later passes resolve imports and
 interpret declarations.
@@ -381,7 +384,9 @@ discarded by `..` can be absent from the graph. Stage 1 requires each
 intermediate directory to exist on the host filesystem.
 Several paths can refer to one identity, which the resolver reads once.
 An empty `only` still visits its provider. An excluded module contributes
-no names or nested imports.
+no names or nested imports. The resolver applies one mode across the graph,
+including C header providers and their selected members. The resolved graph
+retains its mode for signature checking and C emission.
 
 In an `only` list, `Token` or `(as Token read_token)` selects a
 function. `(type Token)` or `(type (as Token LocalToken))` selects a
@@ -506,6 +511,10 @@ token is a string. The first output row contains the written count, span start,
 span end, error, line, and column. The rest is the decoded prefix as raw bytes.
 The [decode fixtures](../tests/stage-2/source_decodings.tsv) check spans,
 compare successful values with Stage 1, and check the prefix on failure.
+
+Prefix a selection, compilation, or caller inspection command with
+`--mode bootstrap` or `--mode native` to choose its mode. The probe defaults
+to bootstrap mode. Both modes in this slice emit a parameterless C entry.
 
 Use `--module FILE [START END [DECL_CAPACITY]]` to select a checked module.
 The first row contains the selected count, start, end, error, line, and
