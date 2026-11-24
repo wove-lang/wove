@@ -221,7 +221,15 @@ owner's original storage. A mutable call borrow requires `let-mut`.
 Owners are released in reverse declaration order when their lexical
 scope exits, including on each completed loop iteration. A return
 evaluates its result first and releases the active owners from the
-scopes it leaves. An owner stays in its declaring binding for this slice.
+scopes it leaves.
+
+`(let received (move (local data)))` transfers the existing allocation
+between local bindings in the same lexical block. Completed call borrows
+allow the move, and the receiving binding controls mutable access. Cleanup
+drops the receiver once. An earlier exit before the transfer drops the
+original owner. Borrowing or moving the old binding again reports
+`ownership.use_after_move` with the attempted operation and the original
+move span.
 
 `(bool.and left right)` evaluates the right operand when the left is true.
 `(bool.or left right)` evaluates it when the left is false. Both operands
@@ -292,6 +300,7 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | 34 | Unavailable function or binding | The requested name or incomplete reference |
 | 35 | Wrong call arity | The call expression |
 | 37 | Assignment to an immutable binding | The target name |
+| 39 | `ownership.use_after_move` | The attempted use, with the original move as a related span |
 
 The [caller inspector](source/callers.wove) uses the checked scalar plan
 from before C emission. Each call records its caller and callee as a
@@ -397,7 +406,11 @@ and the active declarations with the Stage 1 seed.
 
 Use `--emit-c FILE [START END [OUTPUT_CAPACITY]]` to compile a local scalar module.
 The first row gives the written count, source span, error, line, and column.
-The remaining bytes are the C translation unit. The
+On success the remaining bytes are the C translation unit. An ownership
+error with related context adds a `related` row with the file identity,
+span start and end, and one-based line and column. Local emission and
+caller inspection use view-relative spans and parent-file coordinates.
+Graph emission and inspection use spans relative to the defining file. The
 [compilation fixtures](../tests/stage-2/source_compilations.tsv) compile the
 emitted C with Clang, run the executable returning 42, and check the full
 return values at the i32 boundaries. They also cover stable helper names,

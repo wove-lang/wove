@@ -21,7 +21,8 @@
 	(use wove-file "./text.wove" (only c_byte c_text_fragment c_type_text c_cast c_i32_bias write_c_name c_decimal_digits
 			function_name_role parameter_name_role local_name_role temporary_name_role))
 
-	(struct EmitResult (fields (written i32) (start i32) (end i32) (error u32)))
+	(struct EmitResult
+		(fields (written i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
 
 	(fn
 		(:doc `Write the ABI entry or a stable name from a defining function row.`)
@@ -456,10 +457,10 @@
 			(return (local cursor))))
 
 	(fn
-		(:doc `Release active owners in reverse declaration order up to the enclosing scope's owner.`)
+		(:doc `Release live owners in reverse declaration order at a return or block exit.`)
 		write_cleanup
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (statements (shared-slice ScalarStatement))
-			(head i32) (stop i32) (tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
+			(head i32) (stop i32) (exit_row i32) (tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let-mut owner (local head))
@@ -469,11 +470,17 @@
 				(bool.not (i32.eq (local owner) (local stop)))
 				(body
 					(let row (slice.load (local statements) (local owner)))
-					(set (local cursor) (call open_array_drop (borrow-mut (local output)) (local cursor) (local writing)))
-					(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
-						(record.get (local row) target) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
-					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
-					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
+					(let move (record.get (local row) move_site))
+					(if
+						(:doc "An earlier return still owns its source. Fallthrough has executed every same-block transfer.")
+						(bool.or (i32.lt (local move) (i32 0))
+							(bool.and (bool.not (i32.lt (local exit_row) (i32 0))) (i32.lt (local exit_row) (local move))))
+						(then
+							(set (local cursor) (call open_array_drop (borrow-mut (local output)) (local cursor) (local writing)))
+							(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+								(record.get (local row) target) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))))
 					(set (local owner) (record.get (local row) previous_owner))))
 			(return (local cursor))))
 
@@ -521,7 +528,7 @@
 						(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
 					(set (local cursor) (call write_cleanup (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local tree_base)
+						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local index) (local tree_base)
 						(borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 3) (local writing)))
 					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
@@ -654,7 +661,7 @@
 								(then (set (local cursor) (call write_cleanup
 									(borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local statements))
 									(record.get (local arm) previous_owner) (record.get (local entry) previous_owner)
-									(record.get (local function) tree_base) (borrow-mut (local output)) (local cursor) (local writing)))))
+									(i32 -1) (record.get (local function) tree_base) (borrow-mut (local output)) (local cursor) (local writing)))))
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
 							(let alternate (record.get (local exit) alternate))
 							(if
@@ -804,7 +811,7 @@
 		(returns EmitResult)
 		(body
 			(return (record.make EmitResult (written (local written)) (error (local error))
-				(start (local start)) (end (local end))))))
+				(start (local start)) (end (local end)) (related_start (i32 -1)) (related_end (i32 -1))))))
 
 	(fn
 		(:doc `Check, measure, and emit the selected scalar program into the supplied output view.
@@ -818,7 +825,7 @@
 				"gh:wove-lang/wove:73" "gh:wove-lang/wove:74" "gh:wove-lang/wove:75"
 				"gh:wove-lang/wove:77" "gh:wove-lang/wove:79" "gh:wove-lang/wove:83"
 				"gh:wove-lang/wove:85" "gh:wove-lang/wove:90" "gh:wove-lang/wove:104"
-				"gh:wove-lang/wove:107"))
+				"gh:wove-lang/wove:107" "gh:wove-lang/wove:110"))
 		emit_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))
@@ -853,10 +860,12 @@
 				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 				(borrow-mut (local statements)) (borrow-mut (local expressions)) (borrow-mut (local sites)) (local view_start)))
 			(if
-				(:doc "Keep source spans from call resolution and exact scalar checking.")
+				(:doc "Preserve the primary span and any related transfer from body checking.")
 				(u32.lt (u32 0) (record.get (local checked) error))
-				(then (return (call emit_result (i32 0) (record.get (local checked) start)
-					(record.get (local checked) end) (record.get (local checked) error)))))
+				(then (return (record.make EmitResult (written (i32 0))
+					(start (record.get (local checked) start)) (end (record.get (local checked) end))
+					(error (record.get (local checked) error))
+					(related_start (record.get (local checked) related_start)) (related_end (record.get (local checked) related_end))))))
 			(let measured (call write_translation_unit (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local statements)) (borrow-shared (local expressions)) (borrow-mut (local output)) (bool false)))

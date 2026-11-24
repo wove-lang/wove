@@ -278,10 +278,12 @@ def check_compilations(executable, directory, manifest, clang):
 		assert delimiter and tuple(map(int, header.split(b"\t"))) == row, (label, header)
 		assert status == int(row[3] != 0), label
 		expected_c = b"" if expected == "-" else bytes.fromhex(expected)
-		assert len(emitted) == row[0] and emitted == expected_c, (label, emitted)
+		# Rejections can provide an optional related location instead of a C payload.
 		if mode == "reject":
-			assert status == 1, label
+			related = b"" if value == "-" else ("related\t" + "\t".join(value.split()) + "\n").encode()
+			assert status == 1 and row[0] == 0 and expected_c == b"" and emitted == related, (label, emitted)
 			continue
+		assert len(emitted) == row[0] and emitted == expected_c, (label, emitted)
 
 		generated.write_bytes(emitted)
 		command = [*clang, "-I", "runtime", str(generated), runtime, "-o", str(program)]
