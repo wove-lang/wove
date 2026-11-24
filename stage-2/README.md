@@ -168,9 +168,15 @@ functions ending in a return. Helpers can accept and return `i32`, `u8`,
 and direct calls. An `i32` local declared with `let` or `let-mut` comes
 into scope after its initializer. A `set` requires an existing `let-mut`
 binding and a value of that binding's exact type. The selected `main`
-has the ABI signature
-`int main(void)`. Forward calls use checked prototypes, and nested calls
-evaluate from left to right.
+has the ABI signature `int main(void)`. Forward calls use checked
+prototypes, and nested calls evaluate from left to right.
+
+`(bool true)` and `(bool false)` are scalar literals.
+`i32.eq` and `i32.lt` compare signed operands and return `bool`.
+`i32.add.wrapping` and `i32.sub.wrapping` return the signed 32-bit
+result modulo 2^32. All four operators require two `i32` operands,
+each evaluated once, left to right. Emitted C widens the arithmetic,
+reduces it to 32 bits as unsigned, and produces an in-range signed result.
 
 [FNV-1a](hashing/fnv1a.wove) exposes the 31-bit seed with `fnv1a_seed`
 and updates it one raw byte at a time with `fnv1a_byte`. The declaration
@@ -195,7 +201,7 @@ become underscores.
 | `f` | Function | Stable declaration hash | Function name |
 | `p` | Parameter | Zero-based position in its signature | Parameter name |
 | `l` | Local | Declared name's original file-local tree row | Local name |
-| `t` | Nested call temporary | Original expression's source-tree row index | Empty |
+| `t` | Expression temporary | Original expression's file-local tree row | Empty |
 
 For this single-module slice, hash the declared module name, the four-byte
 little-endian function kind, and the original function name using the

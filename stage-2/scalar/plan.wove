@@ -16,7 +16,8 @@
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar (type EntryRead) (type StatementRead)))
+		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar binary_result_type
+			(type EntryRead) (type StatementRead)))
 
 	(struct ScalarFunction
 		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
@@ -693,6 +694,30 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
+		(:doc `Seed both operands of a checked i32 operator before the value walk reaches them.`)
+		plan_binary
+		(params (nodes (shared-slice SourceNode)) (node SourceNode) (first i32) (index i32)
+			(kind u32) (type u32) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A binary operator requires a left operand.")
+				(i32.lt (local first) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let second (record.get (slice.load (local nodes) (local first)) next_sibling))
+			(if
+				(:doc "Exactly one right operand must follow the left operand.")
+				(bool.or (i32.lt (local second) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local second)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let expected (call expression_row (u32 0) (u32 5) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
+			(slice.store (local expressions) (local first) (local expected))
+			(slice.store (local expressions) (local second) (local expected))
+			(slice.store (local expressions) (local index)
+				(call expression_row (local kind) (local type) (i32 -1) (local first) (i32 0) (i32 0) (bool false)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
 		(:doc `Check the scalar expression at a source row whose expected type is known.`)
 		plan_expression
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
@@ -704,10 +729,12 @@
 			(let node (slice.load (local nodes) (local index)))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+			(let binary (call binary_result_type (local tag)))
 			(if
-				(:doc "Accept an exact-type literal, a binding read, or a direct call.")
-				(bool.not (bool.or (u32.eq (local tag) (local type))
-					(bool.or (u32.eq (local tag) (u32 8)) (u32.eq (local tag) (u32 9)))))
+				(:doc "Literals and operators need the exact result type. Reads and calls check their resolved types.")
+				(bool.not
+					(bool.or (bool.or (u32.eq (local tag) (local type)) (u32.eq (local binary) (local type)))
+						(bool.or (u32.eq (local tag) (u32 8)) (u32.eq (local tag) (u32 9)))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) (u32 24)))
 			(if
@@ -728,6 +755,11 @@
 					(local node) (local operand) (local type) (local index) (local caller)
 					(borrow-shared (local functions)) (borrow-shared (local parameters))
 					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A binary operator seeds both operand rows with i32.")
+				(u32.lt (u32 0) (local binary))
+				(then (return (call plan_binary (borrow-shared (local nodes)) (local node)
+					(local operand) (local index) (local tag) (local type) (borrow-mut (local expressions))))))
 			(return (call plan_literal (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local operand) (local type) (local index) (borrow-mut (local expressions))))))
 
@@ -760,8 +792,8 @@
 	(fn
 		(:doc `Check a statement's value tree in source order.
 
-		Each call seeds its argument rows before they are reached. Untyped
-		rows sit outside the plan, for example metadata and literal payloads.
+		Calls and operators seed their operand rows before they are reached.
+		Untyped rows sit outside the plan, for example metadata and literal payloads.
 		Append call sites to the checked prefix supplied by the caller.`)
 		plan_value
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
@@ -784,7 +816,7 @@
 				(body
 					(let type (record.get (slice.load (local expressions) (local index)) type))
 					(if
-						(:doc "Only the root and verified call arguments receive an expected type.")
+						(:doc "Only the root and verified child operands receive an expected type.")
 						(u32.lt (u32 0) (local type))
 						(then
 							(let checked (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
