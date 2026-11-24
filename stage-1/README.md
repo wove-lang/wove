@@ -85,6 +85,17 @@ tags and their payloads use the same prefix. A colon-tagged form after an
 operand is a source error, as are the retired `with-meta`, `meta`, and `;;`
 spellings. Quoted text can contain semicolons.
 
+An `:expect` entry can group test and issue links on the form it describes.
+
+```lisp
+(:expect
+	(tests "stage-2/lexer_stream.wove" "stage-2/lexer_errors.tsv")
+	(issues "gh:wove-lang/wove:53"))
+```
+
+Test paths are relative to `tests/`. Each group takes its strings as operands.
+Either group may be omitted. GitHub issues can use `gh:owner/repo:number` or a full URL.
+
 A single backtick opens or closes a raw string. Inside the string, a doubled
 backtick produces one backtick. Other characters and indentation are kept
 literally, including backslashes, quotes, and semicolons. Physical CRLF and
