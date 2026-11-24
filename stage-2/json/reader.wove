@@ -9,7 +9,9 @@
 	in source order through first_child and next_sibling. Absent links
 	are -1. Kinds 1 through 7 are object, array, string, number, true,
 	false, and null. All source spans are half-open UTF-8 byte ranges.
-	Number spans preserve the complete original lexeme.
+	Number spans preserve the complete original lexeme. Call json_parse for
+	JSON separator rules or json_parse_with_options to allow a single final
+	comma after a member or item.
 
 	A successful parse reports the populated row count and the root span.
 	On failure, discard the rows. Error codes are 1 invalid UTF-8,
@@ -97,8 +99,8 @@
 
 	(fn
 		(:doc "Use each open container's parent link as the parse stack, even at deep nesting.")
-		json_parse
-		(params (source (shared-slice u8)) (nodes (mut-slice JsonNode)))
+		json_parse_with_options
+		(params (source (shared-slice u8)) (nodes (mut-slice JsonNode)) (trailing_commas bool))
 		(returns JsonParseResult)
 		(body
 			(let invalid (call utf8_invalid_offset (borrow-shared (local source))))
@@ -148,7 +150,28 @@
 						(:doc "Only an object closes with a brace.")
 						(local object)
 						(then (set (local close) (u8 125))))
-					(let byte (call json_peek (borrow-shared (local source)) (local cursor)))
+					(let-mut byte (call json_peek (borrow-shared (local source)) (local cursor)))
+					(if
+						(:doc "A complete child requires either a closing delimiter or a separating comma.")
+						(bool.and (bool.not (u8.eq (local byte) (local close)))
+							(bool.not (i32.lt (record.get (local node) last_child) (i32 0))))
+						(then
+							(if
+								(:doc "Diagnose a missing comma at the next significant byte.")
+								(bool.not (u8.eq (local byte) (u8 44)))
+								(then (return (call parse_failure
+									(call json_error_at (borrow-shared (local source)) (u32 9) (local cursor))))))
+							(let after (call json_skip_trivia (borrow-shared (local source))
+								(i32.add.wrapping (local cursor) (i32 1))))
+							(if
+								(:doc "A malformed comment after the comma keeps its original diagnostic.")
+								(u32.lt (u32 0) (record.get (local after) error))
+								(then (return (call parse_failure (local after)))))
+							(set (local cursor) (record.get (local after) end))
+							(if
+								(:doc "With trailing commas enabled the next closer can end this container.")
+								(local trailing_commas)
+								(then (set (local byte) (call json_peek (borrow-shared (local source)) (local cursor)))))))
 					(if
 						(:doc "An immediate closer completes an empty container or follows its last child.")
 						(u8.eq (local byte) (local close))
@@ -159,22 +182,6 @@
 								(record.get (local node) next_sibling))
 							(set (local parent) (record.get (local node) parent)))
 						(else
-							(if
-								(:doc "Only a comma can introduce another child after a complete value.")
-								(bool.not (i32.lt (record.get (local node) last_child) (i32 0)))
-								(then
-									(if
-										(:doc "Diagnose missing commas and mismatched closing delimiters at the next byte.")
-										(bool.not (u8.eq (local byte) (u8 44)))
-										(then (return (call parse_failure
-											(call json_error_at (borrow-shared (local source)) (u32 9) (local cursor))))))
-									(let after (call json_skip_trivia (borrow-shared (local source))
-										(i32.add.wrapping (local cursor) (i32 1))))
-									(if
-										(:doc "Report an incomplete comment even after a comma.")
-										(u32.lt (u32 0) (record.get (local after) error))
-										(then (return (call parse_failure (local after)))))
-									(set (local cursor) (record.get (local after) end))))
 							(let-mut key_start (i32 -1))
 							(let-mut key_end (i32 -1))
 							(if
@@ -182,7 +189,7 @@
 								(local object)
 								(then
 									(if
-										(:doc "A trailing comma cannot be followed by the object's closing brace.")
+										(:doc "A member that has not closed the object requires a quoted key.")
 										(bool.not (u8.eq (call json_peek (borrow-shared (local source)) (local cursor)) (u8 34)))
 										(then (return (call parse_failure
 											(call json_error_at (borrow-shared (local source)) (u32 7) (local cursor))))))
@@ -213,7 +220,7 @@
 									(set (local cursor) (record.get (local after) end))))
 							(let value (call json_scan_value (borrow-shared (local source)) (local cursor)))
 							(if
-								(:doc "The value scanner also rejects a closing bracket just after a comma.")
+								(:doc "A malformed or missing child retains the value scanner's diagnostic.")
 								(u32.lt (u32 0) (record.get (local value) error))
 								(then (return (call parse_failure (local value)))))
 							(if
@@ -242,6 +249,14 @@
 				(then (return (call parse_failure (call json_error_at (borrow-shared (local source)) (u32 10) (local after))))))
 			(return (record.make JsonParseResult (rows (local rows)) (error (u32 0))
 				(start (record.get (local root) start)) (end (local cursor))))))
+
+	(fn
+		(:doc "Parse JSONC comments with strict JSON separator rules.")
+		json_parse
+		(params (source (shared-slice u8)) (nodes (mut-slice JsonNode)))
+		(returns JsonParseResult)
+		(body (return (call json_parse_with_options
+			(borrow-shared (local source)) (borrow-mut (local nodes)) (bool false)))))
 
 	(fn
 		(:doc "Decode a validated key or string span returned by json_parse from the same source. A short output view preserves the written UTF-8 prefix and identifies the first scalar that did not fit.")

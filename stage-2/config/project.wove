@@ -1,0 +1,401 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Read and resolve project configuration with the archive's profile layering.
+
+	Callers own the source, JSON nodes, and one setting row per parsed node.
+	Only a successful result makes the output usable. A setting lookup
+	returns the original value row, preserving the source span and lists
+	or strings. Its corresponding setting row contains any typed scalar.
+	Rows without a schema key have rule -1. Resolve canonical key IDs
+	through project_rule in the schema module.
+	Booleans use zero and one. LTO uses off, thin, full (0 to 2), C
+	standards use 11, 17, 23, indent uses tabs and spaces (0, 1), and
+	line endings use lf and crlf (0, 1).
+
+	Reader errors retain their codes and byte spans. Configuration codes are
+	13 expected object, 14 unknown key, 15 duplicate key, 16 invalid value,
+	17 invalid profile name, 18 duplicate profile name, 19 unknown selected
+	profile, and 20 insufficient setting rows.`)
+	project_config
+
+	(use wove-file "../json/reader.wove" (only (type JsonNode) json_parse_with_options json_decode_string))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "./compiler.wove" (only (type ConfigResult) config_result compiler_defaults))
+	(use wove-file "./schema.wove"
+		(only (type ProjectRule) project_rule_count project_key_bytes project_key_width write_project_schema project_rule
+			project_compiler_rule))
+	(use wove-file "./values.wove" (only read_project_value))
+
+	(struct ProjectRead (fields (error u32) (start i32) (end i32) (default_profile i32) (selected_profile i32)))
+	(struct ProjectSetting (fields (rule i32) (scalar u32)))
+	(struct ProjectOptions
+		(fields (parallel bool) (parallel_jobs u32) (line_width u32)
+			(time bool) (human bool) (max_errors u32) (color bool)))
+
+	(fn
+		(:doc "Report an error with its original byte span and no usable profile rows.")
+		project_failure
+		(params (error u32) (start i32) (end i32))
+		(returns ProjectRead)
+		(body (return (record.make ProjectRead (error (local error)) (start (local start)) (end (local end))
+			(default_profile (i32 -1)) (selected_profile (i32 -1))))))
+
+	(fn
+		(:doc "Find a member of an already validated object. An absent object returns -1.")
+		project_member
+		(params (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting)) (owner i32) (rule i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "Missing profile sections have no values.")
+				(i32.lt (local owner) (i32 0))
+				(then (return (i32 -1))))
+			(let object (slice.load (local nodes) (local owner)))
+			(let-mut child (record.get (local object) first_child))
+			(while
+				(:doc "One field per schema rule can appear in a validated object.")
+				(bool.not (i32.lt (local child) (i32 0)))
+				(body
+					(let member (slice.load (local settings) (local child)))
+					(if
+						(:doc "The stored rule identifies the decoded key.")
+						(i32.eq (record.get (local member) rule) (local rule))
+						(then (return (local child))))
+					(let value (slice.load (local nodes) (local child)))
+					(set (local child) (record.get (local value) next_sibling))))
+			(return (i32 -1))))
+
+	(fn
+		(:doc "Check one object against its scope. Nested validation follows only the schema's fixed levels.")
+		validate_project_object
+		(params (source (shared-slice u8)) (nodes (shared-slice JsonNode)) (settings (mut-slice ProjectSetting))
+			(names (shared-slice u8)) (rules (shared-slice ProjectRule)) (owner i32) (scope u32))
+		(returns ConfigResult)
+		(body
+			(let object (slice.load (local nodes) (local owner)))
+			(if
+				(:doc "Root and profile entries are required to be objects.")
+				(bool.not (u32.eq (record.get (local object) kind) (u32 1)))
+				(then (return (call config_result (u32 13) (record.get (local object) start) (record.get (local object) end)))))
+			(let-mut key (array.alloc u8 (call project_key_width)))
+			(let first (record.get (local object) first_child))
+			(let-mut child (local first))
+			(while
+				(:doc "Validate each member before putting its rule and scalar in the side table.")
+				(bool.not (i32.lt (local child) (i32 0)))
+				(body
+					(let value (slice.load (local nodes) (local child)))
+					(let start (record.get (local value) key_start))
+					(let end (record.get (local value) key_end))
+					(let decoded (call json_decode_string (borrow-shared (local source)) (local start) (local end) (borrow-mut (local key))))
+					(if
+						(:doc "A decoded spelling longer than any schema key is unknown.")
+						(u32.lt (u32 0) (record.get (local decoded) error))
+						(then (return (call config_result (u32 14) (local start) (local end)))))
+					(let id (call project_rule (borrow-shared (local rules)) (borrow-shared (local names))
+						(local scope) (borrow-shared (local key)) (record.get (local decoded) written)))
+					(if
+						(:doc "Every project key must be declared in its containing scope.")
+						(i32.lt (local id) (i32 0))
+						(then (return (call config_result (u32 14) (local start) (local end)))))
+					(let-mut previous (local first))
+					(while
+						(:doc "Only preceding siblings have validated rules to compare.")
+						(i32.lt (local previous) (local child))
+						(body
+							(let setting (slice.load (local settings) (local previous)))
+							(if
+								(:doc "Decoded duplicate keys share a rule ID.")
+								(i32.eq (record.get (local setting) rule) (local id))
+								(then (return (call config_result (u32 15) (local start) (local end)))))
+							(let sibling (slice.load (local nodes) (local previous)))
+							(set (local previous) (record.get (local sibling) next_sibling))))
+					(let rule (slice.load (local rules) (local id)))
+					(let kind (record.get (local rule) kind))
+					(let checked (call read_project_value (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local child) (local kind)))
+					(let invalid (record.get (local checked) invalid))
+					(if
+						(:doc "A list element or a whole field can be the precise origin of a type error.")
+						(bool.not (i32.lt (local invalid) (i32 0)))
+						(then
+							(let bad (slice.load (local nodes) (local invalid)))
+							(return (call config_result (u32 16) (record.get (local bad) start) (record.get (local bad) end)))))
+					(slice.store (local settings) (local child)
+						(record.make ProjectSetting (rule (local id)) (scalar (record.get (local checked) scalar))))
+					(if
+						(:doc "Validate a child object in the scope declared by its field.")
+						(u32.eq (local kind) (u32 15))
+						(then
+							(let section (call validate_project_object (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-mut (local settings)) (borrow-shared (local names)) (borrow-shared (local rules))
+								(local child) (record.get (local rule) child)))
+							(if
+								(:doc "Preserve the nested field's original diagnostic.")
+								(u32.lt (u32 0) (record.get (local section) error))
+								(then (return (local section))))))
+					(set (local child) (record.get (local value) next_sibling))))
+			(return (call config_result (u32 0) (i32 -1) (i32 -1)))))
+
+	(fn
+		(:doc "A decoded profile name must be nonempty and fit on one diagnostic line.")
+		valid_project_name
+		(params (text (shared-slice u8)) (width i32))
+		(returns bool)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Check every decoded name byte for NUL or a line break.")
+				(i32.lt (local index) (local width))
+				(body
+					(let byte (slice.load (local text) (local index)))
+					(if
+						(:doc "The name can be passed as an argument and displayed as one line.")
+						(bool.or (u8.eq (local byte) (u8 0)) (bool.or (u8.eq (local byte) (u8 10)) (u8.eq (local byte) (u8 13))))
+						(then (return (bool false))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (i32.lt (i32 0) (local width)))))
+
+	(fn
+		(:doc "Decode a previously validated name; the owning profile stands in for an omitted name.")
+		project_name_width
+		(params (source (shared-slice u8)) (value JsonNode) (text (mut-slice u8)))
+		(returns i32)
+		(body
+			(if
+				(:doc "A profile object without a name represents the default profile.")
+				(u32.eq (record.get (local value) kind) (u32 1))
+				(then
+					(slice.store (local text) (i32 0) (u8 100))
+					(slice.store (local text) (i32 1) (u8 101))
+					(slice.store (local text) (i32 2) (u8 102))
+					(slice.store (local text) (i32 3) (u8 97))
+					(slice.store (local text) (i32 4) (u8 117))
+					(slice.store (local text) (i32 5) (u8 108))
+					(slice.store (local text) (i32 6) (u8 116))
+					(return (i32 7))))
+			(let decoded (call json_decode_string (borrow-shared (local source)) (record.get (local value) start)
+				(record.get (local value) end) (borrow-mut (local text))))
+			(return (record.get (local decoded) written))))
+
+	(fn
+		(:doc "Obtain a name value, preserving where an omitted name was implied.")
+		project_name_node
+		(params (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting)) (profile i32))
+		(returns JsonNode)
+		(body
+			(let name (call project_member (borrow-shared (local nodes)) (borrow-shared (local settings)) (local profile) (i32 1)))
+			(if
+				(:doc "Use the name's span when an explicit name was supplied.")
+				(bool.not (i32.lt (local name) (i32 0)))
+				(then (return (slice.load (local nodes) (local name)))))
+			(return (slice.load (local nodes) (local profile)))))
+
+	(fn
+		(:doc "Validate every profile, resolving the requested name and the default layer by their decoded bytes.")
+		read_profiles
+		(params (source (shared-slice u8)) (requested (shared-slice u8)) (nodes (shared-slice JsonNode))
+			(settings (mut-slice ProjectSetting)) (names (shared-slice u8)) (rules (shared-slice ProjectRule)) (profiles i32))
+		(returns ProjectRead)
+		(body
+			(let width (slice.len (local source)))
+			(let-mut name (array.alloc u8 (local width)))
+			(let-mut previous_name (array.alloc u8 (local width)))
+			(let root (slice.load (local nodes) (i32 0)))
+			(let-mut first (i32 -1))
+			(let-mut list_start (record.get (local root) start))
+			(let-mut list_end (record.get (local root) end))
+			(if
+				(:doc "A missing profiles member leaves only the built-in defaults.")
+				(bool.not (i32.lt (local profiles) (i32 0)))
+				(then
+					(let list (slice.load (local nodes) (local profiles)))
+					(set (local first) (record.get (local list) first_child))
+					(set (local list_start) (record.get (local list) start))
+					(set (local list_end) (record.get (local list) end))))
+			(let default_key (slice.load (local rules) (i32 9)))
+			(let default_start (record.get (local default_key) start))
+			(let default_end (record.get (local default_key) end))
+			(let requested_width (slice.len (local requested)))
+			(let use_default (bool.or (i32.eq (local requested_width) (i32 0))
+				(call same_bytes (borrow-shared (local names)) (local default_start) (local default_end)
+					(borrow-shared (local requested)) (i32 0) (local requested_width))))
+			(let-mut defaults (i32 -1))
+			(let-mut selected (i32 -1))
+			(let-mut profile (local first))
+			(while
+				(:doc "Validate each profile even if its settings are outside the resolved layers.")
+				(bool.not (i32.lt (local profile) (i32 0)))
+				(body
+					(let checked (call validate_project_object (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-mut (local settings)) (borrow-shared (local names)) (borrow-shared (local rules)) (local profile) (u32 1)))
+					(if
+						(:doc "Forward the original profile field error.")
+						(u32.lt (u32 0) (record.get (local checked) error))
+						(then (return (call project_failure (record.get (local checked) error)
+							(record.get (local checked) start) (record.get (local checked) end)))))
+					(let value (call project_name_node (borrow-shared (local nodes)) (borrow-shared (local settings)) (local profile)))
+					(let length (call project_name_width (borrow-shared (local source)) (local value) (borrow-mut (local name))))
+					(if
+						(:doc "Report explicit empty names or decoded control characters at the name value.")
+						(bool.not (call valid_project_name (borrow-shared (local name)) (local length)))
+						(then (return (call project_failure (u32 17) (record.get (local value) start) (record.get (local value) end)))))
+					(let-mut previous (local first))
+					(while
+						(:doc "Reject repeated names across all profiles, including escape-equivalent names.")
+						(i32.lt (local previous) (local profile))
+						(body
+							(let prior (call project_name_node (borrow-shared (local nodes)) (borrow-shared (local settings)) (local previous)))
+							(let prior_width (call project_name_width (borrow-shared (local source)) (local prior) (borrow-mut (local previous_name))))
+							(if
+								(:doc "The latest spelling locates a duplicate diagnostic.")
+								(call same_bytes (borrow-shared (local name)) (i32 0) (local length)
+									(borrow-shared (local previous_name)) (i32 0) (local prior_width))
+								(then (return (call project_failure (u32 18) (record.get (local value) start) (record.get (local value) end)))))
+							(let object (slice.load (local nodes) (local previous)))
+							(set (local previous) (record.get (local object) next_sibling))))
+					(if
+						(:doc "The canonical default profile supplies the first configuration layer.")
+						(call same_bytes (borrow-shared (local names)) (local default_start) (local default_end)
+							(borrow-shared (local name)) (i32 0) (local length))
+						(then (set (local defaults) (local profile))))
+					(if
+						(:doc "A named selection supplies the overriding configuration layer.")
+						(bool.and (bool.not (local use_default))
+							(call same_bytes (borrow-shared (local requested)) (i32 0) (local requested_width)
+								(borrow-shared (local name)) (i32 0) (local length)))
+						(then (set (local selected) (local profile))))
+					(let object (slice.load (local nodes) (local profile)))
+					(set (local profile) (record.get (local object) next_sibling))))
+			(if
+				(:doc "The profiles array is where a requested profile name can be added or corrected.")
+				(bool.and (bool.not (local use_default)) (i32.lt (local selected) (i32 0)))
+				(then (return (call project_failure (u32 19) (local list_start) (local list_end)))))
+			(return (record.make ProjectRead (error (u32 0)) (start (i32 -1)) (end (i32 -1))
+				(default_profile (local defaults)) (selected_profile (local selected))))))
+
+	(fn
+		(:doc "Parse archive-style JSONC and index the validated project profile settings. An empty request selects default.")
+		read_project_config
+		(params (source (shared-slice u8)) (requested (shared-slice u8))
+			(nodes (mut-slice JsonNode)) (settings (mut-slice ProjectSetting)))
+		(returns ProjectRead)
+		(body
+			(let parsed (call json_parse_with_options (borrow-shared (local source)) (borrow-mut (local nodes)) (bool true)))
+			(if
+				(:doc "Syntax failures preserve the JSONC reader's original code and byte span.")
+				(u32.lt (u32 0) (record.get (local parsed) error))
+				(then (return (call project_failure (record.get (local parsed) error)
+					(record.get (local parsed) start) (record.get (local parsed) end)))))
+			(let rows (record.get (local parsed) rows))
+			(if
+				(:doc "Use a side table large enough to index all of the parsed nodes.")
+				(i32.lt (slice.len (local settings)) (local rows))
+				(then (return (call project_failure (u32 20) (record.get (local parsed) start) (record.get (local parsed) end)))))
+			(let-mut row (i32 0))
+			(while
+				(:doc "Clear stale settings and distinguish container and list items that have no declared key.")
+				(i32.lt (local row) (local rows))
+				(body
+					(slice.store (local settings) (local row) (record.make ProjectSetting (rule (i32 -1)) (scalar (u32 0))))
+					(set (local row) (i32.add.wrapping (local row) (i32 1)))))
+			(let-mut names (array.alloc u8 (call project_key_bytes)))
+			(let-mut rules (array.alloc ProjectRule (call project_rule_count)))
+			(call write_project_schema (borrow-mut (local names)) (borrow-mut (local rules)))
+			(let root (call validate_project_object (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-mut (local settings)) (borrow-shared (local names)) (borrow-shared (local rules)) (i32 0) (u32 0)))
+			(if
+				(:doc "The root must be a project settings object before selecting a profile.")
+				(u32.lt (u32 0) (record.get (local root) error))
+				(then (return (call project_failure (record.get (local root) error)
+					(record.get (local root) start) (record.get (local root) end)))))
+			(let profiles (call project_member (borrow-shared (local nodes)) (borrow-shared (local settings)) (i32 0) (i32 0)))
+			(return (call read_profiles (borrow-shared (local source)) (borrow-shared (local requested))
+				(borrow-shared (local nodes)) (borrow-mut (local settings)) (borrow-shared (local names))
+				(borrow-shared (local rules)) (local profiles)))))
+
+	(fn
+		(:doc "Read a rule at a path within one profile. Use -1 for unused path segments.")
+		profile_field
+		(params (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(profile i32) (section i32) (subsection i32) (field i32))
+		(returns i32)
+		(body
+			(let-mut owner (local profile))
+			(if
+				(:doc "Options may belong to a top-level profile field or a section.")
+				(bool.not (i32.lt (local section) (i32 0)))
+				(then (set (local owner) (call project_member (borrow-shared (local nodes))
+					(borrow-shared (local settings)) (local owner) (local section)))))
+			(if
+				(:doc "Build modes and the warning policy add one more level.")
+				(bool.not (i32.lt (local subsection) (i32 0)))
+				(then (set (local owner) (call project_member (borrow-shared (local nodes))
+					(borrow-shared (local settings)) (local owner) (local subsection)))))
+			(return (call project_member (borrow-shared (local nodes)) (borrow-shared (local settings)) (local owner) (local field)))))
+
+	(fn
+		(:doc "Resolve a field from the selected profile, then default. A missing field returns -1.")
+		project_setting
+		(params (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting)) (result ProjectRead)
+			(section i32) (subsection i32) (field i32))
+		(returns i32)
+		(body
+			(let selected (call profile_field (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(record.get (local result) selected_profile) (local section) (local subsection) (local field)))
+			(if
+				(:doc "Any explicit value, including zero, false, null and empty lists, overrides the default layer.")
+				(bool.not (i32.lt (local selected) (i32 0)))
+				(then (return (local selected))))
+			(return (call profile_field (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(record.get (local result) default_profile) (local section) (local subsection) (local field)))))
+
+	(fn
+		(:doc "Use the built-in scalar only when neither resolved profile provides the field.")
+		resolved_scalar
+		(params (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(result ProjectRead) (section i32) (field i32) (fallback u32))
+		(returns u32)
+		(body
+			(let row (call project_setting (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(local result) (local section) (i32 -1) (local field)))
+			(if
+				(:doc "Missing values have no row in either configuration layer.")
+				(i32.lt (local row) (i32 0))
+				(then (return (local fallback))))
+			(let setting (slice.load (local settings) (local row)))
+			(return (record.get (local setting) scalar))))
+
+	(fn
+		(:doc "Read the shared typed options with built-in defaults and explicit automatic sizing.")
+		project_options
+		(params (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting)) (result ProjectRead))
+		(returns ProjectOptions)
+		(body
+			(let defaults (call compiler_defaults))
+			(let-mut human (u32 0))
+			(let-mut color (u32 0))
+			(if
+				(:doc "The compiler settings retain their existing human-output default.")
+				(record.get (local defaults) human)
+				(then (set (local human) (u32 1))))
+			(if
+				(:doc "The compiler settings retain their existing color default.")
+				(record.get (local defaults) color)
+				(then (set (local color) (u32 1))))
+			(return (record.make ProjectOptions
+				(parallel (u32.eq (u32 1) (call resolved_scalar (borrow-shared (local nodes)) (borrow-shared (local settings))
+					(local result) (i32 -1) (i32 6) (u32 1))))
+				(parallel_jobs (call resolved_scalar (borrow-shared (local nodes)) (borrow-shared (local settings))
+					(local result) (i32 -1) (i32 7) (u32 0)))
+				(line_width (call resolved_scalar (borrow-shared (local nodes)) (borrow-shared (local settings))
+					(local result) (i32 5) (i32 51) (u32 0)))
+				(time (u32.eq (u32 1) (call resolved_scalar (borrow-shared (local nodes)) (borrow-shared (local settings))
+					(local result) (i32 -1) (i32 8) (u32 0))))
+				(human (u32.eq (u32 1) (call resolved_scalar (borrow-shared (local nodes)) (borrow-shared (local settings))
+					(local result) (i32 -1) (call project_compiler_rule (i32 0)) (local human))))
+				(max_errors (call resolved_scalar (borrow-shared (local nodes)) (borrow-shared (local settings))
+					(local result) (i32 -1) (call project_compiler_rule (i32 1)) (record.get (local defaults) max_errors)))
+				(color (u32.eq (u32 1) (call resolved_scalar (borrow-shared (local nodes)) (borrow-shared (local settings))
+					(local result) (i32 -1) (call project_compiler_rule (i32 2)) (local color)))))))))
