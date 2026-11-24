@@ -25,8 +25,8 @@
 #define decode_string wv_seed_fn_55
 #define form_parts wv_seed_fn_57
 #define read_module wv_seed_fn_66
-#define emit_module wv_seed_fn_75
-#define resolve_graph wv_seed_fn_88
+#define emit_module wv_seed_fn_77
+#define resolve_graph wv_seed_fn_130
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -37,12 +37,12 @@ typedef wv_seed_record_8 FormParts;
 typedef wv_seed_record_9 SelectedDeclaration;
 typedef wv_seed_record_10 ModuleRead;
 typedef wv_seed_record_12 EmitResult;
-typedef wv_seed_record_15 GraphModule;
-typedef wv_seed_record_16 GraphBinding;
-typedef wv_seed_record_17 GraphUse;
-typedef wv_seed_record_18 GraphSelector;
-typedef wv_seed_record_19 GraphResult;
-typedef wv_seed_record_22 SuppliedFile;
+typedef wv_seed_record_20 GraphModule;
+typedef wv_seed_record_21 GraphBinding;
+typedef wv_seed_record_22 GraphUse;
+typedef wv_seed_record_23 GraphSelector;
+typedef wv_seed_record_24 GraphResult;
+typedef wv_seed_record_17 SuppliedFile;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -572,8 +572,9 @@ static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t ca
 	const wvrt_mut_slice declarations = {selected->wvrt_items, rows, sizeof(SelectedDeclaration)};
 	const ModuleRead module = read_module(input, nodes, checked, declarations);
 	const wvrt_slice active = {selected->wvrt_items, module.wv_field_1, sizeof(SelectedDeclaration)};
+	// Allow ordinary local helper modules without a fixture-supplied byte limit.
 	if (capacity < 0) {
-		capacity = 64;
+		capacity = 4096;
 	}
 	uint8_t *bytes = guarded_output(capacity);
 	int status = EXIT_FAILURE;

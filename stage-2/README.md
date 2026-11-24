@@ -162,11 +162,31 @@ before the error. Earlier tree errors keep their original spans and codes.
 | 21 | Invalid selection directive | The offending directive or predicate |
 
 The [C emitter](emit_c.wove) consumes a checked tree, its module result,
-and the selected declaration indices. `emit_module` accepts one selected
-`main` with empty `params`, an `i32` result, and one `return` of an
-`(i32 ...)` literal. Its output is a complete C translation unit with the
-ABI entry `int main(void)`. It checks the exact signed decimal range and
-emits significant digits, so source leading zeros keep their decimal value.
+and the selected declaration indices. It checks local scalar functions
+with one return expression. Helpers can accept and return `i32`, `u8`,
+`u32`, and `bool`. Expressions support exact-type literals, parameter
+reads, and direct calls. The selected `main` has the ABI signature
+`int main(void)`. Forward calls use checked prototypes, and nested calls
+evaluate from left to right.
+
+Generated C names have the form `wg<role><id><suffix>`. The `wg` prefix
+stands for Wove-generated. The third character identifies the symbol's
+role. The ID uses seven lowercase Base32hex digits. Its first digit is
+`0` or `1` because IDs are 31 bits. A source suffix replaces dots and
+hyphens with underscores.
+
+| Tag | Role | ID | Suffix |
+| --- | --- | --- | --- |
+| `f` | Function | Stable declaration hash | Function name |
+| `p` | Parameter | Zero-based position in its signature | Parameter name |
+| `t` | Nested call temporary | Original expression's source-tree row index | Empty |
+
+For this single-module slice, hash the declared module name, the four-byte
+little-endian function kind, and the original function name using the
+archive's 31-bit FNV-1a. The ID is independent of source layout and
+declaration order. Detect collisions before writing C, even when the
+readable suffixes differ. Each resolved call keeps the callee's defining
+row and its own source node for later analysis.
 
 The result gives the written count and a view-relative span. Successful
 emission spans the module. A failure preserves the destination bytes and
@@ -175,10 +195,14 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | Code | Failure | Primary span |
 | --- | --- | --- |
 | 16 | Short C output view | The selected entry |
-| 22 | Expected one selected main | The module, unexpected declaration or name, or extra active declaration |
-| 23 | Unsupported entry signature | The function, parameter list, or return type |
-| 24 | Unsupported body or expression | The originating body form, statement, or expression |
-| 25 | Invalid signed decimal i32 | The literal value or malformed literal form |
+| 22 | Missing entry or unsupported declaration | The module, first function name, or offending declaration |
+| 23 | Unsupported signature | The parameter list, result, or offending signature form |
+| 24 | Unsupported body or incompatible expression type | The offending statement or expression |
+| 25 | Invalid scalar literal | The value or malformed literal form |
+| 32 | Stable declaration identity collision | The later function name |
+| 33 | Duplicate function or parameter | The later name |
+| 34 | Unavailable function or parameter | The requested name or incomplete reference |
+| 35 | Wrong call arity | The call expression |
 
 The [graph resolver](source_graph.wove) reads a supplied virtual file table
 and binds active function imports in each file's namespace. The table maps
@@ -258,12 +282,13 @@ metadata, and first ordinary operand indices. The
 [module fixtures](../tests/stage-2/source_modules.tsv) compare these links
 and the active declarations with the Stage 1 seed.
 
-Use `--emit-c FILE [START END [OUTPUT_CAPACITY]]` to compile the scalar entry.
+Use `--emit-c FILE [START END [OUTPUT_CAPACITY]]` to compile a local scalar module.
 The first row gives the written count, source span, error, line, and column.
 The remaining bytes are the C translation unit. The
 [compilation fixtures](../tests/stage-2/source_compilations.tsv) compile the
 emitted C with Clang, run the executable returning 42, and check the full
-return values at the i32 boundaries.
+return values at the i32 boundaries. They also cover stable helper names,
+suffix and identity collisions, and source locations for invalid calls.
 
 The [graph fixtures](../tests/stage-2/source_graphs.tsv) pass virtual paths
 and raw source files to `--graph ENTRY CAPACITY (IDENTITY PATH FILE)...`.
