@@ -72,6 +72,14 @@ wvrt_array *wvrt_array_new(int32_t wvrtlength, size_t wvrtelement_size,
 	return wvrt_result;
 }
 
+// Allocate a zeroed Stage 2 byte owner and report failure at its source span.
+wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrtlength, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	if (wvrtlength < 0) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "array length cannot be negative"); }
+	wvrt_array *wvrt_result = wvrt_array_try_new(wvrtlength, sizeof(uint8_t), _Alignof(uint8_t));
+	if (wvrt_result == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not allocate array"); }
+	return wvrt_result;
+}
+
 // Retire exactly the active owners in an element range.
 static void wvrt_array_drop_range(wvrt_array *wvrtbuffer, int32_t wvrtstart, int32_t wvrtend) {
 	if (wvrtbuffer->wvrt_drop_element == NULL) { return; }

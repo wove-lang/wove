@@ -31,11 +31,12 @@
 		(:doc `A checked expression at its source row.
 
 		Literals carry significant digit offsets in the arena. Conversions
-		and checked slice accesses carry the original file identity in target and the
-		half-open byte span in start and end. First points at the initial
-		operand to evaluate.`)
+		and checked runtime operations carry the original file identity
+		in target and the half-open byte span in start and end. First
+		points at the initial operand to evaluate. A reborrow's target
+		is its defining parameter row or, for an owner, its name row.`)
 		ScalarExpression
-		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool)))
+		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool) (borrowed_owner bool)))
 	(struct ScalarSignature (fields (params i32) (result u32) (first_statement i32) (start i32) (end i32) (error u32)))
 
 	(struct
@@ -368,15 +369,16 @@
 	(fn
 		(:doc `Match a checked value to its exact expected type.
 
-		Expectation 1 infers an integer type. A shared view can read
-		from either slice access mode. Zero marks rows outside expression checking.`)
+		Expectations 1 and 42 infer an integer type. Only the latter can
+		also introduce an owned array through an allocation. A shared view
+		can read from either slice access mode. Zero marks unvisited rows.`)
 		value_matches_type
 		(params (expected u32) (actual u32))
 		(returns bool)
 		(body
 			(if
 				(:doc "An integer initializer or conversion operand can infer its width.")
-				(u32.eq (local expected) (u32 1))
+				(bool.or (u32.eq (local expected) (u32 1)) (u32.eq (local expected) (u32 42)))
 				(then (return (bool.or (u32.eq (local actual) (u32 5))
 					(bool.or (u32.eq (local actual) (u32 10)) (u32.eq (local actual) (u32 11)))))))
 			(if
@@ -392,7 +394,8 @@
 		(returns ScalarExpression)
 		(body
 			(return (record.make ScalarExpression (kind (local kind)) (type (local type)) (target (local target))
-				(first (local first)) (start (local start)) (end (local end)) (negative (local negative))))))
+				(first (local first)) (start (local start)) (end (local end)) (negative (local negative))
+				(borrowed_owner (bool false))))))
 
 	(fn
 		(:doc `Check one literal operand and record its normalized C spelling.`)
@@ -526,6 +529,12 @@
 				(u32.lt (u32 0) (record.get (local named) error))
 				(then (return (local named))))
 			(let name (slice.load (local nodes) (local operand)))
+			(let reborrow (call is_reborrow_keyword (local expected)))
+			(let-mut type (local expected))
+			(if
+				(:doc "An explicit reborrow expects the view type for its access mode.")
+				(local reborrow)
+				(then (set (local type) (u32.sub.wrapping (local expected) (u32 1)))))
 			(let binding (call find_local (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local statements))
 				(record.get (local caller) first_statement) (local statement) (local name)))
 			(if
@@ -535,8 +544,15 @@
 					(let declaration (slice.load (local statements) (local binding)))
 					(let actual (record.get (local declaration) type))
 					(if
-						(:doc "Apply the checked declaration type at this use.")
-						(bool.not (call value_matches_type (local expected) (local actual)))
+						(:doc "Only an explicit call reborrow can use an array owner.")
+						(bool.not (bool.or (call value_matches_type (local type) (local actual))
+							(bool.and (local reborrow) (u32.eq (local actual) (u32 41)))))
+						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+					(if
+						(:doc "An exclusive loan requires the owner to have a writable binding.")
+						(bool.and (u32.eq (local actual) (u32 41))
+							(bool.and (u32.eq (local type) (u32 38))
+								(bool.not (u32.eq (record.get (local declaration) kind) (u32 16)))))
 						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 					(let target (record.get (local declaration) target))
 					(slice.store (local expressions) (local index)
@@ -551,7 +567,7 @@
 			(let actual (record.get (slice.load (local parameters) (local target)) type))
 			(if
 				(:doc "Apply the parameter's declared type at this use.")
-				(bool.not (call value_matches_type (local expected) (local actual)))
+				(bool.not (call value_matches_type (local type) (local actual)))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(slice.store (local expressions) (local index)
 				(call expression_row (u32 2) (local actual) (local target) (i32 -1) (i32 0) (i32 0) (bool false)))
@@ -620,6 +636,10 @@
 						(:doc "Only a let-mut binding accepts a write.")
 						(bool.not (u32.eq (record.get (local target) kind) (u32 16)))
 						(then (return (call entry_at (local name) (i32 -1) (u32 37)))))
+					(if
+						(:doc "An owner stays bound to its allocation for the life of its scope.")
+						(u32.eq (record.get (local target) type) (u32 41))
+						(then (return (call entry_at (slice.load (local nodes) (local operand)) (i32 -1) (u32 24)))))
 					(return (call entry_at (local name) (local binding) (u32 0)))))
 			(let parameter (call find_function_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (borrow-shared (local parameters)) (local name)))
@@ -839,7 +859,7 @@
 		Loans made by nested calls in completed arguments have already ended.`)
 		has_conflicting_loan
 		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
-			(index i32) (statement i32) (parameter i32) (exclusive bool))
+			(index i32) (statement i32) (target i32) (owner bool) (exclusive bool))
 		(returns bool)
 		(body
 			(let-mut child (local index))
@@ -860,9 +880,13 @@
 								(body
 									(let loan (slice.load (local expressions) (local earlier)))
 									(let kind (record.get (local loan) kind))
+									(let loan_owner (record.get (local loan) borrowed_owner))
+									(let same_namespace (bool.or (bool.and (local owner) (local loan_owner))
+										(bool.not (bool.or (local owner) (local loan_owner)))))
 									(if
-										(:doc "An exclusive loan conflicts with either access mode on the same parameter.")
-										(bool.and (i32.eq (local parameter) (record.get (local loan) target))
+										(:doc "Compare the defining binding in its own namespace before checking access.")
+										(bool.and
+											(bool.and (local same_namespace) (i32.eq (local target) (record.get (local loan) target)))
 											(bool.or (u32.eq (local kind) (u32 39))
 												(bool.and (local exclusive) (u32.eq (local kind) (u32 35)))))
 										(then (return (bool true))))
@@ -906,26 +930,29 @@
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local reference) (u32 8) (u32 24)))
 			(if
-				(:doc "Byte views come from named slice parameters.")
+				(:doc "Byte views come from slice parameters or borrowed local owners.")
 				(u32.lt (u32 0) (record.get (local form) error))
 				(then (return (local form))))
 			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local reference) (record.get (local form) operand) (local type) (local index) (local caller) (local statement)
+				(local reference) (record.get (local form) operand) (local expected) (local index) (local caller) (local statement)
 				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
 			(if
 				(:doc "Keep a local lookup or access-mode error at the named source.")
 				(u32.lt (u32 0) (record.get (local checked) error))
 				(then (return (local checked))))
 			(let resolved (slice.load (local expressions) (local index)))
-			(let parameter (record.get (local resolved) target))
+			(let target (record.get (local resolved) target))
+			(let actual (record.get (local resolved) type))
+			(let owner (u32.eq (local actual) (u32 41)))
 			(if
-				(:doc "An earlier call argument can already hold a loan of this mutable view.")
-				(bool.and (u32.eq (record.get (local resolved) type) (u32 38))
+				(:doc "An earlier argument can hold a loan of this owner or mutable parameter.")
+				(bool.and (bool.or (local owner) (u32.eq (local actual) (u32 38)))
 					(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
-						(local index) (local statement) (local parameter) (u32.eq (local type) (u32 38))))
+						(local index) (local statement) (local target) (local owner) (u32.eq (local type) (u32 38))))
 				(then (return (call entry_at (local reference) (i32 -1) (u32 24)))))
 			(slice.store (local expressions) (local index)
-				(call expression_row (local kind) (local type) (local parameter) (i32 -1) (i32 0) (i32 0) (bool false)))
+				(record.make ScalarExpression (kind (local kind)) (type (local type)) (target (local target))
+					(first (i32 -1)) (start (i32 0)) (end (i32 0)) (negative (bool false)) (borrowed_owner (local owner))))
 			(return (local checked))))
 
 	(fn
@@ -984,6 +1011,34 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
+		(:doc `Check a local byte allocation and seed its exact signed length operand.`)
+		plan_allocation
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(element i32) (index i32) (caller ScalarFunction) (view_start i32) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "Require the element type before reading any operand.")
+				(i32.lt (local element) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let element_node (slice.load (local nodes) (local element)))
+			(let count (record.get (local element_node) next_sibling))
+			(if
+				(:doc "The allocation has a type followed by one length.")
+				(bool.or (i32.lt (local count) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local count)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(if
+				(:doc "The supported owner contains bytes.")
+				(bool.not (u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element)) (u32 10)))
+				(then (return (call entry_at (local element_node) (i32 -1) (u32 24)))))
+			(slice.store (local expressions) (local count)
+				(call expression_row (u32 0) (u32 5) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
+			(slice.store (local expressions) (local index)
+				(call runtime_expression (u32 41) (u32 41) (local node) (local count) (local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
 		(:doc `Check the scalar expression at a source row and keep its actual type.`)
 		plan_expression
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
@@ -1011,6 +1066,7 @@
 			(let length (u32.eq (local tag) (u32 36)))
 			(let load (u32.eq (local tag) (u32 37)))
 			(let store (u32.eq (local tag) (u32 40)))
+			(let allocation (bool.and (u32.eq (local tag) (u32 41)) (u32.eq (local expected) (u32 42))))
 			(if
 				(:doc "The length field is an i32 value.")
 				(local length)
@@ -1023,7 +1079,7 @@
 				(:doc "Check the type named by a literal or operator. Reads and calls resolve their types below.")
 				(bool.not
 					(bool.or (call value_matches_type (local expected) (local actual))
-						(bool.or (u32.eq (local tag) (u32 33))
+						(bool.or (bool.or (local allocation) (u32.eq (local tag) (u32 33)))
 							(bool.or (u32.eq (local tag) (u32 8)) (u32.eq (local tag) (u32 9))))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) (u32 24)))
@@ -1032,6 +1088,11 @@
 				(u32.lt (u32 0) (record.get (local form) error))
 				(then (return (local form))))
 			(let operand (record.get (local form) operand))
+			(if
+				(:doc "Only a local declaration can establish a new owning binding.")
+				(local allocation)
+				(then (return (call plan_allocation (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local operand) (local index) (local caller) (local view_start) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A local reference resolves among the caller's bindings visible at this statement.")
 				(u32.eq (local tag) (u32 8))
@@ -1173,7 +1234,7 @@
 				(u32.lt (u32 0) (record.get (local first_block) error))
 				(then (return (local first_block))))
 			(slice.store (local statements) (local first)
-				(call block_statement (record.get (local first_block) operand) (bool true)))
+				(call block_statement (record.get (local first_block) operand) (i32 -1) (bool true)))
 			(let alternate (record.get (local first_node) next_sibling))
 			(if
 				(:doc "An explicit else must be the final arm and supplies its own first statement.")
@@ -1196,7 +1257,7 @@
 						(bool.not (i32.lt (local extra) (i32 0)))
 						(then (return (call entry_at (slice.load (local nodes) (local extra)) (i32 -1) (u32 24)))))
 					(slice.store (local statements) (local alternate)
-						(call block_statement (record.get (local else_arm) operand) (bool true)))))
+						(call block_statement (record.get (local else_arm) operand) (i32 -1) (bool true)))))
 			(return (call entry_at (local node) (local first) (u32 0)))))
 
 	(fn
@@ -1205,7 +1266,7 @@
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction) (index i32)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
 			(bindings (shared-slice GraphBinding)) (statements (mut-slice ScalarStatement))
-			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (site_count i32) (view_start i32))
+			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (site_count i32) (view_start i32) (previous_owner i32))
 		(returns BodyPlan)
 		(body
 			(let node (slice.load (local nodes) (local index)))
@@ -1227,7 +1288,7 @@
 			(let value (record.get (local statement) value))
 			(let-mut first (i32 -1))
 			(let-mut target (record.get (local binding) operand))
-			(let-mut expected (u32 1))
+			(let-mut expected (u32 42))
 			(if
 				(:doc "An assignment uses the exact type and name of the binding checked earlier.")
 				(u32.eq (local kind) (u32 17))
@@ -1268,7 +1329,8 @@
 			(slice.store (local statements) (local index)
 				(record.make ScalarStatement (kind (local kind)) (target (local target)) (value (local value))
 					(type (record.get (slice.load (local expressions) (local value)) type))
-					(first (local first)) (falls_through (bool.not (u32.eq (local kind) (u32 7))))))
+					(first (local first)) (previous_owner (local previous_owner))
+					(falls_through (bool.not (u32.eq (local kind) (u32 7))))))
 			(return (local checked))))
 
 	(fn
@@ -1290,6 +1352,7 @@
 			(let outer (record.get (slice.load (local nodes) (local index)) parent))
 			(let-mut block (local outer))
 			(let-mut falls_through (bool true))
+			(let-mut previous_owner (i32 -1))
 			(while
 				(:doc "Visit remaining statements or leave nested blocks until the function body is complete.")
 				(bool.or (bool.not (i32.lt (local index) (i32 0))) (bool.not (i32.eq (local block) (local outer))))
@@ -1299,19 +1362,20 @@
 						(i32.lt (local index) (i32 0))
 						(then
 							(let exit (call after_block (borrow-shared (local nodes)) (local block)))
+							(let owner (slice.load (local statements) (record.get (local exit) owner)))
+							(let arm (slice.load (local statements) (local block)))
+							(slice.store (local statements) (local block)
+								(call block_statement (record.get (local arm) first) (local previous_owner) (local falls_through)))
+							(set (local previous_owner) (record.get (local owner) previous_owner))
 							(let next_arm (record.get (local exit) alternate))
 							(if
-								(:doc "Retain the then result while checking the else in its own scope.")
+								(:doc "Begin an alternate with only the enclosing scope's owners.")
 								(bool.not (i32.lt (local next_arm) (i32 0)))
 								(then
-									(let arm (slice.load (local statements) (local block)))
-									(slice.store (local statements) (local block)
-										(call block_statement (record.get (local arm) first) (local falls_through)))
 									(set (local block) (local next_arm))
 									(set (local index) (record.get (slice.load (local statements) (local block)) first))
 									(set (local falls_through) (bool true)))
 								(else
-									(let owner (slice.load (local statements) (record.get (local exit) owner)))
 									(let first (record.get (local owner) first))
 									(set (local falls_through)
 										(bool.or (local falls_through)
@@ -1329,13 +1393,17 @@
 							(let checked (call plan_statement (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local caller) (local index) (borrow-shared (local functions)) (borrow-shared (local parameters))
 								(borrow-shared (local bindings)) (borrow-mut (local statements)) (borrow-mut (local expressions))
-								(borrow-mut (local sites)) (local site_count) (local view_start)))
+								(borrow-mut (local sites)) (local site_count) (local view_start) (local previous_owner)))
 							(if
 								(:doc "Stop before planning any statements past the originating error.")
 								(u32.lt (u32 0) (record.get (local checked) error))
 								(then (return (local checked))))
 							(set (local site_count) (record.get (local checked) count))
 							(let statement (slice.load (local statements) (local index)))
+							(if
+								(:doc "An owning declaration becomes the newest active owner for this scope.")
+								(u32.eq (record.get (local statement) type) (u32 41))
+								(then (set (local previous_owner) (local index))))
 							(set (local falls_through) (record.get (local statement) falls_through))
 							(let first (record.get (local statement) first))
 							(if

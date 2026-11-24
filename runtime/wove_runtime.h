@@ -28,6 +28,16 @@ typedef struct WvrtArray {
 typedef struct { const void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size; } wvrt_slice;
 typedef struct { void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size; } wvrt_mut_slice;
 
+// Borrow the full owner as a shared view over its existing storage.
+static inline wvrt_slice wvrt_array_borrow_shared(const wvrt_array *wvrtbuffer) {
+	return (wvrt_slice){wvrtbuffer->wvrt_items, wvrtbuffer->wvrt_length, wvrtbuffer->wvrt_element_size};
+}
+
+// Borrow the full owner as a writable view over its existing storage.
+static inline wvrt_mut_slice wvrt_array_borrow_mut(wvrt_array *wvrtbuffer) {
+	return (wvrt_mut_slice){wvrtbuffer->wvrt_items, wvrtbuffer->wvrt_length, wvrtbuffer->wvrt_element_size};
+}
+
 // Reborrow the same byte range with read-only access.
 static inline wvrt_slice wvrt_share_mut_slice(wvrt_mut_slice wvrtview) {
 	return (wvrt_slice){wvrtview.wvrt_items, wvrtview.wvrt_length, wvrtview.wvrt_element_size};
@@ -35,6 +45,7 @@ static inline wvrt_slice wvrt_share_mut_slice(wvrt_mut_slice wvrtview) {
 
 wvrt_array *wvrt_array_new(int32_t wvrt_length, size_t wvrt_element_size,
 	size_t wvrt_element_alignment, wvrt_location wvrt_site);
+wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrt_length, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
 wvrt_slice wvrt_slice_range_u8(const void *wvrt_items, int32_t wvrt_length,
 	int32_t wvrt_start, int32_t wvrt_end, wvrt_location wvrt_site);

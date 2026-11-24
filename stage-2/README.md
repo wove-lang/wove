@@ -212,6 +212,17 @@ evaluates its operands in order and checks bounds before writing the
 byte in the caller's storage. An out-of-bounds store reports the same
 file identity and half-open span format as a checked load.
 
+A function-local `let` or `let-mut` can own `(array.alloc u8 length)`.
+The length is an exact `i32`. The runtime allocates zeroed bytes and
+reports an invalid length or allocation failure at the allocation's
+original file identity and byte span. A shared call borrow keeps the
+owner's original storage. A mutable call borrow requires `let-mut`.
+
+Owners are released in reverse declaration order when their lexical
+scope exits, including on each completed loop iteration. A return
+evaluates its result first and releases the active owners from the
+scopes it leaves. An owner stays in its declaring binding for this slice.
+
 `(bool.and left right)` evaluates the right operand when the left is true.
 `(bool.or left right)` evaluates it when the left is false. Both operands
 are type-checked as `bool`. Each operand that runs does so once, with the
