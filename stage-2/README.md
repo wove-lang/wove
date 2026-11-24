@@ -121,7 +121,7 @@ means the emitted prefix contains the entire source. Code 16 means the next
 token and its separator could not fit. In either case the prefix ends on a
 token boundary and the remaining output bytes retain their original values.
 
-Use `decode_string` from [the string decoder](source_strings.wove) with the
+Use `decode_string` from [the string decoder](source/strings.wove) with the
 original admitted byte view, a checked kind-2 token, and a writable byte slice.
 It writes the string value as UTF-8 without changing the source. Double-quoted
 values decode JSON escapes and combine a high and low surrogate into one
@@ -134,7 +134,7 @@ the source span of the next scalar. An unpaired surrogate returns code 17 and
 the span of its six-byte escape. In both cases the written prefix ends at a
 scalar boundary and the remaining output retains its previous bytes.
 
-The [module reader](source_module.wove) works from the original bytes and a
+The [module reader](source/module.wove) works from the original bytes and a
 checked source tree. `form_parts` returns the head plus the first metadata
 and first ordinary operand indices. An empty view uses `-1`. Walk metadata
 siblings up to the first ordinary operand and walk ordinary operands to the
@@ -161,7 +161,7 @@ before the error. Earlier tree errors keep their original spans and codes.
 | 20 | Expected a declaration form | The offending ordinary operand |
 | 21 | Invalid selection directive | The offending directive or predicate |
 
-The [C emitter](emit_c.wove) consumes a checked tree, its module result,
+The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices. It checks local scalar functions
 with one return expression. Helpers can accept and return `i32`, `u8`,
 `u32`, and `bool`. Expressions support exact-type literals, parameter
@@ -169,7 +169,7 @@ reads, and direct calls. The selected `main` has the ABI signature
 `int main(void)`. Forward calls use checked prototypes, and nested calls
 evaluate from left to right.
 
-The [C name generator](c_text.wove) takes a `CNameRole`, a checked ID,
+The [C name generator](emit/text.wove) takes a `CNameRole`, a checked ID,
 and the source name's byte span. The seed represents the role enum with
 a record and named constructors. The generator writes
 `wg<role><id><suffix>`, where `wg` stands for Wove-generated and the
@@ -207,7 +207,7 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | 34 | Unavailable function or parameter | The requested name or incomplete reference |
 | 35 | Wrong call arity | The call expression |
 
-The [graph resolver](source_graph.wove) reads a supplied virtual file table
+The [graph resolver](source/graph.wove) reads a supplied virtual file table
 and binds active function imports in each file's namespace. The table maps
 normalized absolute paths to defining file identities and source ranges in a
 shared byte arena. Relative imports use the directory of the reached path.
@@ -235,7 +235,7 @@ and add the identity of the file where they originated.
 
 `make stage-2` translates [the compiler root](wovec.wove) with the Python seed
 and links `build/stage-1/wovec` with Clang and the shared runtime. The root
-imports `admit_source` and `scan_token` from [the scanner](source_scan.wove).
+imports `admit_source` and `scan_token` from [the scanner](source/scan.wove).
 Its parameterless bootstrap entry admits an empty view and expects an EOF
 token.
 
