@@ -93,8 +93,8 @@ wvrt_slice wvrt_slice_range_u8(const void *wvrtitems, int32_t wvrtlength,
 	return (wvrt_slice){wvrt_base, wvrtend - wvrtstart, sizeof(uint8_t)};
 }
 
-// Validate the signed index before converting it to a byte offset.
-static size_t wvrt_slice_offset(int32_t wvrtlength, int32_t wvrtindex, wvrt_location wvrtsite) {
+// Validate the signed index before converting it to an element offset.
+size_t wvrt_slice_offset(int32_t wvrtlength, int32_t wvrtindex, wvrt_location wvrtsite) {
 	// Negative indices and the one-past endpoint cannot name a byte.
 	if (wvrtindex < 0 || wvrtindex >= wvrtlength) {
 		wvrt_trap(wvrtsite, "slice index out of bounds");
