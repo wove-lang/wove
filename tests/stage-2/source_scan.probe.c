@@ -27,8 +27,8 @@
 #define read_module wv_seed_fn_74
 #define emit_module wv_seed_fn_99
 #define resolve_graph wv_seed_fn_112
-#define inspect_callers wv_seed_fn_272
-#define run_scalar_graph wv_seed_fn_288
+#define inspect_callers wv_seed_fn_273
+#define run_scalar_graph wv_seed_fn_289
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
