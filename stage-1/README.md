@@ -7,10 +7,10 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 The Python seed is an internal build tool for bootstrapping Stage 2.
 It reads one module of tagged IR forms and emits C11 to stdout.
-The subset covers functions that return `u8`, `i32`, `u32`, `bool`, or
-`void`, owned byte arrays, and call-scoped shared and exclusive slice
-borrows. Every path through a scalar function returns a value. A void
-function can return without a value or complete at the end of its body.
+The subset covers scalar and record values, owned byte arrays, and call-scoped
+shared and exclusive slice borrows. Every path through a function with a result
+type returns a value. A `void` function can return without a value or complete
+at the end of its body.
 A source rejection prints the filename and line.
 
 Write integer literals as typed decimal nodes such as `(u32 4294967295)`.
@@ -33,6 +33,14 @@ operand first. They evaluate the right operand once when the left operand is
 true for `bool.and` or false for `bool.or`. The seed type-checks both operands
 as `bool` in every case. `(bool.not value)` negates one boolean. All three
 operations return `bool`.
+
+Declare a named record with `(struct Token (fields (kind u32) (start i32)
+(end i32)))`. Its fields can have type `bool`, `u8`, `i32`, or `u32`.
+A `record.make` names the record type and supplies each field once, using its
+declared type. Initializer expressions run in the order written. Use
+`(record.get (local token) start)` to read a field as its declared scalar type.
+Bindings, arguments, and returns copy records by value and preserve the
+record's name as its type.
 
 An `if` statement takes a boolean condition, a `(then ...)` block, and an
 optional `(else ...)` block. Only the selected block executes. Each arm
