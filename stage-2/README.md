@@ -238,6 +238,13 @@ evaluates its operands in order and checks bounds before writing the
 byte in the caller's storage. An out-of-bounds store reports the same
 file identity and half-open span format as a checked load.
 
+A `(mut-slice Token)` carries the same defining record type as its
+shared counterpart and uses the `wvrt_mut_slice` C descriptor.
+Use `(borrow-mut (local data))` to pass writable access to a helper.
+A shared reborrow keeps the same record element and gives read access.
+A store checks its `i32` index before replacing one element with a value
+of the exact defining record type.
+
 A function-local `let` or `let-mut` can own `(array.alloc u8 length)`.
 The length is an exact `i32`. The runtime allocates zeroed bytes and
 reports an invalid length or allocation failure at the allocation's
