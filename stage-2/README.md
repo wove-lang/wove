@@ -379,6 +379,16 @@ function. `(type Token)` or `(type (as Token LocalToken))` selects a
 record. The same name can refer to one function and one type in a file.
 Each selector binds a declaration defined by the provider.
 
+A `use c-header` selects functions from a `bridge c-header` with the same
+decoded header key in the supplied source table. A key such as `"<stdlib.h>"`
+or `"./project.h"` identifies one active bridge in a well-formed canonical file.
+Header lookup leaves Wove-file reachability unchanged. A selected declaration
+has `params` and `returns` forms with exact `bool`, `u8`, `i32`, or `u32` types.
+Parameter names must be unique within the signature. The alias occupies the
+importing file's function namespace. Its binding keeps
+the defining declaration and the raw header, native symbol, and signature
+spans in that file for C call emission in [issue #140](https://github.com/wove-lang/wove/issues/140).
+
 Each binding identifies the importing namespace and the name span in that
 file. Its target is the defining file identity and declaration node index
 in the defining source tree. Earlier reader diagnostics keep their codes
@@ -391,7 +401,7 @@ and add the identity of the file where they originated.
 | 27 | Missing active provider | The importing use |
 | 28 | Active import cycle | The closing use |
 | 29 | Unavailable function or type | The requested name |
-| 30 | Conflicting binding | The new local name |
+| 30 | Conflicting binding or C bridge declaration | The new local name or conflicting declaration |
 | 31 | Excluded entry module | The entry module |
 
 The [scalar graph compiler](emit/graph.wove) consumes the resolver's
@@ -479,8 +489,11 @@ The [graph fixtures](../tests/stage-2/source_graphs.tsv) pass virtual paths
 and raw source files to `--graph ENTRY CAPACITY (IDENTITY PATH FILE)...`.
 The probe prints the reached module rows and local bindings with their
 defining identities and node indices. It prints `binding` for functions
-and `type-binding` for records. A failure gives the code and byte span with
-one-based coordinates in its original file.
+and `type-binding` for records. For a C function, `c-binding` gives the
+same binding fields. The following `c-target` row gives the raw header,
+native symbol, and signature span pairs in the defining file.
+A failure gives the code and byte span with one-based coordinates in its
+original file.
 
 Use `--callers FILE NAME [START END [CAPACITY]]` to inspect a function by
 its Wove name in a library module. Use `--callers-root` with the same

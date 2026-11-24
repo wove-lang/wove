@@ -26,9 +26,9 @@
 #define form_parts wv_seed_fn_65
 #define read_module wv_seed_fn_74
 #define emit_module wv_seed_fn_99
-#define resolve_graph wv_seed_fn_112
-#define inspect_callers wv_seed_fn_273
-#define run_scalar_graph wv_seed_fn_289
+#define resolve_graph wv_seed_fn_116
+#define inspect_callers wv_seed_fn_288
+#define run_scalar_graph wv_seed_fn_304
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -44,10 +44,10 @@ typedef wv_seed_record_17 GraphBinding;
 typedef wv_seed_record_18 GraphUse;
 typedef wv_seed_record_19 GraphSelector;
 typedef wv_seed_record_20 GraphResult;
-typedef wv_seed_record_40 CallSite;
+typedef wv_seed_record_42 CallSite;
 typedef wv_seed_record_23 SuppliedFile;
-typedef wv_seed_record_43 CallerInspection;
-typedef wv_seed_record_47 GraphOutput;
+typedef wv_seed_record_45 CallerInspection;
+typedef wv_seed_record_49 GraphOutput;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -824,9 +824,14 @@ static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t
 		const int32_t start = row.wv_field_1;
 		const int32_t end = row.wv_field_2;
 		const char *name = (const char *)arena + files[owner].wv_field_3 + start;
-		const char *kind = row.wv_field_5 == 0 ? "binding" : "type-binding";
+		const char *kind = row.wv_field_6 == 8 ? "c-binding" : (row.wv_field_5 == 0 ? "binding" : "type-binding");
 		printf("%s %" PRId32 " %.*s %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
 			kind, owner, (int)(end - start), name, row.wv_field_3, row.wv_field_4, start, end);
+		// The declared header, native symbol, and signature all use defining-file offsets.
+		if (row.wv_field_6 == 8) {
+			printf("c-target %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
+				row.wv_field_7, row.wv_field_8, row.wv_field_9, row.wv_field_10, row.wv_field_11, row.wv_field_12);
+		}
 	}
 }
 
