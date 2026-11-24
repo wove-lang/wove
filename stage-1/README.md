@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 The Python seed is an internal build tool for bootstrapping Stage 2.
 It reads one module of tagged IR forms and emits C11 to stdout.
-The subset covers scalar and record values, owned byte arrays, and call-scoped
+The subset covers scalar and record values, owned arrays, and call-scoped
 shared and exclusive slice borrows. Every path through a function with a result
 type returns a value. A `void` function can return without a value or complete
 at the end of its body.
@@ -56,11 +56,14 @@ condition. A return runs the usual cleanup for every scope it leaves.
 Use `(set (local name) value)` to assign an existing `let-mut` scalar.
 The new value has the same type as the binding.
 
-`slice.load` reads a `u8` from either kind of byte slice. `slice.store` needs
-a mutable byte slice and writes to the owner's storage. Both take an `i32`
-index and trap if it falls outside the slice.
+Allocate an owned buffer with `(array.alloc Token count)` for a declared
+copyable record, or use `u8` for a byte buffer. A whole-buffer loan preserves
+the buffer's element type in `(shared-slice Token)` or `(mut-slice Token)`.
+`slice.len` counts elements. `slice.load` copies one element by value.
+`slice.store` requires a mutable view and the exact declared element type.
+Both take an `i32` element index and trap before an out-of-bounds access.
 
-Use `borrow-shared` to forward either kind of byte slice to a helper.
+Use `borrow-shared` to forward either kind of slice to a helper.
 Use `borrow-mut` to forward a mutable slice exclusively. A reborrow
 uses the original storage, and its loan stays active through later
 arguments and the call. Shared loans permit reads of the parent.
