@@ -267,6 +267,7 @@ def check_compilations(executable, directory, manifest, clang):
 	program = directory / "emitted"
 	harness = manifest.with_name("emitted_main.probe.c")
 	runtime = os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")
+	tracked_runtime = os.environ.get("WOVE_TEST_TRACKED_RUNTIME")
 	for label, raw, base, end, capacity, fields, expected, mode, value in fixture_rows(manifest):
 		# File references keep larger compilation examples readable.
 		source.write_bytes(Path(raw[1:]).read_bytes() if raw.startswith("@") else bytes.fromhex(raw))
@@ -295,6 +296,19 @@ def check_compilations(executable, directory, manifest, clang):
 			command.extend(("-Dmain=wove_emitted_main", probe))
 		elif mode == "value":
 			command.extend(("-Dmain=wove_emitted_main", str(harness)))
+		# Use the same instrumented runtime and compatible host probes as the seed.
+		elif mode == "tracked":
+			probe, value = value.split(maxsplit=1)
+			# Standalone runs build the same instrumented runtime once if Make did not supply it.
+			if tracked_runtime is None:
+				tracked_runtime = str(directory / "runtime.tracked.o")
+				tracked = [*clang, "-Dmalloc=tracked_malloc", "-Dcalloc=tracked_calloc", "-Dfree=tracked_free",
+					"-c", "runtime/wove_runtime.c", "-o", tracked_runtime]
+				subprocess.run(tracked, check=True, timeout=30)
+			obj = str(directory / "tracked.o")
+			command = [*clang, "-I", "runtime", "-Dmain=wove_test_main", str(generated), "-c", "-o", obj]
+			subprocess.run(command, check=True, timeout=30)
+			command = [*clang, probe, obj, tracked_runtime, "-o", str(program)]
 		else:
 			assert mode in ("exit", "trap"), label
 		subprocess.run(command, check=True, timeout=30)

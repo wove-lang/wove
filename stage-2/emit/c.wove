@@ -16,7 +16,8 @@
 		(only read_functions plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
 	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_byte_view_type is_reborrow_keyword (type ScalarOperator)))
 	(use wove-file "./runtime.wove"
-		(only write_runtime_header open_conversion open_slice_access open_shared_projection write_slice_length close_runtime_call))
+		(only write_runtime_header open_conversion open_slice_access open_shared_projection write_slice_length close_runtime_call
+			open_array_allocation open_array_drop open_array_borrow))
 	(use wove-file "./text.wove" (only c_byte c_text_fragment c_type_text c_cast c_i32_bias write_c_name c_decimal_digits
 			function_name_role parameter_name_role local_name_role temporary_name_role))
 
@@ -73,6 +74,15 @@
 		(returns u32)
 		(body
 			(let kind (record.get (local row) kind))
+			(if
+				(:doc "An explicit array borrow projects the owner's pointer without allocating.")
+				(record.get (local row) borrowed_owner)
+				(then
+					(let open (call open_array_borrow (borrow-mut (local output)) (local offset)
+						(u32.eq (local kind) (u32 39)) (local writing)))
+					(let value (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(record.get (local row) target) (local tree_base) (borrow-mut (local output)) (local open) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local value) (u8 41) (local writing)))))
 			(if
 				(:doc "Parameter references and whole-view reborrows read the same formal descriptor.")
 				(bool.or (u32.eq (local kind) (u32 2)) (call is_reborrow_keyword (local kind)))
@@ -140,7 +150,8 @@
 		(body
 			(return (bool.or (u32.eq (local kind) (u32 33))
 				(bool.or (u32.eq (local kind) (u32 36))
-					(bool.or (u32.eq (local kind) (u32 37)) (u32.eq (local kind) (u32 40))))))))
+					(bool.or (u32.eq (local kind) (u32 37))
+						(bool.or (u32.eq (local kind) (u32 40)) (u32.eq (local kind) (u32 41)))))))))
 
 	(fn
 		(:doc `Identify expressions with their own evaluation step when nested in another expression.`)
@@ -260,6 +271,17 @@
 						(record.get (local expression) first) (local tree_base)
 						(borrow-mut (local output)) (local open) (local writing)))
 					(return (call close_runtime_call (borrow-mut (local output)) (local value)
+						(record.get (local expression) target) (record.get (local expression) start)
+						(record.get (local expression) end) (local writing)))))
+			(if
+				(:doc "The runtime allocates one zeroed array of the already evaluated length.")
+				(u32.eq (local kind) (u32 41))
+				(then
+					(let open (call open_array_allocation (borrow-mut (local output)) (local offset) (local writing)))
+					(let length (call write_temporary_name (borrow-shared (local source))
+						(record.get (local expression) first) (local tree_base)
+						(borrow-mut (local output)) (local open) (local writing)))
+					(return (call close_runtime_call (borrow-mut (local output)) (local length)
 						(record.get (local expression) target) (record.get (local expression) start)
 						(record.get (local expression) end) (local writing)))))
 			(if
@@ -434,13 +456,36 @@
 			(return (local cursor))))
 
 	(fn
-		(:doc `Write one checked statement after evaluating its nested values.`)
-		write_statement
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (statement ScalarStatement) (tree_base i32)
-			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
+		(:doc `Release active owners in reverse declaration order up to the enclosing scope's owner.`)
+		write_cleanup
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (statements (shared-slice ScalarStatement))
+			(head i32) (stop i32) (tree_base i32) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
+			(let-mut owner (local head))
+			(let-mut cursor (local offset))
+			(while
+				(:doc "A lexical exit drops only the owners in the scopes it leaves.")
+				(bool.not (i32.eq (local owner) (local stop)))
+				(body
+					(let row (slice.load (local statements) (local owner)))
+					(set (local cursor) (call open_array_drop (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(record.get (local row) target) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
+					(set (local owner) (record.get (local row) previous_owner))))
+			(return (local cursor))))
+
+	(fn
+		(:doc `Write one checked statement after evaluating its nested values.`)
+		write_statement
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (index i32) (tree_base i32)
+			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
+			(statements (shared-slice ScalarStatement)) (expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let statement (slice.load (local statements) (local index)))
 			(let root (record.get (local statement) value))
 			(let value (slice.load (local expressions) (local root)))
 			(let kind (record.get (local statement) kind))
@@ -463,6 +508,25 @@
 					(let next (call write_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local value) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
 					(return (call c_byte (borrow-mut (local output)) (local next) (u8 59) (local writing)))))
+			(let previous_owner (record.get (local statement) previous_owner))
+			(if
+				(:doc "Save the return value before any buffer it reads is released.")
+				(bool.and (u32.eq (local kind) (u32 7)) (bool.not (i32.lt (local previous_owner) (i32 0))))
+				(then
+					(set (local cursor) (call write_temporary_declaration (borrow-shared (local source))
+						(local index) (local tree_base) (record.get (local value) type)
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
+						(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
+					(set (local cursor) (call write_cleanup (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 3) (local writing)))
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))))
 			(let target (record.get (local statement) target))
 			(let declaring (bool.or (u32.eq (local kind) (u32 15)) (u32.eq (local kind) (u32 16))))
 			(let conditional (bool.or (local loop) (u32.eq (local kind) (u32 22))))
@@ -581,8 +645,17 @@
 						(:doc "End a block even when it is empty or ends in a return.")
 						(i32.lt (local index) (i32 0))
 						(then
-							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
 							(let exit (call after_block (borrow-shared (local nodes)) (local block)))
+							(let arm (slice.load (local statements) (local block)))
+							(let entry (slice.load (local statements) (record.get (local exit) owner)))
+							(if
+								(:doc "Fallthrough releases the block's owners. A return releases its active scopes itself.")
+								(record.get (local arm) falls_through)
+								(then (set (local cursor) (call write_cleanup
+									(borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local statements))
+									(record.get (local arm) previous_owner) (record.get (local entry) previous_owner)
+									(record.get (local function) tree_base) (borrow-mut (local output)) (local cursor) (local writing)))))
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
 							(let alternate (record.get (local exit) alternate))
 							(if
 								(:doc "An explicit else starts a fresh C block. Otherwise resume at the parent statement's sibling.")
@@ -598,8 +671,9 @@
 						(else
 							(let statement (slice.load (local statements) (local index)))
 							(set (local cursor) (call write_statement (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local statement) (record.get (local function) tree_base)
-								(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local expressions))
+								(local index) (record.get (local function) tree_base)
+								(borrow-shared (local functions)) (borrow-shared (local parameters))
+								(borrow-shared (local statements)) (borrow-shared (local expressions))
 								(borrow-mut (local output)) (local cursor) (local writing)))
 							(let first (record.get (local statement) first))
 							(if
@@ -751,6 +825,7 @@
 		(:expect bootstrap.checked_int_conversion (issue "https://github.com/wove-lang/wove/issues/85"))
 		(:expect bootstrap.shared_byte_slices (issue "https://github.com/wove-lang/wove/issues/90"))
 		(:expect bootstrap.mutable_byte_slices (issue "https://github.com/wove-lang/wove/issues/104"))
+		(:expect bootstrap.owned_byte_buffers (issue "https://github.com/wove-lang/wove/issues/107"))
 		emit_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))
