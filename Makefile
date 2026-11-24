@@ -41,6 +41,10 @@ $(STAGE1)/%.fixture.o: $(STAGE1)/%.c $(RUNTIME_HEADER)
 $(STAGE1)/%: $(STAGE1)/%.fixture.o $(STAGE1)/runtime.o
 	$(CLANG) $(CFLAGS) $^ -o "$@"
 
+# Inspect the full scalar results in the generated translation unit.
+$(STAGE1)/scalar.round_trip: $(OWNERSHIP_TESTS)/scalar.round_trip.probe.c $(STAGE1)/scalar.round_trip.c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE1)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+
 $(STAGE1)/runtime.tracked.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -Dmalloc=tracked_malloc -Dcalloc=tracked_calloc \
