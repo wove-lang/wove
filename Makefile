@@ -22,10 +22,10 @@ SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
 SOURCE_MODULE_READER := stage-2/source/module.wove
 SOURCE_TYPE_MODULE := stage-2/source/types.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
-SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_strings.wove
+SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_strings.wove stage-2/source/c_owners.wove
 C_HEADER_MODULE := stage-2/c/headers.wove
-C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/,emit/c.wove emit/runtime.wove emit/c_strings.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
-	scalar/syntax.wove scalar/flow.wove scalar/plan.wove scalar/graph.wove scalar/records.wove) $(DECIMAL_WRITER)
+C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/,emit/c.wove emit/runtime.wove emit/c_strings.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
+	scalar/syntax.wove scalar/flow.wove scalar/plan.wove scalar/graph.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_DIGITS := stage-2/hashing/digits.wove
 HASHING_BITS := stage-2/hashing/bits.wove
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_DIGITS) $(HASHING_BITS)

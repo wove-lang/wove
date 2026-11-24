@@ -7,9 +7,11 @@
 	C translation unit across the reached files. An inspection resolves the
 	requested spelling in its file and reads the defining declaration's callers.`)
 
-	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../source/c_owners.wove" (only c_name_byte))
+	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../source/callers.wove" (only inspect_graph_name))
 	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
@@ -34,12 +36,87 @@
 				(file (local file)) (start (local start)) (end (local end)) (error (local error))
 				(related_start (i32 -1)) (related_end (i32 -1))))))
 
-	(fn choose_name_prefix
-		(:doc `Pick the shortest generated-name prefix distinct from every selected native symbol.
+	(fn reserve_native_prefix
+		(:doc `Mark a collision with one explicitly selected native identifier.`)
+		(params (arena (shared-slice u8)) (start i32) (end i32) (occupied (mut-slice u8)))
+		(returns void)
+		(body
+			(let slot (call native_name_prefix_slot (borrow-shared (local arena)) (local start) (local end)))
+			(if
+				(:doc "A higher slot cannot affect the first available choice.")
+				(bool.and (bool.not (i32.lt (local slot) (i32 0))) (i32.lt (local slot) (slice.len (local occupied))))
+				(then (slice.store (local occupied) (local slot) (u8 1))))))
 
-		Each binding can occupy at most one prefix slot. A zeroed scratch
-		byte per binding is sufficient because the slot just past that
-		storage is available if every earlier slot is occupied.`)
+	(fn reserve_type_words
+		(:doc `Reserve identifiers ending at separators in a checked C type spelling.`)
+		(params (text (shared-slice u8)) (occupied (mut-slice u8)))
+		(returns void)
+		(body
+			(let length (slice.len (local text)))
+			(let-mut word (i32 0))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Every type word ends at horizontal space or a pointer star.")
+				(i32.lt (local index) (local length))
+				(body
+					(let next (i32.add.wrapping (local index) (i32 1)))
+					(if
+						(:doc "Include complete type words in the prefix check.")
+						(bool.not (call c_name_byte (slice.load (local text) (local index))))
+						(then
+							(call reserve_native_prefix (borrow-shared (local text)) (local word) (local index)
+								(borrow-mut (local occupied)))
+							(set (local word) (local next))))
+					(set (local index) (local next))))))
+
+	(fn reserve_type_prefixes
+		(:doc `Reserve every identifier in the decoded native pointer type.
+
+		A C typedef shares the identifier namespace with ordinary locals
+		and functions. A native type spelling can also be a header macro.`)
+		(params (arena (shared-slice u8)) (start i32) (end i32) (occupied (mut-slice u8)))
+		(returns void)
+		(body
+			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let value (call decode_string (borrow-shared (local arena))
+				(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
+				(borrow-mut (local decoded))))
+			(call reserve_type_words (borrow-shared (slice.range (local decoded) (i32 0)
+				(record.get (local value) written))) (borrow-mut (local occupied)))))
+
+	(fn native_prefix_capacity
+		(:doc `Bound the number of reserved prefixes by selected symbols and type literal widths.
+
+		Every slot also requires a spelling in the arena, so no occupied
+		slot can reach signed i32 capacity.`)
+		(params (bindings (shared-slice GraphBinding)))
+		(returns i32)
+		(body
+			(let-mut count (i32 0))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Each selected C declaration contributes at most two symbols plus its type words.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(let binding (slice.load (local bindings) (local index)))
+					(if
+						(:doc "Ordinary Wove bindings introduce no native symbols.")
+						(u32.eq (record.get (local binding) provider) (u32 8))
+						(then
+							(let width (u32.add.wrapping (u32 2) (int.convert u32
+								(i32.sub.wrapping (record.get (local binding) type_end) (record.get (local binding) type_start)))))
+							(if
+								(:doc "Clamp the upper bound before converting to the slice length.")
+								(u32.lt (int.convert u32 (i32.sub.wrapping (i32 2147483647) (local count))) (local width))
+								(then (return (i32 2147483647))))
+							(set (local count) (i32.add.wrapping (local count) (int.convert i32 (local width))))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (local count))))
+
+	(fn choose_name_prefix
+		(:doc `Pick the shortest generated prefix distinct from identifiers in selected C bindings.
+
+		Reserve function symbols, pointer type words, and implicit destructors.`)
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
 			(occupied (mut-slice u8)))
 		(returns i32)
@@ -51,17 +128,28 @@
 				(body
 					(let binding (slice.load (local bindings) (local index)))
 					(if
-						(:doc "Only C targets retain an externally declared name in the emitted program.")
+						(:doc "Only C targets introduce native identifiers.")
 						(u32.eq (record.get (local binding) provider) (u32 8))
 						(then
 							(let base (record.get (slice.load (local files) (record.get (local binding) file)) source_start))
-							(let slot (call native_name_prefix_slot (borrow-shared (local arena))
-								(i32.add.wrapping (local base) (record.get (local binding) native_start))
-								(i32.add.wrapping (local base) (record.get (local binding) native_end))))
 							(if
-								(:doc "A higher slot cannot affect the first available choice.")
-								(bool.and (bool.not (i32.lt (local slot) (i32 0))) (i32.lt (local slot) (slice.len (local occupied))))
-								(then (slice.store (local occupied) (local slot) (u8 1))))))
+								(:doc "Reserve the ordinary symbol of each selected C function.")
+								(u32.eq (record.get (local binding) namespace) (u32 0))
+								(then (call reserve_native_prefix (borrow-shared (local arena))
+									(i32.add.wrapping (local base) (record.get (local binding) native_start))
+									(i32.add.wrapping (local base) (record.get (local binding) native_end))
+									(borrow-mut (local occupied)))))
+							(if
+								(:doc "A resource cleanup uses its destructor even without a standalone function import.")
+								(i32.lt (i32 0) (record.get (local binding) owner_type))
+								(then (call reserve_native_prefix (borrow-shared (local arena))
+									(i32.add.wrapping (local base) (record.get (local binding) drop_start))
+									(i32.add.wrapping (local base) (record.get (local binding) drop_end))
+									(borrow-mut (local occupied)))
+									(call reserve_type_prefixes (borrow-shared (local arena))
+										(i32.add.wrapping (local base) (record.get (local binding) type_start))
+										(i32.add.wrapping (local base) (record.get (local binding) type_end))
+										(borrow-mut (local occupied)))))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(let-mut slot (i32 0))
 			(while
@@ -97,7 +185,7 @@
 				(u32.lt (u32 0) (record.get (local headers) error))
 				(then (return (call graph_output (i32 0) (i32 -1) (record.get (local headers) file)
 					(record.get (local headers) start) (record.get (local headers) end) (record.get (local headers) error)))))
-			(let-mut occupied (array.alloc u8 (slice.len (local bindings))))
+			(let-mut occupied (array.alloc u8 (call native_prefix_capacity (borrow-shared (local bindings)))))
 			(let name_prefix (call choose_name_prefix (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (borrow-mut (local occupied))))
 			(let count (record.get (local headers) count))
@@ -134,7 +222,7 @@
 		row's local bindings. Both destinations remain untouched on failure.`)
 		(:expect
 			(tests "stage-2/scalar_graphs.tsv")
-			(issues "gh:wove-lang/wove:71" "gh:wove-lang/wove:129" "gh:wove-lang/wove:140" "gh:wove-lang/wove:142"))
+			(issues "gh:wove-lang/wove:71" "gh:wove-lang/wove:129" "gh:wove-lang/wove:140" "gh:wove-lang/wove:142" "gh:wove-lang/wove:144"))
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
 			(bindings (shared-slice GraphBinding)) (root i32) (query_path i32) (name (shared-slice u8))
 			(output (mut-slice u8)) (callers (mut-slice CallSite)))

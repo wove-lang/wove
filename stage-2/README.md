@@ -322,8 +322,8 @@ the role enum with a record and named constructors. The default spelling is
 after the prefix identifies the role. The ID uses seven lowercase
 Base32hex digits and starts with `0` or `1` because IDs are 31 bits.
 A suffix keeps ASCII letters, digits, and underscores. Other bytes
-become underscores. Graph emission reserves a prefix against the selected
-native symbols before writing C. It uses the first available prefix from
+become underscores. Graph emission reserves a prefix against selected
+native function names, type spellings, and destructors before writing C. It uses the first available prefix from
 `wg`, `wwg`, `wwwg`, and so on, keeping the same roles, IDs, and suffixes.
 Native symbols and the ABI entry `main` retain their original spellings.
 
@@ -353,7 +353,7 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | --- | --- | --- |
 | 16 | Short C output view | The selected entry |
 | 22 | Missing entry or unsupported declaration | The module, first function name, or offending declaration |
-| 23 | Unsupported signature or record field type, or invalid C-string contract | The offending signature or contract form or operand |
+| 23 | Unsupported signature or record field type, or invalid native bridge contract | The offending signature or contract form or operand |
 | 24 | Invalid, unsupported, or unreachable body form, or incompatible expression type | The offending form or expression |
 | 25 | Invalid scalar literal | The value or malformed literal form |
 | 32 | Stable declaration identity collision | The later declaration name |
@@ -388,7 +388,7 @@ function. `(type Token)` or `(type (as Token LocalToken))` selects a
 record. The same name can refer to one function and one type in a file.
 Each selector binds a declaration defined by the provider.
 
-A `use c-header` selects functions from a `bridge c-header` with the same
+A `use c-header` selects functions and native types from a `bridge c-header` with the same
 decoded header key in the supplied source table. A key such as `"<stdlib.h>"`
 or `"./project.h"` identifies one active bridge in a well-formed canonical file.
 Header lookup leaves Wove-file reachability unchanged. A selected declaration
@@ -413,6 +413,24 @@ on an embedded NUL before calling C. Raw mode copies every byte, including
 bytes after an embedded NUL. An empty view passes a pointer to one NUL byte.
 C can read the temporary buffers until the call returns, when Wove releases
 their backing storage.
+
+A pointer-backed resource declaration pairs a native C type literal with its
+destructor contract.
+
+```lisp
+(bridge c-header "<stdio.h>"
+	(type (:pragma (c_owned (drop fclose))) File (c-type "FILE *"))
+	(fn tmpfile (params) (returns File)))
+(use c-header "<stdio.h>" (only (type File) tmpfile))
+```
+
+A resource result resolves to its type in the defining bridge. Type selectors
+can alias the name in the importing file. The decoded `c-type` uses C type
+words followed by one or more pointer stars. The header supplies the native
+declarations. Stage 2 keeps the pointer directly in a local owner and
+preserves NULL as a missing handle. Scope cleanup calls the declared
+destructor once for each present handle. Returns evaluate their value before
+cleanup. A local `move` transfers cleanup to the receiving binding.
 
 Each binding identifies the importing namespace and the name span in that
 file. Its target is the defining file identity and declaration node index

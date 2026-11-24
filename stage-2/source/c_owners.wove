@@ -1,0 +1,252 @@
+(module source_c_owners
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Read pointer-backed C resource contracts from selected bridge members.
+
+	Retain the native type literal and destructor as original tree rows.
+	Validate pointer spelling on decoded bytes before accepting the contract.`)
+
+	(use wove-file "./scan.wove" (only is_head_start_byte is_head_byte (type SourceNode) (type Token)))
+	(use wove-file "./module.wove" (only form_parts is_three_bytes source_keyword (type FormParts)))
+	(use wove-file "./strings.wove" (only decode_string))
+
+	(struct COwnerRead (fields (native i32) (drop i32) (start i32) (end i32) (error u32)))
+
+	(fn c_name_byte
+		(:doc `Recognize a byte that can continue a portable C identifier.`)
+		(:pragma (inline always))
+		(params (byte u8))
+		(returns bool)
+		(body (return (bool.or (call is_head_start_byte (local byte))
+			(bool.not (bool.or (u8.lt (local byte) (u8 48)) (u8.lt (u8 57) (local byte))))))))
+
+	(fn is_native_name
+		(:doc `Check a nonempty bare name that can be emitted as a C identifier.`)
+		(params (source (shared-slice u8)) (name SourceNode))
+		(returns bool)
+		(body
+			(let start (record.get (local name) start))
+			(let end (record.get (local name) end))
+			(if
+				(:doc "The first byte must be a letter or underscore.")
+				(bool.not (bool.and (u32.eq (record.get (local name) kind) (u32 1))
+					(call is_head_start_byte (slice.load (local source) (local start)))))
+				(then (return (bool false))))
+			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+			(while
+				(:doc "The remaining bytes can also be decimal digits.")
+				(i32.lt (local cursor) (local end))
+				(body
+					(if (bool.not (call c_name_byte (slice.load (local source) (local cursor)))) (then (return (bool false))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (bool true))))
+
+	(fn is_c_pointer_spelling
+		(:doc `Accept C type words followed by one or more pointer stars.
+
+		Restrict the text to type words, horizontal space, and pointer stars.
+		The C compiler resolves the type words against the selected header.`)
+		(params (source (shared-slice u8)))
+		(returns bool)
+		(body
+			(let-mut cursor (i32 0))
+			(let-mut word (bool false))
+			(let-mut in_word (bool false))
+			(let-mut pointer (bool false))
+			(while
+				(:doc "Once the first pointer star appears, only stars and space can follow.")
+				(i32.lt (local cursor) (slice.len (local source)))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					(if
+						(:doc "Horizontal space separates words and may surround each star.")
+						(bool.or (u8.eq (local byte) (u8 32)) (u8.eq (local byte) (u8 9)))
+						(then (set (local in_word) (bool false)))
+						(else
+							(if
+								(:doc "The pointer suffix follows a native type spelling.")
+								(u8.eq (local byte) (u8 42))
+								(then
+									(if (bool.not (local word)) (then (return (bool false))))
+									(set (local pointer) (bool true)))
+								(else
+									(if
+										(:doc "Each type word is an ASCII C identifier.")
+										(bool.or (local pointer) (bool.not (bool.or (call is_head_start_byte (local byte))
+											(bool.and (local in_word) (call c_name_byte (local byte))))))
+										(then (return (bool false))))
+									(set (local word) (bool true))
+									(set (local in_word) (bool true))))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (local pointer))))
+
+	(fn owner_read
+		(:doc `Package an owner contract or its original failing span.`)
+		(params (native i32) (drop i32) (site SourceNode) (error u32))
+		(returns COwnerRead)
+		(body (return (record.make COwnerRead (native (local native)) (drop (local drop))
+			(start (record.get (local site) start)) (end (record.get (local site) end)) (error (local error))))))
+
+	(fn owner_keyword
+		(:doc `Recognize c_owned, c-type, and drop in their respective contract positions.`)
+		(params (source (shared-slice u8)) (node SourceNode))
+		(returns u32)
+		(body
+			(if (bool.not (u32.eq (record.get (local node) kind) (u32 1))) (then (return (u32 0))))
+			(let start (record.get (local node) start))
+			(let width (i32.sub.wrapping (record.get (local node) end) (local start)))
+			(if
+				(:doc "The marker must use the entire c_owned spelling.")
+				(bool.and (i32.eq (local width) (i32 7))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 99) (u8 95) (u8 111))
+						(bool.and (call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3))
+							(u8 119) (u8 110) (u8 101))
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 100)))))
+				(then (return (u32 1))))
+			(if
+				(:doc "The representation form uses the exact c-type tag.")
+				(bool.and (i32.eq (local width) (i32 6))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 99) (u8 45) (u8 116))
+						(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3))
+							(u8 121) (u8 112) (u8 101))))
+				(then (return (u32 2))))
+			(if
+				(:doc "Only drop introduces a destructor name.")
+				(bool.and (i32.eq (local width) (i32 4))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 100) (u8 114) (u8 111))
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 112))))
+				(then (return (u32 3))))
+			(return (u32 0))))
+
+	(fn owner_form_keyword
+		(:doc `Read the owner keyword at a form head or a bare marker.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns u32)
+		(body
+			(let child (record.get (local node) first_child))
+			(if
+				(:doc "A compound directive uses its checked form head.")
+				(u32.eq (record.get (local node) kind) (u32 40))
+				(then (return (call owner_keyword (borrow-shared (local source)) (slice.load (local nodes) (local child))))))
+			(return (call owner_keyword (borrow-shared (local source)) (local node)))))
+
+	(fn read_owner_drop
+		(:doc `Require exactly one drop form with a portable C symbol.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (directive SourceNode))
+		(returns COwnerRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local directive)))
+			(let clause (record.get (local parts) operands))
+			(if (i32.lt (local clause) (i32 0)) (then (return (call owner_read (i32 -1) (i32 -1) (local directive) (u32 23)))))
+			(let drop (slice.load (local nodes) (local clause)))
+			(if
+				(:doc "Storage flags and extra clauses are outside the pointer owner contract.")
+				(bool.or (bool.not (u32.eq (call owner_form_keyword (borrow-shared (local source))
+					(borrow-shared (local nodes)) (local drop)) (u32 3)))
+					(bool.not (i32.lt (record.get (local drop) next_sibling) (i32 0))))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local directive) (u32 23)))))
+			(let name (record.get (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local drop)) operands))
+			(if (i32.lt (local name) (i32 0)) (then (return (call owner_read (i32 -1) (i32 -1) (local drop) (u32 23)))))
+			(let symbol (slice.load (local nodes) (local name)))
+			(if
+				(:doc "Reject a malformed destructor at the exact symbol or clause.")
+				(bool.not (call is_native_name (borrow-shared (local source)) (local symbol)))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local symbol) (u32 23)))))
+			(if
+				(:doc "Extra operands make the destructor clause ambiguous.")
+				(bool.not (i32.lt (record.get (local symbol) next_sibling) (i32 0)))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local drop) (u32 23)))))
+			(return (call owner_read (i32 -1) (local name) (local directive) (u32 0)))))
+
+	(fn owner_destructor
+		(:doc `Find and validate the single c_owned directive in the type's pragma prefix.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parts FormParts) (site SourceNode))
+		(returns COwnerRead)
+		(body
+			(let-mut metadata (record.get (local parts) metadata))
+			(let-mut drop (i32 -1))
+			(while
+				(:doc "Only :pragma metadata can supply the ownership directive.")
+				(bool.and (bool.not (i32.lt (local metadata) (i32 0)))
+					(bool.not (i32.eq (local metadata) (record.get (local parts) operands))))
+				(body
+					(let entry (slice.load (local nodes) (local metadata)))
+					(let head (slice.load (local nodes) (record.get (local entry) first_child)))
+					(if
+						(:doc "Other metadata leaves the ownership contract untouched.")
+						(u32.eq (call source_keyword (borrow-shared (local source)) (local head)) (u32 3))
+						(then
+							(let pragma (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local entry)))
+							(let-mut index (record.get (local pragma) operands))
+							(while
+								(:doc "Unknown pragmas may coexist with the ownership directive.")
+								(bool.not (i32.lt (local index) (i32 0)))
+								(body
+									(let directive (slice.load (local nodes) (local index)))
+									(if
+										(:doc "An owner carries one destructor, so a second contract is ambiguous.")
+										(u32.eq (call owner_form_keyword (borrow-shared (local source))
+											(borrow-shared (local nodes)) (local directive)) (u32 1))
+										(then
+											(if
+												(:doc "Diagnose a repeated ownership marker at the later directive.")
+												(bool.not (i32.lt (local drop) (i32 0)))
+												(then (return (call owner_read (i32 -1) (i32 -1) (local directive) (u32 23)))))
+											(let checked (call read_owner_drop (borrow-shared (local source))
+												(borrow-shared (local nodes)) (local directive)))
+											(if (u32.lt (u32 0) (record.get (local checked) error)) (then (return (local checked))))
+											(set (local drop) (record.get (local checked) drop))))
+									(set (local index) (record.get (local directive) next_sibling))))))
+					(set (local metadata) (record.get (local entry) next_sibling))))
+			(if (i32.lt (local drop) (i32 0)) (then (return (call owner_read (i32 -1) (i32 -1) (local site) (u32 23)))))
+			(return (call owner_read (i32 -1) (local drop) (local site) (u32 0)))))
+
+	(fn read_c_owner
+		(:doc `Read the type literal and destructor operands of a named pointer owner member.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns COwnerRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let name (slice.load (local nodes) (record.get (local parts) operands)))
+			(let drop (call owner_destructor (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts) (local name)))
+			(if (u32.lt (u32 0) (record.get (local drop) error)) (then (return (local drop))))
+			(let index (record.get (local name) next_sibling))
+			(if (i32.lt (local index) (i32 0)) (then (return (call owner_read (i32 -1) (i32 -1) (local name) (u32 23)))))
+			(let form (slice.load (local nodes) (local index)))
+			(let literal (record.get (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)) operands))
+			(if
+				(:doc "A pointer owner needs one c-type form and a string operand.")
+				(bool.or (i32.lt (local literal) (i32 0))
+					(bool.or (bool.not (i32.lt (record.get (local form) next_sibling) (i32 0)))
+						(bool.not (u32.eq (call owner_form_keyword (borrow-shared (local source))
+							(borrow-shared (local nodes)) (local form)) (u32 2)))))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local form) (u32 23)))))
+			(let value (slice.load (local nodes) (local literal)))
+			(if
+				(:doc "Keep a bad native type operand at its originating span.")
+				(bool.or (bool.not (u32.eq (record.get (local value) kind) (u32 2)))
+					(bool.not (i32.lt (record.get (local value) next_sibling) (i32 0))))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local value) (u32 23)))))
+			(return (call owner_read (local literal) (record.get (local drop) drop) (local node) (u32 0)))))
+
+	(fn check_c_owner
+		(:doc `Check a selected owner contract and admit only its decoded pointer type spelling.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns COwnerRead)
+		(body
+			(let read (call read_c_owner (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(if (u32.lt (u32 0) (record.get (local read) error)) (then (return (local read))))
+			(let literal (slice.load (local nodes) (record.get (local read) native)))
+			(let start (record.get (local literal) start))
+			(let end (record.get (local literal) end))
+			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let value (call decode_string (borrow-shared (local source))
+				(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
+				(borrow-mut (local decoded))))
+			(if
+				(:doc "Reject invalid string escapes and non-pointer type expressions at the type operand.")
+				(bool.or (u32.lt (u32 0) (record.get (local value) error))
+					(bool.not (call is_c_pointer_spelling (borrow-shared (slice.range (local decoded) (i32 0)
+						(record.get (local value) written))))))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local literal) (u32 23)))))
+			(return (local read)))))

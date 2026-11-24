@@ -25,10 +25,10 @@
 #define decode_string wv_seed_fn_71
 #define form_parts wv_seed_fn_72
 #define read_module wv_seed_fn_81
-#define emit_module wv_seed_fn_106
-#define resolve_graph wv_seed_fn_123
-#define inspect_callers wv_seed_fn_314
-#define run_scalar_graph wv_seed_fn_335
+#define emit_module wv_seed_fn_107
+#define resolve_graph wv_seed_fn_124
+#define inspect_callers wv_seed_fn_334
+#define run_scalar_graph wv_seed_fn_359
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -44,10 +44,10 @@ typedef wv_seed_record_17 GraphBinding;
 typedef wv_seed_record_18 GraphUse;
 typedef wv_seed_record_19 GraphSelector;
 typedef wv_seed_record_20 GraphResult;
-typedef wv_seed_record_41 CallSite;
+typedef wv_seed_record_43 CallSite;
 typedef wv_seed_record_23 SuppliedFile;
-typedef wv_seed_record_46 CallerInspection;
-typedef wv_seed_record_50 GraphOutput;
+typedef wv_seed_record_48 CallerInspection;
+typedef wv_seed_record_52 GraphOutput;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -824,13 +824,22 @@ static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t
 		const int32_t start = row.wv_field_1;
 		const int32_t end = row.wv_field_2;
 		const char *name = (const char *)arena + files[owner].wv_field_3 + start;
-		const char *kind = row.wv_field_6 == 8 ? "c-binding" : (row.wv_field_5 == 0 ? "binding" : "type-binding");
+		const char *kind = row.wv_field_5 == 0 ? "binding" : "type-binding";
+		// Preserve the separate namespace when exposing C header bindings.
+		if (row.wv_field_6 == 8) {
+			kind = row.wv_field_5 == 0 ? "c-binding" : "c-type-binding";
+		}
 		printf("%s %" PRId32 " %.*s %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
 			kind, owner, (int)(end - start), name, row.wv_field_3, row.wv_field_4, start, end);
 		// The declared header, native symbol, and signature all use defining-file offsets.
 		if (row.wv_field_6 == 8) {
 			printf("c-target %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
 				row.wv_field_7, row.wv_field_8, row.wv_field_9, row.wv_field_10, row.wv_field_11, row.wv_field_12);
+			// A pointer contract keeps the defining type and destructor, even for an aliased function.
+			if (row.wv_field_13 > 0) {
+				printf("c-owner %" PRId32 " %" PRId32 " %" PRId32 "\n",
+					row.wv_field_13, row.wv_field_14, row.wv_field_15);
+			}
 		}
 	}
 }
