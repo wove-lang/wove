@@ -180,6 +180,29 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | 24 | Unsupported body or expression | The originating body form, statement, or expression |
 | 25 | Invalid signed decimal i32 | The literal value or malformed literal form |
 
+The [graph resolver](source_graph.wove) reads a supplied virtual file table
+and binds active function imports in each file's namespace. The table maps
+normalized absolute paths to defining file identities and source ranges in a
+shared byte arena. Relative imports use the directory of the reached path.
+Several paths can refer to one identity, which the resolver reads once.
+An empty `only` still visits its provider. An excluded module contributes
+no names or nested imports.
+
+Each binding identifies the importing namespace and the name span in that
+file. Its target is the defining file identity and function's node index
+in the defining source tree. Earlier reader diagnostics keep their codes
+and add the identity of the file where they originated.
+
+| Code | Failure | Primary span |
+| --- | --- | --- |
+| 16 | Short graph storage | The next row's source node, when available |
+| 26 | Malformed use, selector, or function name | The originating form or operand |
+| 27 | Missing active provider | The importing use |
+| 28 | Active import cycle | The closing use |
+| 29 | Unavailable function | The requested name |
+| 30 | Conflicting binding | The new local name |
+| 31 | Excluded entry module | The entry module |
+
 `make stage-2` translates [the compiler root](wovec.wove) with the Python seed
 and links `build/stage-1/wovec` with Clang and the shared runtime. The root
 imports `admit_source` and `scan_token` from [the scanner](source_scan.wove).
@@ -238,3 +261,9 @@ The remaining bytes are the C translation unit. The
 [compilation fixtures](../tests/stage-2/source_compilations.tsv) compile the
 emitted C with Clang, run the executable returning 42, and check the full
 return values at the i32 boundaries.
+
+The [graph fixtures](../tests/stage-2/source_graphs.tsv) pass virtual paths
+and raw source files to `--graph ENTRY CAPACITY (IDENTITY PATH FILE)...`.
+The probe prints the reached module rows, local bindings, and their defining
+identities and node indices. A failure gives the code and byte span with
+one-based coordinates in its original file.

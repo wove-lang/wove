@@ -1,0 +1,208 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve import paths in a supplied source graph.
+
+	Each row maps a normalized absolute path to a defining file identity. An
+	identity is the index of its defining row, which carries the original source
+	view. Several paths can name that identity. The graph supplies all ranges
+	inside one immutable arena and uses slash-separated virtual paths.`)
+	source_paths
+
+	(struct SuppliedFile
+		(fields (identity i32) (path_start i32) (path_end i32) (source_start i32) (source_end i32)))
+
+	(fn
+		(:doc `Compare raw byte spans in their original views.`)
+		same_bytes
+		(params (left (shared-slice u8)) (start i32) (end i32) (right (shared-slice u8))
+			(other_start i32) (other_end i32))
+		(returns bool)
+		(body
+			(let width (i32.sub.wrapping (local end) (local start)))
+			(if
+				(:doc "A length mismatch rules out equality without reading either view.")
+				(bool.not (i32.eq (local width) (i32.sub.wrapping (local other_end) (local other_start))))
+				(then (return (bool false))))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Read each pair of bytes inside the two known spans.")
+				(i32.lt (local index) (local width))
+				(body
+					(if
+						(:doc "The first differing byte rules out a match.")
+						(bool.not (u8.eq
+							(slice.load (local left) (i32.add.wrapping (local start) (local index)))
+							(slice.load (local right) (i32.add.wrapping (local other_start) (local index)))))
+						(then (return (bool false))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (bool true))))
+
+	(fn
+		(:doc `Find the end of an absolute path's directory prefix, including its slash.`)
+		directory_end
+		(params (arena (shared-slice u8)) (file SuppliedFile))
+		(returns i32)
+		(body
+			(let-mut cursor (i32.sub.wrapping (record.get (local file) path_end) (i32 1)))
+			(while
+				(:doc "The leading slash guarantees a directory boundary.")
+				(bool.not (u8.eq (slice.load (local arena) (local cursor)) (u8 47)))
+				(body (set (local cursor) (i32.sub.wrapping (local cursor) (i32 1)))))
+			(return (i32.add.wrapping (local cursor) (i32 1)))))
+
+	(fn
+		(:doc `Return the retained path width after removing the last component.`)
+		parent_width
+		(params (path (shared-slice u8)) (width i32))
+		(returns i32)
+		(body
+			(let-mut cursor (local width))
+			(while
+				(:doc "Walk back to the leading slash of the last component, if any.")
+				(i32.lt (i32 0) (local cursor))
+				(body
+					(set (local cursor) (i32.sub.wrapping (local cursor) (i32 1)))
+					(if
+						(:doc "The removed component includes its slash.")
+						(u8.eq (slice.load (local path) (local cursor)) (u8 47))
+						(then (return (local cursor))))))
+			(return (i32 0))))
+
+	(fn
+		(:doc `Copy a component into the reserved path scratch after a leading slash.`)
+		append_component
+		(params (request (shared-slice u8)) (start i32) (end i32)
+			(output (mut-slice u8)) (offset i32))
+		(returns i32)
+		(body
+			(slice.store (local output) (local offset) (u8 47))
+			(let-mut written (i32.add.wrapping (local offset) (i32 1)))
+			(let-mut index (local start))
+			(while
+				(:doc "Copy only bytes between the component's checked bounds.")
+				(i32.lt (local index) (local end))
+				(body
+					(slice.store (local output) (local written) (slice.load (local request) (local index)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))
+					(set (local written) (i32.add.wrapping (local written) (i32 1)))))
+			(return (local written))))
+
+	(fn
+		(:doc `Append the request as normalized components after its optional base directory.
+
+		Width zero denotes the virtual root. The reserved capacity covers the
+		base prefix and the entire request. A NUL byte makes the request invalid.`)
+		normalize_path
+		(params (request (shared-slice u8)) (output (mut-slice u8)) (base i32))
+		(returns i32)
+		(body
+			(let-mut written (local base))
+			(let-mut cursor (i32 0))
+			(let length (slice.len (local request)))
+			(while
+				(:doc "Read one component at a time, accepting repeated or trailing separators.")
+				(i32.lt (local cursor) (local length))
+				(body
+					(let start (local cursor))
+					(while
+						(:doc "Find the component boundary without reading beyond the request.")
+						(bool.and (i32.lt (local cursor) (local length))
+							(bool.not (u8.eq (slice.load (local request) (local cursor)) (u8 47))))
+						(body
+							(if
+								(:doc "Paths containing NUL cannot name a supplied file.")
+								(u8.eq (slice.load (local request) (local cursor)) (u8 0))
+								(then (return (i32 -1))))
+							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+					(let width (i32.sub.wrapping (local cursor) (local start)))
+					(if
+						(:doc "An empty component is already represented by the surrounding separators.")
+						(i32.lt (i32 0) (local width))
+						(then
+							(let dot (u8.eq (slice.load (local request) (local start)) (u8 46)))
+							(if
+								(:doc "A parent component removes one directory, stopping at the root.")
+								(bool.and (i32.eq (local width) (i32 2))
+									(bool.and (local dot)
+										(u8.eq (slice.load (local request)
+											(i32.add.wrapping (local start) (i32 1))) (u8 46))))
+								(then (set (local written) (call parent_width (borrow-shared (local output)) (local written))))
+								(else
+									(if
+										(:doc "A single dot leaves the directory unchanged.")
+										(bool.not (bool.and (i32.eq (local width) (i32 1)) (local dot)))
+										(then (set (local written)
+											(call append_component (borrow-shared (local request)) (local start)
+												(local cursor) (borrow-mut (local output)) (local written)))))))))
+					(if
+						(:doc "Advance past a separator only when it is inside the request.")
+						(i32.lt (local cursor) (local length))
+						(then (set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))))
+			(return (local written))))
+
+	(fn
+		(:doc `Copy a verified importer directory into the reserved scratch prefix.`)
+		copy_directory
+		(params (arena (shared-slice u8)) (start i32) (width i32) (output (mut-slice u8)))
+		(returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Leave the final slash for the next appended component.")
+				(i32.lt (local index) (local width))
+				(body
+					(slice.store (local output) (local index)
+						(slice.load (local arena) (i32.add.wrapping (local start) (local index))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn
+		(:doc `Return the matching supplied path row or -1 when no file has that path.
+
+		Resolve relative requests from the path that brought the importer into the
+		graph. The source identity is resolved separately by the caller.`)
+		resolve_path
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
+			(importer SuppliedFile) (request (shared-slice u8)))
+		(returns i32)
+		(body
+			(let length (slice.len (local request)))
+			(if
+				(:doc "An empty request cannot name a supplied file.")
+				(i32.eq (local length) (i32 0))
+				(then (return (i32 -1))))
+			(let start (record.get (local importer) path_start))
+			(let-mut base (i32 0))
+			(if
+				(:doc "A relative request starts from the importer's directory.")
+				(bool.not (u8.eq (slice.load (local request) (i32 0)) (u8 47)))
+				(then
+					(set (local base)
+						(i32.sub.wrapping (call directory_end (borrow-shared (local arena)) (local importer))
+							(i32.add.wrapping (local start) (i32 1))))))
+			(let capacity (i32.add.wrapping (i32.add.wrapping (local length) (local base)) (i32 1)))
+			(if
+				(:doc "No supplied path could match a request whose scratch width is out of range.")
+				(bool.not (i32.lt (i32 0) (local capacity)))
+				(then (return (i32 -2))))
+			(let-mut output (array.alloc u8 (local capacity)))
+			(call copy_directory (borrow-shared (local arena)) (local start) (local base)
+				(borrow-mut (local output)))
+			(let width (call normalize_path (borrow-shared (local request)) (borrow-mut (local output)) (local base)))
+			(if
+				(:doc "Invalid requests and the virtual root do not name files.")
+				(bool.not (i32.lt (i32 0) (local width)))
+				(then (return (i32 -1))))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Compare the normalized path against each supplied path row.")
+				(i32.lt (local index) (slice.len (local files)))
+				(body
+					(let file (slice.load (local files) (local index)))
+					(if
+						(:doc "The matched row identifies the provider and its reached path.")
+						(call same_bytes (borrow-shared (local output)) (i32 0) (local width)
+							(borrow-shared (local arena)) (record.get (local file) path_start) (record.get (local file) path_end))
+						(then (return (local index))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (i32 -1)))))

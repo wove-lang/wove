@@ -26,6 +26,7 @@
 #define form_parts wv_seed_fn_57
 #define read_module wv_seed_fn_66
 #define emit_module wv_seed_fn_75
+#define resolve_graph wv_seed_fn_88
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -36,6 +37,12 @@ typedef wv_seed_record_8 FormParts;
 typedef wv_seed_record_9 SelectedDeclaration;
 typedef wv_seed_record_10 ModuleRead;
 typedef wv_seed_record_12 EmitResult;
+typedef wv_seed_record_15 GraphModule;
+typedef wv_seed_record_16 GraphBinding;
+typedef wv_seed_record_17 GraphUse;
+typedef wv_seed_record_18 GraphSelector;
+typedef wv_seed_record_19 GraphResult;
+typedef wv_seed_record_22 SuppliedFile;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -620,6 +627,141 @@ static bool read_offset(const char *text, int32_t *offset) {
 	return true;
 }
 
+// Append a fixture byte span after checking that it fits the shared offset domain.
+static bool append_graph_bytes(uint8_t **arena, int32_t *length, const void *bytes, size_t width) {
+	if (width > (size_t)(INT32_MAX - *length)) {
+		return false;
+	}
+	if (width == 0) {
+		return true;
+	}
+	uint8_t *grown = realloc(*arena, (size_t)*length + width);
+	if (grown == NULL) {
+		return false;
+	}
+	memcpy(grown + *length, bytes, width);
+	*arena = grown;
+	*length += (int32_t)width;
+	return true;
+}
+
+// Pack virtual path rows and raw fixture files into the graph's immutable arena.
+static bool read_graph_files(char **args, SuppliedFile *files, int32_t count, uint8_t **arena, int32_t *length) {
+	// Alias rows carry a path without a second copy of the source.
+	for (int32_t i = 0; i < count; ++i, args += 3) {
+		const char *path = args[1];
+		int32_t identity;
+		if (!read_offset(args[0], &identity) || identity >= count || path[0] != '/' || path[1] == '\0') {
+			return false;
+		}
+		const int32_t path_start = *length;
+		if (!append_graph_bytes(arena, length, path, strlen(path))) {
+			return false;
+		}
+		const int32_t source_start = *length;
+		if (i == identity) {
+			int32_t width;
+			uint8_t *bytes = read_source(args[2], &width);
+			const bool added = bytes != NULL && append_graph_bytes(arena, length, bytes, (size_t)width);
+			free(bytes);
+			if (!added) {
+				return false;
+			}
+		}
+		files[i] = (SuppliedFile){identity, path_start, source_start, source_start, *length};
+	}
+	// Every path points directly to its canonical file row.
+	for (int32_t i = 0; i < count; ++i) {
+		const int32_t identity = files[i].wv_field_0;
+		if (files[identity].wv_field_0 != identity) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// Expose reached module rows and binding origins with spellings from their owning files.
+static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t count,
+		const GraphModule *modules, const GraphBinding *bindings, GraphResult result) {
+	printf("ok %" PRId32 " %" PRId32 "\n", result.wv_field_0, result.wv_field_1);
+	// Emit each initialized identity row once, in table order.
+	for (int32_t i = 0; i < count; ++i) {
+		const GraphModule row = modules[i];
+		if (row.wv_field_0 != 0) {
+			printf("module %" PRId32 " %" PRId32 " %" PRId32 " %d %" PRIu32 "\n",
+				i, row.wv_field_1, row.wv_field_2, row.wv_field_6, row.wv_field_0);
+		}
+	}
+	// Report the original name span and the target declaration's exact node index.
+	for (int32_t i = 0; i < result.wv_field_1; ++i) {
+		const GraphBinding row = bindings[i];
+		const int32_t owner = row.wv_field_0;
+		const int32_t start = row.wv_field_1;
+		const int32_t end = row.wv_field_2;
+		const char *name = (const char *)arena + files[owner].wv_field_3 + start;
+		printf("binding %" PRId32 " %.*s %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
+			owner, (int)(end - start), name, row.wv_field_3, row.wv_field_4, start, end);
+	}
+}
+
+// Resolve a packed graph with optional scratch limits and emit stable fixture rows.
+static int graph_mode(int argc, char **argv) {
+	int32_t entry;
+	int32_t capacity;
+	if (argc < 7 || (argc - 4) % 3 != 0 || !read_offset(argv[2], &entry) || !read_offset(argv[3], &capacity)) {
+		fputs("usage: source_scan --graph ENTRY CAPACITY (IDENTITY PATH FILE)...\n", stderr);
+		return EXIT_FAILURE;
+	}
+	const int32_t count = (int32_t)((argc - 4) / 3);
+	wvrt_array *file_storage = wvrt_array_new(count, sizeof(SuppliedFile), _Alignof(SuppliedFile), (wvrt_location){__FILE__, __LINE__, 1});
+	SuppliedFile *files = file_storage->wvrt_items;
+	uint8_t *arena = NULL;
+	int32_t length = 0;
+	if (!read_graph_files(argv + 4, files, count, &arena, &length)) {
+		fputs("could not load supplied graph\n", stderr);
+		free(arena);
+		wvrt_array_drop(file_storage);
+		return EXIT_FAILURE;
+	}
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_array *modules = wvrt_array_new(count, sizeof(GraphModule), _Alignof(GraphModule), site);
+	wvrt_array *bindings = wvrt_array_new(capacity, sizeof(GraphBinding), _Alignof(GraphBinding), site);
+	wvrt_array *uses = wvrt_array_new(capacity, sizeof(GraphUse), _Alignof(GraphUse), site);
+	wvrt_array *selectors = wvrt_array_new(capacity, sizeof(GraphSelector), _Alignof(GraphSelector), site);
+	const GraphResult result = resolve_graph(
+		(wvrt_slice){arena, length, sizeof(uint8_t)},
+		(wvrt_slice){files, count, sizeof(SuppliedFile)}, entry,
+		(wvrt_mut_slice){modules->wvrt_items, count, sizeof(GraphModule)},
+		(wvrt_mut_slice){bindings->wvrt_items, capacity, sizeof(GraphBinding)},
+		(wvrt_mut_slice){uses->wvrt_items, capacity, sizeof(GraphUse)},
+		(wvrt_mut_slice){selectors->wvrt_items, capacity, sizeof(GraphSelector)});
+	const uint32_t error = result.wv_field_5;
+	// Report offsets and coordinates in the diagnostic file's own original view.
+	if (error != 0) {
+		const int32_t file = result.wv_field_2;
+		const int32_t start = result.wv_field_3;
+		const int32_t end = result.wv_field_4;
+		if (file >= 0) {
+			const SuppliedFile row = files[file];
+			const wvrt_slice source = wvrt_slice_range_u8(arena, length, row.wv_field_3, row.wv_field_4, site);
+			const wv_seed_record_2 position = source_position(source, 0, start);
+			printf("error %" PRIu32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRIu32 " %" PRIu32 "\n",
+				error, file, start, end, position.wv_field_0, position.wv_field_1);
+		} else {
+			printf("error %" PRIu32 " -1 0 0 0 0\n", error);
+		}
+	} else {
+		write_graph(arena, files, count, modules->wvrt_items, bindings->wvrt_items, result);
+	}
+	wvrt_array_drop(selectors);
+	wvrt_array_drop(uses);
+	wvrt_array_drop(bindings);
+	wvrt_array_drop(modules);
+	wvrt_array_drop(file_storage);
+	free(arena);
+	return error == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 // Supply a whole file or one checked view to the same seed-built executable.
 static int source_mode(int argc, char **argv) {
 	const bool tokens = strcmp(argv[1], "--tokens") == 0;
@@ -680,7 +822,7 @@ static int source_mode(int argc, char **argv) {
 // Exercise complete inputs and checked views into a larger buffer.
 int main(int argc, char **argv) {
 	if (argc > 1) {
-		return source_mode(argc, argv);
+		return strcmp(argv[1], "--graph") == 0 ? graph_mode(argc, argv) : source_mode(argc, argv);
 	}
 	// Each complete input supplies its own logical byte length.
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
