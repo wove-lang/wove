@@ -37,10 +37,13 @@ stage-1: $(STAGE1)/ownership.transfer
 
 stage-2: $(BOOTSTRAP_COMPILER) $(SOURCE_SCAN)
 
+# Preserve quoting in compiler settings until the runner splits them into arguments.
+test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
+test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: stage-2
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
-	$(PYTHON) tests/stage-2/check_streams.py "$(CLANG)" "$(CFLAGS)" "$(SOURCE_SCAN)" \
+	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \

@@ -4,6 +4,7 @@
 """Compare whole streams from the seed-built Stage 2 probe."""
 
 from itertools import zip_longest
+import os
 from pathlib import Path
 import re
 import shlex
@@ -297,8 +298,10 @@ def check_compilations(executable, directory, manifest, clang):
 
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	compiler, flags, *inputs = sys.argv[1:]
-	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, modules, compilations, *sources = map(Path, inputs)
+	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, modules, compilations, *sources = map(
+		Path, sys.argv[1:])
+	compiler = os.environ.get("WOVE_TEST_CLANG", "clang")
+	flags = os.environ.get("WOVE_TEST_CFLAGS", "")
 	clang = [*shlex.split(compiler), "-std=c11", *shlex.split(flags)]
 	for source in sources:
 		compare_stream(executable, source)
