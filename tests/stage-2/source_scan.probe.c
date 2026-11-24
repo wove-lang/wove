@@ -26,7 +26,7 @@
 #define form_parts wv_seed_fn_57
 #define read_module wv_seed_fn_66
 #define emit_module wv_seed_fn_77
-#define resolve_graph wv_seed_fn_130
+#define resolve_graph wv_seed_fn_133
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -37,11 +37,11 @@ typedef wv_seed_record_8 FormParts;
 typedef wv_seed_record_9 SelectedDeclaration;
 typedef wv_seed_record_10 ModuleRead;
 typedef wv_seed_record_12 EmitResult;
-typedef wv_seed_record_20 GraphModule;
-typedef wv_seed_record_21 GraphBinding;
-typedef wv_seed_record_22 GraphUse;
-typedef wv_seed_record_23 GraphSelector;
-typedef wv_seed_record_24 GraphResult;
+typedef wv_seed_record_21 GraphModule;
+typedef wv_seed_record_22 GraphBinding;
+typedef wv_seed_record_23 GraphUse;
+typedef wv_seed_record_24 GraphSelector;
+typedef wv_seed_record_25 GraphResult;
 typedef wv_seed_record_17 SuppliedFile;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
