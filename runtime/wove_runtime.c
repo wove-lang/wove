@@ -98,16 +98,36 @@ void wvrt_array_drop(wvrt_array *wvrtbuffer) {
 	free(wvrtbuffer);
 }
 
-// Form a shared view relative to the first byte of the checked range.
-wvrt_slice wvrt_slice_range_u8(const void *wvrtitems, int32_t wvrtlength,
-	int32_t wvrtstart, int32_t wvrtend, wvrt_location wvrtsite) {
-	// Check both endpoints before subtracting or advancing the pointer.
-	if (wvrtstart < 0 || wvrtend < wvrtstart || wvrtend > wvrtlength) {
-		wvrt_trap(wvrtsite, "slice range out of bounds");
-	}
+// Check the signed endpoints before deriving either the byte offset or the length.
+static bool wvrt_slice_range_valid(int32_t wvrtlength, int32_t wvrtstart, int32_t wvrtend) {
+	return 0 <= wvrtstart && wvrtstart <= wvrtend && wvrtend <= wvrtlength;
+}
+
+// Project an already checked byte range onto the same backing storage.
+static wvrt_slice wvrt_slice_subrange(const void *wvrtitems, int32_t wvrtstart, int32_t wvrtend) {
 	const uint8_t *wvrt_base = wvrtitems;
 	if (wvrtstart != 0) { wvrt_base += (size_t)wvrtstart; }
 	return (wvrt_slice){wvrt_base, wvrtend - wvrtstart, sizeof(uint8_t)};
+}
+
+// Form a shared view relative to the first byte and retain the seed's line diagnostic.
+wvrt_slice wvrt_slice_range_u8(const void *wvrtitems, int32_t wvrtlength,
+	int32_t wvrtstart, int32_t wvrtend, wvrt_location wvrtsite) {
+	// Reject an invalid range before any pointer arithmetic.
+	if (!wvrt_slice_range_valid(wvrtlength, wvrtstart, wvrtend)) {
+		wvrt_trap(wvrtsite, "slice range out of bounds");
+	}
+	return wvrt_slice_subrange(wvrtitems, wvrtstart, wvrtend);
+}
+
+// Form a Stage 2 view with a diagnostic at the original range expression.
+wvrt_slice wvrt_slice_range_u8_at_span(wvrt_slice wvrtview, int32_t wvrtstart, int32_t wvrtend,
+	int32_t wvrtfile, int32_t wvrtspan_start, int32_t wvrtspan_end) {
+	// Keep bounds failures ahead of pointer arithmetic and the callee.
+	if (!wvrt_slice_range_valid(wvrtview.wvrt_length, wvrtstart, wvrtend)) {
+		wvrt_trap_at_span(wvrtfile, wvrtspan_start, wvrtspan_end, "slice range out of bounds");
+	}
+	return wvrt_slice_subrange(wvrtview.wvrt_items, wvrtstart, wvrtend);
 }
 
 // Check an element index in the signed slice length domain.
