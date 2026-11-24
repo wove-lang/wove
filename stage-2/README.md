@@ -170,14 +170,19 @@ before the error. Earlier tree errors keep their original spans and codes.
 | 21 | Invalid selection directive | The offending directive or predicate |
 
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
-and the selected declaration indices. It checks scalar functions that
-return a value on every path. Helpers can accept and return `i32`, `u8`,
+and the selected declaration indices. A value-returning function must
+return its declared type on every path. Helpers can accept and return `i32`, `u8`,
 `u32`, and `bool`. Expressions support exact-type literals, binding reads,
 and direct calls. A local declared with `let` or `let-mut` takes its
 scalar type from its initializer and comes into scope afterwards. A `set`
 requires an existing `let-mut` binding and a value of that binding's exact
 type. Forward calls use checked prototypes, and nested calls evaluate from
 left to right.
+
+A helper with `(returns void)` can use `(return)` or finish at the end
+of its body. Invoke it with a standalone `(call ...)` statement. The
+call checks its arguments, and either exit releases the helper's live
+local owners.
 
 An executable's `main` returns `i32`. A parameterless entry uses the ABI
 `int main(void)`. In native mode, `main` may receive a `(shared-slice u8)`
