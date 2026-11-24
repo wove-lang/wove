@@ -505,3 +505,25 @@ bytes for emission and call sites for inspection. The success header
 gives the output count, defining file identity, and file-relative span.
 The [scalar graph fixtures](../tests/stage-2/scalar_graphs.tsv) check the
 native result, defining symbols, repeated imports, and original call spans.
+
+## Structured JSON diagnostics
+
+Use [the diagnostic record](diagnostics/record.wove) to retain an error's
+numeric `u32` code and original location. Construct a source location with
+`diagnostic_source` and an argument location with `diagnostic_argv`. Source
+coordinates are half-open byte offsets in the named file. Argv positions
+are zero-based and count from the first user argument after the executable.
+
+Call [`write_diagnostic_json`](diagnostics/json.wove) with the record, its
+UTF-8 message, the source name for a source location, a writable output
+view, and two bytes of nesting storage. Use the returned `written` prefix
+when `error` is zero. The serializer emits one compact object per call.
+
+```jsonl
+{"code":24,"message":"Unexpected expression","location":{"kind":"source","file":"example.wove","start":12,"end":24}}
+{"code":7,"message":"Unknown option","location":{"kind":"argv","index":2}}
+```
+
+Errors 1 and 2 indicate output and nesting capacity. Error 3 indicates an
+unknown location tag, and error 4 indicates invalid UTF-8. Discard the
+output on failure.

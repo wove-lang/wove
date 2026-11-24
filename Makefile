@@ -36,6 +36,9 @@ JSON_CASES := $(JSON_FIXTURES)/cases.tsv
 JSON_WRITER_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors)
 JSON_READER_PROGRAMS := $(addprefix $(STAGE2)/json/,reader reader_errors)
 JSON_PROGRAMS := $(JSON_WRITER_PROGRAMS) $(JSON_READER_PROGRAMS) $(STAGE2)/json/utf8 $(STAGE2)/json/frame
+DIAGNOSTIC_FIXTURES := tests/stage-2/diagnostics
+DIAGNOSTIC_PROGRAM := $(STAGE2)/diagnostics/json
+DIAGNOSTIC_SOURCES := stage-2/diagnostics/record.wove stage-2/diagnostics/json.wove
 CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove $(VALUE_TEXT_MODULES)
 CLI_FIXTURES := tests/stage-2/cli
 CLI_CASES := $(CLI_FIXTURES)/cases.tsv
@@ -64,7 +67,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
 
-.PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang
+.PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -79,7 +82,7 @@ test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang
+test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -89,7 +92,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
-		$(JSON_FRAME_MODULE) $(CLANG_SOURCES) \
+		$(JSON_FRAME_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv
@@ -98,6 +101,10 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 # Run the standalone JSON utilities with the same manifest runner as the seed.
 test-stage-2-json: $(JSON_PROGRAMS)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/json" "$(JSON_CASES)"
+
+# Check the standalone diagnostic serializer and JSON reader together.
+test-stage-2-diagnostics: $(DIAGNOSTIC_PROGRAM)
+	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/diagnostics" "$(DIAGNOSTIC_FIXTURES)/cases.tsv"
 
 # Run the standalone typed argv fixtures with the seed manifest runner.
 test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
@@ -149,6 +156,13 @@ $(JSON_WRITER_PROGRAMS): $(JSON_WRITER_SOURCES)
 $(JSON_READER_PROGRAMS): $(JSON_READER_SOURCES)
 $(STAGE2)/json/frame: $(JSON_FRAME_MODULE) $(JSON_READER_SOURCES)
 $(STAGE2)/json/utf8: $(UTF8_MODULE)
+
+# Build the serializer fixture without importing it into the CLI.
+$(DIAGNOSTIC_PROGRAM): $(DIAGNOSTIC_FIXTURES)/json.wove $(DIAGNOSTIC_SOURCES) $(JSON_WRITER_SOURCES) \
+	$(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED) $(STAGE1)/runtime.o
+	mkdir -p "$(@D)"
+	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
 
 # Build each argv fixture with its own test entry and the seed.
 $(CLI_PROGRAMS): $(STAGE2)/cli/%: $(CLI_FIXTURES)/%.wove $(CLI_FIXTURES)/fixture_data.wove $(CLI_SOURCES) $(SEED) $(STAGE1)/runtime.o
