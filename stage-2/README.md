@@ -169,11 +169,14 @@ reads, and direct calls. The selected `main` has the ABI signature
 `int main(void)`. Forward calls use checked prototypes, and nested calls
 evaluate from left to right.
 
-Generated C names have the form `wg<role><id><suffix>`. The `wg` prefix
-stands for Wove-generated. The third character identifies the symbol's
-role. The ID uses seven lowercase Base32hex digits. Its first digit is
-`0` or `1` because IDs are 31 bits. A source suffix replaces dots and
-hyphens with underscores.
+The [C name generator](c_text.wove) takes a `CNameRole`, a checked ID,
+and the source name's byte span. The seed represents the role enum with
+a record and named constructors. The generator writes
+`wg<role><id><suffix>`, where `wg` stands for Wove-generated and the
+third character identifies the role. The ID uses seven lowercase
+Base32hex digits and starts with `0` or `1` because IDs are 31 bits.
+A suffix keeps ASCII letters, digits, and underscores. Other bytes
+become underscores.
 
 | Tag | Role | ID | Suffix |
 | --- | --- | --- | --- |
