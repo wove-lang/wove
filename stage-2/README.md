@@ -446,8 +446,9 @@ destructor contract.
 ```lisp
 (bridge c-header "<stdio.h>"
 	(type (:pragma (c_owned (drop fclose))) File (c-type "FILE *"))
-	(fn tmpfile (params) (returns File)))
-(use c-header "<stdio.h>" (only (type File) tmpfile))
+	(fn tmpfile (params) (returns File))
+	(fn fileno (params (stream (shared-ref File))) (returns i32)))
+(use c-header "<stdio.h>" (only (type File) tmpfile fileno))
 ```
 
 A resource result resolves to its type in the defining bridge. Type selectors
@@ -457,6 +458,12 @@ declarations. Stage 2 keeps the pointer directly in a local owner and
 preserves NULL as a missing handle. Scope cleanup calls the declared
 destructor once for each present handle. Returns evaluate their value before
 cleanup. A local `move` transfers cleanup to the receiving binding.
+
+A bridge parameter spelled `(shared-ref File)` borrows that exact resource
+type from a local owner. For example, `(call fileno (borrow-shared (local file)))`
+checks the handle at the borrow's source span and passes its original C
+pointer. A missing handle traps before the call. The loan ends on return
+from C, and the local owner retains its destructor responsibility.
 
 Each binding identifies the importing namespace and the name span in that
 file. Its target is the defining file identity and declaration node index

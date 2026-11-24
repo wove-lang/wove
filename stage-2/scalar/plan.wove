@@ -15,6 +15,7 @@
 	(use wove-file "../source/module.wove" (only form_parts validate_form_metadata (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
+	(use wove-file "../source/c_headers.wove" (only read_c_handle_parameter))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "../c/arguments.wove" (only c_value_mode))
 	(use wove-file "./records.wove"
@@ -22,7 +23,7 @@
 			find_member read_member_operand is_record_slice record_slice_type record_slice_element is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element (type ScalarRecord)))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
-	(use wove-file "./owners.wove" (only is_local_owner is_native_owner))
+	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind))
 	(use wove-file "./flow.wove" (only block_statement moved_owner after_block (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar scalar_operator
@@ -175,7 +176,7 @@
 		(:doc `Check each parameter's unique spelling, metadata, and exact type.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32)
 			(parameters (mut-slice ScalarParameter)) (start i32) (records (shared-slice ScalarRecord))
-			(bindings (shared-slice GraphBinding)) (scope FunctionScope))
+			(bindings (shared-slice GraphBinding)) (scope FunctionScope) (bridge i32))
 		(returns EntryRead)
 		(body
 			(let-mut index (local first))
@@ -204,11 +205,25 @@
 					(let checked (call read_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local records)) (borrow-shared (local bindings))
 						(record.get (local scope) file) (record.get (local scope) source_base) (local operand)))
+					(let-mut type (u32 0))
 					(if
-						(:doc "Keep unsupported types and malformed type syntax at their original spans.")
-						(u32.lt (u32 0) (record.get (local checked) error))
-						(then (return (local checked))))
-					(let type (int.convert u32 (record.get (local checked) operand)))
+						(:doc "Ordinary parameters use the exact scalar, record, or slice type.")
+						(u32.eq (u32 0) (record.get (local checked) error))
+						(then (set (local type) (int.convert u32 (record.get (local checked) operand))))
+						(else
+							(if
+								(:doc "Only native signatures can declare borrowed pointer resources.")
+								(i32.lt (local bridge) (i32 0))
+								(then (return (local checked))))
+							(let handle (call read_c_handle_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
+								(slice.load (local nodes) (local operand)) (local bridge) (record.get (local scope) bootstrap)))
+							(if
+								(:doc "A rejected handle type keeps the declaring span.")
+								(u32.lt (u32 0) (record.get (local handle) error))
+								(then (return (record.make EntryRead (operand (i32 -1))
+									(start (record.get (local handle) start)) (end (record.get (local handle) end))
+									(error (record.get (local handle) error)) (related (i32 -1))))))
+							(set (local type) (call native_owner_type (record.get (local handle) declaration)))))
 					(let name_node (slice.load (local nodes) (local name)))
 					(let existing (call find_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local name_node) (borrow-shared (local parameters)) (local start) (local written)))
@@ -300,7 +315,7 @@
 					(error (record.get (local signature) error)) (related (i32 -1))))))
 			(let checked (call read_parameters (borrow-shared (local source)) (borrow-shared (local nodes))
 				(record.get (local signature) params) (borrow-mut (local parameters)) (local next_param)
-				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope)))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (i32 -1)))
 			(if
 				(:doc "Pass through the parameter list's first failure.")
 				(u32.lt (u32 0) (record.get (local checked) error))
@@ -398,7 +413,7 @@
 		also copy a record, allocate, or move an owner. A field receiver
 		(53) can be any registered record. A length or load receiver (55)
 		can use any readable slice. A store receiver (56) must be writable.
-		A move source (57) accepts any local owner. Zero marks unvisited rows.`)
+		An owner operand (57) can supply a transfer or a handle borrow. Zero marks unvisited rows.`)
 		(params (expected u32) (actual u32))
 		(returns bool)
 		(body
@@ -598,7 +613,7 @@
 							(start (record.get (local node) start)) (end (record.get (local node) end))
 							(error (u32 39)) (related (local transfer))))))
 					(if
-						(:doc "Native pointer owners can be read only as the source of a checked transfer.")
+						(:doc "Native pointer owners need a checked borrow or transfer before they can be read.")
 						(bool.and (call is_native_owner (local actual)) (bool.not (u32.eq (local expected) (u32 57))))
 						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 					(if
@@ -968,7 +983,7 @@
 				(start (record.get (local use) start)) (end (record.get (local use) end))
 				(error (record.get (local problem) error)) (related (record.get (local problem) related))))))
 
-	(fn slice_loan_keyword
+	(fn call_loan_keyword
 		(:doc `Get the explicit reborrow keyword for an argument's expected type.`)
 		(params (expected u32))
 		(returns u32)
@@ -982,6 +997,10 @@
 						(call is_writable_slice (local expected))
 						(then (return (u32 39))))
 					(return (u32 35))))
+			(if
+				(:doc "A pointer resource formal requires the same shared borrow spelling.")
+				(call is_native_owner (local expected))
+				(then (return (u32 35))))
 			(return (local expected))))
 
 	(fn plan_named_view
@@ -1025,7 +1044,7 @@
 			(if
 				(:doc "Use the exact formal descriptor type for a whole-record-slice loan.")
 				(call is_record_slice (local expected))
-				(then (set (local kind) (call slice_loan_keyword (local expected)))))
+				(then (set (local kind) (call call_loan_keyword (local expected)))))
 			(if
 				(:doc "A read projects the receiver to shared access and retains its element type.")
 				(u32.eq (local expected) (u32 55))
@@ -1103,15 +1122,48 @@
 			(slice.store (local expressions) (local end) (local expected))
 			(return (call entry_at (local loan) (local index) (u32 0)))))
 
+	(fn plan_handle_borrow
+		(:doc `Borrow the exact live resource without transferring ownership.
+
+		Keep the local pointer as the borrow's operand. The borrow's own
+		original span identifies a missing handle at runtime.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(index i32) (reference_index i32) (caller ScalarFunction) (statement i32) (expected u32) (view_start i32)
+			(parameters (shared-slice ScalarParameter)) (statements (shared-slice ScalarStatement))
+			(expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let reference (slice.load (local nodes) (local reference_index)))
+			(let named (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) (u32 8) (u32 24)))
+			(if
+				(:doc "A handle loan needs a named local owner.")
+				(u32.lt (u32 0) (record.get (local named) error))
+				(then (return (local named))))
+			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)
+				(record.get (local named) operand) (u32 57) (local reference_index) (local caller) (local statement)
+				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+			(if
+				(:doc "A transfer remains related context for a borrow of a moved owner.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (call at_owner_use (local checked) (local node)))))
+			(if
+				(:doc "Compare defining resource identities even when the native pointer types are spelled alike.")
+				(bool.not (u32.eq (local expected) (record.get (slice.load (local expressions) (local reference_index)) type)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(slice.store (local expressions) (local index)
+				(call runtime_expression (call native_handle_borrow_kind) (local expected) (local node) (local reference_index)
+					(local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
 	(fn plan_view
-		(:doc `Check an explicit reborrow argument, including checked shared byte subranges.`)
+		(:doc `Check a call loan of a whole view, a shared byte range, or a C handle.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
 			(index i32) (caller ScalarFunction) (statement i32) (expected u32) (view_start i32)
 			(parameters (shared-slice ScalarParameter)) (statements (shared-slice ScalarStatement))
 			(expressions (mut-slice ScalarExpression)))
 		(returns EntryRead)
 		(body
-			(let keyword (call slice_loan_keyword (local expected)))
+			(let keyword (call call_loan_keyword (local expected)))
 			(let loan (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local keyword) (u32 24)))
 			(if
@@ -1124,6 +1176,12 @@
 				(bool.or (i32.lt (local reference_index) (i32 0))
 					(bool.not (i32.lt (record.get (slice.load (local nodes) (local reference_index)) next_sibling) (i32 0))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(if
+				(:doc "A resource formal takes a checked reference to its defining pointer type.")
+				(call is_native_owner (local expected))
+				(then (return (call plan_handle_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local reference_index) (local caller) (local statement) (local expected) (local view_start)
+					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(let reference (slice.load (local nodes) (local reference_index)))
 			(if
 				(:doc "A shared call can project a range instead of borrowing the whole source.")
@@ -1399,7 +1457,8 @@
 			(let node (slice.load (local nodes) (local index)))
 			(if
 				(:doc "Resolve a call argument in its required reborrow mode and element type.")
-				(bool.or (call is_reborrow_keyword (local expected)) (call is_record_slice (local expected)))
+				(bool.or (call is_native_owner (local expected))
+					(bool.or (call is_reborrow_keyword (local expected)) (call is_record_slice (local expected))))
 				(then (return (call plan_view (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (local caller) (local statement) (local expected) (local view_start)
 					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
