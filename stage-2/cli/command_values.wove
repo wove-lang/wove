@@ -1,0 +1,145 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Decode command operands using the config schema's value kinds and bounds.")
+	command_values
+
+	(use wove-file "../config/project.wove" (only valid_project_name))
+	(use wove-file "../config/values.wove" (only project_word add_import_category pack_import_category project_number_in_range))
+	(use wove-file "./values.wove" (only argv_decimal))
+	(use wove-file "./command_schema.wove" (only command_word))
+
+	(struct CommandScalar (fields (valid bool) (value u32)))
+
+	(fn
+		(:doc "Construct a decoded operand or a failed conversion.")
+		command_scalar
+		(params (valid bool) (value u32))
+		(returns CommandScalar)
+		(body (return (record.make CommandScalar (valid (local valid)) (value (local value))))))
+
+	(fn
+		(:doc "Recognize a letter or underscore in a command-line definition.")
+		definition_letter
+		(params (byte u8))
+		(returns bool)
+		(body (return (bool.or (u8.eq (local byte) (u8 95))
+			(bool.or (bool.and (u8.lt (u8 64) (local byte)) (u8.lt (local byte) (u8 91)))
+				(bool.and (u8.lt (u8 96) (local byte)) (u8.lt (local byte) (u8 123))))))))
+
+	(fn
+		(:doc "Read the identifier syntax of an explicit cfg name.")
+		command_definition
+		(params (bytes (shared-slice u8)) (start i32) (end i32))
+		(returns bool)
+		(body
+			(if
+				(:doc "Definitions require a nonempty name starting with a letter or underscore.")
+				(bool.or (i32.eq (local start) (local end))
+					(bool.not (call definition_letter (slice.load (local bytes) (local start)))))
+				(then (return (bool false))))
+			(let-mut at (i32.add.wrapping (local start) (i32 1)))
+			(while
+				(:doc "Subsequent identifier bytes may also be digits.")
+				(i32.lt (local at) (local end))
+				(body
+					(let byte (slice.load (local bytes) (local at)))
+					(if
+						(:doc "Reject punctuation and layout in definition names.")
+						(bool.not (bool.or (call definition_letter (local byte))
+							(bool.and (u8.lt (u8 47) (local byte)) (u8.lt (local byte) (u8 58)))))
+						(then (return (bool false))))
+					(set (local at) (i32.add.wrapping (local at) (i32 1)))))
+			(return (bool true))))
+
+	(fn
+		(:doc "Decode four distinct comma-separated import categories as four base-four digits.")
+		command_import_order
+		(params (bytes (shared-slice u8)) (start i32) (end i32))
+		(returns CommandScalar)
+		(body
+			(let-mut seen (array.alloc u8 (i32 4)))
+			(let-mut first (local start))
+			(let-mut at (local start))
+			(let-mut count (i32 0))
+			(let-mut packed (u32 0))
+			(while
+				(:doc "Each iteration ends at a comma or one past the last category byte.")
+				(bool true)
+				(body
+					(if
+						(:doc "A comma or the input end finishes one full category.")
+						(bool.or (i32.eq (local at) (local end)) (u8.eq (slice.load (local bytes) (local at)) (u8 44)))
+						(then
+							(let category (call project_word (u32 12)
+								(borrow-shared (slice.range (local bytes) (local first) (local at)))
+								(i32.sub.wrapping (local at) (local first))))
+							(if
+								(:doc "Unknown and repeated categories cannot define the import order.")
+								(bool.not (call add_import_category (borrow-mut (local seen)) (local category)))
+								(then (return (call command_scalar (bool false) (u32 0)))))
+							(set (local packed) (call pack_import_category (local packed) (local category)))
+							(set (local count) (i32.add.wrapping (local count) (i32 1)))
+							(if
+								(:doc "Exactly four categories are required before the operand is complete.")
+								(i32.eq (local at) (local end))
+								(then (return (call command_scalar (i32.eq (local count) (i32 4)) (local packed)))))
+							(set (local first) (i32.add.wrapping (local at) (i32 1)))))
+					(set (local at) (i32.add.wrapping (local at) (i32 1)))))
+			(return (call command_scalar (bool false) (u32 0)))))
+
+	(fn
+		(:doc "Validate one named operand while keeping all text in the original argv byte arena.")
+		decode_command_operand
+		(params (bytes (shared-slice u8)) (start i32) (end i32) (rule i32) (kind u32))
+		(returns CommandScalar)
+		(body
+			(if
+				(:doc "Unsigned settings use the ordinary argv integer grammar and the schema bounds.")
+				(bool.or (u32.eq (local kind) (u32 3))
+					(bool.or (u32.eq (local kind) (u32 13)) (u32.eq (local kind) (u32 14))))
+				(then
+					(let number (call argv_decimal (borrow-shared (local bytes)) (local start) (local end) (bool false)))
+					(let value (record.get (local number) magnitude))
+					(return (call command_scalar (bool.and (record.get (local number) valid)
+						(call project_number_in_range (local kind) (local value))) (local value)))))
+			(if
+				(:doc "A profile selector is a nonempty name accepted by the config reader.")
+				(u32.eq (local kind) (u32 5))
+				(then (return (call command_scalar (call valid_project_name
+					(borrow-shared (slice.range (local bytes) (local start) (local end)))
+					(i32.sub.wrapping (local end) (local start))) (u32 0)))))
+			(if
+				(:doc "The compiler control chooses a native tool family.")
+				(u32.eq (local kind) (u32 17))
+				(then
+					(if
+						(:doc "Clang is compiler zero.")
+						(call command_word (borrow-shared (local bytes)) (local start) (local end) (i32 10))
+						(then (return (call command_scalar (bool true) (u32 0)))))
+					(return (call command_scalar (call command_word (borrow-shared (local bytes))
+						(local start) (local end) (i32 11)) (u32 1)))))
+			(if
+				(:doc "An explicit import-order operand is the full replacement order.")
+				(u32.eq (local kind) (u32 12))
+				(then (return (call command_import_order (borrow-shared (local bytes)) (local start) (local end)))))
+			(if
+				(:doc "The user-facing enum values are shared with the project config reader.")
+				(bool.or (u32.eq (local kind) (u32 7))
+					(bool.and (u32.lt (u32 8) (local kind)) (u32.lt (local kind) (u32 12))))
+				(then
+					(let member (call project_word (local kind)
+						(borrow-shared (slice.range (local bytes) (local start) (local end)))
+						(i32.sub.wrapping (local end) (local start))))
+					(if
+						(:doc "An unknown enum spelling has no typed value.")
+						(i32.lt (local member) (i32 0))
+						(then (return (call command_scalar (bool false) (u32 0)))))
+					(return (call command_scalar (bool true) (int.convert u32 (local member))))))
+			(if
+				(:doc "Both compiler and build definitions require a cfg identifier.")
+				(bool.or (i32.eq (local rule) (i32 14)) (i32.eq (local rule) (i32 22)))
+				(then (return (call command_scalar (call command_definition (borrow-shared (local bytes))
+					(local start) (local end)) (u32 0)))))
+			(return (call command_scalar (bool.or (i32.lt (local start) (local end))
+				(bool.or (i32.eq (local rule) (i32 13)) (i32.eq (local rule) (i32 15)))) (u32 0))))))

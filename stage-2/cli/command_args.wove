@@ -1,0 +1,273 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Parse cc, bin and fmt arguments in original argv order.
+
+	CommandArgument rows retain typed scalar values and text spans. The
+	rule is the project schema row, or -1 for a positional, -2 for the
+	profile selector, -3 and -4 for mode switches, -5 for cc --check, or
+	-6 for bin --compiler. Form 4 clears the corresponding list.
+
+	Errors 1, 2, 3, 5, 7 and 8 match the typed argv diagnostics for
+	unknown option, missing value, invalid value, duplicate option,
+	invalid span and insufficient rows. Code 9 is a missing or unknown
+	command and 10 is a conflicting build mode. Discard rows on error.`)
+	command_args
+
+	(use wove-file "./argv.wove"
+		(only (type ArgSpan) check_argv option_name_end has_no_prefix has_option_prefix))
+	(use wove-file "./command_schema.wove" (only command_name find_command_option))
+	(use wove-file "./command_values.wove" (only decode_command_operand))
+	(use wove-file "../config/schema.wove" (only (type ProjectRule)))
+
+	(struct CommandArgument (fields (rule i32) (form u32) (argv_index i32) (start i32) (end i32) (scalar u32)))
+	(struct CommandArgs (fields (error u32) (argv_index i32) (rule i32)
+		(command u32) (mode u32) (rows i32) (operands i32) (profile i32)))
+	(struct SelectedOption (fields (rule i32) (kind u32) (form u32) (scalar u32) (end i32)))
+	(struct SelectedValue (fields (error u32) (rule i32) (form u32) (index i32) (start i32) (end i32) (scalar u32)))
+
+	(fn
+		(:doc "Create a parse failure with the original argument and schema row.")
+		command_args_error
+		(params (code u32) (index i32) (rule i32))
+		(returns CommandArgs)
+		(body (return (record.make CommandArgs (error (local code)) (argv_index (local index)) (rule (local rule))
+			(command (u32 0)) (mode (u32 0)) (rows (i32 0)) (operands (i32 0)) (profile (i32 -1))))))
+
+	(fn
+		(:doc "Recognize the archive's exact short spelling for build output.")
+		is_short_output
+		(params (bytes (shared-slice u8)) (span ArgSpan))
+		(returns bool)
+		(body
+			(let start (record.get (local span) start))
+			(return (bool.and (i32.eq (i32.sub.wrapping (record.get (local span) end) (local start)) (i32 2))
+				(bool.and (u8.eq (slice.load (local bytes) (local start)) (u8 45))
+					(u8.eq (slice.load (local bytes) (i32.add.wrapping (local start) (i32 1))) (u8 111)))))))
+
+	(fn
+		(:doc "Find a long or short option and its implicit boolean, leaving attached text in the argument.")
+		select_command_option
+		(params (command u32) (bytes (shared-slice u8)) (span ArgSpan)
+			(names (shared-slice u8)) (rules (shared-slice ProjectRule)))
+		(returns SelectedOption)
+		(body
+			(let end (record.get (local span) end))
+			(if
+				(:doc "Only cc and bin recognize -o as their build.output option.")
+				(bool.and (bool.not (u32.eq (local command) (u32 3))) (call is_short_output (borrow-shared (local bytes)) (local span)))
+				(then
+					(let output (slice.load (local rules) (i32 19)))
+					(return (record.make SelectedOption (rule (i32 19)) (kind (record.get (local output) kind)) (form (u32 2))
+						(scalar (u32 0)) (end (local end))))))
+			(if
+				(:doc "Any other dash-prefixed spelling must be a long option.")
+				(bool.not (call has_option_prefix (borrow-shared (local bytes)) (local span)))
+				(then (return (record.make SelectedOption (rule (i32 -1)) (kind (u32 0)) (form (u32 0))
+					(scalar (u32 0)) (end (local end))))))
+			(let start (i32.add.wrapping (record.get (local span) start) (i32 2)))
+			(let stop (call option_name_end (borrow-shared (local bytes)) (local start) (local end)))
+			(let direct (call find_command_option (local command) (borrow-shared (local bytes)) (local start) (local stop)
+				(borrow-shared (local names)) (borrow-shared (local rules))))
+			(let form (record.get (local direct) form))
+			(if
+				(:doc "Match literal names like no-fail before interpreting the no- prefix.")
+				(u32.lt (u32 0) (local form))
+				(then (return (record.make SelectedOption (rule (record.get (local direct) rule)) (kind (record.get (local direct) kind))
+					(form (local form)) (scalar (u32 1)) (end (local stop))))))
+			(if
+				(:doc "Boolean config options and cc --check accept an explicit negative spelling.")
+				(call has_no_prefix (borrow-shared (local bytes)) (local start) (local stop))
+				(then
+					(let inverse (call find_command_option (local command) (borrow-shared (local bytes))
+						(i32.add.wrapping (local start) (i32 3)) (local stop) (borrow-shared (local names)) (borrow-shared (local rules))))
+					(if
+						(:doc "Build mode selectors have only positive spellings.")
+						(bool.and (u32.eq (record.get (local inverse) form) (u32 1))
+							(bool.or (i32.eq (record.get (local inverse) rule) (i32 -5))
+								(bool.not (i32.lt (record.get (local inverse) rule) (i32 0)))))
+						(then (return (record.make SelectedOption (rule (record.get (local inverse) rule)) (kind (u32 1)) (form (u32 1))
+							(scalar (u32 0)) (end (local stop))))))))
+			(return (record.make SelectedOption (rule (i32 -1)) (kind (u32 0)) (form (u32 0))
+				(scalar (u32 0)) (end (local stop))))))
+
+	(fn
+		(:doc "Build an option event with coordinates at the token that supplied the value or error.")
+		selected_value
+		(params (error u32) (option SelectedOption) (index i32) (start i32) (end i32) (scalar u32))
+		(returns SelectedValue)
+		(body (return (record.make SelectedValue (error (local error)) (rule (record.get (local option) rule))
+			(form (record.get (local option) form)) (index (local index)) (start (local start)) (end (local end)) (scalar (local scalar))))))
+
+	(fn
+		(:doc "Read an attached or separate value, including the archive's dash-prefixed native flags.")
+		select_command_value
+		(params (bytes (shared-slice u8)) (argv (shared-slice ArgSpan)) (option SelectedOption) (index i32) (span ArgSpan))
+		(returns SelectedValue)
+		(body
+			(let form (record.get (local option) form))
+			(let rule (record.get (local option) rule))
+			(let stop (record.get (local option) end))
+			(let-mut start (record.get (local span) start))
+			(let-mut end (record.get (local span) end))
+			(let attached (i32.lt (local stop) (local end)))
+			(if
+				(:doc "An unknown named option is an error at its own token.")
+				(u32.eq (local form) (u32 0))
+				(then (return (call selected_value (u32 1) (local option) (local index) (local start) (local end) (u32 0)))))
+			(if
+				(:doc "Switches and list resets take no operands.")
+				(bool.or (u32.eq (local form) (u32 1)) (u32.eq (local form) (u32 4)))
+				(then
+					(if
+						(:doc "Boolean switches use the positive or negative spelling without an equals value.")
+						(local attached)
+						(then (return (call selected_value (u32 3) (local option) (local index) (local start) (local end) (u32 0)))))
+					(return (call selected_value (u32 0) (local option) (local index) (i32 -1) (i32 -1)
+						(record.get (local option) scalar)))))
+			(let-mut value_index (local index))
+			(if
+				(:doc "The equals spelling keeps the operand in the original option row.")
+				(local attached)
+				(then (set (local start) (i32.add.wrapping (local stop) (i32 1))))
+				(else
+					(let next (i32.add.wrapping (local index) (i32 1)))
+					(if
+						(:doc "A final option cannot consume a separate operand.")
+						(i32.eq (local next) (slice.len (local argv)))
+						(then (return (call selected_value (u32 2) (local option) (local index) (local start) (local end) (u32 0)))))
+					(let separate (slice.load (local argv) (local next)))
+					(let native_flag (bool.or (i32.eq (local rule) (i32 13)) (i32.eq (local rule) (i32 15))))
+					(if
+						(:doc "Other options stop at a following flag or marker, but cflag and ldflag forward it verbatim.")
+						(bool.and (bool.not (local native_flag)) (bool.or
+							(call has_option_prefix (borrow-shared (local bytes)) (local separate))
+							(call is_short_output (borrow-shared (local bytes)) (local separate))))
+						(then (return (call selected_value (u32 2) (local option) (local index) (local start) (local end) (u32 0)))))
+					(set (local value_index) (local next))
+					(set (local start) (record.get (local separate) start))
+					(set (local end) (record.get (local separate) end))))
+			(let decoded (call decode_command_operand (borrow-shared (local bytes)) (local start) (local end)
+				(local rule) (record.get (local option) kind)))
+			(if
+				(:doc "An invalid operand is diagnosed at the actual value argument.")
+				(bool.not (record.get (local decoded) valid))
+				(then (return (call selected_value (u32 3) (local option) (local value_index) (local start) (local end) (u32 0)))))
+			(return (call selected_value (u32 0) (local option) (local value_index) (local start) (local end)
+				(record.get (local decoded) value)))))
+
+	(fn
+		(:doc "Locate a previously accepted option or positional by its rule.")
+		first_command_argument
+		(params (arguments (shared-slice CommandArgument)) (start i32) (rows i32) (rule i32))
+		(returns i32)
+		(body
+			(let-mut row (local start))
+			(while
+				(:doc "Skip arguments belonging to other rules without changing argument order.")
+				(i32.lt (local row) (local rows))
+				(body
+					(if
+						(:doc "Every explicit occurrence keeps its canonical rule ID.")
+						(i32.eq (record.get (slice.load (local arguments) (local row)) rule) (local rule))
+						(then (return (local row))))
+					(set (local row) (i32.add.wrapping (local row) (i32 1)))))
+			(return (i32 -1))))
+
+	(fn
+		(:doc "Read one command and its explicit options and source operands.")
+		parse_command_args
+		(params (bytes (shared-slice u8)) (argv (shared-slice ArgSpan)) (names (shared-slice u8))
+			(rules (shared-slice ProjectRule)) (arguments (mut-slice CommandArgument)))
+		(returns CommandArgs)
+		(body
+			(let size (slice.len (local argv)))
+			(let bad (call check_argv (borrow-shared (local argv)) (slice.len (local bytes))))
+			(if
+				(:doc "No command or option lookup may read an unchecked span.")
+				(bool.not (i32.lt (local bad) (i32 0)))
+				(then (return (call command_args_error (u32 7) (local bad) (i32 -1)))))
+			(if
+				(:doc "A supplied invocation has one command at user argv index zero.")
+				(i32.eq (local size) (i32 0))
+				(then (return (call command_args_error (u32 9) (i32 0) (i32 -1)))))
+			(let first (slice.load (local argv) (i32 0)))
+			(let command (call command_name (borrow-shared (local bytes)) (record.get (local first) start) (record.get (local first) end)))
+			(if
+				(:doc "Unknown commands retain the original command argument index.")
+				(u32.eq (local command) (u32 0))
+				(then (return (call command_args_error (u32 9) (i32 0) (i32 -1)))))
+			(if
+				(:doc "At most one event is written per argument after the command.")
+				(i32.lt (slice.len (local arguments)) (i32.sub.wrapping (local size) (i32 1)))
+				(then (return (call command_args_error (u32 8) (i32 -1) (i32 -1)))))
+			(let-mut index (i32 1))
+			(let-mut rows (i32 0))
+			(let-mut operands (i32 0))
+			(let-mut profile (i32 -1))
+			(let-mut mode (u32 0))
+			(let-mut named (bool true))
+			(while
+				(:doc "Each loop consumes one argument, or a named option and its separate operand.")
+				(i32.lt (local index) (local size))
+				(body
+					(let span (slice.load (local argv) (local index)))
+					(let start (record.get (local span) start))
+					(let end (record.get (local span) end))
+					(let width (i32.sub.wrapping (local end) (local start)))
+					(if
+						(:doc "The end-of-options marker leaves all following arguments as source operands.")
+						(bool.and (local named) (bool.and (i32.eq (local width) (i32 2))
+							(call has_option_prefix (borrow-shared (local bytes)) (local span))))
+						(then (set (local named) (bool false)))
+						(else
+							(if
+								(:doc "After the marker, or for ordinary source operands, preserve the entire span.")
+								(bool.and (local named) (bool.and (i32.lt (i32 1) (local width))
+									(u8.eq (slice.load (local bytes) (local start)) (u8 45))))
+								(then
+									(let option (call select_command_option (local command) (borrow-shared (local bytes)) (local span)
+										(borrow-shared (local names)) (borrow-shared (local rules))))
+									(let value (call select_command_value (borrow-shared (local bytes)) (borrow-shared (local argv))
+										(local option) (local index) (local span)))
+									(let code (record.get (local value) error))
+									(let rule (record.get (local value) rule))
+									(let form (record.get (local value) form))
+									(let at (record.get (local value) index))
+									(if
+										(:doc "Selection failures already identify the offending option or value.")
+										(u32.lt (u32 0) (local code))
+										(then (return (call command_args_error (local code) (local at) (local rule)))))
+									(if
+										(:doc "Aliases and boolean polarities share the same single-use rule.")
+										(bool.and (u32.lt (local form) (u32 3))
+											(bool.not (i32.lt (call first_command_argument (borrow-shared (local arguments))
+												(i32 0) (local rows) (local rule)) (i32 0))))
+										(then (return (call command_args_error (u32 5) (local index) (local rule)))))
+									(if
+										(:doc "Select the profile only after recording its exact value argument.")
+										(i32.eq (local rule) (i32 -2))
+										(then (set (local profile) (local rows))))
+									(if
+										(:doc "A build may select exactly one of debug and release.")
+										(bool.or (i32.eq (local rule) (i32 -3)) (i32.eq (local rule) (i32 -4)))
+										(then
+											(if
+												(:doc "Point a conflict at the later mode switch.")
+												(u32.lt (u32 0) (local mode))
+												(then (return (call command_args_error (u32 10) (local index) (local rule)))))
+											(set (local mode) (int.convert u32 (i32.sub.wrapping (i32 -2) (local rule))))))
+									(slice.store (local arguments) (local rows) (record.make CommandArgument
+										(rule (local rule)) (form (local form)) (argv_index (local at))
+										(start (record.get (local value) start)) (end (record.get (local value) end))
+										(scalar (record.get (local value) scalar))))
+									(set (local index) (local at)))
+								(else
+									(slice.store (local arguments) (local rows) (record.make CommandArgument
+										(rule (i32 -1)) (form (u32 0)) (argv_index (local index))
+										(start (local start)) (end (local end)) (scalar (u32 0))))
+									(set (local operands) (i32.add.wrapping (local operands) (i32 1)))))
+							(set (local rows) (i32.add.wrapping (local rows) (i32 1)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (record.make CommandArgs (error (u32 0)) (argv_index (i32 -1)) (rule (i32 -1))
+				(command (local command)) (mode (local mode)) (rows (local rows)) (operands (local operands)) (profile (local profile)))))))

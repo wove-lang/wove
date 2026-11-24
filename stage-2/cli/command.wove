@@ -1,0 +1,236 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve a supplied argv and optional JSONC into one typed command.
+
+	Argv excludes the executable and starts with cc, bin, or fmt.
+	With has_config false, config bytes and JSON scratch are ignored.
+	Otherwise, nodes and settings receive the validated project document.
+	Allocate at least argv length minus one CommandArgument rows.
+	Only the reported rows from a successful invocation are usable.
+
+	Diagnostics use source 1 for argv (including code 11 for an unknown
+	requested profile) and source 2 for project JSONC byte spans. Unused
+	coordinates are -1. The mode is default, debug or release (0 to 2).
+
+	Command settings use origin 1 for the config, 2 for argv, or 3 for
+	built-in values. Explicit options take precedence over their profile
+	settings. Repeated values are kept in argv order and replace the
+	configured list; a clear switch also discards earlier occurrences.
+	A setting's row points to the JSON node or first effective argv row.
+	For argv lists, count is the number of matching rows to read starting
+	at row. Interleaved options and operands retain their original positions.
+	An explicit clear with no following item returns count zero and row -1.
+	Built-in cflags can be read with write_default_cflag in config/defaults.
+	When no explicit source operands are supplied, entry.bin and entry.lib
+	can be resolved from project settings with scope 6.`)
+	command_resolution
+
+	(use wove-file "./argv.wove" (only (type ArgSpan)))
+	(use wove-file "./command_args.wove" (only (type CommandArgument) parse_command_args))
+	(use wove-file "../config/schema.wove" (only (type ProjectRule) project_rule_count project_key_bytes write_project_schema))
+	(use wove-file "../config/project.wove" (only (type ProjectRead) (type ProjectSetting) read_project_config project_setting))
+	(use wove-file "../config/defaults.wove" (only project_default_scalar project_default_cflags))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct CommandInvocation
+		(fields (source u32) (error u32) (argv_index i32) (rule i32) (start i32) (end i32)
+			(command u32) (mode u32) (rows i32) (operands i32) (default_profile i32) (selected_profile i32)))
+	(struct CommandSetting (fields (origin u32) (scalar u32) (row i32) (count i32)))
+
+	(fn
+		(:doc "Report an argv or JSONC failure without publishing a usable invocation.")
+		command_failure
+		(params (source u32) (error u32) (index i32) (rule i32) (start i32) (end i32))
+		(returns CommandInvocation)
+		(body (return (record.make CommandInvocation (source (local source)) (error (local error))
+			(argv_index (local index)) (rule (local rule)) (start (local start)) (end (local end))
+			(command (u32 0)) (mode (u32 0)) (rows (i32 0)) (operands (i32 0))
+			(default_profile (i32 -1)) (selected_profile (i32 -1))))))
+
+	(fn
+		(:doc "Use the profile named by argv; an absent project has only the built-in default profile.")
+		command_project
+		(params (config (shared-slice u8)) (has_config bool) (requested (shared-slice u8))
+			(nodes (mut-slice JsonNode)) (settings (mut-slice ProjectSetting))
+			(names (shared-slice u8)) (rules (shared-slice ProjectRule)))
+		(returns ProjectRead)
+		(body
+			(if
+				(:doc "Validate all profiles and retain original key and value spans when project bytes were supplied.")
+				(local has_config)
+				(then (return (call read_project_config (borrow-shared (local config)) (borrow-shared (local requested))
+					(borrow-mut (local nodes)) (borrow-mut (local settings))))))
+			(let default_name (slice.load (local rules) (i32 9)))
+			(let length (slice.len (local requested)))
+			(let-mut error (u32 0))
+			(if
+				(:doc "The canonical default spelling also works without a project file.")
+				(bool.not (bool.or (i32.eq (local length) (i32 0))
+					(call same_bytes (borrow-shared (local names)) (record.get (local default_name) start)
+						(record.get (local default_name) end) (borrow-shared (local requested)) (i32 0) (local length))))
+				(then (set (local error) (u32 19))))
+			(return (record.make ProjectRead (error (local error)) (start (i32 -1)) (end (i32 -1))
+				(default_profile (i32 -1)) (selected_profile (i32 -1))))))
+
+	(fn
+		(:doc "Resolve argv controls and validate the selected settings before returning the invocation.")
+		resolve_command
+		(params (bytes (shared-slice u8)) (argv (shared-slice ArgSpan)) (config (shared-slice u8)) (has_config bool)
+			(nodes (mut-slice JsonNode)) (settings (mut-slice ProjectSetting)) (arguments (mut-slice CommandArgument)))
+		(returns CommandInvocation)
+		(body
+			(let-mut names (array.alloc u8 (call project_key_bytes)))
+			(let-mut rules (array.alloc ProjectRule (call project_rule_count)))
+			(call write_project_schema (borrow-mut (local names)) (borrow-mut (local rules)))
+			(let parsed (call parse_command_args (borrow-shared (local bytes)) (borrow-shared (local argv))
+				(borrow-shared (local names)) (borrow-shared (local rules)) (borrow-mut (local arguments))))
+			(let error (record.get (local parsed) error))
+			(if
+				(:doc "Unknown commands and invalid options are reported before inspecting the project.")
+				(u32.lt (u32 0) (local error))
+				(then (return (call command_failure (u32 1) (local error) (record.get (local parsed) argv_index)
+					(record.get (local parsed) rule) (i32 -1) (i32 -1)))))
+			(let profile (record.get (local parsed) profile))
+			(let-mut start (i32 0))
+			(let-mut end (i32 0))
+			(let-mut at (i32 -1))
+			(if
+				(:doc "Use the original argv byte span for either selector spelling.")
+				(bool.not (i32.lt (local profile) (i32 0)))
+				(then
+					(let selector (slice.load (local arguments) (local profile)))
+					(set (local start) (record.get (local selector) start))
+					(set (local end) (record.get (local selector) end))
+					(set (local at) (record.get (local selector) argv_index))))
+			(let project (call command_project (borrow-shared (local config)) (local has_config)
+				(borrow-shared (slice.range (local bytes) (local start) (local end)))
+				(borrow-mut (local nodes)) (borrow-mut (local settings)) (borrow-shared (local names)) (borrow-shared (local rules))))
+			(let config_error (record.get (local project) error))
+			(if
+				(:doc "A missing profile is a selector error at the supplied argv value.")
+				(u32.eq (local config_error) (u32 19))
+				(then (return (call command_failure (u32 1) (u32 11) (local at) (i32 -2) (local start) (local end)))))
+			(if
+				(:doc "Malformed project data keeps the JSONC diagnostic span.")
+				(u32.lt (u32 0) (local config_error))
+				(then (return (call command_failure (u32 2) (local config_error) (i32 -1) (i32 -1)
+					(record.get (local project) start) (record.get (local project) end)))))
+			(return (record.make CommandInvocation (source (u32 0)) (error (u32 0))
+				(argv_index (i32 -1)) (rule (i32 -1)) (start (i32 -1)) (end (i32 -1))
+				(command (record.get (local parsed) command)) (mode (record.get (local parsed) mode))
+				(rows (record.get (local parsed) rows)) (operands (record.get (local parsed) operands))
+				(default_profile (record.get (local project) default_profile))
+				(selected_profile (record.get (local project) selected_profile))))))
+
+	(fn
+		(:doc "Construct a typed value, its source row, and the count of effective argv occurrences.")
+		resolved_command_setting
+		(params (origin u32) (scalar u32) (row i32) (count i32))
+		(returns CommandSetting)
+		(body (return (record.make CommandSetting (origin (local origin)) (scalar (local scalar))
+			(row (local row)) (count (local count))))))
+
+	(fn
+		(:doc "Collect the explicit values for one rule, stopping inherited and earlier list items at a clear.")
+		command_argv_setting
+		(params (arguments (shared-slice CommandArgument)) (rows i32) (rule i32))
+		(returns CommandSetting)
+		(body
+			(let-mut origin (u32 0))
+			(let-mut first (i32 -1))
+			(let-mut count (i32 0))
+			(let-mut value (u32 0))
+			(let-mut row (i32 0))
+			(while
+				(:doc "Only occurrences matching the rule contribute to an explicit override.")
+				(i32.lt (local row) (local rows))
+				(body
+					(let argument (slice.load (local arguments) (local row)))
+					(if
+						(:doc "A list reset is explicit even if there are no subsequent values.")
+						(i32.eq (record.get (local argument) rule) (local rule))
+						(then
+							(set (local origin) (u32 2))
+							(if
+								(:doc "A clear switch drops every earlier occurrence of the rule.")
+								(u32.eq (record.get (local argument) form) (u32 4))
+								(then (set (local first) (i32 -1)) (set (local count) (i32 0)))
+								(else
+									(if
+										(:doc "Remember the first surviving occurrence in the ordered argv rows.")
+										(i32.lt (local first) (i32 0))
+										(then (set (local first) (local row))))
+									(set (local count) (i32.add.wrapping (local count) (i32 1)))
+									(set (local value) (record.get (local argument) scalar))))))
+					(set (local row) (i32.add.wrapping (local row) (i32 1)))))
+			(return (call resolved_command_setting (local origin) (local value) (local first) (local count)))))
+
+	(fn
+		(:doc "Translate a leaf rule's scope into its configured profile path.")
+		command_config_row
+		(params (invocation CommandInvocation) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(scope u32) (rule i32))
+		(returns i32)
+		(body
+			(let selected (record.make ProjectRead (error (u32 0)) (start (i32 -1)) (end (i32 -1))
+				(default_profile (record.get (local invocation) default_profile)) (selected_profile (record.get (local invocation) selected_profile))))
+			(let-mut section (i32 -1))
+			(let-mut subsection (i32 -1))
+			(if
+				(:doc "Build fields come from the mode selected by argv.")
+				(u32.eq (local scope) (u32 3))
+				(then
+					(set (local section) (i32 2))
+					(set (local subsection) (i32.add.wrapping (i32 9) (int.convert i32 (record.get (local invocation) mode))))))
+			(if
+				(:doc "Compiler options and compiler warnings both live under cc.")
+				(bool.or (u32.eq (local scope) (u32 4)) (u32.eq (local scope) (u32 5)))
+				(then (set (local section) (i32 3))))
+			(if
+				(:doc "The warning policy adds a subsection under the compiler options.")
+				(u32.eq (local scope) (u32 5))
+				(then (set (local subsection) (i32 25))))
+			(if
+				(:doc "Entry rules hold the configured executable and library source lists.")
+				(u32.eq (local scope) (u32 6))
+				(then (set (local section) (i32 4))))
+			(if
+				(:doc "Formatter rules live together in fmt.")
+				(u32.eq (local scope) (u32 7))
+				(then (set (local section) (i32 5))))
+			(return (call project_setting (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(local selected) (local section) (local subsection) (local rule)))))
+
+	(fn
+		(:doc "Query one effective leaf by its project scope and rule, or a negative invocation control by rule.")
+		command_setting
+		(params (invocation CommandInvocation) (arguments (shared-slice CommandArgument))
+			(nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting)) (scope u32) (rule i32))
+		(returns CommandSetting)
+		(body
+			(let cli (call command_argv_setting (borrow-shared (local arguments)) (record.get (local invocation) rows) (local rule)))
+			(if
+				(:doc "Explicit false, zero, and an empty override list are each present values.")
+				(u32.eq (record.get (local cli) origin) (u32 2))
+				(then (return (local cli))))
+			(let mode (record.get (local invocation) mode))
+			(if
+				(:doc "Only nonnegative project rule IDs participate in JSONC lookup.")
+				(bool.not (i32.lt (local rule) (i32 0)))
+				(then
+					(let row (call command_config_row (local invocation) (borrow-shared (local nodes)) (borrow-shared (local settings))
+						(local scope) (local rule)))
+					(if
+						(:doc "A resolved config node still refers to the original source bytes.")
+						(bool.not (i32.lt (local row) (i32 0)))
+						(then (return (call resolved_command_setting (u32 1)
+							(record.get (slice.load (local settings) (local row)) scalar) (local row) (i32 0)))))))
+			(let-mut count (i32 0))
+			(if
+				(:doc "Built-in optimization flags are a mode-dependent list.")
+				(i32.eq (local rule) (i32 13))
+				(then (set (local count) (call project_default_cflags (local mode)))))
+			(return (call resolved_command_setting (u32 3) (call project_default_scalar (local rule) (local mode))
+				(i32 -1) (local count))))))
