@@ -11,10 +11,13 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 ## Code comments
 
-In implementation code, including Wove modules under `stage-2/`, add a
-descriptive comment above each function definition and immediately before
-each multiline control-flow block. Explain the design intent or an important
-invariant. Use the file's comment syntax, including `;;` in Wove.
+Document each implementation function's purpose or an important invariant.
+For Wove functions under `stage-2/`, put a `:doc` entry first in the function's
+`with-meta` list. For other implementation code, place a descriptive comment
+above the function definition.
+
+Add a descriptive comment immediately before each multiline control-flow block.
+Use the file's comment syntax, including `;;` in Wove.
 
 Purpose comments are optional under `tests/`.
 
