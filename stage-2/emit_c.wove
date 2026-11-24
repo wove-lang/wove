@@ -1,0 +1,433 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Emit a complete C translation unit for the scalar bootstrap entry.
+
+	Validate one selected parameterless main and its i32 return literal in the
+	original source tree. Normalize the decimal spelling before writing C into
+	caller-owned byte storage.`)
+	emit_c
+
+	(use wove-file "./source_scan.wove" (only is_head_byte (type SourceNode)))
+	(use wove-file "./source_module.wove"
+		(only is_three_bytes form_parts select_form (type ModuleRead) (type SelectedDeclaration)))
+
+	(struct EmitResult (fields (written i32) (start i32) (end i32) (error u32)))
+	(struct EntryRead (fields (operand i32) (start i32) (end i32) (error u32)))
+	(struct DecimalSpelling (fields (digits i32) (negative bool)))
+
+	(fn
+		(:doc `Recognize the exact keywords of the scalar entry grammar.
+
+		Return 1 for fn, 2 for main, 3 for params, 4 for returns, 5 for i32,
+		6 for body, 7 for return, and 0 for any other node or an absent index.`)
+		entry_keyword
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (index i32))
+		(returns u32)
+		(body
+			(if
+				(:doc "An absent node has no keyword spelling.")
+				(i32.lt (local index) (i32 0))
+				(then (return (u32 0))))
+			(let node (slice.load (local nodes) (local index)))
+			(if
+				(:doc "Only a bare atom can be a keyword.")
+				(bool.not (u32.eq (record.get (local node) kind) (u32 1)))
+				(then (return (u32 0))))
+			(let start (record.get (local node) start))
+			(let width (i32.sub.wrapping (record.get (local node) end) (local start)))
+			(if
+				(:doc "Match the entire fn keyword before returning its code.")
+				(bool.and
+					(i32.eq (local width) (i32 2))
+					(bool.and
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 0) (u8 102))
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 1) (u8 110))))
+				(then (return (u32 1))))
+			(if
+				(:doc "Match the entire main keyword before returning its code.")
+				(bool.and
+					(i32.eq (local width) (i32 4))
+					(bool.and
+						(call is_three_bytes (borrow-shared (local source))
+							(local start) (u8 109) (u8 97) (u8 105))
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 110))))
+				(then (return (u32 2))))
+			(if
+				(:doc "Match the entire params keyword before returning its code.")
+				(bool.and
+					(i32.eq (local width) (i32 6))
+					(bool.and
+						(call is_three_bytes (borrow-shared (local source))
+							(local start) (u8 112) (u8 97) (u8 114))
+						(call is_three_bytes (borrow-shared (local source))
+							(i32.add.wrapping (local start) (i32 3)) (u8 97) (u8 109) (u8 115))))
+				(then (return (u32 3))))
+			(if
+				(:doc "Match the entire returns keyword before returning its code.")
+				(bool.and
+					(i32.eq (local width) (i32 7))
+					(bool.and
+						(call is_three_bytes (borrow-shared (local source))
+							(local start) (u8 114) (u8 101) (u8 116))
+						(bool.and
+							(call is_three_bytes (borrow-shared (local source))
+								(i32.add.wrapping (local start) (i32 3)) (u8 117) (u8 114) (u8 110))
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 115)))))
+				(then (return (u32 4))))
+			(if
+				(:doc "Match the entire i32 keyword before returning its code.")
+				(bool.and
+					(i32.eq (local width) (i32 3))
+					(call is_three_bytes (borrow-shared (local source))
+						(local start) (u8 105) (u8 51) (u8 50)))
+				(then (return (u32 5))))
+			(if
+				(:doc "Match the entire body keyword before returning its code.")
+				(bool.and
+					(i32.eq (local width) (i32 4))
+					(bool.and
+						(call is_three_bytes (borrow-shared (local source))
+							(local start) (u8 98) (u8 111) (u8 100))
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 121))))
+				(then (return (u32 6))))
+			(if
+				(:doc "Match the entire return keyword before returning its code.")
+				(bool.and
+					(i32.eq (local width) (i32 6))
+					(bool.and
+						(call is_three_bytes (borrow-shared (local source))
+							(local start) (u8 114) (u8 101) (u8 116))
+						(call is_three_bytes (borrow-shared (local source))
+							(i32.add.wrapping (local start) (i32 3)) (u8 117) (u8 114) (u8 110))))
+				(then (return (u32 7))))
+			(return (u32 0))))
+
+	(fn
+		(:doc `Associate an entry-reader result with its original source node.`)
+		entry_at
+		(params (node SourceNode) (operand i32) (error u32))
+		(returns EntryRead)
+		(body
+			(return (record.make EntryRead (operand (local operand)) (error (local error))
+				(start (record.get (local node) start)) (end (record.get (local node) end))))))
+
+	(fn
+		(:doc `Check the expected tag and ordinary metadata at a signature or expression form.`)
+		entry_form
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (tag u32) (error u32))
+		(returns EntryRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(if
+				(:doc "An atom or a different form tag keeps the caller's contextual diagnostic.")
+				(bool.not (u32.eq
+					(call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head))
+					(local tag)))
+				(then (return (call entry_at (local node) (i32 -1) (local error)))))
+			(let metadata (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local parts) (bool false)))
+			(if
+				(:doc "Known selection pragmas cannot guard operands or body forms.")
+				(u32.lt (u32 0) (record.get (local metadata) error))
+				(then (return (record.make EntryRead (operand (i32 -1))
+					(start (record.get (local metadata) start)) (end (record.get (local metadata) end))
+					(error (record.get (local metadata) error))))))
+			(return (call entry_at (local node) (record.get (local parts) operands) (u32 0)))))
+
+	(fn
+		(:doc `Find the single statement, return expression, and literal in a checked entry body.`)
+		read_entry_body
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (body_node SourceNode))
+		(returns EntryRead)
+		(body
+			(let body (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local body_node) (u32 6) (u32 24)))
+			(if
+				(:doc "Report a malformed body at its own span.")
+				(u32.lt (u32 0) (record.get (local body) error))
+				(then (return (local body))))
+			(let statement (record.get (local body) operand))
+			(if
+				(:doc "The body needs a return statement.")
+				(i32.lt (local statement) (i32 0))
+				(then (return (call entry_at (local body_node) (i32 -1) (u32 24)))))
+			(let return_node (slice.load (local nodes) (local statement)))
+			(let returned (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local return_node) (u32 7) (u32 24)))
+			(if
+				(:doc "Only a return statement is supported in this entry.")
+				(u32.lt (u32 0) (record.get (local returned) error))
+				(then (return (local returned))))
+			(let extra_statement (record.get (local return_node) next_sibling))
+			(if
+				(:doc "Point at the first additional statement after return.")
+				(bool.not (i32.lt (local extra_statement) (i32 0)))
+				(then (return (call entry_at (slice.load (local nodes) (local extra_statement)) (i32 -1) (u32 24)))))
+			(let expression (record.get (local returned) operand))
+			(if
+				(:doc "The return requires a value.")
+				(i32.lt (local expression) (i32 0))
+				(then (return (call entry_at (local return_node) (i32 -1) (u32 24)))))
+			(let literal_node (slice.load (local nodes) (local expression)))
+			(if
+				(:doc "The return accepts exactly one expression.")
+				(bool.not (i32.lt (record.get (local literal_node) next_sibling) (i32 0)))
+				(then (return (call entry_at (local return_node) (i32 -1) (u32 24)))))
+			(let literal (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local literal_node) (u32 5) (u32 24)))
+			(if
+				(:doc "A return expression other than an i32 literal is outside this slice.")
+				(u32.lt (u32 0) (record.get (local literal) error))
+				(then (return (local literal))))
+			(let value (record.get (local literal) operand))
+			(if
+				(:doc "Missing or extra literal operands invalidate the whole literal form.")
+				(bool.or (i32.lt (local value) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local value)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local literal_node) (i32 -1) (u32 25)))))
+			(return (local literal))))
+
+	(fn
+		(:doc `Check the selected function's name and parameterless i32 signature.`)
+		read_entry
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns EntryRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let name (record.get (local parts) operands))
+			(if
+				(:doc "The only selected declaration in this slice must be a named function.")
+				(bool.or (bool.not (u32.eq
+					(call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head))
+					(u32 1))) (i32.lt (local name) (i32 0)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 22)))))
+			(let name_node (slice.load (local nodes) (local name)))
+			(if
+				(:doc "Use the C entry point only for the function named main.")
+				(bool.not (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)) (u32 2)))
+				(then (return (call entry_at (local name_node) (i32 -1) (u32 22)))))
+			(let params (record.get (local name_node) next_sibling))
+			(if
+				(:doc "Report a missing parameter list at the function.")
+				(i32.lt (local params) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 23)))))
+			(let params_node (slice.load (local nodes) (local params)))
+			(let parameters (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local params_node) (u32 3) (u32 23)))
+			(if
+				(:doc "The parameter form must be valid before inspecting its operands.")
+				(u32.lt (u32 0) (record.get (local parameters) error))
+				(then (return (local parameters))))
+			(if
+				(:doc "The seed-built entry has no parameters.")
+				(bool.not (i32.lt (record.get (local parameters) operand) (i32 0)))
+				(then (return (call entry_at (local params_node) (i32 -1) (u32 23)))))
+			(let returns (record.get (local params_node) next_sibling))
+			(if
+				(:doc "Report a missing return type at the function.")
+				(i32.lt (local returns) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 23)))))
+			(let returns_node (slice.load (local nodes) (local returns)))
+			(let signature (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local returns_node) (u32 4) (u32 23)))
+			(if
+				(:doc "Return the invalid signature form's diagnostic unchanged.")
+				(u32.lt (u32 0) (record.get (local signature) error))
+				(then (return (local signature))))
+			(let result_type (record.get (local signature) operand))
+			(if
+				(:doc "Exactly one return type belongs to the signature.")
+				(bool.or (i32.lt (local result_type) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local result_type)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local returns_node) (i32 -1) (u32 23)))))
+			(if
+				(:doc "The declared return type must be exactly i32.")
+				(bool.not (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local result_type)) (u32 5)))
+				(then (return (call entry_at (slice.load (local nodes) (local result_type)) (i32 -1) (u32 23)))))
+			(let body (record.get (local returns_node) next_sibling))
+			(if
+				(:doc "The function needs one body after the signature.")
+				(i32.lt (local body) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let body_node (slice.load (local nodes) (local body)))
+			(let extra (record.get (local body_node) next_sibling))
+			(if
+				(:doc "Reject the first unsupported operand after the body.")
+				(bool.not (i32.lt (local extra) (i32 0)))
+				(then (return (call entry_at (slice.load (local nodes) (local extra)) (i32 -1) (u32 24)))))
+			(return (call read_entry_body (borrow-shared (local source)) (borrow-shared (local nodes)) (local body_node)))))
+
+	(fn
+		(:doc `Validate a signed decimal i32 and locate its C-safe significant digits.
+
+		Reject any nondecimal bytes or magnitudes above the signed limit. Retain one
+		digit for zero and emit a minus only for a nonzero negative value.`)
+		decimal_i32
+		(params (source (shared-slice u8)) (node SourceNode))
+		(returns DecimalSpelling)
+		(body
+			(let invalid (record.make DecimalSpelling (digits (i32 -1)) (negative (bool false))))
+			(if
+				(:doc "A decimal literal must be a bare atom.")
+				(bool.not (u32.eq (record.get (local node) kind) (u32 1)))
+				(then (return (local invalid))))
+			(let start (record.get (local node) start))
+			(let end (record.get (local node) end))
+			(let negative (u8.eq (slice.load (local source) (local start)) (u8 45)))
+			(let-mut cursor (local start))
+			(let-mut last_digit (u32 7))
+			(if
+				(:doc "The negative bound permits magnitude 2147483648.")
+				(local negative)
+				(then
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+					(set (local last_digit) (u32 8))))
+			(if
+				(:doc "A minus sign must be followed by a digit.")
+				(bool.not (i32.lt (local cursor) (local end)))
+				(then (return (local invalid))))
+			(let-mut magnitude (u32 0))
+			(let-mut digits (i32.sub.wrapping (local end) (i32 1)))
+			(while
+				(:doc "Validate each raw byte and accumulate without crossing the signed limit.")
+				(i32.lt (local cursor) (local end))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					(if
+						(:doc "Only ASCII digits participate in the magnitude.")
+						(bool.or (u8.lt (local byte) (u8 48)) (u8.lt (u8 57) (local byte)))
+						(then (return (local invalid))))
+					(let digit (u32.sub.wrapping (int.convert u32 (local byte)) (u32 48)))
+					(if
+						(:doc "Check the bound before multiplying the current magnitude by ten.")
+						(bool.or
+							(u32.lt (u32 214748364) (local magnitude))
+							(bool.and (u32.eq (local magnitude) (u32 214748364)) (u32.lt (local last_digit) (local digit))))
+						(then (return (local invalid))))
+					(if
+						(:doc "The first nonzero digit fixes the start of the emitted decimal spelling.")
+						(bool.and (u32.eq (local magnitude) (u32 0)) (u32.lt (u32 0) (local digit)))
+						(then (set (local digits) (local cursor))))
+					(let twice (u32.add.wrapping (local magnitude) (local magnitude)))
+					(let four (u32.add.wrapping (local twice) (local twice)))
+					(let eight (u32.add.wrapping (local four) (local four)))
+					(set (local magnitude) (u32.add.wrapping (u32.add.wrapping (local eight) (local twice)) (local digit)))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (record.make DecimalSpelling
+				(digits (local digits)) (negative (bool.and (local negative) (u32.lt (u32 0) (local magnitude))))))))
+
+	(fn
+		(:doc `Write the fixed C ABI prefix int main(void){return plus one space.`)
+		write_entry_prefix
+		(params (output (mut-slice u8)))
+		(returns void)
+		(body
+			(slice.store (local output) (i32 0) (u8 105))
+			(slice.store (local output) (i32 1) (u8 110))
+			(slice.store (local output) (i32 2) (u8 116))
+			(slice.store (local output) (i32 3) (u8 32))
+			(slice.store (local output) (i32 4) (u8 109))
+			(slice.store (local output) (i32 5) (u8 97))
+			(slice.store (local output) (i32 6) (u8 105))
+			(slice.store (local output) (i32 7) (u8 110))
+			(slice.store (local output) (i32 8) (u8 40))
+			(slice.store (local output) (i32 9) (u8 118))
+			(slice.store (local output) (i32 10) (u8 111))
+			(slice.store (local output) (i32 11) (u8 105))
+			(slice.store (local output) (i32 12) (u8 100))
+			(slice.store (local output) (i32 13) (u8 41))
+			(slice.store (local output) (i32 14) (u8 123))
+			(slice.store (local output) (i32 15) (u8 114))
+			(slice.store (local output) (i32 16) (u8 101))
+			(slice.store (local output) (i32 17) (u8 116))
+			(slice.store (local output) (i32 18) (u8 117))
+			(slice.store (local output) (i32 19) (u8 114))
+			(slice.store (local output) (i32 20) (u8 110))
+			(slice.store (local output) (i32 21) (u8 32))))
+
+	(fn
+		(:doc `Return a count and source span from scalar C emission.`)
+		emit_result
+		(params (written i32) (start i32) (end i32) (error u32))
+		(returns EmitResult)
+		(body
+			(return (record.make EmitResult (written (local written)) (error (local error))
+				(start (local start)) (end (local end))))))
+
+	(fn
+		(:doc `Emit the checked scalar entry into the supplied output view.
+
+		Validate the complete entry and measure the translation unit before writing.
+		Failure leaves the output untouched and reports the originating source span.`)
+		(:expect bootstrap.scalar_c_emission
+			(issue "https://github.com/wove-lang/wove/issues/67"))
+		emit_module
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
+			(declarations (shared-slice SelectedDeclaration)) (output (mut-slice u8)))
+		(returns EmitResult)
+		(body
+			(let start (record.get (local module) start))
+			(let end (record.get (local module) end))
+			(let error (record.get (local module) error))
+			(if
+				(:doc "Forward earlier tree or module errors unchanged.")
+				(u32.lt (u32 0) (local error))
+				(then (return (call emit_result (i32 0) (local start) (local end) (local error)))))
+			(let count (record.get (local module) count))
+			(if
+				(:doc "The root must be active and supply an entry declaration.")
+				(bool.or (bool.not (record.get (local module) active)) (i32.eq (local count) (i32 0)))
+				(then (return (call emit_result (i32 0) (local start) (local end) (u32 22)))))
+			(if
+				(:doc "Point at the additional active declaration when more than one is selected.")
+				(i32.lt (i32 1) (local count))
+				(then
+					(let extra (slice.load (local nodes) (record.get (slice.load (local declarations) (i32 1)) node)))
+					(return (call emit_result (i32 0) (record.get (local extra) start) (record.get (local extra) end) (u32 22)))))
+			(let entry (slice.load (local nodes) (record.get (slice.load (local declarations) (i32 0)) node)))
+			(let literal (call read_entry (borrow-shared (local source)) (borrow-shared (local nodes)) (local entry)))
+			(if
+				(:doc "Body and signature failures leave output storage untouched.")
+				(u32.lt (u32 0) (record.get (local literal) error))
+				(then (return (call emit_result (i32 0) (record.get (local literal) start)
+					(record.get (local literal) end) (record.get (local literal) error)))))
+			(let value (slice.load (local nodes) (record.get (local literal) operand)))
+			(let spelling (call decimal_i32 (borrow-shared (local source)) (local value)))
+			(let digits (record.get (local spelling) digits))
+			(if
+				(:doc "An invalid decimal reports the exact value atom or form.")
+				(i32.lt (local digits) (i32 0))
+				(then (return (call emit_result (i32 0) (record.get (local value) start) (record.get (local value) end) (u32 25)))))
+			(let limit (record.get (local value) end))
+			(let-mut offset (i32 22))
+			(let negative (record.get (local spelling) negative))
+			(let-mut length (i32.add.wrapping (i32 25) (i32.sub.wrapping (local limit) (local digits))))
+			(if
+				(:doc "A nonzero negative value needs one sign byte.")
+				(local negative)
+				(then (set (local length) (i32.add.wrapping (local length) (i32 1)))))
+			(if
+				(:doc "Only emit a complete translation unit when it fits.")
+				(i32.lt (slice.len (local output)) (local length))
+				(then (return (call emit_result (i32 0) (record.get (local entry) start) (record.get (local entry) end) (u32 16)))))
+			(call write_entry_prefix (borrow-mut (local output)))
+			(if
+				(:doc "Write the sign before the normalized digits.")
+				(local negative)
+				(then
+					(slice.store (local output) (local offset) (u8 45))
+					(set (local offset) (i32.add.wrapping (local offset) (i32 1)))))
+			(let-mut cursor (local digits))
+			(while
+				(:doc "Copy the already-validated significant decimal digits.")
+				(i32.lt (local cursor) (local limit))
+				(body
+					(slice.store (local output) (local offset) (slice.load (local source) (local cursor)))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+					(set (local offset) (i32.add.wrapping (local offset) (i32 1)))))
+			(slice.store (local output) (local offset) (u8 59))
+			(slice.store (local output) (i32.add.wrapping (local offset) (i32 1)) (u8 125))
+			(slice.store (local output) (i32.add.wrapping (local offset) (i32 2)) (u8 10))
+			(return (call emit_result (local length) (local start) (local end) (u32 0))))))

@@ -161,6 +161,25 @@ before the error. Earlier tree errors keep their original spans and codes.
 | 20 | Expected a declaration form | The offending ordinary operand |
 | 21 | Invalid selection directive | The offending directive or predicate |
 
+The [C emitter](emit_c.wove) consumes a checked tree, its module result,
+and the selected declaration indices. `emit_module` accepts one selected
+`main` with empty `params`, an `i32` result, and one `return` of an
+`(i32 ...)` literal. Its output is a complete C translation unit with the
+ABI entry `int main(void)`. It checks the exact signed decimal range and
+emits significant digits, so source leading zeros keep their decimal value.
+
+The result gives the written count and a view-relative span. Successful
+emission spans the module. A failure preserves the destination bytes and
+uses the originating span. Tree and module diagnostics keep their codes.
+
+| Code | Failure | Primary span |
+| --- | --- | --- |
+| 16 | Short C output view | The selected entry |
+| 22 | Expected one selected main | The module, unexpected declaration or name, or extra active declaration |
+| 23 | Unsupported entry signature | The function, parameter list, or return type |
+| 24 | Unsupported body or expression | The originating body form, statement, or expression |
+| 25 | Invalid signed decimal i32 | The literal value or malformed literal form |
+
 `make stage-2` translates [the compiler root](wovec.wove) with the Python seed
 and links `build/stage-1/wovec` with Clang and the shared runtime. The root
 imports `admit_source` and `scan_token` from [the scanner](source_scan.wove).
@@ -212,3 +231,10 @@ and the selected declarations. Each lists the original form, head, first
 metadata, and first ordinary operand indices. The
 [module fixtures](../tests/stage-2/source_modules.tsv) compare these links
 and the active declarations with the Stage 1 seed.
+
+Use `--emit-c FILE [START END [OUTPUT_CAPACITY]]` to compile the scalar entry.
+The first row gives the written count, source span, error, line, and column.
+The remaining bytes are the C translation unit. The
+[compilation fixtures](../tests/stage-2/source_compilations.tsv) compile the
+emitted C with Clang, run the executable returning 42, and check the full
+return values at the i32 boundaries.

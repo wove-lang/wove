@@ -25,6 +25,7 @@
 #define decode_string wv_seed_fn_55
 #define form_parts wv_seed_fn_57
 #define read_module wv_seed_fn_66
+#define emit_module wv_seed_fn_75
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -34,6 +35,7 @@ typedef wv_seed_record_6 DecodeResult;
 typedef wv_seed_record_8 FormParts;
 typedef wv_seed_record_9 SelectedDeclaration;
 typedef wv_seed_record_10 ModuleRead;
+typedef wv_seed_record_12 EmitResult;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -548,6 +550,43 @@ static int dump_module(wvrt_slice parent, wvrt_slice input, int32_t start, int32
 	return status;
 }
 
+// Compile a checked module into a guarded C output view and report its result span.
+static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity) {
+	FormCheck checked;
+	wvrt_array *storage = checked_source_tree(input, &checked);
+	const wvrt_slice nodes = {
+		storage != NULL ? storage->wvrt_items : NULL,
+		storage != NULL ? storage->wvrt_length : 0,
+		sizeof(SourceNode),
+	};
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	const int32_t rows = nodes.wvrt_length;
+	wvrt_array *selected = wvrt_array_new(rows, sizeof(SelectedDeclaration), _Alignof(SelectedDeclaration), site);
+	const wvrt_mut_slice declarations = {selected->wvrt_items, rows, sizeof(SelectedDeclaration)};
+	const ModuleRead module = read_module(input, nodes, checked, declarations);
+	const wvrt_slice active = {selected->wvrt_items, module.wv_field_1, sizeof(SelectedDeclaration)};
+	if (capacity < 0) {
+		capacity = 64;
+	}
+	uint8_t *bytes = guarded_output(capacity);
+	int status = EXIT_FAILURE;
+	// Check both guards and the unwritten tail before exposing emitted bytes.
+	if (bytes != NULL) {
+		const wvrt_mut_slice output = {bytes + 1, capacity, sizeof(uint8_t)};
+		const EmitResult result = emit_module(input, nodes, module, active, output);
+		const int32_t count = result.wv_field_0;
+		if (output_intact(bytes, capacity, count)) {
+			write_span(parent, start, (uint32_t)count, result.wv_field_1, result.wv_field_2, result.wv_field_3);
+			const size_t emitted = fwrite(bytes + 1, 1, (size_t)count, stdout);
+			status = result.wv_field_3 == 0 && emitted == (size_t)count ? EXIT_SUCCESS : EXIT_FAILURE;
+		}
+		free(bytes);
+	}
+	wvrt_array_drop(selected);
+	wvrt_array_drop(storage);
+	return status;
+}
+
 // Load the bytes unchanged so newline and UTF-8 offsets survive into the probe.
 static uint8_t *read_source(const char *filename, int32_t *length) {
 	FILE *input = fopen(filename, "rb");
@@ -590,9 +629,10 @@ static int source_mode(int argc, char **argv) {
 	const bool render = strcmp(argv[1], "--render") == 0;
 	const bool decode = strcmp(argv[1], "--decode") == 0;
 	const bool module = strcmp(argv[1], "--module") == 0;
-	const bool takes_capacity = tree || render || decode || module;
+	const bool emit = strcmp(argv[1], "--emit-c") == 0;
+	const bool takes_capacity = tree || render || decode || module || emit;
 	if ((argc != 3 && argc != 5 && !(takes_capacity && argc == 6)) || (!tokens && !form && !takes_capacity)) {
-		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render | --decode | --module]"
+		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render | --decode | --module | --emit-c]"
 			" FILE [START END [CAPACITY]]\n", stderr);
 		return EXIT_FAILURE;
 	}
@@ -628,6 +668,8 @@ static int source_mode(int argc, char **argv) {
 		status = dump_decode(parent, view, start, capacity);
 	} else if (module) {
 		status = dump_module(parent, view, start, capacity);
+	} else if (emit) {
+		status = dump_c(parent, view, start, capacity);
 	} else {
 		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	}

@@ -13,6 +13,7 @@ COMPILER_ROOT := stage-2/wovec.wove
 SOURCE_SCAN_MODULE := stage-2/source_scan.wove
 SOURCE_STRINGS_MODULE := stage-2/source_strings.wove
 SOURCE_MODULE_READER := stage-2/source_module.wove
+C_EMITTER := stage-2/emit_c.wove
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -36,13 +37,16 @@ stage-1: $(STAGE1)/ownership.transfer
 
 stage-2: $(BOOTSTRAP_COMPILER) $(SOURCE_SCAN)
 
+# Preserve quoting in compiler settings until the runner splits them into arguments.
+test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
+test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: stage-2
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
-		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv \
+		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		stage-2/*.wove tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
@@ -50,7 +54,7 @@ test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 
 # Translate the compiler root and regenerate C when any source module changes.
-$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(SEED)
+$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(C_EMITTER) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
@@ -81,7 +85,7 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE)
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
-REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) \
+REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(C_EMITTER) \
 	$(ROUND_TRIP_PROVIDERS) \
 	$(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))

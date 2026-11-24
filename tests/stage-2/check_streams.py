@@ -4,8 +4,10 @@
 """Compare whole streams from the seed-built Stage 2 probe."""
 
 from itertools import zip_longest
+import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -258,9 +260,49 @@ def check_modules(executable, directory, manifest):
 				compare_form_parts(view, nodes, parts, form)
 
 
+# Compare emitted C and exercise its executable or full-width return value.
+def check_compilations(executable, directory, manifest, clang):
+	source = directory / "compile-input.wove"
+	generated = directory / "emitted.c"
+	program = directory / "emitted"
+	harness = manifest.with_name("emitted_main.probe.c")
+	for label, raw, base, end, capacity, fields, expected, mode, value in fixture_rows(manifest):
+		source.write_bytes(bytes.fromhex(raw))
+		bounds = (int(base), int(end), int(capacity))
+		output, status = run_probe(executable, "--emit-c", source, bounds)
+		header, delimiter, emitted = output.partition(b"\n")
+		row = tuple(map(int, fields.split()))
+		assert delimiter and tuple(map(int, header.split(b"\t"))) == row, (label, header)
+		assert status == int(row[3] != 0), label
+		expected_c = b"" if expected == "-" else bytes.fromhex(expected)
+		assert len(emitted) == row[0] and emitted == expected_c, (label, emitted)
+		if mode == "reject":
+			assert status == 1, label
+			continue
+
+		generated.write_bytes(emitted)
+		command = [*clang, str(generated), "-o", str(program)]
+		# Keep the exit-status fixture's actual C main and expose full i32 values through the probe.
+		if mode == "value":
+			command.extend(("-Dmain=wove_emitted_main", str(harness)))
+		else:
+			assert mode == "exit", label
+		subprocess.run(command, check=True, timeout=30)
+		result = subprocess.run([program], capture_output=True, check=False, timeout=30)
+		assert not result.stderr, (label, result.stderr)
+		if mode == "value":
+			assert result.returncode == 0 and result.stdout == (value + "\n").encode(), (label, result)
+		else:
+			assert result.returncode == int(value) and not result.stdout, (label, result)
+
+
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, modules, *sources = map(Path, sys.argv[1:])
+	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, modules, compilations, *sources = map(
+		Path, sys.argv[1:])
+	compiler = os.environ.get("WOVE_TEST_CLANG", "clang")
+	flags = os.environ.get("WOVE_TEST_CFLAGS", "")
+	clang = [*shlex.split(compiler), "-std=c11", *shlex.split(flags)]
 	for source in sources:
 		compare_stream(executable, source)
 
@@ -274,6 +316,7 @@ def main():
 		check_renderings(executable, directory, renderings)
 		check_decodings(executable, directory, decodings)
 		check_modules(executable, directory, modules)
+		check_compilations(executable, directory, compilations, clang)
 
 
 if __name__ == "__main__":
