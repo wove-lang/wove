@@ -52,6 +52,9 @@ typedef struct {
 char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrt_arguments, size_t wvrt_count);
 void wvrt_cstr_drop(char *wvrt_storage);
 
+void wvrt_check_c_bytes(wvrt_slice wvrt_view, int64_t wvrt_size, int64_t wvrt_count,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
 // Borrow the full owner as a shared view over its existing storage.
 static inline wvrt_slice wvrt_array_borrow_shared(const wvrt_array *wvrtbuffer) {
 	return (wvrt_slice){wvrtbuffer->wvrt_items, wvrtbuffer->wvrt_length, wvrtbuffer->wvrt_element_size};

@@ -23,6 +23,24 @@ static _Noreturn void wvrt_trap_at_span(int32_t wvrtfile, int32_t wvrtstart, int
 	exit(EXIT_FAILURE);
 }
 
+// Validate the requested prefix before a C call borrows the original byte storage.
+void wvrt_check_c_bytes(wvrt_slice wvrtview, int64_t wvrtsize, int64_t wvrtcount,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Each dimension is nonnegative even when the other dimension is zero.
+	if (wvrtsize < 0 || wvrtcount < 0) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "negative C byte extent");
+	}
+	// A nonempty byte slice has a valid byte stride and a backing address.
+	if (wvrtview.wvrt_length < 0 || (wvrtview.wvrt_length > 0 &&
+		(wvrtview.wvrt_items == NULL || wvrtview.wvrt_element_size != sizeof(uint8_t)))) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "invalid C byte slice");
+	}
+	// Compare by division so even a product above INT64_MAX cannot overflow.
+	if (wvrtsize != 0 && wvrtcount > (int64_t)wvrtview.wvrt_length / wvrtsize) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "C byte extent out of bounds");
+	}
+}
+
 // Check every argument before allocating one short-lived backing store for the call.
 char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrtarguments, size_t wvrtcount) {
 	if (wvrtcount == 0) { return NULL; }
