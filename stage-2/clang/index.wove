@@ -1,0 +1,163 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Index the direct members of the first inner array in one Clang AST document.
+
+	Pass offset zero initially and the successful end offset to the next
+	call to read adjacent documents. A successful empty frame marks EOF.
+	Source and declaration spans are absolute within the supplied bytes.
+	JSON node rows and their spans are relative to the indexed document.
+	The caller owns the nodes, declaration rows and decoded key bytes.
+	Keep them available through any lookup on the returned index.
+
+	Error codes 1 through 12 are JSON diagnostics. Code 13 is an invalid
+	document offset, 14 is insufficient index rows, and 15 is insufficient
+	decoded key storage. Discard all scratch and index rows on failure.`)
+	clang_ast_index
+
+	(use wove-file "../json/reader.wove" (only (type JsonNode) json_parse json_decode_string))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../json/frame.wove" (only json_frame))
+	(use wove-file "./fields.wove" (only clang_field clang_inner))
+
+	(struct ClangDeclaration
+		(fields (node i32) (start i32) (end i32) (kind_start i32) (kind_end i32) (name_start i32) (name_end i32)))
+	(struct ClangIndex
+		(fields (error u32) (start i32) (end i32) (nodes i32) (entries i32) (names i32)))
+
+	(fn
+		(:doc "Keep the original error location and avoid publishing partial index counts.")
+		clang_index_result
+		(params (error u32) (start i32) (end i32) (nodes i32) (entries i32) (names i32))
+		(returns ClangIndex)
+		(body (return (record.make ClangIndex (error (local error)) (start (local start)) (end (local end))
+			(nodes (local nodes)) (entries (local entries)) (names (local names))))))
+
+	(fn
+		(:doc "Decode one string field and append it to the key arena, or return -1 if capacity is short.")
+		append_clang_key
+		(params (source (shared-slice u8)) (base i32) (nodes (shared-slice JsonNode)) (row i32)
+			(decoded (mut-slice u8)) (names (mut-slice u8)) (at i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "Absent fields have an empty key span.")
+				(i32.lt (local row) (i32 0))
+				(then (return (local at))))
+			(let field (slice.load (local nodes) (local row)))
+			(if
+				(:doc "The archive's string lookup treats a nonstring field as an empty key.")
+				(bool.not (u32.eq (record.get (local field) kind) (u32 3)))
+				(then (return (local at))))
+			(let value (call json_decode_string (borrow-shared (local source))
+				(i32.add.wrapping (local base) (record.get (local field) start))
+				(i32.add.wrapping (local base) (record.get (local field) end)) (borrow-mut (local decoded))))
+			(let width (record.get (local value) written))
+			(if
+				(:doc "Check remaining arena capacity before adding any offsets or copying bytes.")
+				(bool.or (u32.lt (u32 0) (record.get (local value) error))
+					(i32.lt (i32.sub.wrapping (slice.len (local names)) (local at)) (local width)))
+				(then (return (i32 -1))))
+			(let-mut byte (i32 0))
+			(while
+				(:doc "Each decoded key is stored exactly once without its JSON quotes.")
+				(i32.lt (local byte) (local width))
+				(body
+					(slice.store (local names) (i32.add.wrapping (local at) (local byte)) (slice.load (local decoded) (local byte)))
+					(set (local byte) (i32.add.wrapping (local byte) (i32 1)))))
+			(return (i32.add.wrapping (local at) (local width)))))
+
+	(fn
+		(:doc "Index one validated document's declaration array without walking nested bodies.")
+		index_clang_rows
+		(params (source (shared-slice u8)) (start i32) (end i32) (rows i32) (nodes (shared-slice JsonNode))
+			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
+		(returns ClangIndex)
+		(body
+			(let-mut node (call clang_inner (borrow-shared (local source)) (local start) (borrow-shared (local nodes)) (i32 0)))
+			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let-mut count (i32 0))
+			(let-mut cursor (i32 0))
+			(while
+				(:doc "Only direct items of the selected array enter this index, in source order.")
+				(bool.not (i32.lt (local node) (i32 0)))
+				(body
+					(let value (slice.load (local nodes) (local node)))
+					(let at (i32.add.wrapping (local start) (record.get (local value) start)))
+					(let stop (i32.add.wrapping (local start) (record.get (local value) end)))
+					(if
+						(:doc "Report the declaration that could not be added to the row view.")
+						(i32.eq (local count) (slice.len (local entries)))
+						(then (return (call clang_index_result (u32 14) (local at) (local stop) (i32 0) (i32 0) (i32 0)))))
+					(let kind (call clang_field (borrow-shared (local source)) (local start)
+						(borrow-shared (local nodes)) (local node) (u32 1)))
+					(let name (call clang_field (borrow-shared (local source)) (local start)
+						(borrow-shared (local nodes)) (local node) (u32 2)))
+					(let kind_end (call append_clang_key (borrow-shared (local source)) (local start) (borrow-shared (local nodes))
+						(local kind) (borrow-mut (local decoded)) (borrow-mut (local names)) (local cursor)))
+					(if
+						(:doc "A declaration needs both of its decoded keys to be usable.")
+						(i32.lt (local kind_end) (i32 0))
+						(then (return (call clang_index_result (u32 15) (local at) (local stop) (i32 0) (i32 0) (i32 0)))))
+					(let name_end (call append_clang_key (borrow-shared (local source)) (local start) (borrow-shared (local nodes))
+						(local name) (borrow-mut (local decoded)) (borrow-mut (local names)) (local kind_end)))
+					(if
+						(:doc "Use the original declaration span for either exhausted key.")
+						(i32.lt (local name_end) (i32 0))
+						(then (return (call clang_index_result (u32 15) (local at) (local stop) (i32 0) (i32 0) (i32 0)))))
+					(slice.store (local entries) (local count) (record.make ClangDeclaration
+						(node (local node)) (start (local at)) (end (local stop))
+						(kind_start (local cursor)) (kind_end (local kind_end)) (name_start (local kind_end)) (name_end (local name_end))))
+					(set (local cursor) (local name_end))
+					(set (local count) (i32.add.wrapping (local count) (i32 1)))
+					(set (local node) (record.get (local value) next_sibling))))
+			(return (call clang_index_result (u32 0) (local start) (local end) (local rows) (local count) (local cursor)))))
+
+	(fn
+		(:doc "Frame, validate, and index the next supplied Clang document at or after offset.")
+		clang_index
+		(params (source (shared-slice u8)) (offset i32) (nodes (mut-slice JsonNode))
+			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
+		(returns ClangIndex)
+		(body
+			(let frame (call json_frame (borrow-shared (local source)) (local offset)))
+			(let error (record.get (local frame) error))
+			(let start (record.get (local frame) start))
+			(let end (record.get (local frame) end))
+			(if
+				(:doc "An empty frame is EOF, while a framing error already has absolute coordinates.")
+				(bool.or (u32.lt (u32 0) (local error)) (i32.eq (local start) (local end)))
+				(then (return (call clang_index_result (local error) (local start) (local end) (i32 0) (i32 0) (i32 0)))))
+			(let parsed (call json_parse (borrow-shared (slice.range (local source) (local start) (local end))) (borrow-mut (local nodes))))
+			(if
+				(:doc "Translate diagnostics from the bounded JSON view back to the original stream.")
+				(u32.lt (u32 0) (record.get (local parsed) error))
+				(then (return (call clang_index_result (record.get (local parsed) error)
+					(i32.add.wrapping (local start) (record.get (local parsed) start))
+					(i32.add.wrapping (local start) (record.get (local parsed) end)) (i32 0) (i32 0) (i32 0)))))
+			(return (call index_clang_rows (borrow-shared (local source)) (local start) (local end)
+				(record.get (local parsed) rows) (borrow-shared (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names))))))
+
+	(fn
+		(:doc "Return the last exact kind and name match, with node -1 when absent.")
+		clang_declaration
+		(params (index ClangIndex) (entries (shared-slice ClangDeclaration)) (names (shared-slice u8))
+			(kind (shared-slice u8)) (name (shared-slice u8)))
+		(returns ClangDeclaration)
+		(body
+			(let-mut row (record.get (local index) entries))
+			(while
+				(:doc "Later redeclarations of the exact kind and name take precedence.")
+				(i32.lt (i32 0) (local row))
+				(body
+					(set (local row) (i32.sub.wrapping (local row) (i32 1)))
+					(let entry (slice.load (local entries) (local row)))
+					(if
+						(:doc "Compare full decoded keys without descending into the original JSON body.")
+						(bool.and (call same_bytes (borrow-shared (local names)) (record.get (local entry) kind_start)
+							(record.get (local entry) kind_end) (borrow-shared (local kind)) (i32 0) (slice.len (local kind)))
+							(call same_bytes (borrow-shared (local names)) (record.get (local entry) name_start)
+								(record.get (local entry) name_end) (borrow-shared (local name)) (i32 0) (slice.len (local name))))
+						(then (return (local entry))))))
+			(return (record.make ClangDeclaration (node (i32 -1)) (start (i32 -1)) (end (i32 -1))
+				(kind_start (i32 -1)) (kind_end (i32 -1)) (name_start (i32 -1)) (name_end (i32 -1)))))))

@@ -1,0 +1,215 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Fill the archived C probe template without opening files or invoking a tool.
+
+	Pass the bytes of templates/probe_header.tmpl.h. Its two literal <@.h>
+	tokens are replaced by the supplied header name. Bare names become
+	angle-bracket names. A supplied angle-bracket or quoted header stays in
+	that form. Append optional C declarations after the probe.
+
+	The result gives the written or required byte count. Error codes are
+	1 invalid header, 2 invalid template marker count, 3 unrepresentable
+	output size, and 4 insufficient output. Failures leave output intact.`)
+	clang_probe_source
+
+	(struct ProbeSource (fields (error u32) (written i32) (required i32)))
+
+	(fn
+		(:doc "Keep header spelling to path bytes that cannot escape the C header operand.")
+		header_path_byte
+		(params (byte u8))
+		(returns bool)
+		(body
+			(return (bool.or (u8.eq (local byte) (u8 95))
+				(bool.or (bool.and (u8.lt (u8 64) (local byte)) (u8.lt (local byte) (u8 91)))
+					(bool.or (bool.and (u8.lt (u8 96) (local byte)) (u8.lt (local byte) (u8 123)))
+						(bool.and (u8.lt (u8 44) (local byte)) (u8.lt (local byte) (u8 58)))))))))
+
+	(fn
+		(:doc "Return zero for an invalid header, one for a bare path, or two for a literal.")
+		probe_header_form
+		(params (header (shared-slice u8)))
+		(returns u32)
+		(body
+			(let-mut end (slice.len (local header)))
+			(if
+				(:doc "An include operand needs a nonempty name.")
+				(i32.eq (local end) (i32 0))
+				(then (return (u32 0))))
+			(let first (slice.load (local header) (i32 0)))
+			(let-mut at (i32 0))
+			(let-mut form (u32 1))
+			(if
+				(:doc "Preserve the semantics of angle-bracket and quoted includes.")
+				(bool.or (u8.eq (local first) (u8 60)) (u8.eq (local first) (u8 34)))
+				(then
+					(let-mut close (u8 62))
+					(if
+						(:doc "A quoted name closes with the same quote.")
+						(u8.eq (local first) (u8 34))
+						(then (set (local close) (u8 34))))
+					(set (local end) (i32.sub.wrapping (local end) (i32 1)))
+					(if
+						(:doc "Require a closing delimiter around a nonempty path.")
+						(bool.or (i32.lt (local end) (i32 2))
+							(bool.not (u8.eq (slice.load (local header) (local end)) (local close))))
+						(then (return (u32 0))))
+					(set (local at) (i32 1))
+					(set (local form) (u32 2))))
+			(while
+				(:doc "Check the complete path before it can be placed in a preprocessing directive.")
+				(i32.lt (local at) (local end))
+				(body
+					(if
+						(:doc "Header delimiters, control bytes and layout are outside the path alphabet.")
+						(bool.not (call header_path_byte (slice.load (local header) (local at))))
+						(then (return (u32 0))))
+					(set (local at) (i32.add.wrapping (local at) (i32 1)))))
+			(return (local form))))
+
+	(fn
+		(:doc "Match the template's complete <@.h> token at a checked byte offset.")
+		probe_marker
+		(params (template (shared-slice u8)) (at i32))
+		(returns bool)
+		(body (return (bool.and
+			(bool.not (i32.lt (i32.sub.wrapping (slice.len (local template)) (local at)) (i32 5)))
+			(bool.and (u8.eq (slice.load (local template) (local at)) (u8 60))
+				(bool.and (u8.eq (slice.load (local template) (i32.add.wrapping (local at) (i32 1))) (u8 64))
+					(bool.and (u8.eq (slice.load (local template) (i32.add.wrapping (local at) (i32 2))) (u8 46))
+						(bool.and (u8.eq (slice.load (local template) (i32.add.wrapping (local at) (i32 3))) (u8 104))
+							(u8.eq (slice.load (local template) (i32.add.wrapping (local at) (i32 4))) (u8 62))))))))))
+
+	(fn
+		(:doc "Require one availability test site and one include site in the supplied template.")
+		probe_marker_count
+		(params (template (shared-slice u8)))
+		(returns i32)
+		(body
+			(let-mut at (i32 0))
+			(let-mut count (i32 0))
+			(while
+				(:doc "Both complete markers will be replaced and all other template bytes copied.")
+				(i32.lt (local at) (slice.len (local template)))
+				(body
+					(if
+						(:doc "A third marker is already enough to reject this template.")
+						(call probe_marker (borrow-shared (local template)) (local at))
+						(then
+							(set (local count) (i32.add.wrapping (local count) (i32 1)))
+							(if
+								(:doc "Bound the count independently of the supplied template length.")
+								(i32.lt (i32 2) (local count))
+								(then (return (local count))))))
+					(set (local at) (i32.add.wrapping (local at) (i32 1)))))
+			(return (local count))))
+
+	(fn
+		(:doc "Measure the output without overflowing the i32 slice index range.")
+		probe_size
+		(params (template i32) (header i32) (extra i32))
+		(returns i32)
+		(body
+			(let-mut available (i32.sub.wrapping (i32 2147483647) (i32.sub.wrapping (local template) (i32 10))))
+			(let-mut copy (i32 0))
+			(while
+				(:doc "Reserve room for both complete header spellings.")
+				(i32.lt (local copy) (i32 2))
+				(body
+					(if
+						(:doc "The remaining size cannot represent this operand.")
+						(i32.lt (local available) (local header))
+						(then (return (i32 -1))))
+					(set (local available) (i32.sub.wrapping (local available) (local header)))
+					(set (local copy) (i32.add.wrapping (local copy) (i32 1)))))
+			(if
+				(:doc "The caller's extra declarations must also fit in a single output view.")
+				(i32.lt (local available) (local extra))
+				(then (return (i32 -1))))
+			(return (i32.sub.wrapping (i32 2147483647) (i32.sub.wrapping (local available) (local extra))))))
+
+	(fn
+		(:doc "Copy a complete fragment after the caller has checked the total output size.")
+		copy_probe_bytes
+		(params (fragment (shared-slice u8)) (output (mut-slice u8)) (start i32))
+		(returns i32)
+		(body
+			(let-mut at (i32 0))
+			(while
+				(:doc "The fragment's bytes remain in their original order.")
+				(i32.lt (local at) (slice.len (local fragment)))
+				(body
+					(slice.store (local output) (i32.add.wrapping (local start) (local at)) (slice.load (local fragment) (local at)))
+					(set (local at) (i32.add.wrapping (local at) (i32 1)))))
+			(return (i32.add.wrapping (local start) (local at)))))
+
+	(fn
+		(:doc "Write the intended literal header operand without involving C macro expansion.")
+		write_probe_header
+		(params (header (shared-slice u8)) (form u32) (output (mut-slice u8)) (start i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "A literal name already carries the requested delimiters.")
+				(u32.eq (local form) (u32 2))
+				(then (return (call copy_probe_bytes (borrow-shared (local header)) (borrow-mut (local output)) (local start)))))
+			(slice.store (local output) (local start) (u8 60))
+			(let end (call copy_probe_bytes (borrow-shared (local header)) (borrow-mut (local output))
+				(i32.add.wrapping (local start) (i32 1))))
+			(slice.store (local output) (local end) (u8 62))
+			(return (i32.add.wrapping (local end) (i32 1)))))
+
+	(fn
+		(:doc "Fill both include operands and append extra C source after successful size checks.")
+		render_clang_probe
+		(params (template (shared-slice u8)) (header (shared-slice u8)) (extra (shared-slice u8)) (output (mut-slice u8)))
+		(returns ProbeSource)
+		(body
+			(let form (call probe_header_form (borrow-shared (local header))))
+			(if
+				(:doc "Reject an ill-formed literal before writing a preprocessing directive.")
+				(u32.eq (local form) (u32 0))
+				(then (return (record.make ProbeSource (error (u32 1)) (written (i32 0)) (required (i32 0))))))
+			(if
+				(:doc "Check the template's marker contract before measuring replacements.")
+				(bool.not (i32.eq (call probe_marker_count (borrow-shared (local template))) (i32 2)))
+				(then (return (record.make ProbeSource (error (u32 2)) (written (i32 0)) (required (i32 0))))))
+			(let-mut width (slice.len (local header)))
+			(if
+				(:doc "A bare header needs two additional delimiter bytes.")
+				(u32.eq (local form) (u32 1))
+				(then
+					(if
+						(:doc "Check the extra delimiter bytes before adding them.")
+						(i32.lt (i32 2147483645) (local width))
+						(then (return (record.make ProbeSource (error (u32 3)) (written (i32 0)) (required (i32 0))))))
+					(set (local width) (i32.add.wrapping (local width) (i32 2)))))
+			(let size (call probe_size (slice.len (local template)) (local width) (slice.len (local extra))))
+			(if
+				(:doc "A source larger than the slice index range cannot be rendered.")
+				(i32.lt (local size) (i32 0))
+				(then (return (record.make ProbeSource (error (u32 3)) (written (i32 0)) (required (i32 0))))))
+			(if
+				(:doc "Report exact capacity without modifying the caller's buffer.")
+				(i32.lt (slice.len (local output)) (local size))
+				(then (return (record.make ProbeSource (error (u32 4)) (written (i32 0)) (required (local size))))))
+			(let-mut at (i32 0))
+			(let-mut written (i32 0))
+			(while
+				(:doc "Replace only the complete marker token and keep the rest of the C text verbatim.")
+				(i32.lt (local at) (slice.len (local template)))
+				(body
+					(if
+						(:doc "A marker writes the full delimited name and consumes five template bytes.")
+						(call probe_marker (borrow-shared (local template)) (local at))
+						(then
+							(set (local written) (call write_probe_header (borrow-shared (local header)) (local form)
+								(borrow-mut (local output)) (local written)))
+							(set (local at) (i32.add.wrapping (local at) (i32 5))))
+						(else
+							(slice.store (local output) (local written) (slice.load (local template) (local at)))
+							(set (local written) (i32.add.wrapping (local written) (i32 1)))
+							(set (local at) (i32.add.wrapping (local at) (i32 1)))))))
+			(let end (call copy_probe_bytes (borrow-shared (local extra)) (borrow-mut (local output)) (local written)))
+			(return (record.make ProbeSource (error (u32 0)) (written (local end)) (required (local size)))))))
