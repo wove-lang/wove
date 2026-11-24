@@ -1,245 +1,45 @@
 (module
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Decode checked source string tokens into caller-owned byte storage.
-
-	The input still holds the original spelling for rendering and diagnostics.
-	Decode one scalar at a time so a capacity failure leaves a valid UTF-8 prefix.`)
+	(:doc "Decode checked Wove string tokens. Raw backticks and physical line endings are handled here.")
 	source_strings
 
 	(use wove-file "./scan.wove" (only (type Token)))
-	(use wove-file "../text/utf8.wove" (only utf8_width))
+	(use wove-file "../text/quoted.wove" (only decode_double_quoted))
+	(use wove-file "../text/utf8.wove" (only copy_utf8_scalar utf8_width))
 
 	(struct DecodeResult (fields (written i32) (start i32) (end i32) (error u32)))
-	(struct StringUnit (fields (end i32) (scalar i32) (error u32)))
+	(struct RawUnit (fields (end i32) (replacement i32)))
 
 	(fn
-		(:doc `Shift a small, nonnegative value left using the seed's wrapping addition.`)
-		shift_left
-		(params (value i32) (bits i32))
-		(returns i32)
-		(body
-			(let-mut result (local value))
-			(let-mut remaining (local bits))
-			(while
-				(:doc "The hex and surrogate callers keep the result within i32.")
-				(i32.lt (i32 0) (local remaining))
-				(body
-					(set (local result) (i32.add.wrapping (local result) (local result)))
-					(set (local remaining) (i32.sub.wrapping (local remaining) (i32 1)))))
-			(return (local result))))
-
-	(fn
-		(:doc `Convert a hexadecimal digit already checked by the lexer.`)
-		hex_value
-		(params (byte u8))
-		(returns i32)
-		(body
-			(let value (int.convert i32 (local byte)))
-			(if
-				(:doc "ASCII decimal digits begin at 48.")
-				(i32.lt (local value) (i32 58))
-				(then (return (i32.sub.wrapping (local value) (i32 48)))))
-			(if
-				(:doc "Uppercase hexadecimal letters begin at 65 and represent 10–15.")
-				(i32.lt (local value) (i32 71))
-				(then (return (i32.sub.wrapping (local value) (i32 55)))))
-			(return (i32.sub.wrapping (local value) (i32 87)))))
-
-	(fn
-		(:doc `Read the four digits after the escaped Unicode marker.`)
-		read_unicode_escape
-		(params (source (shared-slice u8)) (start i32))
-		(returns i32)
-		(body
-			(let end (i32.add.wrapping (local start) (i32 6)))
-			(let-mut cursor (i32.add.wrapping (local start) (i32 2)))
-			(let-mut value (i32 0))
-			(while
-				(:doc "The checked token guarantees four hexadecimal bytes at this offset.")
-				(i32.lt (local cursor) (local end))
-				(body
-					(let digit (call hex_value (slice.load (local source) (local cursor))))
-					(set (local value) (i32.add.wrapping (call shift_left (local value) (i32 4)) (local digit)))
-					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
-			(return (local value))))
-
-	(fn
-		(:doc `Represent one decoded scalar, or use -1 to copy the source bytes unchanged.`)
-		string_unit
-		(params (end i32) (scalar i32))
-		(returns StringUnit)
-		(body
-			(return (record.make StringUnit (end (local end)) (scalar (local scalar)) (error (u32 0))))))
-
-	(fn
-		(:doc `Decode a Unicode escape or combine a high/low surrogate pair.
-
-		An unmatched surrogate reports the span of its own six-byte escape.`)
-		decode_unicode_escape
+		(:doc "Read one raw unit and return -1 to preserve its original UTF-8 bytes.")
+		raw_unit
 		(params (source (shared-slice u8)) (start i32) (limit i32))
-		(returns StringUnit)
-		(body
-			(let value (call read_unicode_escape (borrow-shared (local source)) (local start)))
-			(let end (i32.add.wrapping (local start) (i32 6)))
-			(if
-				(:doc "Values outside the surrogate range are Unicode scalars.")
-				(bool.or (i32.lt (local value) (i32 55296)) (bool.not (i32.lt (local value) (i32 57344))))
-				(then (return (call string_unit (local end) (local value)))))
-			(if
-				(:doc "Only a high surrogate can start a pair. Bound the following escape before reading it.")
-				(bool.and
-					(i32.lt (local value) (i32 56320))
-					(bool.and
-						(bool.not (i32.lt (i32.sub.wrapping (local limit) (local end)) (i32 6)))
-						(bool.and
-							(u8.eq (slice.load (local source) (local end)) (u8 92))
-							(u8.eq (slice.load (local source) (i32.add.wrapping (local end) (i32 1))) (u8 117)))))
-				(then
-					(let low (call read_unicode_escape (borrow-shared (local source)) (local end)))
-					(if
-						(:doc "A low surrogate supplies the low ten bits above U+FFFF.")
-						(bool.and (bool.not (i32.lt (local low) (i32 56320))) (i32.lt (local low) (i32 57344)))
-						(then
-							(let high_bits (call shift_left (i32.sub.wrapping (local value) (i32 55296)) (i32 10)))
-							(let scalar (i32.add.wrapping (i32 65536)
-								(i32.add.wrapping (local high_bits) (i32.sub.wrapping (local low) (i32 56320)))))
-							(return (call string_unit (i32.add.wrapping (local end) (i32 6)) (local scalar)))))))
-			(return (record.make StringUnit (end (local end)) (scalar (i32 0)) (error (u32 17))))))
-
-	(fn
-		(:doc `Map the lexer's checked JSON short escapes to their scalar values.`)
-		short_escape_value
-		(params (byte u8))
-		(returns i32)
-		(body
-			(if (u8.eq (local byte) (u8 98)) (then (return (i32 8))))
-			(if (u8.eq (local byte) (u8 102)) (then (return (i32 12))))
-			(if (u8.eq (local byte) (u8 110)) (then (return (i32 10))))
-			(if (u8.eq (local byte) (u8 114)) (then (return (i32 13))))
-			(if (u8.eq (local byte) (u8 116)) (then (return (i32 9))))
-			(return (int.convert i32 (local byte)))))
-
-	(fn
-		(:doc `Read one scalar's source extent and its transformation, if any.`)
-		read_string_unit
-		(params (source (shared-slice u8)) (start i32) (limit i32) (raw bool))
-		(returns StringUnit)
+		(returns RawUnit)
 		(body
 			(let byte (slice.load (local source) (local start)))
-			(let next (i32.add.wrapping (local start) (i32 1)))
 			(if
-				(:doc "Raw delimiters and physical line endings are the only transformations in backtick strings.")
-				(local raw)
+				(:doc "The raw scanner pairs any backtick inside the delimiters.")
+				(u8.eq (local byte) (u8 96))
+				(then (return (record.make RawUnit
+					(end (i32.add.wrapping (local start) (i32 2))) (replacement (i32 96))))))
+			(if
+				(:doc "Emit one LF for a lone CR or a CRLF pair.")
+				(u8.eq (local byte) (u8 13))
 				(then
+					(let-mut end (i32.add.wrapping (local start) (i32 1)))
 					(if
-						(:doc "An interior backtick is paired in a checked raw token.")
-						(u8.eq (local byte) (u8 96))
-						(then (return (call string_unit (i32.add.wrapping (local start) (i32 2)) (i32 96)))))
-					(if
-						(:doc "Preserve one logical LF for both CRLF and lone CR.")
-						(u8.eq (local byte) (u8 13))
-						(then
-							(let-mut end (local next))
-							(if
-								(:doc "A CR at the end of the payload has no following LF.")
-								(bool.and (i32.lt (local next) (local limit))
-									(u8.eq (slice.load (local source) (local next)) (u8 10)))
-								(then (set (local end) (i32.add.wrapping (local next) (i32 1)))))
-							(return (call string_unit (local end) (i32 10))))))
-				(else
-					(if
-						(:doc "A checked backslash is followed by a short escape or four hex digits after u.")
-						(u8.eq (local byte) (u8 92))
-						(then
-							(let escape (slice.load (local source) (local next)))
-							(if
-								(:doc "Unicode escapes can expand to multiple UTF-8 bytes.")
-								(u8.eq (local escape) (u8 117))
-								(then (return (call decode_unicode_escape (borrow-shared (local source)) (local start) (local limit)))))
-							(return (call string_unit (i32.add.wrapping (local start) (i32 2))
-								(call short_escape_value (local escape))))))))
-			(return (call string_unit
-				(i32.add.wrapping (local start) (call utf8_width (local byte))) (i32 -1)))))
+						(:doc "A CR at the end of the payload is already a complete line break.")
+						(bool.and (i32.lt (local end) (local limit))
+							(u8.eq (slice.load (local source) (local end)) (u8 10)))
+						(then (set (local end) (i32.add.wrapping (local end) (i32 1)))))
+					(return (record.make RawUnit (end (local end)) (replacement (i32 10))))))
+			(return (record.make RawUnit
+				(end (i32.add.wrapping (local start) (call utf8_width (local byte))))
+				(replacement (i32 -1))))))
 
 	(fn
-		(:doc `Return the UTF-8 width of a checked Unicode scalar.`)
-		scalar_width
-		(params (scalar i32))
-		(returns i32)
-		(body
-			(if (i32.lt (local scalar) (i32 128)) (then (return (i32 1))))
-			(if (i32.lt (local scalar) (i32 2048)) (then (return (i32 2))))
-			(if (i32.lt (local scalar) (i32 65536)) (then (return (i32 3))))
-			(return (i32 4))))
-
-	(fn
-		(:doc `Return the leading UTF-8 byte's prefix for the selected width.`)
-		utf8_prefix
-		(params (width i32))
-		(returns i32)
-		(body
-			(if (i32.eq (local width) (i32 1)) (then (return (i32 0))))
-			(if (i32.eq (local width) (i32 2)) (then (return (i32 192))))
-			(if (i32.eq (local width) (i32 3)) (then (return (i32 224))))
-			(return (i32 240))))
-
-	(fn
-		(:doc `Return the place value of the next UTF-8 group with two to four bytes remaining.`)
-		utf8_place
-		(params (remaining i32))
-		(returns i32)
-		(body
-			(if (i32.eq (local remaining) (i32 2)) (then (return (i32 64))))
-			(if (i32.eq (local remaining) (i32 3)) (then (return (i32 4096))))
-			(return (i32 262144))))
-
-	(fn
-		(:doc `Emit a scalar in UTF-8 after the caller has checked its entire output width.`)
-		write_scalar
-		(params (output (mut-slice u8)) (start i32) (width i32) (scalar i32))
-		(returns void)
-		(body
-			(let-mut rest (local scalar))
-			(let-mut remaining (local width))
-			(let-mut cursor (local start))
-			(let-mut prefix (call utf8_prefix (local width)))
-			(while
-				(:doc "Emit high groups first, leaving the low group for the final byte.")
-				(i32.lt (i32 1) (local remaining))
-				(body
-					(let place (call utf8_place (local remaining)))
-					(let-mut byte (local prefix))
-					(while
-						(:doc "At most one six-bit payload fits in this group.")
-						(bool.not (i32.lt (local rest) (local place)))
-						(body
-							(set (local rest) (i32.sub.wrapping (local rest) (local place)))
-							(set (local byte) (i32.add.wrapping (local byte) (i32 1)))))
-					(slice.store (local output) (local cursor) (int.convert u8 (local byte)))
-					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
-					(set (local remaining) (i32.sub.wrapping (local remaining) (i32 1)))
-					(set (local prefix) (i32 128))))
-			(slice.store (local output) (local cursor)
-				(int.convert u8 (i32.add.wrapping (local prefix) (local rest))))))
-
-	(fn
-		(:doc `Copy an unescaped scalar's original bytes after checking its output width.`)
-		copy_scalar
-		(params (source (shared-slice u8)) (output (mut-slice u8)) (start i32) (target i32) (width i32))
-		(returns void)
-		(body
-			(let-mut offset (i32 0))
-			(while
-				(:doc "Both views contain the complete scalar when entering this loop.")
-				(i32.lt (local offset) (local width))
-				(body
-					(slice.store (local output) (i32.add.wrapping (local target) (local offset))
-						(slice.load (local source) (i32.add.wrapping (local start) (local offset))))
-					(set (local offset) (i32.add.wrapping (local offset) (i32 1)))))))
-
-	(fn
-		(:doc `Keep the byte count and the original source span together in every decode result.`)
+		(:doc "Keep the byte count and the original source span together in every decode result.")
 		decode_result
 		(params (written i32) (start i32) (end i32) (error u32))
 		(returns DecodeResult)
@@ -248,11 +48,44 @@
 				(written (local written)) (start (local start)) (end (local end)) (error (local error))))))
 
 	(fn
-		(:doc `Decode a checked kind-2 token from its original admitted byte view.
+		(:doc "Decode a checked raw span, collapsing doubled backticks and normalizing line endings.")
+		decode_raw_string
+		(params (source (shared-slice u8)) (start i32) (end i32) (output (mut-slice u8)))
+		(returns DecodeResult)
+		(body
+			(let limit (i32.sub.wrapping (local end) (i32 1)))
+			(let capacity (slice.len (local output)))
+			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+			(let-mut written (i32 0))
+			(while
+				(:doc "Process a whole raw unit before advancing the written prefix.")
+				(i32.lt (local cursor) (local limit))
+				(body
+					(let unit (call raw_unit (borrow-shared (local source)) (local cursor) (local limit)))
+					(let after (record.get (local unit) end))
+					(let replacement (record.get (local unit) replacement))
+					(let copy (i32.lt (local replacement) (i32 0)))
+					(let-mut width (i32 1))
+					(if
+						(:doc "Only unmodified input retains its original byte width.")
+						(local copy)
+						(then (set (local width) (i32.sub.wrapping (local after) (local cursor)))))
+					(if
+						(:doc "A short view leaves the next unit and its source span unconsumed.")
+						(i32.lt (i32.sub.wrapping (local capacity) (local written)) (local width))
+						(then (return (call decode_result (local written) (local cursor) (local after) (u32 16)))))
+					(if
+						(:doc "Preserve intact multibyte scalars and write substitutions as single ASCII bytes.")
+						(local copy)
+						(then (call copy_utf8_scalar (borrow-shared (local source)) (borrow-mut (local output))
+							(local cursor) (local written) (local width)))
+						(else (slice.store (local output) (local written) (int.convert u8 (local replacement)))))
+					(set (local written) (i32.add.wrapping (local written) (local width)))
+					(set (local cursor) (local after))))
+			(return (call decode_result (local written) (local start) (local end) (u32 0)))))
 
-		Success reports the original token span. On failure, the span identifies the
-		first scalar that could not be decoded or written. The written prefix ends at
-		a scalar boundary and the remaining output bytes retain their original values.`)
+	(fn
+		(:doc "Decode a checked kind-2 token from its original admitted byte view. A failure retains the complete UTF-8 prefix and the source span of the first unit that could not be decoded or written.")
 		(:expect parser.decode_string
 			(issue "https://github.com/wove-lang/wove/issues/65"))
 		decode_string
@@ -261,39 +94,22 @@
 		(body
 			(let start (record.get (local token) start))
 			(let end (record.get (local token) end))
-			(let limit (i32.sub.wrapping (local end) (i32 1)))
-			(let raw (u8.eq (slice.load (local source) (local start)) (u8 96)))
-			(let capacity (slice.len (local output)))
-			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
-			(let-mut written (i32 0))
-			(while
-				(:doc "Decode only the payload, one complete scalar at a time.")
-				(i32.lt (local cursor) (local limit))
-				(body
-					(let unit (call read_string_unit (borrow-shared (local source)) (local cursor) (local limit) (local raw)))
-					(let after (record.get (local unit) end))
-					(let error (record.get (local unit) error))
-					(if
-						(:doc "An unpaired surrogate keeps its original escape span.")
-						(u32.lt (u32 0) (local error))
-						(then (return (call decode_result (local written) (local cursor) (local after) (local error)))))
-					(let scalar (record.get (local unit) scalar))
-					(let copy (i32.lt (local scalar) (i32 0)))
-					(let-mut width (i32.sub.wrapping (local after) (local cursor)))
-					(if
-						(:doc "Escapes can decode to a scalar with a different byte width.")
-						(bool.not (local copy))
-						(then (set (local width) (call scalar_width (local scalar)))))
-					(if
-						(:doc "A short view leaves the next scalar and its source span unconsumed.")
-						(i32.lt (i32.sub.wrapping (local capacity) (local written)) (local width))
-						(then (return (call decode_result (local written) (local cursor) (local after) (u32 16)))))
-					(if
-						(:doc "Copy original UTF-8 bytes or encode the transformed scalar.")
-						(local copy)
-						(then (call copy_scalar (borrow-shared (local source)) (borrow-mut (local output))
-							(local cursor) (local written) (local width)))
-						(else (call write_scalar (borrow-mut (local output)) (local written) (local width) (local scalar))))
-					(set (local written) (i32.add.wrapping (local written) (local width)))
-					(set (local cursor) (local after))))
-			(return (call decode_result (local written) (local start) (local end) (u32 0))))))
+			(if
+				(:doc "A backtick uses Wove's raw decoding rules.")
+				(u8.eq (slice.load (local source) (local start)) (u8 96))
+				(then (return (call decode_raw_string (borrow-shared (local source))
+					(local start) (local end) (borrow-mut (local output))))))
+			(let decoded (call decode_double_quoted (borrow-shared (local source))
+				(local start) (local end) (borrow-mut (local output))))
+			(let code (record.get (local decoded) error))
+			(let-mut error (u32 0))
+			(if
+				(:doc "Wove source diagnostics use code 16 for insufficient decoder output.")
+				(u32.eq (local code) (u32 5))
+				(then (set (local error) (u32 16))))
+			(if
+				(:doc "Wove source diagnostics use code 17 for an unpaired surrogate.")
+				(u32.eq (local code) (u32 4))
+				(then (set (local error) (u32 17))))
+			(return (call decode_result (record.get (local decoded) written)
+				(record.get (local decoded) start) (record.get (local decoded) end) (local error))))))

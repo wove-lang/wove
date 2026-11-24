@@ -1,0 +1,385 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Scan and decode double-quoted strings in an admitted UTF-8 byte view.
+
+	Pass the byte offset of the opening quote to scan_double_quoted. A
+	successful result includes both delimiters in its half-open span and
+	can be passed to the scalar validator or decoder with the same source.
+
+	Scan errors are 1 unterminated string, 2 malformed escape, and 3 literal
+	control byte. Scalar validation and decoding report error 4 at an
+	unpaired surrogate. Decoding also reports error 5 at the first scalar
+	that exceeds the supplied output. The written prefix ends on a scalar
+	boundary. Zero indicates success in all three operations.`)
+	double_quoted
+
+	(use wove-file "./utf8.wove" (only utf8_width copy_utf8_scalar))
+
+	(struct QuotedSpan (fields (start i32) (end i32) (error u32)))
+	(struct QuotedUnit (fields (end i32) (scalar i32) (error u32)))
+	(struct QuotedDecodeResult (fields (written i32) (start i32) (end i32) (error u32)))
+
+	(fn
+		(:doc `Recognize the JSON short escapes after their opening backslash.`)
+		(:pragma (inline always))
+		is_short_escape
+		(params (byte u8))
+		(returns bool)
+		(body
+			(return
+				(:doc "Accept escaped punctuation and the five named control characters.")
+				(bool.or
+					(bool.or
+						(u8.eq (local byte) (u8 34))
+						(bool.or (u8.eq (local byte) (u8 92)) (u8.eq (local byte) (u8 47))))
+					(bool.or
+						(bool.or (u8.eq (local byte) (u8 98)) (u8.eq (local byte) (u8 102)))
+						(bool.or
+							(u8.eq (local byte) (u8 110))
+							(bool.or (u8.eq (local byte) (u8 114)) (u8.eq (local byte) (u8 116)))))))))
+
+	(fn
+		(:doc `Accept ASCII digits and both cases of A through F in Unicode escapes.`)
+		(:pragma (inline always))
+		is_hex_digit
+		(params (byte u8))
+		(returns bool)
+		(body
+			(return
+				(:doc "Use half-open byte ranges for decimal, uppercase, and lowercase digits.")
+				(bool.or
+					(bool.and (bool.not (u8.lt (local byte) (u8 48))) (u8.lt (local byte) (u8 58)))
+					(bool.or
+						(bool.and (bool.not (u8.lt (local byte) (u8 65))) (u8.lt (local byte) (u8 71)))
+						(bool.and (bool.not (u8.lt (local byte) (u8 97))) (u8.lt (local byte) (u8 103))))))))
+
+	(fn
+		(:doc "Keep a quoted string's original span or the extent of a scanning error.")
+		quoted_span
+		(params (error u32) (start i32) (end i32))
+		(returns QuotedSpan)
+		(body
+			(return (record.make QuotedSpan (start (local start)) (end (local end)) (error (local error))))))
+
+	(fn
+		(:doc `Validate quoted bytes while preserving the full spelling for the parser.`)
+		scan_double_quoted
+		(params (source (shared-slice u8)) (start i32))
+		(returns QuotedSpan)
+		(body
+			(let length (slice.len (local source)))
+			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+			(while
+				(:doc "Read only bytes inside the supplied view, including while scanning escapes.")
+				(i32.lt (local cursor) (local length))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+					(if
+						(:doc "An unescaped quote completes the span just after the closing byte.")
+						(u8.eq (local byte) (u8 34))
+						(then
+							(return (call quoted_span (u32 0) (local start) (local cursor)))))
+					(if
+						(:doc "Raw ASCII control bytes end the error span just after the offending byte.")
+						(u8.lt (local byte) (u8 32))
+						(then (return (call quoted_span (u32 3) (local start) (local cursor)))))
+					(if
+						(:doc "A backslash consumes its escape bytes before the next quote check.")
+						(u8.eq (local byte) (u8 92))
+						(then
+							(if
+								(:doc "A trailing backslash reaches the view end without an escape byte.")
+								(i32.eq (local cursor) (local length))
+								(then (return (call quoted_span (u32 2) (local start) (local length)))))
+							(let escape (slice.load (local source) (local cursor)))
+							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+							(if
+								(:doc "A Unicode escape must supply exactly four hex digits.")
+								(u8.eq (local escape) (u8 117))
+								(then
+									(let-mut digits (i32 0))
+									(while
+										(:doc "Check each digit before advancing to the next byte.")
+										(i32.lt (local digits) (i32 4))
+										(body
+											(if
+												(:doc "A clipped escape reports the view end.")
+												(i32.eq (local cursor) (local length))
+												(then (return (call quoted_span (u32 2) (local start) (local length)))))
+											(let digit (slice.load (local source) (local cursor)))
+											(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+											(if
+												(:doc "Include the first invalid digit in the error span.")
+												(bool.not (call is_hex_digit (local digit)))
+												(then (return (call quoted_span (u32 2) (local start) (local cursor)))))
+											(set (local digits) (i32.add.wrapping (local digits) (i32 1))))))
+								(else
+									(if
+										(:doc "Every other escape must belong to the short escape set.")
+										(bool.not (call is_short_escape (local escape)))
+										(then (return (call quoted_span (u32 2) (local start) (local cursor)))))))))))
+			(return (call quoted_span (u32 1) (local start) (local length)))))
+
+	(fn
+		(:doc `Shift a small, nonnegative value left using the seed's wrapping addition.`)
+		shift_left
+		(params (value i32) (bits i32))
+		(returns i32)
+		(body
+			(let-mut result (local value))
+			(let-mut remaining (local bits))
+			(while
+				(:doc "The hex and surrogate callers keep the result within i32.")
+				(i32.lt (i32 0) (local remaining))
+				(body
+					(set (local result) (i32.add.wrapping (local result) (local result)))
+					(set (local remaining) (i32.sub.wrapping (local remaining) (i32 1)))))
+			(return (local result))))
+
+	(fn
+		(:doc `Convert a hexadecimal digit already checked by the lexer.`)
+		hex_value
+		(params (byte u8))
+		(returns i32)
+		(body
+			(let value (int.convert i32 (local byte)))
+			(if
+				(:doc "ASCII decimal digits begin at 48.")
+				(i32.lt (local value) (i32 58))
+				(then (return (i32.sub.wrapping (local value) (i32 48)))))
+			(if
+				(:doc "Uppercase hexadecimal letters begin at 65 and represent 10–15.")
+				(i32.lt (local value) (i32 71))
+				(then (return (i32.sub.wrapping (local value) (i32 55)))))
+			(return (i32.sub.wrapping (local value) (i32 87)))))
+
+	(fn
+		(:doc `Read the four digits after the escaped Unicode marker.`)
+		read_unicode_escape
+		(params (source (shared-slice u8)) (start i32))
+		(returns i32)
+		(body
+			(let end (i32.add.wrapping (local start) (i32 6)))
+			(let-mut cursor (i32.add.wrapping (local start) (i32 2)))
+			(let-mut value (i32 0))
+			(while
+				(:doc "The checked token guarantees four hexadecimal bytes at this offset.")
+				(i32.lt (local cursor) (local end))
+				(body
+					(let digit (call hex_value (slice.load (local source) (local cursor))))
+					(set (local value) (i32.add.wrapping (call shift_left (local value) (i32 4)) (local digit)))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (local value))))
+
+	(fn
+		(:doc `Represent one decoded scalar, or use -1 to copy the source bytes unchanged.`)
+		string_unit
+		(params (end i32) (scalar i32))
+		(returns QuotedUnit)
+		(body
+			(return (record.make QuotedUnit (end (local end)) (scalar (local scalar)) (error (u32 0))))))
+
+	(fn
+		(:doc `Decode a Unicode escape or combine a high/low surrogate pair.
+
+		An unmatched surrogate reports the span of its own six-byte escape.`)
+		decode_unicode_escape
+		(params (source (shared-slice u8)) (start i32) (limit i32))
+		(returns QuotedUnit)
+		(body
+			(let value (call read_unicode_escape (borrow-shared (local source)) (local start)))
+			(let end (i32.add.wrapping (local start) (i32 6)))
+			(if
+				(:doc "Values outside the surrogate range are Unicode scalars.")
+				(bool.or (i32.lt (local value) (i32 55296)) (bool.not (i32.lt (local value) (i32 57344))))
+				(then (return (call string_unit (local end) (local value)))))
+			(if
+				(:doc "Only a high surrogate can start a pair. Bound the following escape before reading it.")
+				(bool.and
+					(i32.lt (local value) (i32 56320))
+					(bool.and
+						(bool.not (i32.lt (i32.sub.wrapping (local limit) (local end)) (i32 6)))
+						(bool.and
+							(u8.eq (slice.load (local source) (local end)) (u8 92))
+							(u8.eq (slice.load (local source) (i32.add.wrapping (local end) (i32 1))) (u8 117)))))
+				(then
+					(let low (call read_unicode_escape (borrow-shared (local source)) (local end)))
+					(if
+						(:doc "A low surrogate supplies the low ten bits above U+FFFF.")
+						(bool.and (bool.not (i32.lt (local low) (i32 56320))) (i32.lt (local low) (i32 57344)))
+						(then
+							(let high_bits (call shift_left (i32.sub.wrapping (local value) (i32 55296)) (i32 10)))
+							(let scalar (i32.add.wrapping (i32 65536)
+								(i32.add.wrapping (local high_bits) (i32.sub.wrapping (local low) (i32 56320)))))
+							(return (call string_unit (i32.add.wrapping (local end) (i32 6)) (local scalar)))))))
+			(return (record.make QuotedUnit (end (local end)) (scalar (i32 0)) (error (u32 4))))))
+
+	(fn
+		(:doc `Map the lexer's checked JSON short escapes to their scalar values.`)
+		short_escape_value
+		(params (byte u8))
+		(returns i32)
+		(body
+			(if (u8.eq (local byte) (u8 98)) (then (return (i32 8))))
+			(if (u8.eq (local byte) (u8 102)) (then (return (i32 12))))
+			(if (u8.eq (local byte) (u8 110)) (then (return (i32 10))))
+			(if (u8.eq (local byte) (u8 114)) (then (return (i32 13))))
+			(if (u8.eq (local byte) (u8 116)) (then (return (i32 9))))
+			(return (int.convert i32 (local byte)))))
+
+	(fn
+		(:doc "Read the source extent and decoded value of one unit in a checked double-quoted payload.")
+		read_quoted_unit
+		(params (source (shared-slice u8)) (start i32) (limit i32))
+		(returns QuotedUnit)
+		(body
+			(let byte (slice.load (local source) (local start)))
+			(if
+				(:doc "A checked backslash introduces a short escape or four hex digits after u.")
+				(u8.eq (local byte) (u8 92))
+				(then
+					(let next (i32.add.wrapping (local start) (i32 1)))
+					(let escape (slice.load (local source) (local next)))
+					(if
+						(:doc "Unicode escapes may join into a surrogate pair.")
+						(u8.eq (local escape) (u8 117))
+						(then (return (call decode_unicode_escape (borrow-shared (local source)) (local start) (local limit)))))
+					(return (call string_unit (i32.add.wrapping (local start) (i32 2))
+						(call short_escape_value (local escape))))))
+			(return (call string_unit
+				(i32.add.wrapping (local start) (call utf8_width (local byte))) (i32 -1)))))
+
+	(fn
+		(:doc "Validate the scalars in a scanned double-quoted span without writing output.")
+		validate_double_quoted_scalars
+		(params (source (shared-slice u8)) (start i32) (end i32))
+		(returns QuotedSpan)
+		(body
+			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+			(let limit (i32.sub.wrapping (local end) (i32 1)))
+			(while
+				(:doc "Visit each unit within the delimiters and retain an unmatched surrogate's span.")
+				(i32.lt (local cursor) (local limit))
+				(body
+					(let unit (call read_quoted_unit (borrow-shared (local source)) (local cursor) (local limit)))
+					(let next (record.get (local unit) end))
+					(if
+						(:doc "The first unpaired surrogate anchors the error to its own six-byte escape.")
+						(u32.lt (u32 0) (record.get (local unit) error))
+						(then (return (call quoted_span (record.get (local unit) error) (local cursor) (local next)))))
+					(set (local cursor) (local next))))
+			(return (call quoted_span (u32 0) (local start) (local end)))))
+
+	(fn
+		(:doc `Return the UTF-8 width of a checked Unicode scalar.`)
+		scalar_width
+		(params (scalar i32))
+		(returns i32)
+		(body
+			(if (i32.lt (local scalar) (i32 128)) (then (return (i32 1))))
+			(if (i32.lt (local scalar) (i32 2048)) (then (return (i32 2))))
+			(if (i32.lt (local scalar) (i32 65536)) (then (return (i32 3))))
+			(return (i32 4))))
+
+	(fn
+		(:doc `Return the leading UTF-8 byte's prefix for the selected width.`)
+		utf8_prefix
+		(params (width i32))
+		(returns i32)
+		(body
+			(if (i32.eq (local width) (i32 1)) (then (return (i32 0))))
+			(if (i32.eq (local width) (i32 2)) (then (return (i32 192))))
+			(if (i32.eq (local width) (i32 3)) (then (return (i32 224))))
+			(return (i32 240))))
+
+	(fn
+		(:doc `Return the place value of the next UTF-8 group with two to four bytes remaining.`)
+		utf8_place
+		(params (remaining i32))
+		(returns i32)
+		(body
+			(if (i32.eq (local remaining) (i32 2)) (then (return (i32 64))))
+			(if (i32.eq (local remaining) (i32 3)) (then (return (i32 4096))))
+			(return (i32 262144))))
+
+	(fn
+		(:doc `Emit a scalar in UTF-8 after the caller has checked its entire output width.`)
+		write_scalar
+		(params (output (mut-slice u8)) (start i32) (width i32) (scalar i32))
+		(returns void)
+		(body
+			(let-mut rest (local scalar))
+			(let-mut remaining (local width))
+			(let-mut cursor (local start))
+			(let-mut prefix (call utf8_prefix (local width)))
+			(while
+				(:doc "Emit high groups first, leaving the low group for the final byte.")
+				(i32.lt (i32 1) (local remaining))
+				(body
+					(let place (call utf8_place (local remaining)))
+					(let-mut byte (local prefix))
+					(while
+						(:doc "At most one six-bit payload fits in this group.")
+						(bool.not (i32.lt (local rest) (local place)))
+						(body
+							(set (local rest) (i32.sub.wrapping (local rest) (local place)))
+							(set (local byte) (i32.add.wrapping (local byte) (i32 1)))))
+					(slice.store (local output) (local cursor) (int.convert u8 (local byte)))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+					(set (local remaining) (i32.sub.wrapping (local remaining) (i32 1)))
+					(set (local prefix) (i32 128))))
+			(slice.store (local output) (local cursor)
+				(int.convert u8 (i32.add.wrapping (local prefix) (local rest))))))
+
+	(fn
+		(:doc `Keep the byte count and the original source span together in every decode result.`)
+		quoted_decode_result
+		(params (written i32) (start i32) (end i32) (error u32))
+		(returns QuotedDecodeResult)
+		(body
+			(return (record.make QuotedDecodeResult
+				(written (local written)) (start (local start)) (end (local end)) (error (local error))))))
+
+	(fn
+		(:doc "Decode a scanned double-quoted span and keep a complete UTF-8 prefix if an escape or capacity check fails.")
+		decode_double_quoted
+		(params (source (shared-slice u8)) (start i32) (end i32) (output (mut-slice u8)))
+		(returns QuotedDecodeResult)
+		(body
+			(let limit (i32.sub.wrapping (local end) (i32 1)))
+			(let capacity (slice.len (local output)))
+			(let-mut cursor (i32.add.wrapping (local start) (i32 1)))
+			(let-mut written (i32 0))
+			(while
+				(:doc "Decode only the payload, one complete scalar at a time.")
+				(i32.lt (local cursor) (local limit))
+				(body
+					(let unit (call read_quoted_unit (borrow-shared (local source)) (local cursor) (local limit)))
+					(let after (record.get (local unit) end))
+					(let error (record.get (local unit) error))
+					(if
+						(:doc "An unpaired surrogate keeps its original escape span.")
+						(u32.lt (u32 0) (local error))
+						(then (return (call quoted_decode_result (local written) (local cursor) (local after) (local error)))))
+					(let scalar (record.get (local unit) scalar))
+					(let copy (i32.lt (local scalar) (i32 0)))
+					(let-mut width (i32.sub.wrapping (local after) (local cursor)))
+					(if
+						(:doc "Escapes can decode to a scalar with a different byte width.")
+						(bool.not (local copy))
+						(then (set (local width) (call scalar_width (local scalar)))))
+					(if
+						(:doc "A short view leaves the next scalar and its source span unconsumed.")
+						(i32.lt (i32.sub.wrapping (local capacity) (local written)) (local width))
+						(then (return (call quoted_decode_result (local written) (local cursor) (local after) (u32 5)))))
+					(if
+						(:doc "Copy original UTF-8 bytes or encode the transformed scalar.")
+						(local copy)
+						(then (call copy_utf8_scalar (borrow-shared (local source)) (borrow-mut (local output))
+							(local cursor) (local written) (local width)))
+						(else (call write_scalar (borrow-mut (local output)) (local written) (local width) (local scalar))))
+					(set (local written) (i32.add.wrapping (local written) (local width)))
+					(set (local cursor) (local after))))
+			(return (call quoted_decode_result (local written) (local start) (local end) (u32 0))))))
