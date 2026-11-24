@@ -1,17 +1,18 @@
-(module emit_c_strings
+(module emit_c_arguments
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Emit a native call with shared C-string conversions from already evaluated arguments.
+	(:doc `Emit one native call from captured scalar, string, and byte view arguments.
 
-	Prepare one backing allocation for the converted strings, pass the
-	derived pointers in formal order, save the result, and release the
-	backing allocation before the result can be consumed.`)
+	Check bounded byte views before allocating any converted strings. Pass the
+	original or converted pointers in formal order, save the result, and release
+	any string backing allocation before the result can be consumed.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../scalar/plan.wove" (only (type ScalarFunction) (type ScalarParameter) (type ScalarExpression)))
 	(use wove-file "./text.wove" (only c_byte c_span write_c_name write_temporary_name (type CNameRole)))
 	(use wove-file "./owners.wove" (only write_bridge_result_type))
-	(use wove-file "./runtime.wove" (only write_runtime_site write_c_number write_site_number))
+	(use wove-file "./runtime.wove" (only write_runtime_site write_c_number write_site_number write_slice_items))
+	(use wove-file "./c_bytes.wove" (only write_c_byte_checks))
 
 	(fn c_string_text
 		(:doc `Write fixed syntax for C-string descriptor setup, invocation, and cleanup.`)
@@ -177,10 +178,10 @@
 				(body
 					(let node (slice.load (local nodes) (local argument)))
 					(let param (slice.load (local parameters) (local formal)))
-					(let mode (record.get (local param) c_string))
+					(let mode (record.get (local param) c_mode))
 					(if
 						(:doc "Only a converted argument contributes a byte view to the preparation array.")
-						(u8.lt (u8 0) (local mode))
+						(bool.and (u8.lt (u8 0) (local mode)) (u8.lt (local mode) (u8 3)))
 						(then
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 123) (local writing)))
 							(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local argument) (local tree_base)
@@ -200,8 +201,8 @@
 					(set (local formal) (i32.add.wrapping (local formal) (i32 1)))))
 			(return (call c_string_text (borrow-mut (local output)) (local cursor) (u32 3) (local writing)))))
 
-	(fn write_c_string_invocation
-		(:doc `Invoke the original C symbol with converted pointers and captured scalar operands.`)
+	(fn write_c_native_invocation
+		(:doc `Invoke the original C symbol with borrowed byte pointers, converted strings, and scalar operands.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parameters (shared-slice ScalarParameter))
 			(expression ScalarExpression) (callee ScalarFunction) (tree_base i32) (index i32)
 			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
@@ -231,9 +232,10 @@
 						(bool.not (i32.eq (local argument) (local first)))
 						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))))
 					(let param (slice.load (local parameters) (local formal)))
+					(let mode (record.get (local param) c_mode))
 					(if
 						(:doc "Read each converted const char pointer from the preparation array.")
-						(u8.lt (u8 0) (record.get (local param) c_string))
+						(bool.and (u8.lt (u8 0) (local mode)) (u8.lt (local mode) (u8 3)))
 						(then
 							(set (local cursor) (call write_c_string_scratch (borrow-shared (local source)) (local index) (local tree_base)
 								(u8 97) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
@@ -244,13 +246,17 @@
 							(set (local converted) (i32.add.wrapping (local converted) (i32 1))))
 						(else
 							(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local argument) (local tree_base)
-								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(if
+								(:doc "Pass the bounded view's original pointer with its const or mutable access.")
+								(u8.eq (local mode) (u8 3))
+								(then (set (local cursor) (call write_slice_items (borrow-mut (local output)) (local cursor) (local writing)))))))
 					(set (local argument) (record.get (slice.load (local nodes) (local argument)) next_sibling))
 					(set (local formal) (i32.add.wrapping (local formal) (i32 1)))))
 			(return (call c_string_text (borrow-mut (local output)) (local cursor) (u32 7) (local writing)))))
 
-	(fn write_c_string_call
-		(:doc `Prepare, call, and release in one evaluation step leaving the result temporary live.`)
+	(fn write_c_string_setup
+		(:doc `Prepare one scratch array for all captured C-string arguments.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parameters (shared-slice ScalarParameter))
 			(expression ScalarExpression) (caller ScalarFunction) (callee ScalarFunction) (index i32)
 			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
@@ -269,9 +275,39 @@
 			(set (local cursor) (call write_site_number (borrow-mut (local output)) (local cursor)
 				(record.get (local callee) c_strings) (borrow-mut (local digits)) (local writing)))
 			(set (local cursor) (call c_string_text (borrow-mut (local output)) (local cursor) (u32 7) (local writing)))
-			(set (local cursor) (call write_c_string_invocation (borrow-shared (local source)) (borrow-shared (local nodes))
+			(return (local cursor))))
+
+	(fn write_c_argument_call
+		(:doc `Check, prepare, invoke, and release in one evaluation step with a saved result.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parameters (shared-slice ScalarParameter))
+			(expression ScalarExpression) (caller ScalarFunction) (callee ScalarFunction) (index i32)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let tree_base (record.get (local caller) tree_base))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Reject any bad byte extent before allocating string scratch or entering C.")
+				(i32.lt (i32 0) (record.get (local callee) c_bytes))
+				(then (set (local cursor) (call write_c_byte_checks (borrow-shared (local source))
+					(borrow-shared (local nodes)) (borrow-shared (local parameters))
+					(local expression) (local caller) (local callee)
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(let strings (i32.lt (i32 0) (record.get (local callee) c_strings)))
+			(if
+				(:doc "Only a C-string contract materializes backing storage.")
+				(local strings)
+				(then (set (local cursor) (call write_c_string_setup (borrow-shared (local source))
+					(borrow-shared (local nodes)) (borrow-shared (local parameters))
+					(local expression) (local caller) (local callee) (local index)
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(set (local cursor) (call write_c_native_invocation (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local parameters)) (local expression) (local callee) (local tree_base) (local index)
 				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "Keep the borrowed byte pointers in their caller's storage.")
+				(bool.not (local strings))
+				(then (return (local cursor))))
 			(set (local cursor) (call c_string_text (borrow-mut (local output)) (local cursor) (u32 6) (local writing)))
 			(set (local cursor) (call write_c_string_scratch (borrow-shared (local source)) (local index) (local tree_base)
 				(u8 98) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))

@@ -410,8 +410,8 @@ decoded header key in the supplied source table. A key such as `"<stdlib.h>"`
 or `"./project.h"` identifies one active bridge in a well-formed canonical file.
 Header lookup leaves Wove-file reachability unchanged. A selected declaration
 has `params` and `returns` forms. Both support exact `bool`, `u8`, `i32`, and
-`u32` types. A parameter may also be a `(shared-slice u8)` with a C-string
-contract. Parameter names must be unique within the signature. The alias occupies the
+`u32` types. Shared and mutable byte-slice parameters require an explicit
+native argument contract. Parameter names must be unique within the signature. The alias occupies the
 importing file's function namespace. Its binding keeps the defining declaration
 and the raw header, native symbol, and signature spans in that file.
 
@@ -430,6 +430,15 @@ on an embedded NUL before calling C. Raw mode copies every byte, including
 bytes after an embedded NUL. An empty view passes a pointer to one NUL byte.
 C can read the temporary buffers until the call returns, when Wove releases
 their backing storage.
+
+Use `(:pragma (c_bytes data count))` for a byte count or
+`(:pragma (c_bytes data size count))` for a product. The named dimensions
+accept `u8`, `i32`, or `u32` formals. After argument evaluation, both
+dimensions must be nonnegative and their extent must fit in the selected
+view length. Stage 2 compares by division to avoid overflow. Zero extents
+can lend empty views. The check traps at the data argument before entering
+C. A shared view passes a read-only pointer, and a mutable view passes a
+writable pointer to the same storage for the duration of the call.
 
 A pointer-backed resource declaration pairs a native C type literal with its
 destructor contract.
