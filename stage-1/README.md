@@ -85,11 +85,16 @@ tags and their payloads use the same prefix. A colon-tagged form after an
 operand is a source error, as are the retired `with-meta`, `meta`, and `;;`
 spellings. Quoted text can contain semicolons.
 
-Stage 1 selects declarations and `(decls ...)` groups inside a module before
+Stage 1 selects module roots, declarations, and `(decls ...)` groups before
 name resolution. It always enables `bootstrap`. All `cfg` predicates on a
-declaration must pass, and a `(test)` marker in any `:pragma` entry excludes
-it. The seed skips other directives, including `inline`, and leaves other
+form must pass, and a `(test)` marker in any `:pragma` entry excludes the
+form. The seed skips other directives, including `inline`, and leaves other
 metadata payloads for later stages.
+
+A module can use `(:pragma (cfg (not bootstrap)))` to guard the entire file.
+An excluded provider exposes no functions and its nested imports are skipped.
+An empty `(only)` can load that provider, while a named selection reports the
+unavailable name at its source line. The entry module must be active.
 
 Use `(use wove-file "./source_scan.wove" (only scan_token (as source_kind
 lexer_kind)))` to select functions from a local file. The path resolves from
@@ -98,12 +103,12 @@ binds a new name to the original declaration and signature. `(only)` loads the
 file and binds no names. Each function resolves its helpers and types in its
 defining file. A provider supplies its own function declarations for selection.
 
-Bootstrap selection runs before the seed opens a provider. The seed loads
-each file once by identity, so multiple paths to the same module share its
-declarations and use its first resolved path. An active missing file or cycle
-is diagnosed at the importing `use` line. Errors inside an imported file use
-that file's spelling and line. The entry module supplies the executable's
-`main`.
+The seed evaluates selection pragmas on a `use` before opening its provider.
+It loads each file once by identity, so multiple paths to the same module
+share its declarations and use its first resolved path. An active missing
+file or cycle is diagnosed at the importing `use` line. Errors inside an
+imported file use that file's spelling and line. The entry module supplies
+the executable's `main`.
 
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.

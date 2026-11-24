@@ -785,12 +785,12 @@ def cfg_matches(node: Node) -> bool:
 	return not negated
 
 
-# Apply only the seed's known selection pragmas on the enclosing declaration.
-def metadata_enabled(node: Form, *, declaration: bool = False) -> bool:
+# Apply the seed's known selection pragmas to an eligible form.
+def metadata_enabled(node: Form, *, selectable: bool = False) -> bool:
 	enabled = True
 	# Other metadata entries and unknown pragma payloads stay opaque to Stage 1.
 	for entry in node.metadata:
-		# Only pragma entries can select a declaration.
+		# Only pragma entries affect selection.
 		if entry.tag != ":pragma":
 			continue
 		# Validate every known directive, including those after an exclusion.
@@ -807,14 +807,14 @@ def metadata_enabled(node: Form, *, declaration: bool = False) -> bool:
 			# Leave the payload of an unknown directive uninterpreted.
 			else:
 				continue
-			# Only declarations and their groups support selection.
-			if not declaration:
+			# Module roots, declarations, and declaration groups support selection.
+			if not selectable:
 				raise SourceError(pragma.line)
 			enabled = selected and enabled
 	return enabled
 
 
-# Validate a form whose metadata does not select a declaration.
+# Validate metadata on an ordinary operand or statement.
 def checked_form(node: Node, tag: str | None = None, arity: int | None = None) -> Form:
 	value = form(node, tag, arity)
 	metadata_enabled(value)
@@ -827,7 +827,7 @@ def selected_declarations(nodes: tuple[Node, ...]) -> Iterator[Form]:
 	for node in nodes:
 		declaration = form(node)
 		# An inactive declaration or group contributes no definitions.
-		if not metadata_enabled(declaration, declaration=True):
+		if not metadata_enabled(declaration, selectable=True):
 			continue
 		# A group declares its active children in the enclosing module.
 		if declaration.tag == "decls":
@@ -856,11 +856,17 @@ def read_module(
 ) -> Module:
 	# Parsing, declaration selection, and signature checks belong to this file.
 	with source_file(filename):
-		module = checked_form(parse(source), "module")
+		module = form(parse(source), "module")
 		# The module name precedes its declarations.
 		if not module.operands:
 			raise SourceError(module.line)
 		identifier(module.operands[0])
+		# An excluded file contributes no declarations or edges to the import graph.
+		if not metadata_enabled(module, selectable=True):
+			# A build still needs its entry module to be active.
+			if entry:
+				raise SourceError(module.line)
+			return Module(filename, {}, {}, [], {})
 		records = {}
 		function_declarations = []
 		uses = []
