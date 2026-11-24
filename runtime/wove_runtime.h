@@ -4,6 +4,7 @@
 #ifndef WVRT_RUNTIME_H
 #define WVRT_RUNTIME_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
