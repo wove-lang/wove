@@ -10,11 +10,12 @@ STAGE1 := $(BUILD_DIR)/stage-1
 STAGE2 := $(BUILD_DIR)/stage-2
 BOOTSTRAP_COMPILER := $(STAGE1)/wovec
 COMPILER_ROOT := stage-2/wovec.wove
-SOURCE_SCAN_MODULE := stage-2/source_scan.wove
-SOURCE_STRINGS_MODULE := stage-2/source_strings.wove
-SOURCE_MODULE_READER := stage-2/source_module.wove
-SOURCE_GRAPH_MODULES := stage-2/source_graph.wove stage-2/source_imports.wove stage-2/source_paths.wove
-C_EMITTER_SOURCES := $(addprefix stage-2/,emit_c.wove scalar_syntax.wove scalar_plan.wove c_text.wove c_names.wove)
+SOURCE_SCAN_MODULE := stage-2/source/scan.wove
+SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
+SOURCE_MODULE_READER := stage-2/source/module.wove
+SOURCE_CALLERS := stage-2/source/callers.wove
+SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove
+C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove scalar/syntax.wove scalar/plan.wove emit/text.wove emit/names.wove)
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -48,7 +49,9 @@ test-stage-2: stage-2
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
-		stage-2/*.wove tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
+		tests/stage-2/source_callers.tsv \
+		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove \
+		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/source_graphs.tsv
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
@@ -57,7 +60,7 @@ test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 
 # Translate the compiler root and regenerate C when any source module changes.
 $(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) \
-	$(SOURCE_GRAPH_MODULES) $(C_EMITTER_SOURCES) $(SEED)
+	$(SOURCE_GRAPH_MODULES) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
@@ -89,7 +92,7 @@ $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE)
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
 REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) \
-	$(SOURCE_GRAPH_MODULES) $(C_EMITTER_SOURCES) $(ROUND_TRIP_PROVIDERS) \
+	$(SOURCE_GRAPH_MODULES) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(ROUND_TRIP_PROVIDERS) \
 	$(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
 

@@ -103,7 +103,7 @@ An excluded provider exposes no declarations and its nested imports are skipped.
 An empty `(only)` can load that provider, while a named selection reports the
 unavailable name at its source line. The entry module must be active.
 
-Use `(use wove-file "./source_scan.wove" (only scan_token (as source_kind
+Use `(use wove-file "./source/scan.wove" (only scan_token (as source_kind
 lexer_kind)))` to select functions from a local file. The path resolves from
 the importing file. A bare name keeps its spelling, and `(as original local)`
 binds a new name to the original declaration and signature. `(only)` loads the

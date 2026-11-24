@@ -11,6 +11,10 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 ## Implementation notes
 
+Split reusable logic into focused modules. Organize related modules in
+directories named for their purpose, with short module filenames inside
+each group. For example, keep the Stage 2 scanner in `stage-2/source/scan.wove`.
+
 In Wove modules under `stage-2/`, document each function and multiline
 control-flow form with a `(:doc "...")` entry at the start of its metadata
 prefix. Explain the form's purpose or an important invariant. Attach a

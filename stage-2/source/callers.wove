@@ -1,0 +1,148 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Inspect computed callers in a checked Stage 2 source module.
+
+	Resolve the selected functions and bodies with the same planner used for
+	C emission. Match incoming call sites by defining file and declaration
+	row. Return each original span in source order, including repeated
+	calls from one caller.`)
+	source_callers
+
+	(use wove-file "./scan.wove" (only (type SourceNode)))
+	(use wove-file "./module.wove" (only (type ModuleRead) (type SelectedDeclaration)))
+	(use wove-file "../scalar/plan.wove"
+		(only read_functions plan_bodies find_function (type ScalarFunction) (type ScalarParameter)
+			(type ScalarExpression) (type CallSite)))
+
+	(struct CallerInspection (fields (declaration i32) (count i32) (start i32) (end i32) (error u32)))
+
+	(fn
+		(:doc `Report the inspected declaration and count, or an original view-relative diagnostic.`)
+		inspection_result
+		(params (declaration i32) (count i32) (start i32) (end i32) (error u32))
+		(returns CallerInspection)
+		(body
+			(return (record.make CallerInspection (declaration (local declaration)) (count (local count))
+				(start (local start)) (end (local end)) (error (local error))))))
+
+	(fn
+		(:doc `Match the call site's defining callee identity.`)
+		matches_callee
+		(params (site CallSite) (file i32) (declaration i32))
+		(returns bool)
+		(body
+			(return (bool.and (i32.eq (record.get (local site) callee_file) (local file))
+				(i32.eq (record.get (local site) callee) (local declaration))))))
+
+	(fn
+		(:doc `Copy the callee's incoming call sites after checking the whole result fits.`)
+		copy_callers
+		(params (sites (shared-slice CallSite)) (count i32) (file i32) (view_start i32) (declaration i32)
+			(node SourceNode) (output (mut-slice CallSite)))
+		(returns CallerInspection)
+		(body
+			(let-mut written (i32 0))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Count each matching call site and report the first site beyond output capacity.")
+				(i32.lt (local index) (local count))
+				(body
+					(let site (slice.load (local sites) (local index)))
+					(if
+						(:doc "Only calls resolved to this defining declaration need an output row.")
+						(call matches_callee (local site) (local file) (local declaration))
+						(then
+							(if
+								(:doc "Report the short result using the originating call span in the source view.")
+								(bool.not (i32.lt (local written) (slice.len (local output))))
+								(then (return (call inspection_result (local declaration) (i32 0)
+									(i32.sub.wrapping (record.get (local site) start) (local view_start))
+									(i32.sub.wrapping (record.get (local site) end) (local view_start)) (u32 16)))))
+							(set (local written) (i32.add.wrapping (local written) (i32 1)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(set (local written) (i32 0))
+			(set (local index) (i32 0))
+			(while
+				(:doc "Copy the checked result in the original source order.")
+				(i32.lt (local index) (local count))
+				(body
+					(let site (slice.load (local sites) (local index)))
+					(if
+						(:doc "Retain every distinct call-site span, even for repeated callers.")
+						(call matches_callee (local site) (local file) (local declaration))
+						(then
+							(slice.store (local output) (local written) (local site))
+							(set (local written) (i32.add.wrapping (local written) (i32 1)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call inspection_result (local declaration) (local written)
+				(record.get (local node) start) (record.get (local node) end) (u32 0)))))
+
+	(fn
+		(:doc `Resolve the active module and expose the requested function's computed callers.
+
+		The name is the original Wove spelling. Success returns the inspected
+		declaration row and zero or more file-relative call sites. Diagnostics
+		use source-view offsets and leave the destination untouched. The view
+		start and its length must fit the original file's signed offset range.
+		Set entry_module for a module serving as the executable root.`)
+		(:expect bootstrap.resolved_callers
+			(issue "https://github.com/wove-lang/wove/issues/86"))
+		inspect_callers
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
+			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (entry_module bool)
+			(name (shared-slice u8)) (output (mut-slice CallSite)))
+		(returns CallerInspection)
+		(body
+			(let start (record.get (local module) start))
+			(let end (record.get (local module) end))
+			(let error (record.get (local module) error))
+			(if
+				(:doc "Preserve diagnostics from source admission, structure, and selection.")
+				(u32.lt (u32 0) (local error))
+				(then (return (call inspection_result (i32 -1) (i32 0) (local start) (local end) (local error)))))
+			(let count (record.get (local module) count))
+			(if
+				(:doc "An excluded or empty module has no inspectable function.")
+				(bool.or (bool.not (record.get (local module) active)) (i32.eq (local count) (i32 0)))
+				(then (return (call inspection_result (i32 -1) (i32 0) (local start) (local end) (u32 36)))))
+			(let rows (slice.len (local nodes)))
+			(let-mut functions (array.alloc ScalarFunction (local count)))
+			(let-mut parameters (array.alloc ScalarParameter (local rows)))
+			(let signatures (call read_functions (borrow-shared (local source)) (borrow-shared (local nodes)) (local module)
+				(borrow-shared (local declarations)) (borrow-mut (local functions)) (borrow-mut (local parameters)) (local entry_module)))
+			(if
+				(:doc "Resolve callers only for a module with checked local signatures.")
+				(u32.lt (u32 0) (record.get (local signatures) error))
+				(then (return (call inspection_result (i32 -1) (i32 0) (record.get (local signatures) start)
+					(record.get (local signatures) end) (record.get (local signatures) error)))))
+			(let-mut expressions (array.alloc ScalarExpression (local rows)))
+			(let-mut sites (array.alloc CallSite (local rows)))
+			(let checked (call plan_bodies (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-mut (local expressions))
+				(borrow-mut (local sites)) (local file) (local view_start)))
+			(if
+				(:doc "Report the original invalid call or expression before returning any inspection data.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (call inspection_result (i32 -1) (i32 0) (record.get (local checked) start)
+					(record.get (local checked) end) (record.get (local checked) error)))))
+			(let target (call find_function (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local name)) (i32 0) (slice.len (local name))))
+			(if
+				(:doc "An unavailable query name refers to the module's source span.")
+				(i32.lt (local target) (i32 0))
+				(then (return (call inspection_result (i32 -1) (i32 0) (local start) (local end) (u32 36)))))
+			(return (call copy_inspected_callers (borrow-shared (local nodes)) (borrow-shared (local functions))
+				(local target) (borrow-shared (local sites)) (record.get (local checked) operand) (local file)
+				(local view_start) (borrow-mut (local output))))))
+
+	(fn
+		(:doc `Resolve the selected function table row back to its original declaration before filtering.`)
+		copy_inspected_callers
+		(params (nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction)) (target i32)
+			(sites (shared-slice CallSite)) (count i32) (file i32) (view_start i32) (output (mut-slice CallSite)))
+		(returns CallerInspection)
+		(body
+			(let declaration (record.get (slice.load (local functions) (local target)) declaration))
+			(return (call copy_callers (borrow-shared (local sites)) (local count) (local file) (local view_start)
+				(local declaration) (slice.load (local nodes) (local declaration)) (borrow-mut (local output)))))))

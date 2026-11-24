@@ -6,14 +6,15 @@
 	Collect signatures first, then check each return expression against the
 	function and parameter tables. Function rows keep original declaration
 	and name nodes. Checked call rows keep the callee row independently of
-	the name that will be used in C, and are indexed by original call node.`)
+	the name that will be used in C, and are indexed by original call node.
+	Retain source-level call sites before either inspection or lowering.`)
 	scalar_plan
 
-	(use wove-file "./source_scan.wove" (only is_identifier_head (type SourceNode)))
-	(use wove-file "./source_module.wove" (only form_parts select_form (type ModuleRead) (type SelectedDeclaration)))
-	(use wove-file "./source_paths.wove" (only same_bytes))
-	(use wove-file "./c_names.wove" (only module_identity function_identity))
-	(use wove-file "./scalar_syntax.wove"
+	(use wove-file "../source/scan.wove" (only is_identifier_head (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts select_form (type ModuleRead) (type SelectedDeclaration)))
+	(use wove-file "../source/paths.wove" (only same_bytes))
+	(use wove-file "../emit/names.wove" (only module_identity function_identity))
+	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_return scalar_type decimal_scalar (type EntryRead)))
 
 	(struct ScalarFunction
@@ -23,6 +24,14 @@
 	(struct ScalarExpression
 		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool)))
 	(struct ScalarSignature (fields (params i32) (result u32) (expression i32) (start i32) (end i32) (error u32)))
+
+	(struct
+		(:doc `A direct call links the two defining files and declaration rows.
+
+		The span is half-open in the caller's original file. The file values
+		come from the compilation's file table or the single-file caller.`)
+		CallSite
+		(fields (caller_file i32) (caller i32) (callee_file i32) (callee i32) (start i32) (end i32)))
 
 	(fn
 		(:doc `Carry an original source diagnostic through the signature reader.`)
@@ -196,32 +205,36 @@
 			(return (record.make EntryRead (operand (local written)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
 
 	(fn
-		(:doc `Find the checked local function row whose original name matches the requested spelling.`)
+		(:doc `Look up a checked function by a byte span from either the source or an inspection query.`)
 		find_function
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name SourceNode)
-			(functions (shared-slice ScalarFunction)) (count i32))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (functions (shared-slice ScalarFunction))
+			(spelling (shared-slice u8)) (start i32) (end i32))
 		(returns i32)
 		(body
 			(let-mut cursor (i32 0))
 			(while
 				(:doc "The selected namespace is the populated function prefix.")
-				(i32.lt (local cursor) (local count))
+				(i32.lt (local cursor) (slice.len (local functions)))
 				(body
 					(let target (slice.load (local functions) (local cursor)))
 					(let declared (slice.load (local nodes) (record.get (local target) name)))
 					(if
 						(:doc "C suffix sanitization has no role in source name resolution.")
-						(call same_name (borrow-shared (local source)) (local declared) (local name))
+						(call same_bytes (borrow-shared (local source)) (record.get (local declared) start)
+							(record.get (local declared) end) (borrow-shared (local spelling)) (local start) (local end))
 						(then (return (local cursor))))
 					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
 			(return (i32 -1))))
 
 	(fn
-		(:doc `Register selected function signatures and reject duplicate or colliding identities.`)
+		(:doc `Register selected signatures and reject duplicate or colliding identities.
+
+		Classify main as the ABI entry in an executable root. Library functions
+		follow ordinary scalar signature and call rules, including main.`)
 		read_functions
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (functions (mut-slice ScalarFunction))
-			(parameters (mut-slice ScalarParameter)))
+			(parameters (mut-slice ScalarParameter)) (entry_module bool))
 		(returns EntryRead)
 		(body
 			(let scope (slice.load (local nodes) (record.get (local module) name)))
@@ -267,7 +280,8 @@
 										(then (return (call entry_at (local spelling) (i32 -1) (u32 33)))))
 									(return (call entry_at (local spelling) (i32 -1) (u32 32)))))
 							(set (local previous) (i32.add.wrapping (local previous) (i32 1)))))
-					(let entry (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)) (u32 2)))
+					(let entry (bool.and (local entry_module)
+						(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)) (u32 2))))
 					(let signature (call read_signature (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local node) (local spelling) (local entry)))
 					(if
@@ -295,8 +309,8 @@
 					(set (local next_param) (local limit))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(if
-				(:doc "Report a module with functions but no main at its first function name.")
-				(i32.lt (local main) (i32 0))
+				(:doc "The executable root must define the ABI entry.")
+				(bool.and (local entry_module) (i32.lt (local main) (i32 0)))
 				(then (return (call entry_at
 					(slice.load (local nodes) (record.get (slice.load (local functions) (i32 0)) name)) (i32 -1) (u32 22)))))
 			(return (record.make EntryRead (operand (local main)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
@@ -406,7 +420,8 @@
 				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
 				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
 			(let target (call find_function (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local name) (borrow-shared (local functions)) (slice.len (local functions))))
+				(borrow-shared (local functions)) (borrow-shared (local source))
+				(record.get (local name) start) (record.get (local name) end)))
 			(if
 				(:doc "The ABI entry is a host entry point and is unavailable to direct Wove calls.")
 				(bool.or (i32.lt (local target) (i32 0))
@@ -477,17 +492,32 @@
 				(local node) (local operand) (local type) (local index) (borrow-mut (local expressions))))))
 
 	(fn
+		(:doc `Capture the defining source rows and the file-relative span of a resolved local call.`)
+		local_call_site
+		(params (caller ScalarFunction) (callee ScalarFunction) (node SourceNode) (file i32) (view_start i32))
+		(returns CallSite)
+		(body
+			(return (record.make CallSite
+				(caller_file (local file)) (caller (record.get (local caller) declaration))
+				(callee_file (local file)) (callee (record.get (local callee) declaration))
+				(start (i32.add.wrapping (local view_start) (record.get (local node) start)))
+				(end (i32.add.wrapping (local view_start) (record.get (local node) end)))))))
+
+	(fn
 		(:doc `Resolve every scalar expression in source order without walking the native call stack.
 
 		A call seeds its direct argument rows before they are reached. Source
 		rows with type zero are outside the expression plan, such as metadata,
-		literal payloads, and called-name atoms. Start with zeroed plan storage.`)
+		literal payloads, and called-name atoms. Start with zeroed plan storage.
+		Read the returned call-site count only after successful checking. Supply
+		a file identity and a view start whose full source range fits in i32.`)
 		plan_bodies
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(expressions (mut-slice ScalarExpression)))
+			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (file i32) (view_start i32))
 		(returns EntryRead)
 		(body
+			(let-mut site_count (i32 0))
 			(let-mut function (i32 0))
 			(while
 				(:doc "Each selected function contributes one checked return expression tree.")
@@ -516,7 +546,21 @@
 									(if
 										(:doc "Preserve source spans from the first failing signature or expression.")
 										(u32.lt (u32 0) (record.get (local checked) error))
-										(then (return (local checked))))))
+										(then (return (local checked))))
+									(let expression (slice.load (local expressions) (local index)))
+									(if
+										(:doc "Record every resolved call before lowering, using its defining declaration row.")
+										(u32.eq (record.get (local expression) kind) (u32 3))
+										(then
+											(let node (slice.load (local nodes) (local index)))
+											(if
+												(:doc "A short call-site table reports the first unwritable call.")
+												(bool.not (i32.lt (local site_count) (slice.len (local sites))))
+												(then (return (call entry_at (local node) (i32 -1) (u32 16)))))
+											(let callee (slice.load (local functions) (record.get (local expression) target)))
+											(slice.store (local sites) (local site_count)
+												(call local_call_site (local caller) (local callee) (local node) (local file) (local view_start)))
+											(set (local site_count) (i32.add.wrapping (local site_count) (i32 1)))))))
 							(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 					(set (local function) (i32.add.wrapping (local function) (i32 1)))))
-			(return (record.make EntryRead (operand (i32 0)) (start (i32 0)) (end (i32 0)) (error (u32 0)))))))
+			(return (record.make EntryRead (operand (local site_count)) (start (i32 0)) (end (i32 0)) (error (u32 0)))))))
