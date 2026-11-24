@@ -11,7 +11,7 @@ OWNERSHIP_TESTS := tests/stage-1
 OWNERSHIP_CASES := $(OWNERSHIP_TESTS)/cases.tsv
 
 # Build native programs for executable cases. The runner handles compile-only rejections.
-TEST_PROGRAMS := $(shell awk '$$1 == "run" || $$1 == "tracked" || $$1 == "bounds-trap" { \
+TEST_PROGRAMS := $(shell awk '$$1 == "run" || $$1 == "tracked" || $$1 == "bounds-trap" || $$1 == "conversion-trap" { \
 	name = $$2; sub(/\.wove$$/, "", name); print name; \
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
@@ -42,7 +42,7 @@ $(STAGE1)/%: $(STAGE1)/%.fixture.o $(STAGE1)/runtime.o
 	$(CLANG) $(CFLAGS) $^ -o "$@"
 
 # Inspect the full scalar results in the generated translation unit.
-$(STAGE1)/scalar.round_trip: $(OWNERSHIP_TESTS)/scalar.round_trip.probe.c $(STAGE1)/scalar.round_trip.c $(STAGE1)/runtime.o
+$(STAGE1)/scalar.round_trip $(STAGE1)/scalar.convert: $(STAGE1)/%: $(OWNERSHIP_TESTS)/%.probe.c $(STAGE1)/%.c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE1)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(STAGE1)/runtime.tracked.o: $(RUNTIME) $(RUNTIME_HEADER)

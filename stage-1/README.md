@@ -8,12 +8,14 @@ of their body. A source rejection prints the filename and line.
 
 Write scalar literals as typed decimal nodes such as `(u32 4294967295)`.
 The seed checks the range of each literal and preserves its exact type
-through local bindings, parameters, calls, and returns.
+through local bindings, parameters, calls, and returns. Use
+`(int.convert i32 (local byte))` to explicitly convert between seed integers.
+The conversion preserves values that fit and traps at the source line when a
+value is outside the selected type's range.
 
 `slice.load` reads a `u8` from either kind of byte slice. `slice.store` needs
 a mutable byte slice and writes to the owner's storage. Both take an `i32`
-index and trap if it falls outside the slice. Use `i32.from-u8` to widen a
-byte for use in an `i32` expression.
+index and trap if it falls outside the slice.
 
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.
@@ -21,7 +23,7 @@ Run `make test` to check the transfer, its allocation lifetime, and the borrow
 rejection cases. The runner reads fixture paths and expected results from
 [the case manifest](../tests/stage-1/cases.tsv). Each row specifies a mode,
 a source path relative to the manifest, and an exit status or diagnostic line.
-Bounds trap cases match the runtime diagnostic at that line.
+Trap cases match the runtime diagnostic at that line.
 Use decimal numbers without leading zeros for expected results.
 Tracked cases also run with the allocation probe.
 

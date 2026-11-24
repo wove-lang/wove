@@ -263,6 +263,23 @@ class FunctionEmitter:
 			spelling = f"UINT32_C({number})" if expr.tag == U32 else str(number)
 			return Value(expr.tag, spelling)
 
+		# Check the selected type's range before casting the result to its C type.
+		if expr.tag == "int.convert":
+			target, operand = form(expr, arity=2).operands
+			kind = identifier(target)
+			# The target must name a seed integer type.
+			if kind not in SCALAR_LIMITS:
+				raise SourceError(node.line)
+			value = self.expression(operand)
+			# Conversion takes an integer value from any of the seed scalar types.
+			if value.kind not in SCALAR_LIMITS:
+				raise SourceError(node.line)
+			low, high = SCALAR_LIMITS[kind]
+			return self.temporary(
+				kind, f"({C_TYPE[kind]})wvrt_int_convert({value.c}, {low}, {high}, "
+				f"{self.site(node.line)})"
+			)
+
 		# Widen an unsigned byte so it can be used in an i32 expression or index.
 		if expr.tag == "i32.from-u8":
 			target, = form(expr, arity=1).operands

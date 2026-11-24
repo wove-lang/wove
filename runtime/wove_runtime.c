@@ -104,6 +104,16 @@ void wvrt_slice_store_u8(void *wvrtitems, int32_t wvrtlength, int32_t wvrtindex,
 	((uint8_t *)wvrtitems)[wvrt_offset] = wvrtvalue;
 }
 
+// Check an integer in the common signed domain before the caller casts it.
+int64_t wvrt_int_convert(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax,
+	wvrt_location wvrtsite) {
+	// All seed integers fit in int64_t, so this comparison preserves their signs and high bits.
+	if (wvrtvalue < wvrtmin || wvrtvalue > wvrtmax) {
+		wvrt_trap(wvrtsite, "integer conversion out of range");
+	}
+	return wvrtvalue;
+}
+
 // Add modulo 2^32 and turn the upper half into an in-range signed value.
 int32_t wvrt_i32_add_wrapping(int32_t wvrtleft, int32_t wvrtright) {
 	uint32_t wvrt_bits = (uint32_t)wvrtleft + (uint32_t)wvrtright;
