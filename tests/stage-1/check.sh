@@ -16,7 +16,7 @@ check_status() {
 	status=0
 	"$program" || status=$?
 	# Report fixture failures with both statuses.
-	if [ "$status" -ne "$expected" ]; then
+	if [ "$status" != "$expected" ]; then
 		printf '%s returned %s, expected %s\n' "$program" "$status" "$expected" >&2
 		exit 1
 	fi
@@ -48,6 +48,14 @@ while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 		printf 'invalid case in %s: %s %s %s %s\n' "$manifest" "$mode" "$source" "$expected" "$extra" >&2
 		exit 1
 	fi
+
+	# Match the decimal spelling emitted by the process or source reporter.
+	case "$expected" in
+		*[!0123456789]*|0?*)
+			printf 'invalid expected result in %s for %s: %s\n' "$manifest" "$source" "$expected" >&2
+			exit 1
+			;;
+	esac
 
 	program="$build/${source%.wove}"
 	# Run the requested check and compare the result from the manifest.

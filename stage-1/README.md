@@ -11,6 +11,7 @@ Run `make test` to check the transfer, its allocation lifetime, and the borrow
 rejection cases. The runner reads fixture paths and expected results from
 [the case manifest](../tests/stage-1/cases.tsv). Each row specifies a mode,
 a source path relative to the manifest, and an exit status or rejection line.
+Use decimal numbers without leading zeros for expected results.
 Tracked cases also run with the allocation probe.
 
 The seed entry point is `python3 stage-1/wovec.py SOURCE`. The generated C
