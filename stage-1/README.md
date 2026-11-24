@@ -1,10 +1,14 @@
 # Stage 1 seed
 
 The Python seed reads one module of tagged IR forms and emits C11 to stdout.
-The subset covers straight-line functions that return `i32`, `u8`, or `void`,
+The subset covers straight-line functions that return `u8`, `i32`, `u32`, or `void`,
 owned byte arrays, and call-scoped shared and exclusive slice borrows.
 Scalar functions end in an explicit return. Void functions complete at the end
 of their body. A source rejection prints the filename and line.
+
+Write scalar literals as typed decimal nodes such as `(u32 4294967295)`.
+The seed checks the range of each literal and preserves its exact type
+through local bindings, parameters, calls, and returns.
 
 `slice.load` reads a `u8` from either kind of byte slice. `slice.store` needs
 a mutable byte slice and writes to the owner's storage. Both take an `i32`

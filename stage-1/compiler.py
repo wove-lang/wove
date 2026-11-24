@@ -12,14 +12,20 @@ from syntax import Atom, Form, Node, SourceError, form, identifier, parse
 
 I32 = "i32"
 U8 = "u8"
+U32 = "u32"
 VOID = "void"
-SCALARS = (I32, U8)
+SCALAR_LIMITS = {
+	I32: (-(2**31), 2**31 - 1),
+	U8: (0, 255),
+	U32: (0, 2**32 - 1),
+}
 OWNED = "owned-array"
 SHARED = "shared-slice"
 MUT = "mut-slice"
 C_TYPE = {
 	I32: "int32_t",
 	U8: "uint8_t",
+	U32: "uint32_t",
 	VOID: "void",
 	OWNED: "wvrt_array *",
 	SHARED: "wvrt_slice",
@@ -52,7 +58,7 @@ class Function:
 # Accept scalar inputs and the two byte slice parameter types.
 def parameter_type(node: Node) -> str:
 	# Scalar types are written as bare symbols.
-	if isinstance(node, Atom) and not node.quoted and node.text in SCALARS:
+	if isinstance(node, Atom) and not node.quoted and node.text in SCALAR_LIMITS:
 		return node.text
 	view = form(node, arity=1)
 	# Slice parameters specify their loan kind and byte element type.
@@ -101,7 +107,7 @@ def read_function(node: Node, index: int) -> tuple[str, Function]:
 	result_node, = form(returns_node, "returns", 1).operands
 	result = identifier(result_node)
 	# Seed functions return a scalar or complete without a value.
-	if result not in (*SCALARS, VOID):
+	if result != VOID and result not in SCALAR_LIMITS:
 		raise SourceError(result_node.line)
 	# Keep the C entry point on its existing zero-argument i32 ABI.
 	if name == "main" and (params or result != I32):
@@ -222,7 +228,7 @@ class FunctionEmitter:
 		values = []
 		# Each argument may acquire a loan that constrains later arguments.
 		for argument, (_, kind) in zip(args, callee.params):
-			value = self.typed(argument, kind) if kind in SCALARS else self.borrow(argument, kind)
+			value = self.typed(argument, kind) if kind in SCALAR_LIMITS else self.borrow(argument, kind)
 			values.append(value.c)
 		expression = f"{callee.c_name}({', '.join(values)})"
 		# A void call is a statement and supplies no C value to a consumer.
@@ -239,7 +245,7 @@ class FunctionEmitter:
 	def expression(self, node: Node) -> Value:
 		expr = form(node)
 		# Convert the decimal literal to a C-safe spelling.
-		if expr.tag in SCALARS:
+		if expr.tag in SCALAR_LIMITS:
 			literal, = form(expr, arity=1).operands
 			# Restrict the spelling to a signed decimal atom.
 			if not isinstance(literal, Atom) or literal.quoted or not re.fullmatch(r"-?[0-9]+", literal.text):
@@ -250,11 +256,12 @@ class FunctionEmitter:
 			# Treat values beyond Python’s conversion limit as source failures.
 			except ValueError:
 				raise SourceError(node.line) from None
-			low, high = (0, 255) if expr.tag == U8 else (-(2**31), 2**31 - 1)
+			low, high = SCALAR_LIMITS[expr.tag]
 			# Check the declared type before handing the literal to C.
 			if not low <= number <= high:
 				raise SourceError(node.line)
-			return Value(expr.tag, str(number))
+			spelling = f"UINT32_C({number})" if expr.tag == U32 else str(number)
+			return Value(expr.tag, spelling)
 
 		# Widen an unsigned byte so it can be used in an i32 expression or index.
 		if expr.tag == "i32.from-u8":
@@ -266,7 +273,7 @@ class FunctionEmitter:
 		if expr.tag == "local":
 			binding = self.local(expr, node.line)
 			# Array and slice places need an explicit operation.
-			if binding.value.kind not in SCALARS:
+			if binding.value.kind not in SCALAR_LIMITS:
 				raise SourceError(node.line)
 			return binding.value
 
