@@ -186,6 +186,13 @@ name after its initializer and stays in scope only within its arm.
 A return exits the function from either arm. When both arms return,
 the conditional is terminal.
 
+A statement `(while condition (body ...))` evaluates its `bool` condition
+before each iteration, including the first. Each iteration has a fresh
+body scope. Updates to an outer mutable binding are visible to the next
+test. A return inside the loop exits the function. A loop can skip its
+body, so a value-returning function still needs a return on the path
+after the loop.
+
 [FNV-1a](hashing/fnv1a.wove) exposes the 31-bit seed with `fnv1a_seed`
 and updates it one raw byte at a time with `fnv1a_byte`. The declaration
 identity builder supplies the order and delimiters for its components.
