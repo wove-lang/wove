@@ -8,6 +8,9 @@ BUILD_DIR ?= build
 
 STAGE1 := $(BUILD_DIR)/stage-1
 STAGE2 := $(BUILD_DIR)/stage-2
+BOOTSTRAP_COMPILER := $(STAGE1)/wovec
+COMPILER_ROOT := stage-2/wovec.wove
+SOURCE_SCAN_MODULE := stage-2/source_scan.wove
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -29,9 +32,10 @@ all: stage-1
 
 stage-1: $(STAGE1)/ownership.transfer
 
-stage-2: $(SOURCE_SCAN)
+stage-2: $(BOOTSTRAP_COMPILER) $(SOURCE_SCAN)
 
 test-stage-2: stage-2
+	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
@@ -41,14 +45,19 @@ test-stage-2: stage-2
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
 
-# Translate the canonical Stage 2 scanner directly with the Python seed.
-$(STAGE2)/source_scan.c: stage-2/source_scan.wove $(SEED)
+# Translate the compiler root and regenerate C when its scanner module changes.
+$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
-# Supply source slices and check full-width results in the fixture executable.
-$(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(STAGE2)/source_scan.c $(STAGE1)/runtime.o
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE2)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+# Link the seed-built compiler entry with the shared runtime.
+$(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime $^ -o "$@"
+
+# Give the scanner fixture access to the same generated scanner functions.
+$(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(STAGE1)/wovec.c $(STAGE1)/runtime.o
+	mkdir -p "$(@D)"
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE1)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
@@ -57,7 +66,7 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 # Keep required providers in the build graph even when a source file is missing.
 ROUND_TRIP_PROVIDERS := $(addprefix $(OWNERSHIP_TESTS)/imports/,left.wove right.wove nested/shared.wove)
 RUNTIME_LOCATION_PROVIDER := $(OWNERSHIP_TESTS)/slice.load_negative.wove
-IMPORT_PROVIDERS := $(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER)
+IMPORT_PROVIDERS := $(SOURCE_SCAN_MODULE) $(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER)
 $(STAGE1)/imports.round_trip.c: $(ROUND_TRIP_PROVIDERS)
 $(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
 

@@ -113,13 +113,18 @@ means the emitted prefix contains the entire source. Code 16 means the next
 token and its separator could not fit. In either case the prefix ends on a
 token boundary and the remaining output bytes retain their original values.
 
-`make stage-2` emits C with the Python seed and links the scanner with
-its [source fixture](../tests/stage-2/source_scan.probe.c) and the shared
-runtime. Run `make test-stage-2` to exercise those inputs and compare full
-streams with the Stage 1 lexer. The [layout fixtures](../tests/stage-2/lexer_layouts.tsv)
-supply indentation, line endings, and parent view bytes. The parity check
-compares the resulting token kinds and raw spellings.
-`make test` includes these checks.
+`make stage-2` translates [the compiler root](wovec.wove) with the Python seed
+and links `build/stage-1/wovec` with Clang and the shared runtime. The root
+imports `admit_source` and `scan_token` from [the scanner](source_scan.wove).
+Its parameterless bootstrap entry admits an empty view and expects an EOF
+token.
+
+The [scanner fixture](../tests/stage-2/source_scan.probe.c) uses the same
+generated C. Run `make test-stage-2` to run the bootstrap entry and compare
+scanner streams with the Stage 1 lexer. The
+[layout fixtures](../tests/stage-2/lexer_layouts.tsv) supply indentation, line
+endings, and parent view bytes. The parity check compares token kinds and raw
+spellings. `make test` includes these checks.
 
 The seed-built fixture executable accepts `--tokens FILE [START END]` to
 print numeric rows with kind, start, end, error, line, and column. The span
