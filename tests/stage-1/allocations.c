@@ -1,14 +1,23 @@
 // Copyright (c) 2026 wove contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifndef WOVE_TRACK_ARRAYS
+#define WOVE_TRACK_ARRAYS 1
+#endif
+#ifndef WOVE_TRACK_ELEMENTS
+#define WOVE_TRACK_ELEMENTS 3
+#endif
+#ifndef WOVE_TRACK_ELEMENT_SIZE
+#define WOVE_TRACK_ELEMENT_SIZE 1
+#endif
+
 static void *descriptor;
 static void *backing;
-static bool allocated_descriptor;
-static bool allocated_backing;
+static size_t descriptor_allocations;
+static size_t backing_allocations;
 
 int wove_test_main(void);
 
@@ -19,21 +28,25 @@ static _Noreturn void fail(const char *message) {
 	exit(EXIT_FAILURE);
 }
 
-// An owned byte array has one descriptor allocated with malloc.
+// Each tracked owner has one descriptor and completes cleanup before the next allocation.
 void *tracked_malloc(size_t size) {
-	if (allocated_descriptor) { fail("second descriptor allocation"); }
-	allocated_descriptor = true;
+	// Each native fixture specifies how many independent allocations to expect.
+	if (descriptor != NULL || backing != NULL || descriptor_allocations == WOVE_TRACK_ARRAYS) {
+		fail("unexpected descriptor allocation");
+	}
+	++descriptor_allocations;
 	descriptor = malloc(size);
 	return descriptor;
 }
 
 // Its zero-initialized backing storage is one separate allocation.
 void *tracked_calloc(size_t count, size_t size) {
-	// Expect the initial three requested bytes and a single backing allocation.
-	if (allocated_backing || count != 3 || size != 1) {
+	// The current descriptor owns one backing block with the fixture's native element layout.
+	if (descriptor == NULL || backing != NULL || backing_allocations + 1 != descriptor_allocations ||
+			count != WOVE_TRACK_ELEMENTS || size != WOVE_TRACK_ELEMENT_SIZE) {
 		fail("unexpected backing storage allocation");
 	}
-	allocated_backing = true;
+	++backing_allocations;
 	backing = calloc(count, size);
 	return backing;
 }
@@ -52,12 +65,13 @@ void tracked_free(void *pointer) {
 	free(pointer);
 }
 
-// Check both original allocations were released before returning the Wove result.
+// Check every expected descriptor and backing block was released before returning the Wove result.
 int main(void) {
 	int status = wove_test_main();
 	// An exit status alone cannot establish that both original blocks were released.
-	if (!allocated_descriptor || !allocated_backing || descriptor != NULL || backing != NULL) {
-		fail("expected one array allocation and its complete release");
+	if (descriptor_allocations != WOVE_TRACK_ARRAYS || backing_allocations != WOVE_TRACK_ARRAYS ||
+			descriptor != NULL || backing != NULL) {
+		fail("expected each array allocation to be released");
 	}
 	return status;
 }

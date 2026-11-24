@@ -25,10 +25,10 @@
 #define decode_string wv_seed_fn_63
 #define form_parts wv_seed_fn_65
 #define read_module wv_seed_fn_74
-#define emit_module wv_seed_fn_98
-#define resolve_graph wv_seed_fn_111
-#define inspect_callers wv_seed_fn_266
-#define run_scalar_graph wv_seed_fn_282
+#define emit_module wv_seed_fn_99
+#define resolve_graph wv_seed_fn_112
+#define inspect_callers wv_seed_fn_272
+#define run_scalar_graph wv_seed_fn_288
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -44,7 +44,7 @@ typedef wv_seed_record_17 GraphBinding;
 typedef wv_seed_record_18 GraphUse;
 typedef wv_seed_record_19 GraphSelector;
 typedef wv_seed_record_20 GraphResult;
-typedef wv_seed_record_39 CallSite;
+typedef wv_seed_record_40 CallSite;
 typedef wv_seed_record_23 SuppliedFile;
 typedef wv_seed_record_43 CallerInspection;
 typedef wv_seed_record_47 GraphOutput;

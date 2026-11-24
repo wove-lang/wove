@@ -20,7 +20,7 @@
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records copyable_type read_parameter_type find_record record_type record_index is_record_type
 			find_member read_member_operand is_record_slice record_slice_type record_slice_element is_readable_slice is_writable_slice
-			(type ScalarRecord)))
+			is_array_owner array_owner_type array_owner_element (type ScalarRecord)))
 	(use wove-file "./flow.wove" (only block_statement moved_owner after_block (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar scalar_operator
@@ -387,7 +387,7 @@
 		also copy a record, allocate, or move an owner. A field receiver
 		(53) can be any registered record. A length or load receiver (55)
 		can use any readable slice. A store receiver (56) must be writable.
-		Zero marks unvisited rows.`)
+		A move source (57) accepts any array owner. Zero marks unvisited rows.`)
 		value_matches_type
 		(params (expected u32) (actual u32))
 		(returns bool)
@@ -422,6 +422,10 @@
 				(bool.and (bool.and (call is_record_slice (local expected)) (call is_record_slice (local actual)))
 					(bool.and (bool.not (call is_writable_slice (local expected))) (call is_writable_slice (local actual))))
 				(then (return (u32.eq (call record_slice_element (local expected)) (call record_slice_element (local actual))))))
+			(if
+				(:doc "A move carries the source owner's exact type into the receiving local.")
+				(u32.eq (local expected) (u32 57))
+				(then (return (call is_array_owner (local actual)))))
 			(return (u32.eq (local expected) (local actual)))))
 
 	(fn
@@ -588,16 +592,26 @@
 							(start (record.get (local node) start)) (end (record.get (local node) end))
 							(error (u32 39)) (related (local transfer))))))
 					(if
-						(:doc "Reborrows and moves are the explicit ways to use an owner.")
-						(bool.not (bool.or (call value_matches_type (local type) (local actual))
-							(bool.and (local reborrow) (u32.eq (local actual) (u32 41)))))
-						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
-					(if
-						(:doc "An exclusive loan requires the owner to have a writable binding.")
-						(bool.and (u32.eq (local actual) (u32 41))
-							(bool.and (u32.eq (local type) (u32 38))
-								(bool.not (u32.eq (record.get (local declaration) kind) (u32 16)))))
-						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+						(:doc "Only an explicit matching call loan can borrow an owner's backing storage.")
+						(bool.and (call is_array_owner (local actual))
+							(bool.or (local reborrow) (call is_record_slice (local expected))))
+						(then
+							(let-mut element (u32 10))
+							(if
+								(:doc "A record formal carries its exact defining element type.")
+								(call is_record_slice (local type))
+								(then (set (local element) (call record_slice_element (local type)))))
+							(if
+								(:doc "Both types must agree, and exclusive access requires a writable binding.")
+								(bool.or (bool.not (u32.eq (call array_owner_element (local actual)) (local element)))
+									(bool.and (call is_writable_slice (local type))
+										(bool.not (u32.eq (record.get (local declaration) kind) (u32 16)))))
+								(then (return (call entry_at (local node) (i32 -1) (u32 24))))))
+						(else
+							(if
+								(:doc "All other uses must satisfy the expected value type.")
+								(bool.not (call value_matches_type (local type) (local actual)))
+								(then (return (call entry_at (local node) (i32 -1) (u32 24)))))))
 					(let target (record.get (local declaration) target))
 					(slice.store (local expressions) (local index)
 						(call expression_row (u32 6) (local actual) (local target) (i32 -1) (i32 0) (i32 0) (bool false)))
@@ -682,7 +696,7 @@
 						(then (return (call entry_at (local name) (i32 -1) (u32 37)))))
 					(if
 						(:doc "An owner stays bound to its allocation for the life of its scope.")
-						(u32.eq (record.get (local target) type) (u32 41))
+						(call is_array_owner (record.get (local target) type))
 						(then (return (call entry_at (slice.load (local nodes) (local operand)) (i32 -1) (u32 24)))))
 					(return (call entry_at (local name) (local binding) (u32 0)))))
 			(let parameter (call find_function_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -971,7 +985,7 @@
 			(return (local expected))))
 
 	(fn
-		(:doc `Resolve an access or call loan from a named slice or byte owner.`)
+		(:doc `Resolve an access or call loan from a named slice or array owner.`)
 		plan_named_view
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (use SourceNode) (reference SourceNode)
 			(index i32) (caller ScalarFunction) (statement i32) (expected u32) (range_source bool)
@@ -982,7 +996,7 @@
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local reference) (u32 8) (u32 24)))
 			(if
-				(:doc "Views come from named parameters or borrowed local byte owners.")
+				(:doc "Views come from named parameters or borrowed local owners.")
 				(u32.lt (u32 0) (record.get (local form) error))
 				(then (return (local form))))
 			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -995,10 +1009,11 @@
 			(let resolved (slice.load (local expressions) (local index)))
 			(let target (record.get (local resolved) target))
 			(let actual (record.get (local resolved) type))
-			(let owner (u32.eq (local actual) (u32 41)))
+			(let owner (call is_array_owner (local actual)))
 			(if
-				(:doc "A range source is an owner or a shared byte slice parameter.")
-				(bool.and (local range_source) (bool.not (bool.or (local owner) (u32.eq (local actual) (u32 34)))))
+				(:doc "A range source is a byte owner or a shared byte slice parameter.")
+				(bool.and (local range_source)
+					(bool.not (bool.or (u32.eq (local actual) (u32 41)) (u32.eq (local actual) (u32 34)))))
 				(then (return (call entry_at (local reference) (i32 -1) (u32 24)))))
 			(let-mut kind (u32 2))
 			(let-mut type (local expected))
@@ -1215,10 +1230,11 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
-		(:doc `Check a local byte allocation and seed its exact signed length operand.`)
+		(:doc `Check a local byte or record allocation and seed its exact signed element count.`)
 		plan_allocation
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
-			(element i32) (index i32) (caller ScalarFunction) (view_start i32) (expressions (mut-slice ScalarExpression)))
+			(element i32) (index i32) (caller ScalarFunction) (view_start i32)
+			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)) (expressions (mut-slice ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(if
@@ -1232,14 +1248,17 @@
 				(bool.or (i32.lt (local count) (i32 0))
 					(bool.not (i32.lt (record.get (slice.load (local nodes) (local count)) next_sibling) (i32 0))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings))
+				(record.get (local caller) file) (record.get (local caller) source_base) (local element)))
 			(if
-				(:doc "The supported owner contains bytes.")
-				(bool.not (u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element)) (u32 10)))
+				(:doc "An allocation supports bytes or a visible copyable record type.")
+				(bool.not (bool.or (u32.eq (local type) (u32 10)) (call is_record_type (local type))))
 				(then (return (call entry_at (local element_node) (i32 -1) (u32 24)))))
 			(slice.store (local expressions) (local count)
 				(call expression_row (u32 0) (u32 5) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
 			(slice.store (local expressions) (local index)
-				(call runtime_expression (u32 41) (u32 41) (local node) (local count) (local caller) (local view_start)))
+				(call runtime_expression (u32 41) (call array_owner_type (local type)) (local node) (local count) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
@@ -1443,7 +1462,8 @@
 				(:doc "Only a local declaration can establish a new owning binding.")
 				(local allocation)
 				(then (return (call plan_allocation (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local operand) (local index) (local caller) (local view_start) (borrow-mut (local expressions))))))
+					(local node) (local operand) (local index) (local caller) (local view_start)
+					(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A local reference resolves among the caller's bindings visible at this statement.")
 				(u32.eq (local tag) (u32 8))
@@ -1557,7 +1577,7 @@
 				(then (return (call body_error (local caller) (record.get (local local_form) start) (record.get (local local_form) end)
 					(record.get (local local_form) error)))))
 			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local reference) (record.get (local local_form) operand) (u32 41) (local root) (local caller) (local statement)
+				(local reference) (record.get (local local_form) operand) (u32 57) (local root) (local caller) (local statement)
 				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
 			(if
 				(:doc "A repeated transfer points at the attempted move and the move that consumed its source.")
@@ -1839,7 +1859,7 @@
 							(let statement (slice.load (local statements) (local index)))
 							(if
 								(:doc "An owning declaration becomes the newest active owner for this scope.")
-								(u32.eq (record.get (local statement) type) (u32 41))
+								(call is_array_owner (record.get (local statement) type))
 								(then (set (local previous_owner) (local index))))
 							(set (local falls_through) (record.get (local statement) falls_through))
 							(let first (record.get (local statement) first))
