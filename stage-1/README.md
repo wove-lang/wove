@@ -51,6 +51,13 @@ uses the original storage, and its loan stays active through later
 arguments and the call. Shared loans permit reads of the parent.
 Exclusive loans suspend access to the parent until the helper returns.
 
+Use `(borrow-shared (slice.range (local source) start end))` to pass a
+half-open range of a named byte buffer or slice. The seed evaluates the
+`i32` endpoints once from left to right, then checks
+`0 <= start <= end <= source.len`. The helper sees the original
+storage starting at `start` and a length of `end - start`.
+Equal endpoints form an empty view, including at the end of the source.
+
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.
 Run `make test` to check the transfer, its allocation lifetime, and the borrow

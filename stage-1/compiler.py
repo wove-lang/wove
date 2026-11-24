@@ -234,22 +234,41 @@ class FunctionEmitter:
 	def borrow(self, node: Node, kind: str) -> Value:
 		tag = "borrow-mut" if kind == MUT else "borrow-shared"
 		target, = form(node, tag, 1).operands
-		binding = self.local(target, node.line)
-		origin = binding.value
+		source = target
+		range_bounds = None
 		exclusive = kind == MUT
+		# A range projects the named source for a shared call argument.
+		if isinstance(target, Form) and target.tag == "slice.range":
+			# The seed supports shared range loans.
+			if exclusive:
+				raise SourceError(node.line)
+			source, start, end = form(target, arity=3).operands
+			range_bounds = (start, end)
+		binding = self.local(source, node.line)
+		origin = binding.value
 		writable = binding.writable if origin.kind == OWNED else origin.kind == MUT
 		# Exclusive access comes from a writable owner or a mutable slice type.
 		if origin.kind not in (OWNED, SHARED, MUT) or (exclusive and not writable):
 			raise SourceError(node.line)
 		self.check_access(binding, exclusive, node.line)
-		self.loans.append((binding, kind))
-
-		# Copy the pointer and extent so every reborrow uses the same storage.
 		fields = origin.c + ("->" if origin.kind == OWNED else ".")
-		return self.temporary(
-			kind, f"({C_TYPE[kind]}){{{fields}wvrt_items, "
-			f"{fields}wvrt_length, {fields}wvrt_element_size}}"
-		)
+
+		# Evaluate both range endpoints before acquiring the new loan.
+		if range_bounds is not None:
+			start = self.typed(range_bounds[0], I32)
+			end = self.typed(range_bounds[1], I32)
+			expression = (
+				f"wvrt_slice_range_u8({fields}wvrt_items, {fields}wvrt_length, "
+				f"{start.c}, {end.c}, {self.site(target.line)})"
+			)
+		# A whole-place borrow keeps the original pointer and extent.
+		else:
+			expression = (
+				f"({C_TYPE[kind]}){{{fields}wvrt_items, "
+				f"{fields}wvrt_length, {fields}wvrt_element_size}}"
+			)
+		self.loans.append((binding, kind))
+		return self.temporary(kind, expression)
 
 	# Evaluate arguments left to right and end only this call's loans.
 	def call(self, node: Form) -> Value:

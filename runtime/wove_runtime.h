@@ -31,6 +31,8 @@ typedef struct { void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size
 wvrt_array *wvrt_array_new(int32_t wvrt_length, size_t wvrt_element_size,
 	size_t wvrt_element_alignment, wvrt_location wvrt_site);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
+wvrt_slice wvrt_slice_range_u8(const void *wvrt_items, int32_t wvrt_length,
+	int32_t wvrt_start, int32_t wvrt_end, wvrt_location wvrt_site);
 uint8_t wvrt_slice_load_u8(const void *wvrt_items, int32_t wvrt_length, int32_t wvrt_index,
 	wvrt_location wvrt_site);
 void wvrt_slice_store_u8(void *wvrt_items, int32_t wvrt_length, int32_t wvrt_index,

@@ -14,7 +14,7 @@ OWNERSHIP_TESTS := tests/stage-1
 OWNERSHIP_CASES := $(OWNERSHIP_TESTS)/cases.tsv
 
 # Build native programs for executable cases. The runner handles compile-only rejections.
-TEST_PROGRAMS := $(shell awk '$$1 == "run" || $$1 == "tracked" || $$1 == "bounds-trap" || $$1 == "conversion-trap" { \
+TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|range-trap)$$/ { \
 	name = $$2; sub(/\.wove$$/, "", name); print name; \
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")

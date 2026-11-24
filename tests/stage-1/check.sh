@@ -98,6 +98,10 @@ while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 		conversion-trap)
 			check_trap "$fixtures/$source" "$expected" "$program" "integer conversion out of range"
 			;;
+		# Check a range was rejected before the helper ran.
+		range-trap)
+			check_trap "$fixtures/$source" "$expected" "$program" "slice range out of bounds"
+			;;
 		# Reject unknown modes so every listed fixture is exercised.
 		*)
 			printf 'unknown test mode in %s: %s\n' "$manifest" "$mode" >&2
