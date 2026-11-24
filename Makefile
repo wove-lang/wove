@@ -25,7 +25,8 @@ SOURCE_CALLERS := stage-2/source/callers.wove
 SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove
 C_EMITTER_SOURCES := $(addprefix stage-2/,emit/c.wove emit/runtime.wove emit/graph.wove emit/names.wove emit/records.wove emit/text.wove \
 	scalar/syntax.wove scalar/flow.wove scalar/plan.wove scalar/graph.wove scalar/records.wove) $(DECIMAL_WRITER)
-HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove)
+HASHING_DIGITS := stage-2/hashing/digits.wove
+HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_DIGITS)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
@@ -157,6 +158,9 @@ $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove stage-2/has
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
+
+# Base16 and Base32hex use the same ASCII digit mapping.
+$(addprefix $(STAGE2)/hashing/,base16 base32hex): $(HASHING_DIGITS)
 
 # Build JSON fixtures separately from the Stage 2 compiler entry.
 $(JSON_PROGRAMS): $(STAGE2)/json/%: $(JSON_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o
