@@ -93,9 +93,9 @@ test-stage-2-json: $(JSON_PROGRAMS)
 test-stage-2-cli: $(CLI_PROGRAMS)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/cli" "$(CLI_CASES)"
 
-# Exercise the project loader with a real config and independent profile data.
-test-stage-2-config: $(CONFIG_PROGRAM) wovec.jsonc $(CONFIG_FIXTURES)/sizing.jsonc
-	"$(CONFIG_PROGRAM)" wovec.jsonc "$(CONFIG_FIXTURES)/sizing.jsonc"
+# Exercise the project loader with the checked-in config and standalone cases.
+test-stage-2-config: $(CONFIG_PROGRAM)
+	$(PYTHON) "$(CONFIG_FIXTURES)/check.py" "$(CONFIG_PROGRAM)" "$(CONFIG_FIXTURES)/cases.tsv"
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
