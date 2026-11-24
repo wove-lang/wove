@@ -3,7 +3,7 @@ Copyright (c) 2026 wove contributors
 SPDX-License-Identifier: MIT OR Apache-2.0
 -->
 
-# Stage 2 source scanner
+# Stage 2 source scanner and form checker
 
 Call `source_diagnostic` once on the shared byte slice before tokenization.
 The admission check covers the entire view, including bytes in comments and
@@ -59,6 +59,27 @@ The first-byte helpers `source_offset` and `source_kind` find the first
 significant byte from cursor zero. `source_kind` returns 0 at EOF, 40 or 41
 for a parenthesis, and 1 for every other leading byte.
 
+`check_source_form` validates exactly one top-level tagged form. Each opener
+requires a bare tag as the first significant token. Operands may be atoms,
+quoted strings, or nested forms. Comments remain in source order and count
+toward the row total. Tag spelling and metadata context belong to a later
+pass.
+
+The result gives the real root's span, including its closing parenthesis,
+and the number of rows needed for the source tree. Count one synthetic source
+root and one row for each opener, bare atom, quoted atom, or comment.
+
+A failed check returns zero rows and the original diagnostic span. Lexer and
+admission errors retain codes 1–5. Structural checks use the following codes.
+
+| Code | Failure | Primary span |
+| --- | --- | --- |
+| 6 | Expected a root form | The first significant token, or EOF for empty or comment-only input |
+| 7 | Expected a bare tag | The significant token that followed the opener |
+| 8 | Unexpected closer | The closer without a matching opener |
+| 9 | Unclosed form | The innermost unmatched opener |
+| 10 | Extra input after the root | The first extra significant token |
+
 `make stage-2` emits C with the Python seed and links the scanner with
 its [source fixture](../tests/stage-2/source_scan.probe.c) and the shared
 runtime. Run `make test-stage-2` to exercise those inputs and compare full
@@ -70,3 +91,7 @@ compares the resulting token kinds and spellings, including comments.
 The seed-built fixture executable accepts `--tokens FILE [START END]` to
 print numeric rows with kind, start, end, error, line, and column. The span
 is relative to the selected view and the coordinates use the whole file.
+
+Use `--form FILE [START END]` to check structure. The single result row
+contains the row count, start, end, error, line, and column. The same
+view-relative spans and file coordinates apply.

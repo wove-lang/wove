@@ -5,6 +5,7 @@
 	(struct Token (fields (kind u32) (start i32) (end i32) (error u32)))
 	(struct SourceDiagnostic (fields (error u32) (start i32) (end i32)))
 	(struct SourcePosition (fields (line u32) (column u32)))
+	(struct FormCheck (fields (rows u32) (start i32) (end i32) (error u32)))
 
 	;; Match the seed's ASCII separators, U+0009–U+000D and U+001C–U+0020.
 	(fn is_ascii_whitespace
@@ -469,6 +470,120 @@
 						(then (return (i32 0))))
 					(set (local tail) (i32.add.wrapping (local tail) (i32 1)))))
 			(return (local width))))
+
+	;; Carry the first failure's original span back through the form check.
+	(fn form_failure
+		(params (error u32) (start i32) (end i32))
+		(returns FormCheck)
+		(body
+			(return (record.make FormCheck
+				(rows (u32 0)) (start (local start)) (end (local end)) (error (local error))))))
+
+	;; Locate the last opener at the final depth of a stream that reached EOF.
+	(fn unclosed_form_start
+		(params (source (shared-slice u8)) (final_depth i32))
+		(returns i32)
+		(body
+			(let length (slice.len (local source)))
+			(let-mut cursor (i32 0))
+			(let-mut depth (i32 0))
+			(let-mut opener (i32 0))
+			;; Rescan only after the first pass proves the tokens reach EOF.
+			(while (i32.lt (local cursor) (local length))
+				(body
+					(let token (call scan_token (borrow-shared (local source)) (local cursor)))
+					(let kind (record.get (local token) kind))
+					(set (local cursor) (record.get (local token) end))
+					;; The innermost unclosed form is the final opener at final_depth.
+					(if (u32.eq (local kind) (u32 40))
+						(then
+							(set (local depth) (i32.add.wrapping (local depth) (i32 1)))
+							;; Replace a candidate that may already have closed.
+							(if (i32.eq (local depth) (local final_depth))
+								(then (set (local opener) (record.get (local token) start))))))
+					;; Close the innermost form before classifying the next token.
+					(if (u32.eq (local kind) (u32 41))
+						(then (set (local depth) (i32.sub.wrapping (local depth) (i32 1)))))))
+			(return (local opener))))
+
+	(with-meta
+		(meta
+			(:expect parser.source_form
+				(issue "https://github.com/wove-lang/wove/issues/43")))
+		;; Validate one tagged root and count the rows needed to materialize its source tree.
+		(fn check_source_form
+			(params (source (shared-slice u8)))
+			(returns FormCheck)
+			(body
+				(let admission (call source_diagnostic (borrow-shared (local source))))
+				(let admission_error (record.get (local admission) error))
+				;; Admission failures take precedence over any form structure.
+				(if (u32.lt (u32 0) (local admission_error))
+					(then
+						(return (call form_failure (local admission_error)
+							(record.get (local admission) start) (record.get (local admission) end)))))
+				(let length (slice.len (local source)))
+				(let-mut cursor (i32 0))
+				(let-mut rows (u32 1))
+				(let-mut depth (i32 0))
+				(let-mut root_start (i32 -1))
+				(let-mut root_end (i32 0))
+				(let-mut needs_tag (bool false))
+				;; Advance by raw token ends and keep only the state of the open forms.
+				(while (i32.lt (local cursor) (local length))
+					(body
+						(let token (call scan_token (borrow-shared (local source)) (local cursor)))
+						(let kind (record.get (local token) kind))
+						(let start (record.get (local token) start))
+						(let end (record.get (local token) end))
+						(let error (record.get (local token) error))
+						(set (local cursor) (local end))
+						;; Keep the lexer's original error code and byte span.
+						(if (u32.lt (u32 0) (local error))
+							(then (return (call form_failure (local error) (local start) (local end)))))
+						;; Comments occupy rows alongside openers and operands.
+						(if (bool.not (bool.or (u32.eq (local kind) (u32 0)) (u32.eq (local kind) (u32 41))))
+							(then (set (local rows) (u32.add.wrapping (local rows) (u32 1)))))
+						;; Comments and the end marker leave the structural state unchanged.
+						(if (bool.not (bool.or (u32.eq (local kind) (u32 0)) (u32.eq (local kind) (u32 59))))
+							(then
+								;; The first significant token after an opener must be a bare tag.
+								(if (bool.and (local needs_tag) (bool.not (u32.eq (local kind) (u32 1))))
+									(then (return (call form_failure (u32 7) (local start) (local end)))))
+								(set (local needs_tag) (u32.eq (local kind) (u32 40)))
+								;; At depth zero, a significant token must start the only root.
+								(if (i32.eq (local depth) (i32 0))
+									(then
+										;; A closer at depth zero has no matching opener.
+										(if (u32.eq (local kind) (u32 41))
+											(then (return (call form_failure (u32 8) (local start) (local end)))))
+										;; A completed root allows only trailing trivia.
+										(if (bool.not (i32.lt (local root_start) (i32 0)))
+											(then (return (call form_failure (u32 10) (local start) (local end)))))
+										;; A bare or quoted atom cannot serve as the root.
+										(if (bool.not (local needs_tag))
+											(then (return (call form_failure (u32 6) (local start) (local end)))))
+										(set (local root_start) (local start))))
+								;; A closer completes its form and may finish the root span.
+								(if (u32.eq (local kind) (u32 41))
+									(then
+										(set (local depth) (i32.sub.wrapping (local depth) (i32 1)))
+										;; Preserve the exclusive end of the actual root.
+										(if (i32.eq (local depth) (i32 0))
+											(then (set (local root_end) (local end))))))
+								;; Only an opener increases depth.
+								(if (local needs_tag)
+									(then (set (local depth) (i32.add.wrapping (local depth) (i32 1)))))))))
+				;; Prefer the innermost unmatched opener as the primary EOF span.
+				(if (i32.lt (i32 0) (local depth))
+					(then
+						(let opener (call unclosed_form_start (borrow-shared (local source)) (local depth)))
+						(return (call form_failure (u32 9) (local opener) (i32.add.wrapping (local opener) (i32 1))))))
+				;; Empty or comment-only input anchors the missing root at EOF.
+				(if (i32.lt (local root_start) (i32 0))
+					(then (return (call form_failure (u32 6) (local length) (local length)))))
+				(return (record.make FormCheck
+					(rows (local rows)) (start (local root_start)) (end (local root_end)) (error (u32 0)))))))
 
 	;; Supply the seed entry point while the fixture provides input slices.
 	(fn main
