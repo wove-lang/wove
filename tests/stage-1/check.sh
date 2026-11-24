@@ -37,19 +37,20 @@ check_rejected() {
 	diff -u "$build/expected.stderr" "$build/rejected.stderr"
 }
 
-# A bounds failure must report the runtime trap at the specified access.
-check_bounds_trap() {
+# A runtime failure must report the expected trap at the specified line.
+check_trap() {
 	fixture=$1
 	line=$2
 	program=$3
+	diagnostic=$4
 	status=0
 	"$program" 2> "$build/trap.stderr" || status=$?
 	# A successful exit cannot satisfy a runtime trap expectation.
 	if [ "$status" -eq 0 ]; then
-		printf '%s completed, expected a bounds trap\n' "$program" >&2
+		printf '%s completed, expected a runtime trap\n' "$program" >&2
 		exit 1
 	fi
-	printf '%s:%s:1: runtime error: slice index out of bounds\n' "$fixture" "$line" > "$build/expected.stderr"
+	printf '%s:%s:1: runtime error: %s\n' "$fixture" "$line" "$diagnostic" > "$build/expected.stderr"
 	diff -u "$build/expected.stderr" "$build/trap.stderr"
 }
 
@@ -91,7 +92,11 @@ while read -r mode source expected extra <&3 || [ -n "${mode:-}" ]; do
 			;;
 		# Check the exact diagnostic from a runtime bounds trap.
 		bounds-trap)
-			check_bounds_trap "$fixtures/$source" "$expected" "$program"
+			check_trap "$fixtures/$source" "$expected" "$program" "slice index out of bounds"
+			;;
+		# Check the exact diagnostic from a failed integer conversion.
+		conversion-trap)
+			check_trap "$fixtures/$source" "$expected" "$program" "integer conversion out of range"
 			;;
 		# Reject unknown modes so every listed fixture is exercised.
 		*)
