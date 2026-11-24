@@ -311,13 +311,16 @@ offset and returns true. An out-of-range ID or output span returns false
 and preserves the destination.
 
 The [C name generator](emit/text.wove) takes a `CNameRole`, a checked ID,
-and the source name's byte span. The seed represents the role enum with
-a record and named constructors. The generator writes
-`wg<role><id><suffix>`, where `wg` stands for Wove-generated and the
-third character identifies the role. The ID uses seven lowercase
+the source name's byte span, and a translation unit prefix. The seed represents
+the role enum with a record and named constructors. The default spelling is
+`wg<role><id><suffix>`, where `wg` stands for Wove-generated. The character
+after the prefix identifies the role. The ID uses seven lowercase
 Base32hex digits and starts with `0` or `1` because IDs are 31 bits.
 A suffix keeps ASCII letters, digits, and underscores. Other bytes
-become underscores.
+become underscores. Graph emission reserves a prefix against the selected
+native symbols before writing C. It uses the first available prefix from
+`wg`, `wwg`, `wwwg`, and so on, keeping the same roles, IDs, and suffixes.
+Native symbols and the ABI entry `main` retain their original spellings.
 
 | Tag | Role | ID | Suffix |
 | --- | --- | --- | --- |

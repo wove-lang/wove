@@ -19,6 +19,7 @@
 			(type ScalarExpression) (type CallSite)))
 	(use wove-file "../scalar/graph.wove" (only layout_trees signature_capacity prepare_graph (type ScalarTree)))
 	(use wove-file "./c.wove" (only write_translation_unit))
+	(use wove-file "./text.wove" (only native_name_prefix_slot))
 	(use wove-file "./headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
 
 	(struct GraphOutput
@@ -34,6 +35,44 @@
 			(return (record.make GraphOutput (count (local count)) (declaration (local declaration))
 				(file (local file)) (start (local start)) (end (local end)) (error (local error))
 				(related_start (i32 -1)) (related_end (i32 -1))))))
+
+	(fn
+		(:doc `Pick the shortest generated-name prefix distinct from every selected native symbol.
+
+		Each binding can occupy at most one prefix slot. A zeroed scratch
+		byte per binding is sufficient because the slot just past that
+		storage is available if every earlier slot is occupied.`)
+		choose_name_prefix
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(occupied (mut-slice u8)))
+		(returns i32)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Reserve the possible generated-name prefixes of the original C spellings.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(let binding (slice.load (local bindings) (local index)))
+					(if
+						(:doc "Only C targets retain an externally declared name in the emitted program.")
+						(u32.eq (record.get (local binding) provider) (u32 8))
+						(then
+							(let base (record.get (slice.load (local files) (record.get (local binding) file)) source_start))
+							(let slot (call native_name_prefix_slot (borrow-shared (local arena))
+								(i32.add.wrapping (local base) (record.get (local binding) native_start))
+								(i32.add.wrapping (local base) (record.get (local binding) native_end))))
+							(if
+								(:doc "A higher slot cannot affect the first available choice.")
+								(bool.and (bool.not (i32.lt (local slot) (i32 0))) (i32.lt (local slot) (slice.len (local occupied))))
+								(then (slice.store (local occupied) (local slot) (u8 1))))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(let-mut slot (i32 0))
+			(while
+				(:doc "Use wg unless a selected symbol could overlap its generated names.")
+				(bool.and (i32.lt (local slot) (slice.len (local occupied)))
+					(u8.eq (slice.load (local occupied) (local slot)) (u8 1)))
+				(body (set (local slot) (i32.add.wrapping (local slot) (i32 1)))))
+			(return (local slot))))
 
 	(fn
 		(:doc `Measure and emit the checked graph as a complete C translation unit.`)
@@ -62,6 +101,9 @@
 				(u32.lt (u32 0) (record.get (local headers) error))
 				(then (return (call graph_output (i32 0) (i32 -1) (record.get (local headers) file)
 					(record.get (local headers) start) (record.get (local headers) end) (record.get (local headers) error)))))
+			(let-mut occupied (array.alloc u8 (slice.len (local bindings))))
+			(let name_prefix (call choose_name_prefix (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (borrow-mut (local occupied))))
 			(let count (record.get (local headers) count))
 			(let prefix (call write_includes (borrow-shared (local paths)) (borrow-shared (local includes))
 				(local count) (borrow-mut (local output)) (bool false)))
@@ -69,7 +111,7 @@
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 				(borrow-mut (local output)) (local prefix)
-				(record.get (local headers) stdint) (record.get (local headers) runtime) (bool false)))
+				(record.get (local headers) stdint) (record.get (local headers) runtime) (local name_prefix) (bool false)))
 			(if
 				(:doc "Keep the destination untouched when the full unit cannot fit.")
 				(u32.lt (int.convert u32 (slice.len (local output))) (local measured))
@@ -84,7 +126,7 @@
 				(borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 				(borrow-mut (local output)) (local first)
-				(record.get (local headers) stdint) (record.get (local headers) runtime) (bool true)))
+				(record.get (local headers) stdint) (record.get (local headers) runtime) (local name_prefix) (bool true)))
 			(return (call graph_output (int.convert i32 (local written)) (i32 -1) (local root)
 				(record.get (local tree) start) (record.get (local tree) end) (u32 0)))))
 
