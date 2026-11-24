@@ -9,9 +9,9 @@
 	source_module
 
 	(use wove-file "./scan.wove"
-		(only is_head_byte is_identifier_head (type SourceNode) (type FormCheck)))
+		(only is_head_byte is_identifier_head named_form_error (type SourceNode) (type FormCheck)))
 
-	(struct FormParts (fields (head i32) (metadata i32) (operands i32)))
+	(struct FormParts (fields (head i32) (metadata i32) (operands i32) (name i32) (metadata_end i32)))
 	(struct SelectedDeclaration (fields (node i32)))
 	(struct ModuleRead (fields (name i32) (count i32) (active bool) (start i32) (end i32) (error u32)))
 	(struct Selection (fields (active bool) (start i32) (end i32) (error u32)))
@@ -31,37 +31,59 @@
 			(return (u8.eq (slice.load (local source) (record.get (local head) start)) (u8 58)))))
 
 	(fn
-		(:doc `Expose the head, metadata prefix, and ordinary operands of a checked form.
+		(:doc `Expose a checked form's name, metadata range, and remaining ordinary operands.
 
-		Each field is a node index or -1 for an empty view. Walk metadata siblings
-		up to the first ordinary operand. Walk ordinary operands to the end.`)
+		Each field is an original row index or -1. A module or function name
+		has its own slot. Walk metadata siblings up to metadata_end and
+		ordinary operand siblings to the end. Either metadata placement
+		produces the same logical views.`)
 		form_parts
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
 		(returns FormParts)
 		(body
 			(if
-				(:doc "Nodes without a form head have no metadata or operand view.")
+				(:doc "Nodes without a form head have no name, metadata, or operand view.")
 				(bool.not (u32.eq (record.get (local node) kind) (u32 40)))
-				(then (return (record.make FormParts (head (i32 -1)) (metadata (i32 -1)) (operands (i32 -1))))))
+				(then (return (record.make FormParts (head (i32 -1)) (metadata (i32 -1))
+					(operands (i32 -1)) (name (i32 -1)) (metadata_end (i32 -1))))))
 			(let head (record.get (local node) first_child))
 			(let tag (slice.load (local nodes) (local head)))
-			(let first (record.get (local tag) next_sibling))
-			(let-mut cursor (local first))
+			(let named (u32.lt (u32 0) (call named_form_error (borrow-shared (local source))
+				(borrow-shared (local nodes)) (local node) (local tag))))
+			(let-mut cursor (record.get (local tag) next_sibling))
+			(let-mut name (i32 -1))
+			(if
+				(:doc "A declaration starting with its name puts any metadata in the next sibling range.")
+				(bool.and (local named) (bool.and (bool.not (i32.lt (local cursor) (i32 0)))
+					(bool.not (call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local nodes) (local cursor))))))
+				(then
+					(set (local name) (local cursor))
+					(set (local cursor) (record.get (slice.load (local nodes) (local name)) next_sibling))))
 			(let-mut metadata (i32 -1))
+			(let first (local cursor))
 			(while
-				(:doc "Only the initial run of colon-tagged siblings belongs to the prefix.")
-				(bool.not (i32.lt (local cursor) (i32 0)))
+				(:doc "The contiguous run of colon-tagged siblings is the metadata range.")
+				(bool.and (bool.not (i32.lt (local cursor) (i32 0)))
+					(call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local nodes) (local cursor))))
 				(body
-					(let child (slice.load (local nodes) (local cursor)))
-					(if
-						(:doc "The first non-metadata sibling starts the ordinary operands.")
-						(bool.not (call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local child)))
-						(then
-							(return (record.make FormParts
-								(head (local head)) (metadata (local metadata)) (operands (local cursor))))))
 					(set (local metadata) (local first))
-					(set (local cursor) (record.get (local child) next_sibling))))
-			(return (record.make FormParts (head (local head)) (metadata (local metadata)) (operands (i32 -1))))))
+					(set (local cursor) (record.get (slice.load (local nodes) (local cursor)) next_sibling))))
+			(let-mut metadata_end (i32 -1))
+			(if
+				(:doc "Remember the first sibling outside a nonempty metadata range.")
+				(bool.not (i32.lt (local metadata) (i32 0)))
+				(then (set (local metadata_end) (local cursor))))
+			(if
+				(:doc "A legacy prefix ends at the name before the ordinary fields.")
+				(bool.and (local named) (bool.and (i32.lt (local name) (i32 0))
+					(bool.not (i32.lt (local cursor) (i32 0)))))
+				(then
+					(set (local name) (local cursor))
+					(set (local cursor) (record.get (slice.load (local nodes) (local name)) next_sibling))))
+			(return (record.make FormParts (head (local head)) (metadata (local metadata))
+				(operands (local cursor)) (name (local name)) (metadata_end (local metadata_end))))))
 
 	(fn
 		(:doc `Compare three bytes inside an atom whose width has already been checked.`)
@@ -248,7 +270,7 @@
 		(body
 			(let-mut active (bool true))
 			(let-mut index (record.get (local parts) metadata))
-			(let stop (record.get (local parts) operands))
+			(let stop (record.get (local parts) metadata_end))
 			(while
 				(:doc "Only rows in the metadata view may select this form.")
 				(bool.and (bool.not (i32.lt (local index) (i32 0))) (bool.not (i32.eq (local index) (local stop))))
@@ -335,9 +357,9 @@
 				(bool.not (u32.eq (call source_keyword (borrow-shared (local source)) (local head)) (u32 1)))
 				(then (return (call module_result (i32 -1) (i32 0) (bool false)
 					(record.get (local head) start) (record.get (local head) end) (u32 18)))))
-			(let name (record.get (local parts) operands))
+			(let name (record.get (local parts) name))
 			(if
-				(:doc "The first ordinary operand must name the module even when excluded.")
+				(:doc "The module's name slot is required even when selection excludes the module.")
 				(i32.lt (local name) (i32 0))
 				(then (return (call module_result (i32 -1) (i32 0) (bool false) (local start) (local end) (u32 19)))))
 			(let name_node (slice.load (local nodes) (local name)))
@@ -360,7 +382,7 @@
 				(bool.not (record.get (local selected) active))
 				(then (return (call module_result (local name) (i32 0) (bool false) (local start) (local end) (u32 0)))))
 			(let-mut count (i32 0))
-			(let-mut index (record.get (local name_node) next_sibling))
+			(let-mut index (record.get (local parts) operands))
 			(while
 				(:doc "Walk selected group children and their siblings without a separate stack.")
 				(bool.not (i32.lt (local index) (i32 0)))

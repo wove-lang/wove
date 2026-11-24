@@ -136,6 +136,11 @@ def check_diagnostics(executable, directory, manifest):
 			assert len(rows) == 1, label
 
 
+# Read fixture bytes from an inline hex span or a checked-in source file.
+def fixture_bytes(raw):
+	return Path(raw[1:]).read_bytes() if raw.startswith("@") else bytes.fromhex(raw)
+
+
 # Check result rows for the configured valid and malformed tagged forms.
 def check_forms(executable, directory, manifest):
 	source = directory / "form.wove"
@@ -151,7 +156,7 @@ def check_forms(executable, directory, manifest):
 def check_trees(executable, directory, manifest, mode):
 	source = directory / "tree.wove"
 	for label, raw, base, end, capacity, *fields in fixture_rows(manifest):
-		source.write_bytes(bytes.fromhex(raw))
+		source.write_bytes(fixture_bytes(raw))
 		expected = [tuple(map(int, row.split())) for row in fields]
 		bounds = (int(base), int(end), int(capacity))
 		rows, status = probe_rows(executable, mode, source, bounds)
@@ -172,7 +177,7 @@ def check_renderings(executable, directory, manifest):
 	rendered = directory / "render-output.wove"
 	# Both the original parent bytes and the expected output prefix come from the fixture.
 	for label, raw, base, end, capacity, written, error, expected in fixture_rows(manifest):
-		source.write_bytes(bytes.fromhex(raw))
+		source.write_bytes(fixture_bytes(raw))
 		bounds = (int(base), int(end))
 		expected_count, expected_error = int(written), int(error)
 		output, status = run_probe(executable, "--render", source, (*bounds, int(capacity)))
@@ -212,31 +217,41 @@ def check_decodings(executable, directory, manifest):
 
 # Compare the sibling views with the seed's separated metadata and operand lists.
 def compare_form_parts(view, nodes, parts, form):
-	owner, head, metadata, operands = parts
+	owner, head, metadata, operands, name, metadata_end = parts
 	assert nodes[owner][5] == head
 	_, _, start, end, *_ = nodes[head]
 	assert view[start:end].decode("utf-8") == form.tag
 	assert position(view, nodes[owner][2])[0] == form.line
 
 	tags = []
-	while metadata >= 0 and metadata != operands:
+	while metadata >= 0 and metadata != metadata_end:
 		_, _, start, end, *_ = nodes[nodes[metadata][5]]
 		tags.append(view[start:end].decode("utf-8"))
 		metadata = nodes[metadata][6]
 	assert tags == [entry.tag for entry in form.metadata]
 
+	ordinary = form.operands
+	# A name slot consumes the seed's first logical operand separately.
+	if name >= 0:
+		expected_name, *ordinary = ordinary
+		_, kind, start, end, *_ = nodes[name]
+		assert kind == 1 and not expected_name.quoted
+		assert view[start:end].decode("utf-8") == expected_name.text
+		assert position(view, start)[0] == expected_name.line
+
 	count = 0
+	# The remaining ordinary fields reach the end of the original sibling list.
 	while operands >= 0:
 		count += 1
 		operands = nodes[operands][6]
-	assert count == len(form.operands)
+	assert count == len(ordinary)
 
 
 # Verify exact result rows and compare successful module selection with the seed.
 def check_modules(executable, directory, manifest):
 	source = directory / "module.wove"
 	for label, raw, base, end, capacity, *fields in fixture_rows(manifest):
-		parent = bytes.fromhex(raw)
+		parent = fixture_bytes(raw)
 		source.write_bytes(parent)
 		start, stop = int(base), int(end)
 		expected = [tuple(map(int, row.split())) for row in fields]
@@ -270,7 +285,7 @@ def check_compilations(executable, directory, manifest, clang):
 	tracked_runtime = os.environ.get("WOVE_TEST_TRACKED_RUNTIME")
 	for label, raw, base, end, capacity, fields, expected, mode, value in fixture_rows(manifest):
 		# File references keep larger compilation examples readable.
-		source.write_bytes(Path(raw[1:]).read_bytes() if raw.startswith("@") else bytes.fromhex(raw))
+		source.write_bytes(fixture_bytes(raw))
 		bounds = (int(base), int(end), int(capacity))
 		output, status = run_probe(executable, "--emit-c", source, bounds)
 		header, delimiter, emitted = output.partition(b"\n")

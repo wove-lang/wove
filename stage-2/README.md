@@ -98,16 +98,19 @@ spans both parentheses and has its tag as its first child.
 After building the tree, call `check_source_metadata` with the same source
 view, successful result, and shared node slice. Form heads use
 `[A-Za-z_][A-Za-z0-9_.-]*`. A leading colon marks a metadata entry only
-when the form is in its parent's prefix. That prefix is the contiguous
-sequence of colon-tagged forms immediately after the parent's tag. The
-first ordinary child after the prefix is operand zero. Each entry keeps its
-order, parent link, spelling, and original byte span.
+when the form is in its parent's prefix. For a module or function
+declaration, the contiguous prefix may follow its bare name. The legacy
+placement immediately after the tag is also accepted during migration.
+Other forms use the prefix immediately after the tag. Each entry keeps
+its order, parent link, spelling, and original byte span.
 
 | Code | Failure | Primary span |
 | --- | --- | --- |
 | 12 | Invalid head spelling | The head atom |
 | 13 | Misplaced metadata entry | The colon-prefixed head atom |
 | 14 | Retired `with-meta` or `meta` form | The head atom |
+| 19 | Missing or invalid module name | The module form or invalid name operand |
+| 22 | Missing or invalid function name | The function form or invalid name operand |
 
 `render_source_tree` takes the original byte view, its built and validated
 shared node slice, and a writable byte slice. It walks the tree links in
@@ -135,13 +138,14 @@ the span of its six-byte escape. In both cases the written prefix ends at a
 scalar boundary and the remaining output retains its previous bytes.
 
 The [module reader](source/module.wove) works from the original bytes and a
-checked source tree. `form_parts` returns the head plus the first metadata
-and first ordinary operand indices. An empty view uses `-1`. Walk metadata
-siblings up to the first ordinary operand and walk ordinary operands to the
-end. All indices refer to existing tree rows.
+checked source tree. `form_parts` returns the head, optional module or
+function name, metadata range, and first ordinary field. Empty views use
+`-1`. Walk metadata siblings up to the exclusive `metadata_end` bound and
+ordinary fields to the end. Both declaration layouts use the same logical
+views. All indices refer to existing tree rows.
 
-`read_module` reads the name from the first ordinary operand and writes the
-original indices of selected declarations into a caller-provided record slice.
+`read_module` reads the name slot and writes the original indices of selected
+declarations into a caller-provided record slice.
 It applies bootstrap `cfg` and `test` selection to the module, its groups, and
 its declarations. It flattens active `decls` in source order. An excluded
 module succeeds with its name and zero declarations. Unknown metadata and
@@ -478,7 +482,7 @@ The first row contains the selected count, start, end, error, line, and
 column. The second row gives the name node index and the active flag.
 When the module has a checked name, the remaining rows describe the module
 and the selected declarations. Each lists the original form, head, first
-metadata, and first ordinary operand indices. The
+metadata, first ordinary field, name, and exclusive metadata bound indices. The
 [module fixtures](../tests/stage-2/source_modules.tsv) compare these links
 and the active declarations with the Stage 1 seed.
 

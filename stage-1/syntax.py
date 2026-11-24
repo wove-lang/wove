@@ -45,8 +45,8 @@ IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 TAG = re.compile(":?" + IDENTIFIER.pattern)
 
 
-# Separate the initial metadata entries from the operands of a completed form.
-def read_form(children: list[Node], line: int) -> Form:
+# Separate metadata from the logical operands of a completed form.
+def read_form(children: list[Node], line: int, parent_tag: str | None) -> Form:
 	# Every opener needs a bare tag.
 	if not children:
 		raise SourceError(line)
@@ -55,19 +55,32 @@ def read_form(children: list[Node], line: int) -> Form:
 	# The old attachment forms are reserved so they fail at their old spelling.
 	if tag in ("with-meta", "meta"):
 		raise SourceError(head.line)
+	named = (tag == "module" and parent_tag is None) or (
+		tag == "fn" and parent_tag in (None, "module", "decls", "bridge")
+	)
 	metadata = []
 	operands = []
-	# Once an operand appears, later colon-tagged children cannot attach.
+	prefix_open = True
+	name_first = named
+	# A bare declaration name can precede the prefix when it is the first child.
 	for child in children:
-		# Metadata entries are forms with colon-prefixed heads, never colon atoms.
+		# A colon-tagged form belongs to the one contiguous metadata prefix.
 		if isinstance(child, Form) and child.tag.startswith(":"):
-			# The prefix is the only valid site for a colon-tagged form.
-			if operands:
+			# Once ordinary fields begin, metadata has no attachment point.
+			if not prefix_open:
 				raise SourceError(child.line)
 			metadata.append(child)
-		# Atoms and ordinary forms start or extend the operand list.
+		# Preserve the name as the first logical operand for the seed's consumers.
 		else:
+			# The first ordinary child of a declaration must be its bare name.
+			if named and not operands:
+				identifier(child)
+			prefix_open = name_first
 			operands.append(child)
+		name_first = False
+	# A metadata-only declaration without a name points to its opener.
+	if named and not operands:
+		raise SourceError(line)
 	return Form(tag, tuple(operands), line, tuple(metadata))
 
 
@@ -95,7 +108,10 @@ def parse(source: str) -> Form:
 			if len(stack) == 1:
 				raise SourceError(line)
 			start, children = stack.pop()
-			node = read_form(children, start)
+			parent = stack[-1][1]
+			head = parent[0] if len(stack) > 1 and parent else None
+			parent_tag = head.text if isinstance(head, Atom) and not head.quoted else None
+			node = read_form(children, start, parent_tag)
 		# Raw strings collapse doubled backticks and retain the remaining text.
 		elif kind == "string" and token.startswith("`"):
 			node = Atom(token[1:-1].replace("``", "`"), line, quoted=True)
