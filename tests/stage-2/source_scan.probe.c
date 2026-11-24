@@ -20,15 +20,15 @@
 #define source_position wv_seed_fn_16
 #define check_source_form wv_seed_fn_19
 #define build_source_tree wv_seed_fn_24
-#define check_source_metadata wv_seed_fn_33
-#define render_source_tree wv_seed_fn_35
-#define decode_string wv_seed_fn_63
-#define form_parts wv_seed_fn_65
-#define read_module wv_seed_fn_74
-#define emit_module wv_seed_fn_99
-#define resolve_graph wv_seed_fn_116
-#define inspect_callers wv_seed_fn_291
-#define run_scalar_graph wv_seed_fn_311
+#define check_source_metadata wv_seed_fn_41
+#define render_source_tree wv_seed_fn_43
+#define decode_string wv_seed_fn_71
+#define form_parts wv_seed_fn_72
+#define read_module wv_seed_fn_81
+#define emit_module wv_seed_fn_106
+#define resolve_graph wv_seed_fn_123
+#define inspect_callers wv_seed_fn_298
+#define run_scalar_graph wv_seed_fn_318
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -516,8 +516,8 @@ static int render_view(wvrt_slice input, int32_t capacity) {
 static void write_form_parts(wvrt_slice input, wvrt_slice nodes, int32_t index) {
 	const SourceNode *rows = nodes.wvrt_items;
 	const FormParts parts = form_parts(input, nodes, rows[index]);
-	printf("%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\n",
-		index, parts.wv_field_0, parts.wv_field_1, parts.wv_field_2);
+	printf("%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\n",
+		index, parts.wv_field_0, parts.wv_field_1, parts.wv_field_2, parts.wv_field_3);
 }
 
 // Read one module and report the original row indices of its active declarations.
@@ -649,7 +649,7 @@ static void write_function_ref(const char *tag, CallerSources source, int32_t fi
 	}
 	const SourceNode *rows = source.nodes.wvrt_items;
 	const FormParts parts = form_parts(source.bytes, source.nodes, rows[declaration]);
-	const SourceNode name = rows[parts.wv_field_2];
+	const SourceNode name = rows[parts.wv_field_3];
 	const int32_t start = name.wv_field_1;
 	const int width = (int)(name.wv_field_2 - start);
 	printf("(%s %" PRId32 " %" PRId32 " %.*s)", tag, file, declaration,

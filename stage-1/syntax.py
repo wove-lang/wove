@@ -45,8 +45,57 @@ IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 TAG = re.compile(":?" + IDENTIFIER.pattern)
 
 
-# Separate the initial metadata entries from the operands of a completed form.
-def read_form(children: list[Node], line: int) -> Form:
+# Recognize metadata entries without interpreting their payloads.
+def is_metadata(node: Node) -> bool:
+	return isinstance(node, Form) and node.tag.startswith(":")
+
+
+# Locate the first ordinary child after any tag-adjacent metadata.
+def first_ordinary(children: list[Node]) -> int:
+	index = 1
+	# A contiguous prefix can precede the name or provider.
+	while index < len(children) and is_metadata(children[index]):
+		index += 1
+	return index
+
+
+# Follow only declaration containers when deciding whether a fn owns a name.
+def function_declaration(parents: list[tuple[int, list[Node]]]) -> bool:
+	in_bridge = False
+	# The synthetic accumulator has no tag and can host a standalone source form.
+	for depth in range(len(parents) - 1, 0, -1):
+		children = parents[depth][1]
+		head = children[0] if children else None
+		# A malformed or opaque enclosing form cannot establish declaration context.
+		if not isinstance(head, Atom) or head.quoted:
+			return False
+		# A module contributes declarations after its name at the source root.
+		if head.text == "module":
+			name = children[1] if len(children) > 1 else None
+			return depth == 1 and isinstance(name, Atom) and not name.quoted and bool(IDENTIFIER.fullmatch(name.text))
+		# Declaration groups are transparent within a declaration ancestry.
+		if head.text == "decls":
+			continue
+		# A supported C bridge contributes members after its provider and header.
+		if head.text != "bridge" or in_bridge:
+			return False
+		index = first_ordinary(children)
+		# The ancestor frame must have read both bridge fields before this member.
+		if index + 1 >= len(children):
+			return False
+		provider, header = children[index], children[index + 1]
+		# Other providers keep their payload grammar opaque.
+		if not (
+			isinstance(provider, Atom) and not provider.quoted and provider.text in ("c", "c-header")
+			and isinstance(header, Atom) and header.quoted
+		):
+			return False
+		in_bridge = True
+	return True
+
+
+# Separate metadata from the logical operands of a completed form.
+def read_form(children: list[Node], line: int, parents: list[tuple[int, list[Node]]]) -> Form:
 	# Every opener needs a bare tag.
 	if not children:
 		raise SourceError(line)
@@ -55,18 +104,28 @@ def read_form(children: list[Node], line: int) -> Form:
 	# The old attachment forms are reserved so they fail at their old spelling.
 	if tag in ("with-meta", "meta"):
 		raise SourceError(head.line)
+	named = (tag == "module" and len(parents) == 1) or (tag == "fn" and function_declaration(parents))
 	metadata = []
 	operands = []
-	# Once an operand appears, later colon-tagged children cannot attach.
+	# A declaration's fixed name slot precedes any metadata entries.
+	if named:
+		# With no operand, the missing name points to the declaration opener.
+		if not children:
+			raise SourceError(line)
+		identifier(children[0])
+		operands.append(children[0])
+		children = children[1:]
+	prefix_open = True
+	# The first ordinary field closes the one contiguous metadata prefix.
 	for child in children:
-		# Metadata entries are forms with colon-prefixed heads, never colon atoms.
-		if isinstance(child, Form) and child.tag.startswith(":"):
-			# The prefix is the only valid site for a colon-tagged form.
-			if operands:
+		# Metadata is attached to the declaration independently of its name and fields.
+		if is_metadata(child):
+			# A later colon-tagged form has no attachment point.
+			if not prefix_open:
 				raise SourceError(child.line)
 			metadata.append(child)
-		# Atoms and ordinary forms start or extend the operand list.
 		else:
+			prefix_open = False
 			operands.append(child)
 	return Form(tag, tuple(operands), line, tuple(metadata))
 
@@ -95,7 +154,7 @@ def parse(source: str) -> Form:
 			if len(stack) == 1:
 				raise SourceError(line)
 			start, children = stack.pop()
-			node = read_form(children, start)
+			node = read_form(children, start, stack)
 		# Raw strings collapse doubled backticks and retain the remaining text.
 		elif kind == "string" and token.startswith("`"):
 			node = Atom(token[1:-1].replace("``", "`"), line, quoted=True)
