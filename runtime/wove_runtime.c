@@ -152,7 +152,7 @@ uint8_t wvrt_slice_load_u8(const void *wvrtitems, int32_t wvrtlength, int32_t wv
 }
 
 // Check a Stage 2 index before deriving a backing storage address.
-static size_t wvrt_slice_offset_at_span(int32_t wvrtlength, int32_t wvrtindex,
+size_t wvrt_slice_offset_at_span(int32_t wvrtlength, int32_t wvrtindex,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	// Preserve the span of the original access in the trap.
 	if (!wvrt_slice_index_valid(wvrtlength, wvrtindex)) {
