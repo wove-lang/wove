@@ -328,6 +328,9 @@ class FunctionEmitter:
 			# Array and slice places need an explicit operation.
 			if binding.value.kind not in SCALAR_TYPES:
 				raise SourceError(node.line)
+			# Capture the value now even if a later statement writes to its slot.
+			if binding.writable:
+				return self.temporary(binding.value.kind, binding.value.c)
 			return binding.value
 
 		# Allocate one runtime array with the source location for traps.
@@ -429,11 +432,15 @@ class FunctionEmitter:
 			continues = self.statement(node)
 		return continues
 
-	# Enter an arm's scope and drop its locals when the arm falls through.
-	def block(self, node: Form) -> bool:
+	# Enter a scope and drop its locals when the block falls through.
+	def block(self, node: Form, test: Node | None = None) -> bool:
 		self.scopes.append({})
+		# Lower the loop's condition inside the C loop so it runs each iteration.
+		if test is not None:
+			condition = self.typed(test, BOOL)
+			self.emit_line(f"if (!{condition.c}) {{ break; }}")
 		continues = self.statements(node.operands)
-		# A return has already dropped the locals in this arm.
+		# A return has already dropped the locals in this block.
 		if continues:
 			self.cleanup(self.scopes[-1:])
 		scope = self.scopes.pop()
@@ -469,6 +476,19 @@ class FunctionEmitter:
 		self.moved = then_moved | self.moved if else_continues else then_moved
 		return then_continues or else_continues
 
+	# Emit a pre-test loop with one body scope per iteration.
+	def loop(self, node: Form) -> None:
+		test, body_node = form(node, arity=2).operands
+		body = form(body_node, "body")
+		incoming = self.moved.copy()
+		self.emit_line("while (true) {")
+		continues = self.block(body, test)
+		# Outer owners available at entry must survive every path back to the test.
+		if continues and self.moved - incoming:
+			raise SourceError(node.line)
+		self.moved = incoming
+		self.emit_line("}")
+
 	# Lower a statement and report whether execution can continue past it.
 	def statement(self, node: Node) -> bool:
 		statement = form(node)
@@ -476,7 +496,23 @@ class FunctionEmitter:
 		if statement.tag == "if":
 			return self.conditional(statement)
 
-		# A return exits the function and every enclosing arm.
+		# A loop may continue past its body when the condition becomes false.
+		if statement.tag == "while":
+			self.loop(statement)
+			return True
+
+		# Assignment updates the named scalar's own C slot.
+		if statement.tag == "set":
+			target, operand = form(statement, arity=2).operands
+			binding = self.local(target, node.line)
+			# Only writable scalar locals have assignable slots.
+			if not binding.writable or binding.value.kind not in SCALAR_TYPES:
+				raise SourceError(node.line)
+			value = self.typed(operand, binding.value.kind)
+			self.emit_line(f"{binding.value.c} = {value.c};")
+			return True
+
+		# A return exits the function and every enclosing block.
 		if statement.tag == "return":
 			self.emit_return(statement)
 			return False
@@ -511,7 +547,11 @@ class FunctionEmitter:
 		# A binding needs a value to own or copy.
 		if value.kind == VOID:
 			raise SourceError(initializer.line)
-		scope[symbol] = Binding(value, writable=statement.tag == "let-mut")
+		writable = statement.tag == "let-mut"
+		# A mutable scalar needs a separate slot even when initialized from another local.
+		if writable and value.kind in SCALAR_TYPES:
+			value = self.temporary(value.kind, value.c)
+		scope[symbol] = Binding(value, writable=writable)
 		return True
 
 	# Emit the function and require a result from each scalar exit path.
