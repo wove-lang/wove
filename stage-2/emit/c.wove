@@ -14,7 +14,7 @@
 	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement)))
 	(use wove-file "../scalar/plan.wove"
 		(only read_functions plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
-	(use wove-file "../scalar/syntax.wove" (only binary_operator (type BinaryOperator)))
+	(use wove-file "../scalar/syntax.wove" (only scalar_operator (type ScalarOperator)))
 	(use wove-file "./text.wove" (only c_byte c_text_fragment c_type_text c_cast c_i32_bias write_c_name c_decimal_digits
 			function_name_role parameter_name_role local_name_role temporary_name_role))
 
@@ -123,23 +123,30 @@
 		(returns bool)
 		(body
 			(return (bool.or (u32.eq (local kind) (u32 3))
-				(u32.lt (u32 0) (record.get (call binary_operator (local kind)) result))))))
+				(u32.lt (u32 0) (record.get (call scalar_operator (local kind)) result))))))
 
 	(fn
-		(:doc `Combine two already evaluated operands of the operator's exact type.
+		(:doc `Write an operator using already evaluated operands of its exact type.
 
 		To wrap, first bias the signed long long result by 2^31. A uint32_t
 		cast reduces it modulo 2^32. Subtract the bias in the wide signed
 		type, leaving an in-range value for the conversion back to i32.`)
-		write_binary
+		write_operator
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (expression ScalarExpression)
-			(operator BinaryOperator) (tree_base i32)
+			(operator ScalarOperator) (tree_base i32)
 			(output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let symbol (record.get (local operator) symbol))
 			(let wrapping (u32.eq (record.get (local operator) result) (u32 5)))
 			(let first (record.get (local expression) first))
+			(if
+				(:doc "Negate the single checked operand with C's logical not.")
+				(i32.eq (record.get (local operator) arity) (i32 1))
+				(then
+					(let cursor (call c_byte (borrow-mut (local output)) (local offset) (local symbol) (local writing)))
+					(return (call write_temporary_name (borrow-shared (local source)) (local first) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local writing)))))
 			(let second (record.get (slice.load (local nodes) (local first)) next_sibling))
 			(let-mut cursor (local offset))
 			(if
@@ -174,17 +181,23 @@
 	(fn
 		(:doc `Write a checked value using the temporaries already evaluated for its operands.`)
 		write_value
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (expression ScalarExpression) (tree_base i32)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (value_index i32) (tree_base i32)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
 			(expressions (shared-slice ScalarExpression)) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
+			(let expression (slice.load (local expressions) (local value_index)))
 			(let kind (record.get (local expression) kind))
-			(let operator (call binary_operator (local kind)))
+			(let operator (call scalar_operator (local kind)))
 			(if
-				(:doc "Binary operations use the left and right temporaries.")
+				(:doc "Short-circuit evaluation has already stored the result for this value.")
+				(record.get (local operator) short_circuit)
+				(then (return (call write_temporary_name (borrow-shared (local source)) (local value_index) (local tree_base)
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Eager operators use the temporaries for their operands.")
 				(u32.lt (u32 0) (record.get (local operator) result))
-				(then (return (call write_binary (borrow-shared (local source)) (borrow-shared (local nodes))
+				(then (return (call write_operator (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local expression) (local operator) (local tree_base) (borrow-mut (local output)) (local offset) (local writing)))))
 			(if
 				(:doc "Only calls need a C argument list.")
@@ -220,11 +233,65 @@
 			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))))
 
 	(fn
+		(:doc `Begin a typed temporary declaration and leave its initializer slot open.`)
+		write_temporary_declaration
+		(params (source (shared-slice u8)) (index i32) (tree_base i32) (type u32)
+			(output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let type_end (call c_type_text (borrow-mut (local output)) (local offset) (local type) (local writing)))
+			(let space (call c_byte (borrow-mut (local output)) (local type_end) (u8 32) (local writing)))
+			(let name_end (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
+				(borrow-mut (local output)) (local space) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local name_end) (u8 61) (local writing)))))
+
+	(fn
+		(:doc `Write the branch boundary after either operand of bool.and or bool.or.
+
+		After the left operand, initialize the result and guard evaluation
+		of the right. After the right, update the result inside the guard
+		and close the block. Both operands already have typed temporaries.`)
+		write_short_circuit_edge
+		(params (source (shared-slice u8)) (index i32) (parent i32) (tree_base i32)
+			(left bool) (symbol u8) (output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Declare the result at the left edge. The right edge assigns the same slot.")
+				(local left)
+				(then
+					(set (local cursor) (call write_temporary_declaration (borrow-shared (local source))
+						(local parent) (local tree_base) (u32 12) (borrow-mut (local output)) (local cursor) (local writing))))
+				(else
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source))
+						(local parent) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))))
+			(set (local cursor) (call write_temporary_name (borrow-shared (local source))
+				(local index) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
+			(if
+				(:doc "The right value is used before its guard closes.")
+				(bool.not (local left))
+				(then (return (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))))
+			(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 6) (local writing)))
+			(if
+				(:doc "Disjunction enters the right block when the left value is false.")
+				(u8.eq (local symbol) (u8 124))
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 33) (local writing)))))
+			(set (local cursor) (call write_temporary_name (borrow-shared (local source))
+				(local parent) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 123) (local writing)))))
+
+	(fn
 		(:doc `Evaluate nested values left to right before writing the enclosing statement.
 
-		Traverse the original expression tree in postorder. Calls, binary
-		expressions, and operands of binary expressions are evaluated once
-		into typed temporaries before their parent uses them.`)
+		Traverse the original expression tree in postorder. Materialize
+		nested calls and operators and each operator operand. For a
+		short-circuit operator, finish the left value before opening a
+		guard around the full right subtree. Even at the root, the guard
+		leaves a result temporary available to the statement writer.`)
 		write_nested_values
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (root i32) (tree_base i32)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
@@ -241,32 +308,42 @@
 					(let expression (slice.load (local expressions) (local index)))
 					(let first (record.get (local expression) first))
 					(if
-						(:doc "Visit the first child of an unvisited call or binary expression.")
+						(:doc "Visit the first child of an unvisited call or operator.")
 						(bool.and (local entering) (bool.not (i32.lt (local first) (i32 0))))
 						(then (set (local index) (local first)))
 						(else
 							(if
-								(:doc "The statement writer uses the completed root expression directly.")
+								(:doc "The root is ready as an expression or a completed short-circuit temporary.")
 								(i32.eq (local index) (local root))
 								(then (return (local cursor))))
 							(let node (slice.load (local nodes) (local index)))
-							(let parent (slice.load (local expressions) (record.get (local node) parent)))
+							(let parent_index (record.get (local node) parent))
+							(let parent (slice.load (local expressions) (local parent_index)))
+							(let parent_operator (call scalar_operator (record.get (local parent) kind)))
+							(let kind (record.get (local expression) kind))
+							(let operator (call scalar_operator (local kind)))
 							(if
-								(:doc "Save compound values and every binary operand before visiting its sibling.")
-								(bool.or (call requires_value_temporary (record.get (local expression) kind))
-									(u32.lt (u32 0) (record.get (call binary_operator (record.get (local parent) kind)) result)))
+								(:doc "Save an eager compound value or operator operand before moving to its sibling.")
+								(bool.and (bool.not (record.get (local operator) short_circuit))
+									(bool.or (u32.eq (local kind) (u32 3))
+										(bool.or (u32.lt (u32 0) (record.get (local operator) result))
+											(u32.lt (u32 0) (record.get (local parent_operator) result)))))
 								(then
-									(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor)
-										(record.get (local expression) type) (local writing)))
-									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))
-									(set (local cursor) (call write_temporary_name (borrow-shared (local source))
-										(local index) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
-									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))
+									(set (local cursor) (call write_temporary_declaration (borrow-shared (local source))
+										(local index) (local tree_base) (record.get (local expression) type)
+										(borrow-mut (local output)) (local cursor) (local writing)))
 									(set (local cursor) (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
-										(local expression) (local tree_base)
-										(borrow-shared (local functions)) (borrow-shared (local parameters))
+										(local index) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
 										(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
 									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))))
+							(if
+								(:doc "Open the right guard after the left value. Close it after the right value.")
+								(record.get (local parent_operator) short_circuit)
+								(then
+									(set (local cursor) (call write_short_circuit_edge (borrow-shared (local source))
+										(local index) (local parent_index) (local tree_base)
+										(i32.eq (local index) (record.get (local parent) first)) (record.get (local parent_operator) symbol)
+										(borrow-mut (local output)) (local cursor) (local writing)))))
 							(let sibling (record.get (local node) next_sibling))
 							(set (local entering) (bool.not (i32.lt (local sibling) (i32 0))))
 							(if
@@ -325,7 +402,7 @@
 								(local target) (local tree_base) (borrow-mut (local output)) (local cursor) (local writing)))
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))))))
 			(set (local cursor) (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local value) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local writing)))
 			(if
 				(:doc "Leave the loop before any body statement when the condition is false.")
@@ -495,7 +572,7 @@
 				(:doc "Include fixed-width types for helpers, compound bodies, or a wrapping expression in a lone return.")
 				(bool.or (i32.lt (i32 1) (local count))
 					(bool.or (bool.not (u32.eq (record.get (local first_statement) kind) (u32 7)))
-						(u32.eq (record.get (call binary_operator (record.get (local first_value) kind)) result) (u32 5))))
+						(u32.eq (record.get (call scalar_operator (record.get (local first_value) kind)) result) (u32 5))))
 				(then (set (local cursor)
 					(call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 0) (local writing)))))
 			(let-mut index (i32 0))
@@ -550,6 +627,7 @@
 		(:expect bootstrap.scalar_while (issue "https://github.com/wove-lang/wove/issues/75"))
 		(:expect bootstrap.unsigned_scalars (issue "https://github.com/wove-lang/wove/issues/77"))
 		(:expect bootstrap.unsigned_comparisons (issue "https://github.com/wove-lang/wove/issues/79"))
+		(:expect bootstrap.short_circuit (issue "https://github.com/wove-lang/wove/issues/83"))
 		emit_module
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (file i32) (view_start i32) (output (mut-slice u8)))
