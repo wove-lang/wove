@@ -68,6 +68,8 @@ NATIVE_WOVE_SOURCES = $(sort $(SOURCE_SCAN_MODULE) $(SOURCE_MODULE_READER) $(SOU
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
 	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
+PROCESS_MODULE := stage-2/io/process.wove
+PROCESS_CASES := tests/stage-2/process/cases.tsv
 CLANG_FIXTURES := tests/stage-2/clang
 CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
@@ -113,10 +115,10 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) stage-2/hashing/base16.wove $(BLAKE2B_SOURCES) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
-		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) \
+		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(PROCESS_MODULE) \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
-		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv
+		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv $(PROCESS_CASES)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/hashing" "$(HASHING_CASES)"
 
 # Run the standalone JSON utilities with the same manifest runner as the seed.
