@@ -40,6 +40,9 @@ void wvrt_slice_store_u8(void *wvrt_items, int32_t wvrt_length, int32_t wvrt_ind
 	uint8_t wvrt_value, wvrt_location wvrt_site);
 int64_t wvrt_int_convert(int64_t wvrt_value, int64_t wvrt_min, int64_t wvrt_max,
 	wvrt_location wvrt_site);
+uint8_t wvrt_int_to_u8(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+int32_t wvrt_int_to_i32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+uint32_t wvrt_int_to_u32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_i32_add_wrapping(int32_t wvrt_left, int32_t wvrt_right);
 int32_t wvrt_i32_sub_wrapping(int32_t wvrt_left, int32_t wvrt_right);
 uint32_t wvrt_u32_add_wrapping(uint32_t wvrt_left, uint32_t wvrt_right);

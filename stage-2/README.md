@@ -181,6 +181,14 @@ return their signed 32-bit result modulo 2^32. Each binary operand is
 evaluated once, left to right. Emitted C widens the arithmetic,
 reduces it to 32 bits as unsigned, and produces an in-range signed result.
 
+`(int.convert target value)` evaluates the integer operand once and
+preserves its numerical value when it fits the target `u8`, `i32`, or
+`u32`. A value outside the target range traps before the cast. The
+runtime diagnostic identifies the original file ID and half-open byte
+span of the conversion, including from a source subrange or an imported
+file. C emitted for conversions includes `wove_runtime.h` and links
+with the shared Wove C runtime.
+
 `(bool.and left right)` evaluates the right operand when the left is true.
 `(bool.or left right)` evaluates it when the left is false. Both operands
 are type-checked as `bool`. Each operand that runs does so once, with the
