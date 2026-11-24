@@ -621,10 +621,12 @@ becomes `argv[0]` and a bare name uses `PATH`.
 
 The view length is the capture limit. The host bridge writes only the
 captured prefix, drains any excess stdout, and reaps the child. A zero-length
-view can still report overflow. Stdin and stderr are inherited. The status
-is the normal exit code, 128 plus the terminating signal, or -1 on host
-failure. Consumers link [the POSIX bridge](io/process.c) and make its header
-available to the generated C translation unit.
+view can still report overflow. On hosts without `pipe2`, the bridge opens
+a private FIFO under `TMPDIR` or `/tmp` and removes it before launch. Stdin
+and stderr are inherited. The status is the normal exit code, 128 plus the
+terminating signal, or -1 on host failure. Consumers link
+[the POSIX bridge](io/process.c) and make its header available to the
+generated C translation unit.
 
 ## Native single-source compilation
 

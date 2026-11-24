@@ -1,6 +1,11 @@
 // Copyright (c) 2026 wove contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#elif defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "process.h"
@@ -11,8 +16,13 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#if defined(__APPLE__)
+#include <Availability.h>
+#endif
 
 extern char **environ;
 
@@ -52,23 +62,77 @@ static char **make_argv(const uint8_t *program, size_t program_length,
 	return argv;
 }
 
+// Open a private FIFO with close-on-exec already set, then remove its filesystem names.
+static bool open_capture_fifo(int descriptors[2]) {
+	const char *root = getenv("TMPDIR");
+	if (root == NULL || root[0] == '\0') { root = "/tmp"; }
+	static const char directory[] = "/wove-capture.XXXXXX";
+	static const char name[] = "/stdout";
+	const size_t length = strlen(root);
+	if (length > SIZE_MAX - sizeof directory - sizeof name) { return false; }
+	char *path = malloc(length + sizeof directory - 1 + sizeof name);
+	if (path == NULL) { return false; }
+	memcpy(path, root, length);
+	memcpy(path + length, directory, sizeof directory);
+	// A private directory keeps both FIFO opens tied to this capture.
+	if (mkdtemp(path) == NULL) {
+		free(path);
+		return false;
+	}
+	char *tail = path + length + sizeof directory - 1;
+	memcpy(tail, name, sizeof name);
+	int reader = -1;
+	int writer = -1;
+	bool unlinked = false;
+	// Open the reader first, temporarily nonblocking, so the writer can attach.
+	if (mkfifo(path, S_IRUSR | S_IWUSR) == 0) {
+		reader = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (reader >= 0) { writer = open(path, O_WRONLY | O_CLOEXEC); }
+		unlinked = unlink(path) == 0;
+	}
+	*tail = '\0';
+	const bool removed = rmdir(path) == 0;
+	free(path);
+	// After both opens, restore blocking reads without changing descriptor flags.
+	if (writer >= 0 && unlinked && removed && fcntl(reader, F_SETFL, 0) == 0) {
+		descriptors[0] = reader;
+		descriptors[1] = writer;
+		return true;
+	}
+	if (writer >= 0) { close(writer); }
+	if (reader >= 0) { close(reader); }
+	return false;
+}
+
+// Create close-on-exec descriptors without a separate file-descriptor flag update.
+static bool create_capture_pipe(int descriptors[2]) {
+#if defined(__linux__)
+	if (pipe2(descriptors, O_CLOEXEC) == 0) { return true; }
+	if (errno != ENOSYS) { return false; }
+#elif defined(__APPLE__) && defined(__MAC_27_0) && defined(__clang__)
+	// A newer SDK can still target a macOS release without pipe2.
+	if (__builtin_available(macOS 27, *)) {
+		if (pipe2(descriptors, O_CLOEXEC) == 0) { return true; }
+		if (errno != ENOSYS) { return false; }
+	}
+#endif
+	return open_capture_fifo(descriptors);
+}
+
 // Put both endpoints above stdio so the child can always duplicate then close them.
 static bool open_capture_pipe(int descriptors[2]) {
-	if (pipe(descriptors) != 0) { return false; }
-	// Keep each original endpoint close-on-exec outside the explicit stdout mapping.
-	for (size_t index = 0; index < 2; ++index) {
+	if (!create_capture_pipe(descriptors)) { return false; }
+	size_t index = 0;
+	// Relocation also creates close-on-exec descriptors atomically.
+	for (; index < 2; ++index) {
 		const int endpoint = descriptors[index];
-		// Relocate an endpoint when the parent entered with a closed standard descriptor.
-		if (endpoint <= STDERR_FILENO) {
-			const int replacement = fcntl(endpoint, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
-			if (replacement < 0) { break; }
-			descriptors[index] = replacement;
-			if (close(endpoint) != 0) { break; }
-		} else if (fcntl(endpoint, F_SETFD, FD_CLOEXEC) != 0) {
-			break;
-		}
-		if (index == 1) { return true; }
+		if (endpoint > STDERR_FILENO) { continue; }
+		const int replacement = fcntl(endpoint, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+		if (replacement < 0) { break; }
+		descriptors[index] = replacement;
+		if (close(endpoint) != 0) { break; }
 	}
+	if (index == 2) { return true; }
 	close(descriptors[0]);
 	close(descriptors[1]);
 	return false;

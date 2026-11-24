@@ -69,7 +69,9 @@ NATIVE_WOVE_SOURCES = $(sort $(SOURCE_SCAN_MODULE) $(SOURCE_MODULE_READER) $(SOU
 	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
 PROCESS_MODULE := stage-2/io/process.wove
-PROCESS_CASES := tests/stage-2/process/cases.tsv
+PROCESS_FIXTURES := tests/stage-2/process
+PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
+PROCESS_INHERITANCE_TEST := $(STAGE2)/process/inheritance
 CLANG_FIXTURES := tests/stage-2/clang
 CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
@@ -90,7 +92,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	}' "$(OWNERSHIP_CASES)")
 
 .PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
-.PHONY: test-stage-2-gcc test-stage-2-gcc-live test-stage-2-blake2b test-stage-2-native
+.PHONY: test-stage-2-gcc test-stage-2-gcc-live test-stage-2-blake2b test-stage-2-native test-stage-2-process
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -105,7 +107,7 @@ test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native
+test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -143,6 +145,17 @@ test-stage-2-native: $(NATIVE_COMPILER)
 # Exercise the project loader with the checked-in config and standalone cases.
 test-stage-2-config: $(CONFIG_PROGRAM)
 	$(PYTHON) "$(CONFIG_FIXTURES)/check.py" "$(CONFIG_PROGRAM)" "$(CONFIG_FIXTURES)/cases.tsv"
+
+# Interleave an unrelated native launch with capture descriptor creation.
+test-stage-2-process: $(PROCESS_INHERITANCE_TEST)
+	TMPDIR="$(abspath $(STAGE2)/process)" "$(PROCESS_INHERITANCE_TEST)"
+
+$(PROCESS_INHERITANCE_TEST).o: stage-2/io/process.c stage-2/io/process.h
+	mkdir -p "$(@D)"
+	$(CLANG) -std=c11 $(CFLAGS) -Dpipe=wove_test_pipe -Dpipe2=wove_test_pipe2 -Dopen=wove_test_open -c "$<" -o "$@"
+
+$(PROCESS_INHERITANCE_TEST): $(PROCESS_FIXTURES)/inheritance.c $(PROCESS_INHERITANCE_TEST).o stage-2/io/process.h
+	$(CLANG) -std=c11 $(CFLAGS) -I stage-2/io $(filter-out %.h,$^) -o "$@"
 
 # Check generated C input and captured JSON separately from native command launching.
 test-stage-2-clang: $(AST_PROBE) $(CLANG_TEMPLATE)
