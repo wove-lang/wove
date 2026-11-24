@@ -26,8 +26,9 @@
 #define form_parts wv_seed_fn_57
 #define read_module wv_seed_fn_66
 #define emit_module wv_seed_fn_77
-#define resolve_graph wv_seed_fn_134
-#define inspect_callers wv_seed_fn_144
+#define resolve_graph wv_seed_fn_90
+#define inspect_callers wv_seed_fn_148
+#define run_scalar_graph wv_seed_fn_161
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -38,14 +39,15 @@ typedef wv_seed_record_8 FormParts;
 typedef wv_seed_record_9 SelectedDeclaration;
 typedef wv_seed_record_10 ModuleRead;
 typedef wv_seed_record_12 EmitResult;
-typedef wv_seed_record_22 GraphModule;
-typedef wv_seed_record_23 GraphBinding;
-typedef wv_seed_record_24 GraphUse;
-typedef wv_seed_record_25 GraphSelector;
-typedef wv_seed_record_26 GraphResult;
-typedef wv_seed_record_17 CallSite;
-typedef wv_seed_record_18 SuppliedFile;
-typedef wv_seed_record_30 CallerInspection;
+typedef wv_seed_record_13 GraphModule;
+typedef wv_seed_record_14 GraphBinding;
+typedef wv_seed_record_15 GraphUse;
+typedef wv_seed_record_16 GraphSelector;
+typedef wv_seed_record_17 GraphResult;
+typedef wv_seed_record_26 CallSite;
+typedef wv_seed_record_20 SuppliedFile;
+typedef wv_seed_record_32 CallerInspection;
+typedef wv_seed_record_36 GraphOutput;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -617,31 +619,50 @@ static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t ca
 	return status;
 }
 
-// Serialize an original function identity and spelling from its checked declaration row.
-static void write_function_ref(const char *tag, wvrt_slice input, wvrt_slice nodes, int32_t file, int32_t declaration) {
-	const SourceNode *rows = nodes.wvrt_items;
-	const FormParts parts = form_parts(input, nodes, rows[declaration]);
+typedef struct {
+	wvrt_slice bytes;
+	wvrt_slice nodes;
+	const SuppliedFile *files;
+} CallerSources;
+
+// Recover a name from its checked declaration row. A graph endpoint selects its own source.
+static void write_function_ref(const char *tag, CallerSources source, int32_t file, int32_t declaration) {
+	wvrt_array *storage = NULL;
+	// The graph supplies canonical file rows plus original local declaration indices.
+	if (source.files != NULL) {
+		const SuppliedFile input = source.files[file];
+		const wvrt_location site = {__FILE__, __LINE__, 1};
+		source.bytes = wvrt_slice_range_u8(source.bytes.wvrt_items, source.bytes.wvrt_length,
+			input.wv_field_3, input.wv_field_4, site);
+		FormCheck checked;
+		storage = checked_source_tree(source.bytes, &checked);
+		source.nodes = (wvrt_slice){storage->wvrt_items, storage->wvrt_length, sizeof(SourceNode)};
+	}
+	const SourceNode *rows = source.nodes.wvrt_items;
+	const FormParts parts = form_parts(source.bytes, source.nodes, rows[declaration]);
 	const SourceNode name = rows[parts.wv_field_2];
 	const int32_t start = name.wv_field_1;
 	const int width = (int)(name.wv_field_2 - start);
 	printf("(%s %" PRId32 " %" PRId32 " %.*s)", tag, file, declaration,
-		width, (const char *)input.wvrt_items + start);
+		width, (const char *)source.bytes.wvrt_items + start);
+	wvrt_array_drop(storage);
 }
 
 // Render a checked callers list as a metadata prefix on the inspected declaration.
-static void write_callers(wvrt_slice input, wvrt_slice nodes, CallerInspection result, const CallSite *rows) {
+static void write_callers(CallerSources source, int32_t file, int32_t declaration, int32_t count,
+		const CallSite *rows) {
 	fputs("(declaration\n\t(:callers", stdout);
 	// Render every call row in source order, with original declaration identities and offsets.
-	for (int32_t i = 0; i < result.wv_field_1; ++i) {
+	for (int32_t i = 0; i < count; ++i) {
 		const CallSite site = rows[i];
 		fputs("\n\t\t(call-site ", stdout);
-		write_function_ref("caller", input, nodes, site.wv_field_0, site.wv_field_1);
+		write_function_ref("caller", source, site.wv_field_0, site.wv_field_1);
 		fputc(' ', stdout);
-		write_function_ref("callee", input, nodes, site.wv_field_2, site.wv_field_3);
+		write_function_ref("callee", source, site.wv_field_2, site.wv_field_3);
 		printf(" (span %" PRId32 " %" PRId32 " %" PRId32 "))", site.wv_field_0, site.wv_field_4, site.wv_field_5);
 	}
 	fputs(")\n\t", stdout);
-	write_function_ref("identity", input, nodes, 0, result.wv_field_0);
+	write_function_ref("identity", source, file, declaration);
 	fputs(")\n", stdout);
 }
 
@@ -677,7 +698,8 @@ static int dump_callers(wvrt_slice parent, wvrt_slice input, int32_t start, cons
 		} else {
 			write_span(parent, start, (uint32_t)count, result.wv_field_2, result.wv_field_3, result.wv_field_4);
 			if (result.wv_field_4 == 0) {
-				write_callers(input, source.nodes, result, storage->wvrt_items);
+				write_callers((CallerSources){input, source.nodes, NULL}, result.wv_field_5,
+					result.wv_field_0, count, storage->wvrt_items);
 				status = EXIT_SUCCESS;
 			}
 		}
@@ -797,62 +819,137 @@ static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t
 	}
 }
 
-// Resolve a packed graph with optional scratch limits and emit stable fixture rows.
-static int graph_mode(int argc, char **argv) {
-	int32_t entry;
-	int32_t capacity;
-	if (argc < 7 || (argc - 4) % 3 != 0 || !read_offset(argv[2], &entry) || !read_offset(argv[3], &capacity)) {
-		fputs("usage: source_scan --graph ENTRY CAPACITY (IDENTITY PATH FILE)...\n", stderr);
-		return EXIT_FAILURE;
+// Report a graph diagnostic in the original file's own byte and coordinate space.
+static void write_graph_error(wvrt_slice arena, const SuppliedFile *files, uint32_t error,
+		int32_t file, int32_t start, int32_t end) {
+	// Path row failures can occur before there is a source file for the diagnostic.
+	if (file < 0) {
+		printf("error %" PRIu32 " -1 0 0 0 0\n", error);
+		return;
 	}
-	const int32_t count = (int32_t)((argc - 4) / 3);
-	wvrt_array *file_storage = wvrt_array_new(count, sizeof(SuppliedFile), _Alignof(SuppliedFile), (wvrt_location){__FILE__, __LINE__, 1});
-	SuppliedFile *files = file_storage->wvrt_items;
-	uint8_t *arena = NULL;
-	int32_t length = 0;
-	if (!read_graph_files(argv + 4, files, count, &arena, &length)) {
-		fputs("could not load supplied graph\n", stderr);
-		free(arena);
-		wvrt_array_drop(file_storage);
+	const SuppliedFile row = files[file];
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	const wvrt_slice source = wvrt_slice_range_u8(arena.wvrt_items, arena.wvrt_length, row.wv_field_3, row.wv_field_4, site);
+	const wv_seed_record_2 position = source_position(source, 0, start);
+	printf("error %" PRIu32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRIu32 " %" PRIu32 "\n",
+		error, file, start, end, position.wv_field_0, position.wv_field_1);
+}
+
+// Compile or inspect a resolved graph and check that the chosen destination remains bounded.
+static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice modules, wvrt_slice bindings,
+		int32_t root, int32_t query, const char *name, int32_t capacity) {
+	const bool emit = query < 0;
+	const int32_t byte_capacity = emit ? capacity : 0;
+	const int32_t site_capacity = emit ? 0 : capacity;
+	uint8_t *bytes = guarded_output(byte_capacity);
+	if (bytes == NULL) {
 		return EXIT_FAILURE;
 	}
 	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_array *storage = wvrt_array_new(site_capacity, sizeof(CallSite), _Alignof(CallSite), site);
+	unsigned char *sites = storage->wvrt_items;
+	const size_t site_bytes = (size_t)site_capacity * sizeof(CallSite);
+	memset(sites, 0xa5, site_bytes);
+	const GraphOutput result = run_scalar_graph(arena, files, modules, bindings, root, query,
+		(wvrt_slice){name, (int32_t)strlen(name), sizeof(uint8_t)},
+		(wvrt_mut_slice){bytes + 1, byte_capacity, sizeof(uint8_t)},
+		(wvrt_mut_slice){sites, site_capacity, sizeof(CallSite)});
+	const int32_t written = result.wv_field_0;
+	const int32_t byte_count = emit ? written : 0;
+	const int32_t site_count = emit ? 0 : written;
+	int status = EXIT_FAILURE;
+	// Inspect the output canaries before publishing either a result or its diagnostic.
+	if (!output_intact(bytes, byte_capacity, byte_count) || site_count < 0 || site_count > site_capacity) {
+		fputs("scalar graph result exceeded its output view\n", stderr);
+	} else {
+		size_t offset = (size_t)site_count * sizeof(CallSite);
+		while (offset < site_bytes && sites[offset] == 0xa5) {
+			++offset;
+		}
+		if (offset != site_bytes) {
+			fputs("scalar graph modified unused caller rows\n", stderr);
+		} else if (result.wv_field_5 != 0) {
+			write_graph_error(arena, files.wvrt_items, result.wv_field_5, result.wv_field_2,
+				result.wv_field_3, result.wv_field_4);
+		} else {
+			printf("ok %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
+				written, result.wv_field_2, result.wv_field_3, result.wv_field_4);
+			if (emit) {
+				status = fwrite(bytes + 1, 1, (size_t)written, stdout) == (size_t)written ? EXIT_SUCCESS : EXIT_FAILURE;
+			} else {
+				write_callers((CallerSources){arena, {0}, files.wvrt_items}, result.wv_field_2,
+					result.wv_field_1, written, storage->wvrt_items);
+				status = EXIT_SUCCESS;
+			}
+		}
+	}
+	wvrt_array_drop(storage);
+	free(bytes);
+	return status;
+}
+
+// Resolve a supplied graph before exposing its bindings, compiled C, or caller metadata.
+static int graph_mode(int argc, char **argv) {
+	const bool emit = strcmp(argv[1], "--emit-graph") == 0;
+	const bool inspect = strcmp(argv[1], "--graph-callers") == 0;
+	const int first_file = inspect ? 7 : emit ? 5 : 4;
+	int32_t entry;
+	int32_t capacity;
+	int32_t output = 0;
+	int32_t query = -1;
+	// The fixture supplies graph scratch capacity and an independent result limit for each consumer.
+	if (argc < first_file + 3 || (argc - first_file) % 3 != 0 ||
+			!read_offset(argv[2], &entry) || !read_offset(argv[3], &capacity) ||
+			((emit || inspect) && !read_offset(argv[first_file - 1], &output)) ||
+			(inspect && !read_offset(argv[4], &query))) {
+		fputs("usage: source_scan --graph ENTRY SCRATCH (IDENTITY PATH FILE)...\n"
+			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n"
+			"       source_scan --graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n", stderr);
+		return EXIT_FAILURE;
+	}
+	const int32_t count = (int32_t)((argc - first_file) / 3);
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_array *file_storage = wvrt_array_new(count, sizeof(SuppliedFile), _Alignof(SuppliedFile), site);
+	SuppliedFile *files = file_storage->wvrt_items;
+	uint8_t *bytes = NULL;
+	int32_t length = 0;
+	// Read original bytes once, then give Wove the supplied virtual identities and views.
+	if (!read_graph_files(argv + first_file, files, count, &bytes, &length)) {
+		fputs("could not load supplied graph\n", stderr);
+		free(bytes);
+		wvrt_array_drop(file_storage);
+		return EXIT_FAILURE;
+	}
+	const wvrt_slice arena = {bytes, length, sizeof(uint8_t)};
+	const wvrt_slice supplied = {files, count, sizeof(SuppliedFile)};
 	wvrt_array *modules = wvrt_array_new(count, sizeof(GraphModule), _Alignof(GraphModule), site);
 	wvrt_array *bindings = wvrt_array_new(capacity, sizeof(GraphBinding), _Alignof(GraphBinding), site);
 	wvrt_array *uses = wvrt_array_new(capacity, sizeof(GraphUse), _Alignof(GraphUse), site);
 	wvrt_array *selectors = wvrt_array_new(capacity, sizeof(GraphSelector), _Alignof(GraphSelector), site);
-	const GraphResult result = resolve_graph(
-		(wvrt_slice){arena, length, sizeof(uint8_t)},
-		(wvrt_slice){files, count, sizeof(SuppliedFile)}, entry,
+	const GraphResult result = resolve_graph(arena, supplied, entry,
 		(wvrt_mut_slice){modules->wvrt_items, count, sizeof(GraphModule)},
 		(wvrt_mut_slice){bindings->wvrt_items, capacity, sizeof(GraphBinding)},
 		(wvrt_mut_slice){uses->wvrt_items, capacity, sizeof(GraphUse)},
 		(wvrt_mut_slice){selectors->wvrt_items, capacity, sizeof(GraphSelector)});
-	const uint32_t error = result.wv_field_5;
-	// Report offsets and coordinates in the diagnostic file's own original view.
-	if (error != 0) {
-		const int32_t file = result.wv_field_2;
-		const int32_t start = result.wv_field_3;
-		const int32_t end = result.wv_field_4;
-		if (file >= 0) {
-			const SuppliedFile row = files[file];
-			const wvrt_slice source = wvrt_slice_range_u8(arena, length, row.wv_field_3, row.wv_field_4, site);
-			const wv_seed_record_2 position = source_position(source, 0, start);
-			printf("error %" PRIu32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRIu32 " %" PRIu32 "\n",
-				error, file, start, end, position.wv_field_0, position.wv_field_1);
-		} else {
-			printf("error %" PRIu32 " -1 0 0 0 0\n", error);
-		}
+	int status = EXIT_FAILURE;
+	// Every consumer requires successful import selection and canonical binding resolution.
+	if (result.wv_field_5 != 0) {
+		write_graph_error(arena, files, result.wv_field_5, result.wv_field_2, result.wv_field_3, result.wv_field_4);
+	} else if (emit || inspect) {
+		status = finish_graph(arena, supplied, (wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},
+			(wvrt_slice){bindings->wvrt_items, result.wv_field_1, sizeof(GraphBinding)}, files[entry].wv_field_0,
+			query, inspect ? argv[5] : "", output);
 	} else {
-		write_graph(arena, files, count, modules->wvrt_items, bindings->wvrt_items, result);
+		write_graph(bytes, files, count, modules->wvrt_items, bindings->wvrt_items, result);
+		status = EXIT_SUCCESS;
 	}
 	wvrt_array_drop(selectors);
 	wvrt_array_drop(uses);
 	wvrt_array_drop(bindings);
 	wvrt_array_drop(modules);
 	wvrt_array_drop(file_storage);
-	free(arena);
-	return error == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+	free(bytes);
+	return status;
 }
 
 // Supply a whole file or one checked view to the same seed-built executable.
@@ -923,7 +1020,9 @@ static int source_mode(int argc, char **argv) {
 // Exercise complete inputs and checked views into a larger buffer.
 int main(int argc, char **argv) {
 	if (argc > 1) {
-		return strcmp(argv[1], "--graph") == 0 ? graph_mode(argc, argv) : source_mode(argc, argv);
+		const bool graph = strcmp(argv[1], "--graph") == 0 || strcmp(argv[1], "--emit-graph") == 0 ||
+			strcmp(argv[1], "--graph-callers") == 0;
+		return graph ? graph_mode(argc, argv) : source_mode(argc, argv);
 	}
 	// Each complete input supplies its own logical byte length.
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
