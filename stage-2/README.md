@@ -13,8 +13,15 @@ Each `Token` carries a `u32` kind and an `i32` half-open span, `[start, end)`,
 relative to the supplied slice. The scanner skips ASCII space, tab, carriage
 return, and newline. A bare atom stops at whitespace, a parenthesis, a
 semicolon, or a double quote. Atom kind is 1, opening and closing parenthesis
-kinds are 40 and 41, and unsupported delimiters consume one byte with kind 3.
-End of input has kind 0 and both offsets equal to the slice length.
+kinds are 40 and 41, and a lone semicolon or double quote consumes one byte
+with lexical error kind 3. End of input has kind 0 and both offsets equal to
+the slice length.
+
+A `;;` line comment is a raw token of kind 59. Its span includes both
+semicolons and all comment text up to CR, LF, or the end of the view. The
+line ending is available to the next scan as whitespace, and offsets
+preserve the original bytes under LF, CRLF, and lone CR. A caller can skip
+kind 59 to walk the significant tokens.
 
 The first-byte helpers `source_offset` and `source_kind` find the first
 significant byte from cursor zero. `source_kind` returns 0 at EOF, 40 or 41

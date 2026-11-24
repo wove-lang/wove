@@ -12,7 +12,7 @@
 			;; Accept horizontal space and either byte in a line ending.
 			(return (bool.or
 				(bool.or (u8.eq (local byte) (u8 32)) (u8.eq (local byte) (u8 9)))
-				(bool.or (u8.eq (local byte) (u8 13)) (u8.eq (local byte) (u8 10)))))))
+				(call is_line_ending (local byte))))))
 
 	;; Parentheses are both atom boundaries and one-byte tokens.
 	(fn is_parenthesis
@@ -21,8 +21,8 @@
 		(body
 			(return (bool.or (u8.eq (local byte) (u8 40)) (u8.eq (local byte) (u8 41))))))
 
-	;; Reserve semicolon and double quote as delimiters for later lexer forms.
-	(fn is_unsupported_delimiter
+	;; Leave comment markers and quote delimiters for their own token scan.
+	(fn is_semicolon_or_quote
 		(params (byte u8))
 		(returns bool)
 		(body
@@ -85,21 +85,48 @@
 							(call is_whitespace (local byte))
 							(bool.or
 								(call is_parenthesis (local byte))
-								(call is_unsupported_delimiter (local byte))))
+								(call is_semicolon_or_quote (local byte))))
 						(then (return (local cursor))))
 					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
 			(return (local cursor))))
 
-	;; Scan one token and return its half-open byte span in the supplied view.
+	;; Share the physical newline boundary between whitespace and comments.
+	(fn is_line_ending
+		(params (byte u8))
+		(returns bool)
+		(body
+			(return (bool.or (u8.eq (local byte) (u8 13)) (u8.eq (local byte) (u8 10))))))
+
+	;; Scan comment text from just past the opening semicolons.
+	(fn line_comment_end
+		(params (source (shared-slice u8)) (text_start i32))
+		(returns i32)
+		(body
+			(let length (slice.len (local source)))
+			(let-mut cursor (local text_start))
+			;; A comment can run to the end of the view, even with no text.
+			(while (i32.lt (local cursor) (local length))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					;; Leave the line ending outside the raw span for whitespace scanning.
+					(if (call is_line_ending (local byte))
+						(then (return (local cursor))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(return (local cursor))))
+
+	;; Scan one raw token and return its half-open byte span in the supplied view.
 	(fn scan_token
 		(params (source (shared-slice u8)) (cursor i32))
 		(returns Token)
 		(expect lexer.token_span
 			(issue "https://github.com/wove-lang/wove/issues/29"))
+		(expect lexer.line_comment
+			(issue "https://github.com/wove-lang/wove/issues/30"))
 		(body
 			(let start (call skip_whitespace (borrow-shared (local source)) (local cursor)))
+			(let length (slice.len (local source)))
 			;; Only the exact end cursor can return EOF without another checked load.
-			(if (i32.eq (local start) (slice.len (local source)))
+			(if (i32.eq (local start) (local length))
 				(then
 					(return (record.make Token (kind (u32 0)) (start (local start)) (end (local start))))))
 			(let byte (slice.load (local source) (local start)))
@@ -111,8 +138,18 @@
 						(kind (int.convert u32 (local byte)))
 						(start (local start))
 						(end (local next))))))
-			;; Consume one unsupported delimiter so the next scan can make progress.
-			(if (call is_unsupported_delimiter (local byte))
+			;; Recognize a comment opener only when both semicolons are inside this view.
+			(if (bool.and
+					(u8.eq (local byte) (u8 59))
+					(bool.and
+						(i32.lt (local next) (local length))
+						(u8.eq (slice.load (local source) (local next)) (u8 59))))
+				(then
+					(let text_start (i32.add.wrapping (local next) (i32 1)))
+					(let end (call line_comment_end (borrow-shared (local source)) (local text_start)))
+					(return (record.make Token (kind (u32 59)) (start (local start)) (end (local end))))))
+			;; Consume a lone semicolon or quote so the next scan can make progress.
+			(if (call is_semicolon_or_quote (local byte))
 				(then
 					(return (record.make Token (kind (u32 3)) (start (local start)) (end (local next))))))
 			(let end (call bare_atom_end (borrow-shared (local source)) (local next)))
