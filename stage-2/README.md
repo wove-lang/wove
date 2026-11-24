@@ -169,6 +169,12 @@ before the error. Earlier tree errors keep their original spans and codes.
 | 20 | Expected a declaration form | The offending ordinary operand |
 | 21 | Invalid selection directive | The offending directive or predicate |
 
+A `disabled` group can appear among module declarations, block statements,
+or bridge members. It can hold a multiline `:doc` alone or retain forms
+alongside its metadata. The checked source tree and renderer preserve the
+group in place. Semantic traversal skips the entire group before selection,
+name lookup, type checking, C emission, and caller inspection.
+
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices. A value-returning function must
 return its declared type on every path. Helpers can accept and return `i32`, `u8`,
