@@ -7,6 +7,8 @@ CFLAGS ?= -O2 -Wall -Wextra
 BUILD_DIR ?= build
 
 STAGE1 := $(BUILD_DIR)/stage-1
+STAGE2 := $(BUILD_DIR)/stage-2
+SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
 RUNTIME_HEADER := runtime/wove_runtime.h
@@ -19,7 +21,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
 
-.PHONY: all stage-1 test
+.PHONY: all stage-1 stage-2 test test-stage-2
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -27,8 +29,22 @@ all: stage-1
 
 stage-1: $(STAGE1)/ownership.transfer
 
-test: stage-1 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
+stage-2: $(SOURCE_SCAN)
+
+test-stage-2: stage-2
+	"$(SOURCE_SCAN)"
+
+test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
+
+# Translate the canonical Stage 2 scanner directly with the Python seed.
+$(STAGE2)/source_scan.c: stage-2/source_scan.wove $(SEED)
+	mkdir -p "$(@D)"
+	$(PYTHON) stage-1/wovec.py "$<" > "$@"
+
+# Supply source slices and check full-width results in the fixture executable.
+$(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(STAGE2)/source_scan.c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE2)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
