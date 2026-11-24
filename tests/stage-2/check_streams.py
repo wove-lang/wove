@@ -284,18 +284,23 @@ def check_compilations(executable, directory, manifest, clang):
 
 		generated.write_bytes(emitted)
 		command = [*clang, "-I", "runtime", str(generated), runtime, "-o", str(program)]
+		arguments = ()
 		# Rename the emitted entry when a native probe needs its own main.
 		if mode == "probe":
 			probe, value = value.split(maxsplit=1)
+			command.extend(("-Dmain=wove_emitted_main", probe))
+		elif mode == "probe-trap":
+			probe, argument, value = value.split(maxsplit=2)
+			arguments = (argument,)
 			command.extend(("-Dmain=wove_emitted_main", probe))
 		elif mode == "value":
 			command.extend(("-Dmain=wove_emitted_main", str(harness)))
 		else:
 			assert mode in ("exit", "trap"), label
 		subprocess.run(command, check=True, timeout=30)
-		result = subprocess.run([program], capture_output=True, check=False, timeout=30)
+		result = subprocess.run([program, *arguments], capture_output=True, check=False, timeout=30)
 		# Trap fixtures provide an exact runtime diagnostic at the originating site.
-		if mode == "trap":
+		if mode in ("trap", "probe-trap"):
 			assert result.returncode == 1 and not result.stdout, (label, result)
 			assert result.stderr == (value + "\n").encode(), (label, result.stderr)
 			continue

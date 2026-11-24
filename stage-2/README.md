@@ -189,6 +189,15 @@ span of the conversion, including from a source subrange or an imported
 file. C emitted for conversions includes `wove_runtime.h` and links
 with the shared Wove C runtime.
 
+Helpers can take `(shared-slice u8)` parameters using the runtime's
+`wvrt_slice` ABI. Pass a named view to another helper with
+`(borrow-shared (local data))`. `(slice.len (local data))` returns its
+signed `i32` length. `(slice.load (local data) index)` takes an exact
+`i32` index and returns a `u8`. A negative index or an index at or beyond
+the length traps before reading the slice, with the original file ID and
+half-open byte span of the load. C emitted for a shared view includes
+`wove_runtime.h`. Link the shared runtime when the code uses a checked load.
+
 `(bool.and left right)` evaluates the right operand when the left is true.
 `(bool.or left right)` evaluates it when the left is false. Both operands
 are type-checked as `bool`. Each operand that runs does so once, with the
