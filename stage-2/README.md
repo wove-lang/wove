@@ -179,6 +179,12 @@ initializer exactly once in the order written. Supply every field once
 with its declared type. A local stores the result by value, and
 `(record.get (local tok) start)` reads a field with its exact type.
 
+Functions can take and return records declared in their defining module.
+Calls pass these values by copy, and a caller retains its original local.
+An argument or return must match the defining record identity, so two
+types with the same fields remain distinct. Record layout declarations
+can follow the signatures that refer to them.
+
 `(bool true)` and `(bool false)` are scalar literals.
 `i32.eq` and `i32.lt` compare signed operands. `u8.eq`, `u8.lt`,
 `u32.eq`, and `u32.lt` compare unsigned operands. Each comparison

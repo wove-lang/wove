@@ -95,6 +95,71 @@
 			(return (i32 -1))))
 
 	(fn
+		(:doc `Resolve a scalar or file-local record by the signature's original type spelling.`)
+		copyable_type
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(records (shared-slice ScalarRecord)) (file i32) (index i32))
+		(returns u32)
+		(body
+			(let scalar (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local index)))
+			(if
+				(:doc "The primitive types keep their original codes.")
+				(u32.lt (u32 0) (local scalar))
+				(then (return (local scalar))))
+			(let name (slice.load (local nodes) (local index)))
+			(if
+				(:doc "A compound type or a quoted name cannot name a local record.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+				(then (return (u32 0))))
+			(let found (call find_record (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local file) (local name)))
+			(if
+				(:doc "Only active definitions from this file resolve in a signature.")
+				(i32.lt (local found) (i32 0))
+				(then (return (u32 0))))
+			(return (call record_type (local found)))))
+
+	(fn
+		(:doc `Read a copyable parameter type or byte slice, retaining any type operand diagnostic.`)
+		read_parameter_type
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(records (shared-slice ScalarRecord)) (file i32) (index i32))
+		(returns EntryRead)
+		(body
+			(let node (slice.load (local nodes) (local index)))
+			(let value (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local file) (local index)))
+			(if
+				(:doc "A value parameter keeps its exact scalar or record type.")
+				(u32.lt (u32 0) (local value))
+				(then (return (call entry_at (local node) (int.convert i32 (local value)) (u32 0)))))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local parts) head)))
+			(if
+				(:doc "Both access modes have distinct parameter type codes.")
+				(bool.not (call is_byte_view_type (local type)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 23)))))
+			(let view (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local type) (u32 23)))
+			(if
+				(:doc "Forward a malformed view or invalid metadata at its original span.")
+				(u32.lt (u32 0) (record.get (local view) error))
+				(then (return (local view))))
+			(let element (record.get (local view) operand))
+			(if
+				(:doc "This slice type needs exactly one element type.")
+				(bool.or (i32.lt (local element) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local element)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 23)))))
+			(if
+				(:doc "Both byte-slice access modes require u8 elements.")
+				(bool.not (u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element)) (u32 10)))
+				(then (return (call entry_at (slice.load (local nodes) (local element)) (i32 -1) (u32 23)))))
+			(return (call entry_at (local node) (int.convert i32 (local type)) (u32 0)))))
+
+
+	(fn
 		(:doc `Validate a named member form and return its single ordinary operand.`)
 		read_member_operand
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (member SourceNode))
@@ -235,4 +300,37 @@
 			(slice.store (local records) (local index)
 				(record.make ScalarRecord (name (local name)) (file (local file)) (identity (local identity))
 					(first (local first)) (count (local count))))
-			(return (call entry_at (local node) (i32.add.wrapping (local index) (i32 1)) (u32 0))))))
+			(return (call entry_at (local node) (i32.add.wrapping (local index) (i32 1)) (u32 0)))))
+
+	(fn
+		(:doc `Register every active type in a file before any of its signatures are read.
+
+		A graph supplies the file's tree base and the next available record
+		row. Single-file checking starts both positions at zero.`)
+		register_module_records
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(declarations (shared-slice SelectedDeclaration)) (count i32) (base i32)
+			(file i32) (module u32) (records (mut-slice ScalarRecord)) (start i32))
+		(returns EntryRead)
+		(body
+			(let-mut index (i32 0))
+			(let-mut next (local start))
+			(while
+				(:doc "Use the selected declarations in source order to preserve layout diagnostics.")
+				(i32.lt (local index) (local count))
+				(body
+					(let form (i32.add.wrapping (local base) (record.get (slice.load (local declarations) (local index)) node)))
+					(if
+						(:doc "Only struct declarations populate the type namespace.")
+						(u32.eq (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)) (u32 48))
+						(then
+							(let checked (call register_record (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local form) (local file) (local module) (borrow-mut (local records)) (local next)))
+							(if
+								(:doc "Preserve the original invalid type or field span.")
+								(u32.lt (u32 0) (record.get (local checked) error))
+								(then (return (local checked))))
+							(set (local next) (record.get (local checked) operand))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (record.make EntryRead (operand (local next)) (start (i32 0)) (end (i32 0))
+				(error (u32 0)) (related (i32 -1)))))))

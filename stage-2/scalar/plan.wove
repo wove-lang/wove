@@ -18,11 +18,11 @@
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "./records.wove"
-		(only declaration_kind register_record find_record record_type record_index is_record_type
+		(only declaration_kind register_module_records copyable_type read_parameter_type find_record record_type record_index is_record_type
 			find_member read_member_operand (type ScalarRecord)))
 	(use wove-file "./flow.wove" (only block_statement moved_owner after_block (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form read_statement scalar_type read_parameter_type decimal_scalar scalar_operator
+		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar scalar_operator
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name (type ScalarOperator) (type EntryRead) (type StatementRead)))
 
 	(struct ScalarFunction
@@ -67,10 +67,10 @@
 				(error (record.get (local error) error))))))
 
 	(fn
-		(:doc `Check the signature and body shape of one named scalar function.`)
+		(:doc `Check the signature and body shape of one named function.`)
 		read_signature
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
-			(name SourceNode) (entry bool))
+			(name SourceNode) (entry bool) (records (shared-slice ScalarRecord)) (file i32))
 		(returns ScalarSignature)
 		(body
 			(let params (record.get (local name) next_sibling))
@@ -92,7 +92,7 @@
 				(then (return (call signature_error (call entry_at (local params_node) (i32 -1) (u32 23))))))
 			(let result_node (record.get (local params_node) next_sibling))
 			(if
-				(:doc "Every function declares its exact scalar result type.")
+				(:doc "Every function declares its exact result type.")
 				(i32.lt (local result_node) (i32 0))
 				(then (return (call signature_error (call entry_at (local node) (i32 -1) (u32 23))))))
 			(let returns (slice.load (local nodes) (local result_node)))
@@ -108,9 +108,10 @@
 				(bool.or (i32.lt (local type_node) (i32 0))
 					(bool.not (i32.lt (record.get (slice.load (local nodes) (local type_node)) next_sibling) (i32 0))))
 				(then (return (call signature_error (call entry_at (local returns) (i32 -1) (u32 23))))))
-			(let result (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
+			(let result (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local file) (local type_node)))
 			(if
-				(:doc "Helpers can return any supported scalar, and main returns i32.")
+				(:doc "Helpers can return a scalar or a local record. Main returns i32.")
 				(bool.or (u32.eq (local result) (u32 0))
 					(bool.and (local entry) (bool.not (u32.eq (local result) (u32 5)))))
 				(then (return (call signature_error
@@ -164,10 +165,10 @@
 			(return (i32 -1))))
 
 	(fn
-		(:doc `Check each parameter's unique spelling, metadata, and exact scalar or byte slice type.`)
+		(:doc `Check each parameter's unique spelling, metadata, and exact type.`)
 		read_parameters
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32)
-			(parameters (mut-slice ScalarParameter)) (start i32))
+			(parameters (mut-slice ScalarParameter)) (start i32) (records (shared-slice ScalarRecord)) (file i32))
 		(returns EntryRead)
 		(body
 			(let-mut index (local first))
@@ -193,7 +194,8 @@
 						(then (return (record.make EntryRead (operand (i32 -1))
 							(start (record.get (local selection) start)) (end (record.get (local selection) end))
 							(error (record.get (local selection) error)) (related (i32 -1))))))
-					(let checked (call read_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+					(let checked (call read_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local file) (local operand)))
 					(if
 						(:doc "Keep unsupported types and malformed type syntax at their original spans.")
 						(u32.lt (u32 0) (record.get (local checked) error))
@@ -242,7 +244,8 @@
 		the canonical file and tree base recover the original declaration row.`)
 		register_function
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32) (scope FunctionScope)
-			(functions (mut-slice ScalarFunction)) (index i32) (parameters (mut-slice ScalarParameter)) (next_param i32))
+			(functions (mut-slice ScalarFunction)) (index i32) (parameters (mut-slice ScalarParameter)) (next_param i32)
+			(records (shared-slice ScalarRecord)))
 		(returns EntryRead)
 		(body
 			(let node (slice.load (local nodes) (local declaration)))
@@ -281,7 +284,7 @@
 			(let entry (bool.and (record.get (local scope) entry_module)
 				(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)) (u32 2))))
 			(let signature (call read_signature (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local node) (local spelling) (local entry)))
+				(local node) (local spelling) (local entry) (borrow-shared (local records)) (record.get (local scope) file)))
 			(if
 				(:doc "A malformed signature keeps its originating span.")
 				(u32.lt (u32 0) (record.get (local signature) error))
@@ -289,7 +292,8 @@
 					(start (record.get (local signature) start)) (end (record.get (local signature) end))
 					(error (record.get (local signature) error)) (related (i32 -1))))))
 			(let checked (call read_parameters (borrow-shared (local source)) (borrow-shared (local nodes))
-				(record.get (local signature) params) (borrow-mut (local parameters)) (local next_param)))
+				(record.get (local signature) params) (borrow-mut (local parameters)) (local next_param)
+				(borrow-shared (local records)) (record.get (local scope) file)))
 			(if
 				(:doc "Pass through the parameter list's first failure.")
 				(u32.lt (u32 0) (record.get (local checked) error))
@@ -321,10 +325,16 @@
 			(let scope (record.make FunctionScope (file (local file)) (tree_base (i32 0))
 				(tree_limit (slice.len (local nodes))) (source_base (i32 0)) (module_id (local module_id))
 				(entry_module (local entry_module))))
+			(let types (call register_module_records (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local declarations)) (record.get (local module) count) (i32 0)
+				(local file) (local module_id) (borrow-mut (local records)) (i32 0)))
+			(if
+				(:doc "Register the full type namespace before reading forward signature references.")
+				(u32.lt (u32 0) (record.get (local types) error))
+				(then (return (local types))))
 			(let-mut index (i32 0))
 			(let-mut next_function (i32 0))
 			(let-mut next_param (i32 0))
-			(let-mut next_record (i32 0))
 			(let-mut main (i32 -1))
 			(while
 				(:doc "Read every selected definition before resolving bodies and forward references.")
@@ -332,20 +342,13 @@
 				(body
 					(let declaration (record.get (slice.load (local declarations) (local index)) node))
 					(if
-						(:doc "Structs are types. Other declarations follow the existing signature checks.")
-						(u32.eq (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local declaration)) (u32 48))
+						(:doc "Only functions need signatures after the types have been registered.")
+						(bool.not (u32.eq (call declaration_kind (borrow-shared (local source))
+							(borrow-shared (local nodes)) (local declaration)) (u32 48)))
 						(then
-							(let registered (call register_record (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local declaration) (local file) (local module_id) (borrow-mut (local records)) (local next_record)))
-							(if
-								(:doc "Return the first invalid type without publishing its layout.")
-								(u32.lt (u32 0) (record.get (local registered) error))
-								(then (return (local registered))))
-							(set (local next_record) (record.get (local registered) operand)))
-						(else
 							(let registered (call register_function (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local declaration) (local scope) (borrow-mut (local functions)) (local next_function)
-								(borrow-mut (local parameters)) (local next_param)))
+								(borrow-mut (local parameters)) (local next_param) (borrow-shared (local records))))
 							(if
 								(:doc "Keep the rejected signature or declaration's original span.")
 								(u32.lt (u32 0) (record.get (local registered) error))
@@ -1258,7 +1261,7 @@
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) (u32 8) (u32 24)))
 			(if
-				(:doc "A field receiver is a named local in this slice.")
+				(:doc "A field receiver is a named record parameter or local.")
 				(u32.lt (u32 0) (record.get (local form) error))
 				(then (return (local form))))
 			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
