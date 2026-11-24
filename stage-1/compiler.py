@@ -31,6 +31,12 @@ C_TYPE = {
 	SHARED: "wvrt_slice",
 	MUT: "wvrt_mut_slice",
 }
+WRAPPING_OPS = {
+	"i32.add.wrapping": (I32, "wvrt_i32_add_wrapping"),
+	"i32.sub.wrapping": (I32, "wvrt_i32_sub_wrapping"),
+	"u32.add.wrapping": (U32, "wvrt_u32_add_wrapping"),
+	"u32.sub.wrapping": (U32, "wvrt_u32_sub_wrapping"),
+}
 
 
 @dataclass(frozen=True)
@@ -334,12 +340,14 @@ class FunctionEmitter:
 				f"{index.c}, {self.site(node.line)})"
 			)
 
-		# Evaluate operands in order before adding modulo 2^32.
-		if expr.tag == "i32.add.wrapping":
+		wrapping = WRAPPING_OPS.get(expr.tag)
+		# Evaluate exact-type operands in order before performing wrapping arithmetic.
+		if wrapping is not None:
+			kind, helper = wrapping
 			left, right = form(expr, arity=2).operands
-			first = self.typed(left, I32)
-			second = self.typed(right, I32)
-			return self.temporary(I32, f"wvrt_i32_add_wrapping({first.c}, {second.c})")
+			first = self.typed(left, kind)
+			second = self.typed(right, kind)
+			return self.temporary(kind, f"{helper}({first.c}, {second.c})")
 
 		# Call lowering manages the lifetime of its argument loans.
 		if expr.tag == "call":

@@ -114,9 +114,28 @@ int64_t wvrt_int_convert(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax,
 	return wvrtvalue;
 }
 
-// Add modulo 2^32 and turn the upper half into an in-range signed value.
+// Reduce the unsigned sum to its low 32 bits.
+uint32_t wvrt_u32_add_wrapping(uint32_t wvrtleft, uint32_t wvrtright) {
+	return (uint32_t)((uint64_t)wvrtleft + wvrtright);
+}
+
+// Reduce the unsigned difference to its low 32 bits.
+uint32_t wvrt_u32_sub_wrapping(uint32_t wvrtleft, uint32_t wvrtright) {
+	return (uint32_t)((uint64_t)wvrtleft - wvrtright);
+}
+
+// Interpret wrapped bits as a signed value using only in-range signed casts.
+static int32_t wvrt_i32_from_wrapped_bits(uint32_t wvrtbits) {
+	if (wvrtbits <= INT32_MAX) { return (int32_t)wvrtbits; }
+	return -1 - (int32_t)(UINT32_MAX - wvrtbits);
+}
+
+// Add in the modulo domain and return the corresponding signed value.
 int32_t wvrt_i32_add_wrapping(int32_t wvrtleft, int32_t wvrtright) {
-	uint32_t wvrt_bits = (uint32_t)wvrtleft + (uint32_t)wvrtright;
-	if (wvrt_bits <= INT32_MAX) { return (int32_t)wvrt_bits; }
-	return -1 - (int32_t)(UINT32_MAX - wvrt_bits);
+	return wvrt_i32_from_wrapped_bits(wvrt_u32_add_wrapping((uint32_t)wvrtleft, (uint32_t)wvrtright));
+}
+
+// Subtract in the modulo domain and return the corresponding signed value.
+int32_t wvrt_i32_sub_wrapping(int32_t wvrtleft, int32_t wvrtright) {
+	return wvrt_i32_from_wrapped_bits(wvrt_u32_sub_wrapping((uint32_t)wvrtleft, (uint32_t)wvrtright));
 }

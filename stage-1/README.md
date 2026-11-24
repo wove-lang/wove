@@ -13,6 +13,10 @@ through local bindings, parameters, calls, and returns. Use
 The conversion preserves values that fit and traps at the source line when a
 value is outside the selected type's range.
 
+`i32.add.wrapping`, `i32.sub.wrapping`, `u32.add.wrapping`, and
+`u32.sub.wrapping` compute modulo 2^32. Both operands and the result have
+the operation's named type.
+
 `slice.load` reads a `u8` from either kind of byte slice. `slice.store` needs
 a mutable byte slice and writes to the owner's storage. Both take an `i32`
 index and trap if it falls outside the slice.
