@@ -46,6 +46,10 @@ CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove projec
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
+CLANG_FIXTURES := tests/stage-2/clang
+CLANG_PROBE := $(STAGE2)/clang/probe
+CLANG_SOURCES := $(addprefix stage-2/clang/,source.wove frame.wove fields.wove index.wove values.wove)
+CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -59,7 +63,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
 
-.PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config
+.PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -74,7 +78,7 @@ test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config
+test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -84,6 +88,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
+		$(CLANG_SOURCES) \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv
@@ -101,6 +106,10 @@ test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
 # Exercise the project loader with the checked-in config and standalone cases.
 test-stage-2-config: $(CONFIG_PROGRAM)
 	$(PYTHON) "$(CONFIG_FIXTURES)/check.py" "$(CONFIG_PROGRAM)" "$(CONFIG_FIXTURES)/cases.tsv"
+
+# Check generated C input and captured JSON separately from native command launching.
+test-stage-2-clang: $(CLANG_PROBE) $(CLANG_TEMPLATE)
+	$(PYTHON) "$(CLANG_FIXTURES)/check.py" "$(CLANG_PROBE)" "$(CLANG)" "$(CLANG_TEMPLATE)"
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
@@ -163,6 +172,14 @@ $(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOUR
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
 $(COMMAND_PROGRAM): $(CLI_FIXTURES)/command.probe.c $(COMMAND_PROGRAM).c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+
+# Bring only the JSON and byte helpers into the standalone probe fixture.
+$(CLANG_PROBE).c: $(CLANG_FIXTURES)/probe.wove $(CLANG_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED)
+	mkdir -p "$(@D)"
+	$(PYTHON) stage-1/wovec.py "$<" > "$@"
+
+$(CLANG_PROBE): $(CLANG_FIXTURES)/probe.probe.c $(CLANG_PROBE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)

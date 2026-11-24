@@ -1,0 +1,74 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Frame one value at a time without merging adjacent Clang JSON documents.")
+	clang_json_frame
+
+	(use wove-file "../json/lex.wove"
+		(only (type JsonToken) json_token json_lex_error json_skip_trivia json_scan_value json_scan_string))
+
+	(fn
+		(:doc "Locate the next complete value's span. The JSON reader validates the framed slice.")
+		clang_document
+		(params (source (shared-slice u8)) (offset i32))
+		(returns JsonToken)
+		(body
+			(let length (slice.len (local source)))
+			(if
+				(:doc "Reject an offset outside the supplied byte view before attempting any lexical read.")
+				(bool.or (i32.lt (local offset) (i32 0)) (i32.lt (local length) (local offset)))
+				(then (return (call json_lex_error (u32 13) (local offset) (local offset)))))
+			(let trivia (call json_skip_trivia (borrow-shared (local source)) (local offset)))
+			(if
+				(:doc "An unterminated comment keeps its absolute source span.")
+				(u32.lt (u32 0) (record.get (local trivia) error))
+				(then (return (local trivia))))
+			(let start (record.get (local trivia) end))
+			(if
+				(:doc "End of the supplied stream is a successful empty frame.")
+				(i32.eq (local start) (local length))
+				(then (return (call json_token (u32 0) (local start) (local start)))))
+			(let root (call json_scan_value (borrow-shared (local source)) (local start)))
+			(let kind (record.get (local root) kind))
+			(if
+				(:doc "An invalid root or complete scalar needs no container delimiter scan.")
+				(bool.or (u32.lt (u32 0) (record.get (local root) error)) (u32.lt (u32 2) (local kind)))
+				(then (return (local root))))
+			(let-mut depth (i32 1))
+			(let-mut at (record.get (local root) end))
+			(while
+				(:doc "Depth counts nested delimiters outside quoted strings and comments.")
+				(bool.and (i32.lt (i32 0) (local depth)) (i32.lt (local at) (local length)))
+				(body
+					(let next (call json_skip_trivia (borrow-shared (local source)) (local at)))
+					(if
+						(:doc "Trivia is shared with the parser and can contain otherwise significant delimiters.")
+						(u32.lt (u32 0) (record.get (local next) error))
+						(then (return (local next))))
+					(set (local at) (record.get (local next) end))
+					(if
+						(:doc "An incomplete container is framed through EOF so the reader diagnoses the missing delimiter.")
+						(i32.eq (local at) (local length))
+						(then (return (call json_token (local kind) (local start) (local at)))))
+					(let byte (slice.load (local source) (local at)))
+					(if
+						(:doc "A checked quoted token may contain escapes and any delimiter without ending the frame.")
+						(u8.eq (local byte) (u8 34))
+						(then
+							(let quoted (call json_scan_string (borrow-shared (local source)) (local at)))
+							(if
+								(:doc "Preserve the quoted token's original invalid-escape or unterminated span.")
+								(u32.lt (u32 0) (record.get (local quoted) error))
+								(then (return (local quoted))))
+							(set (local at) (record.get (local quoted) end)))
+						(else
+							(if
+								(:doc "A nested array or object adds one delimiter level.")
+								(bool.or (u8.eq (local byte) (u8 123)) (u8.eq (local byte) (u8 91)))
+								(then (set (local depth) (i32.add.wrapping (local depth) (i32 1)))))
+							(if
+								(:doc "The parser checks delimiter pairing and member syntax inside the candidate span.")
+								(bool.or (u8.eq (local byte) (u8 125)) (u8.eq (local byte) (u8 93)))
+								(then (set (local depth) (i32.sub.wrapping (local depth) (i32 1)))))
+							(set (local at) (i32.add.wrapping (local at) (i32 1)))))))
+			(return (call json_token (local kind) (local start) (local at))))))
