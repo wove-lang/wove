@@ -1,0 +1,262 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Parse one JSONC value into caller-owned rows.
+
+	The root occupies row zero. Each value occupies one row, in source
+	order. Object values also carry their member key's quoted span.
+	Nonmembers have -1 for both key offsets. Containers link their children
+	in source order through first_child and next_sibling. Absent links
+	are -1. Kinds 1 through 7 are object, array, string, number, true,
+	false, and null. All source spans are half-open UTF-8 byte ranges.
+	Number spans preserve the complete original lexeme.
+
+	A successful parse reports the populated row count and the root span.
+	On failure, discard the rows. Error codes are 1 invalid UTF-8,
+	2 expected value, 3 malformed string, 4 malformed number,
+	5 malformed literal, 6 unterminated comment, 7 expected object key,
+	8 expected colon, 9 expected comma or closing delimiter,
+	10 trailing content, and 11 insufficient row capacity.
+	The string decoder additionally uses 12 for insufficient byte capacity.`)
+	json_reader
+
+	(use wove-file "./lex.wove"
+		(only (type JsonToken) json_error_at json_lex_error json_peek json_scan_string json_scan_value json_skip_trivia))
+	(use wove-file "../source/scan.wove" (only (type Token)))
+	(use wove-file "../source/strings.wove" (only decode_string))
+	(use wove-file "../text/utf8.wove" (only utf8_invalid_offset))
+
+	(struct JsonNode
+		(fields (kind u32) (start i32) (end i32) (key_start i32) (key_end i32)
+			(parent i32) (first_child i32) (last_child i32) (next_sibling i32)))
+	(struct JsonParseResult (fields (rows i32) (error u32) (start i32) (end i32)))
+	(struct JsonStringResult (fields (written i32) (error u32) (start i32) (end i32)))
+
+	(fn
+		(:doc "Forward a lexical or syntax diagnostic and invalidate the output rows.")
+		parse_failure
+		(params (token JsonToken))
+		(returns JsonParseResult)
+		(body
+			(return (record.make JsonParseResult (rows (i32 0)) (error (record.get (local token) error))
+				(start (record.get (local token) start)) (end (record.get (local token) end))))))
+
+	(fn
+		(:doc "Return true for the kinds whose rows track children and a closing delimiter.")
+		is_json_container
+		(params (kind u32))
+		(returns bool)
+		(body
+			(return (bool.or (u32.eq (local kind) (u32 1)) (u32.eq (local kind) (u32 2))))))
+
+	(fn
+		(:doc "Append a new value row with no children or following sibling.")
+		store_value
+		(params (nodes (mut-slice JsonNode)) (index i32) (value JsonToken) (parent i32)
+			(key_start i32) (key_end i32))
+		(returns void)
+		(body
+			(slice.store (local nodes) (local index)
+				(record.make JsonNode (kind (record.get (local value) kind))
+					(start (record.get (local value) start)) (end (record.get (local value) end))
+					(key_start (local key_start)) (key_end (local key_end)) (parent (local parent))
+					(first_child (i32 -1)) (last_child (i32 -1)) (next_sibling (i32 -1))))))
+
+	(fn
+		(:doc "Replace the chosen span end and child or sibling links while preserving the row identity.")
+		update_row
+		(params (nodes (mut-slice JsonNode)) (index i32) (node JsonNode)
+			(end i32) (first i32) (last i32) (sibling i32))
+		(returns void)
+		(body
+			(slice.store (local nodes) (local index)
+				(record.make JsonNode (kind (record.get (local node) kind))
+					(start (record.get (local node) start)) (end (local end))
+					(key_start (record.get (local node) key_start)) (key_end (record.get (local node) key_end))
+					(parent (record.get (local node) parent))
+					(first_child (local first)) (last_child (local last)) (next_sibling (local sibling))))))
+
+	(fn
+		(:doc "Link a new child to its container and to the preceding sibling when present.")
+		link_child
+		(params (nodes (mut-slice JsonNode)) (parent i32) (node JsonNode) (child i32))
+		(returns void)
+		(body
+			(let last (record.get (local node) last_child))
+			(let-mut first (record.get (local node) first_child))
+			(if
+				(:doc "The first child has no previous sibling to update.")
+				(i32.lt (local last) (i32 0))
+				(then (set (local first) (local child)))
+				(else
+					(let previous (slice.load (local nodes) (local last)))
+					(call update_row (borrow-mut (local nodes)) (local last) (local previous)
+						(record.get (local previous) end) (record.get (local previous) first_child)
+						(record.get (local previous) last_child) (local child))))
+			(call update_row (borrow-mut (local nodes)) (local parent) (local node)
+				(record.get (local node) end) (local first) (local child) (record.get (local node) next_sibling))))
+
+	(fn
+		(:doc "Use each open container's parent link as the parse stack, even at deep nesting.")
+		json_parse
+		(params (source (shared-slice u8)) (nodes (mut-slice JsonNode)))
+		(returns JsonParseResult)
+		(body
+			(let invalid (call utf8_invalid_offset (borrow-shared (local source))))
+			(if
+				(:doc "Anchor invalid UTF-8 at its first offending lead byte.")
+				(bool.not (i32.eq (local invalid) (i32 -1)))
+				(then (return (call parse_failure
+					(call json_error_at (borrow-shared (local source)) (u32 1) (local invalid))))))
+			(let initial (call json_skip_trivia (borrow-shared (local source)) (i32 0)))
+			(if
+				(:doc "An open comment can prevent the parser from finding the root.")
+				(u32.lt (u32 0) (record.get (local initial) error))
+				(then (return (call parse_failure (local initial)))))
+			(let root (call json_scan_value (borrow-shared (local source)) (record.get (local initial) end)))
+			(if
+				(:doc "Reject a malformed or absent root before writing rows.")
+				(u32.lt (u32 0) (record.get (local root) error))
+				(then (return (call parse_failure (local root)))))
+			(let capacity (slice.len (local nodes)))
+			(if
+				(:doc "The root requires one row, even when it is scalar or empty.")
+				(i32.eq (local capacity) (i32 0))
+				(then (return (call parse_failure (call json_lex_error (u32 11)
+					(record.get (local root) start) (record.get (local root) end))))))
+			(call store_value (borrow-mut (local nodes)) (i32 0) (local root) (i32 -1) (i32 -1) (i32 -1))
+			(let-mut parent (i32 -1))
+			(if
+				(:doc "A scalar root is complete after its first token.")
+				(call is_json_container (record.get (local root) kind))
+				(then (set (local parent) (i32 0))))
+			(let-mut cursor (record.get (local root) end))
+			(let-mut rows (i32 1))
+			(while
+				(:doc "At each iteration, the cursor is just after a container opener or its most recent complete child.")
+				(bool.not (i32.lt (local parent) (i32 0)))
+				(body
+					(let trivia (call json_skip_trivia (borrow-shared (local source)) (local cursor)))
+					(if
+						(:doc "Retain a comment error before interpreting any punctuation.")
+						(u32.lt (u32 0) (record.get (local trivia) error))
+						(then (return (call parse_failure (local trivia)))))
+					(set (local cursor) (record.get (local trivia) end))
+					(let node (slice.load (local nodes) (local parent)))
+					(let object (u32.eq (record.get (local node) kind) (u32 1)))
+					(let-mut close (u8 93))
+					(if
+						(:doc "Only an object closes with a brace.")
+						(local object)
+						(then (set (local close) (u8 125))))
+					(let byte (call json_peek (borrow-shared (local source)) (local cursor)))
+					(if
+						(:doc "An immediate closer completes an empty container or follows its last child.")
+						(u8.eq (local byte) (local close))
+						(then
+							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
+							(call update_row (borrow-mut (local nodes)) (local parent) (local node) (local cursor)
+								(record.get (local node) first_child) (record.get (local node) last_child)
+								(record.get (local node) next_sibling))
+							(set (local parent) (record.get (local node) parent)))
+						(else
+							(if
+								(:doc "Only a comma can introduce another child after a complete value.")
+								(bool.not (i32.lt (record.get (local node) last_child) (i32 0)))
+								(then
+									(if
+										(:doc "Diagnose missing commas and mismatched closing delimiters at the next byte.")
+										(bool.not (u8.eq (local byte) (u8 44)))
+										(then (return (call parse_failure
+											(call json_error_at (borrow-shared (local source)) (u32 9) (local cursor))))))
+									(let after (call json_skip_trivia (borrow-shared (local source))
+										(i32.add.wrapping (local cursor) (i32 1))))
+									(if
+										(:doc "Report an incomplete comment even after a comma.")
+										(u32.lt (u32 0) (record.get (local after) error))
+										(then (return (call parse_failure (local after)))))
+									(set (local cursor) (record.get (local after) end))))
+							(let-mut key_start (i32 -1))
+							(let-mut key_end (i32 -1))
+							(if
+								(:doc "A member starts with a string key followed by a colon.")
+								(local object)
+								(then
+									(if
+										(:doc "A trailing comma cannot be followed by the object's closing brace.")
+										(bool.not (u8.eq (call json_peek (borrow-shared (local source)) (local cursor)) (u8 34)))
+										(then (return (call parse_failure
+											(call json_error_at (borrow-shared (local source)) (u32 7) (local cursor))))))
+									(let key (call json_scan_string (borrow-shared (local source)) (local cursor)))
+									(if
+										(:doc "A malformed key keeps its string diagnostic span.")
+										(u32.lt (u32 0) (record.get (local key) error))
+										(then (return (call parse_failure (local key)))))
+									(set (local key_start) (record.get (local key) start))
+									(set (local key_end) (record.get (local key) end))
+									(let separator (call json_skip_trivia (borrow-shared (local source)) (local key_end)))
+									(if
+										(:doc "Trivia between a key and colon can itself be malformed.")
+										(u32.lt (u32 0) (record.get (local separator) error))
+										(then (return (call parse_failure (local separator)))))
+									(let colon (record.get (local separator) end))
+									(if
+										(:doc "Only a colon separates the key from its value.")
+										(bool.not (u8.eq (call json_peek (borrow-shared (local source)) (local colon)) (u8 58)))
+										(then (return (call parse_failure
+											(call json_error_at (borrow-shared (local source)) (u32 8) (local colon))))))
+									(let after (call json_skip_trivia (borrow-shared (local source))
+										(i32.add.wrapping (local colon) (i32 1))))
+									(if
+										(:doc "A complete key and colon still require an admitted value.")
+										(u32.lt (u32 0) (record.get (local after) error))
+										(then (return (call parse_failure (local after)))))
+									(set (local cursor) (record.get (local after) end))))
+							(let value (call json_scan_value (borrow-shared (local source)) (local cursor)))
+							(if
+								(:doc "The value scanner also rejects a closing bracket just after a comma.")
+								(u32.lt (u32 0) (record.get (local value) error))
+								(then (return (call parse_failure (local value)))))
+							(if
+								(:doc "Check the next row slot before writing it or changing any links.")
+								(i32.eq (local rows) (local capacity))
+								(then (return (call parse_failure (call json_lex_error (u32 11)
+									(record.get (local value) start) (record.get (local value) end))))))
+							(call store_value (borrow-mut (local nodes)) (local rows) (local value)
+								(local parent) (local key_start) (local key_end))
+							(call link_child (borrow-mut (local nodes)) (local parent) (local node) (local rows))
+							(if
+								(:doc "An opened container becomes the new parent until its closer is consumed.")
+								(call is_json_container (record.get (local value) kind))
+								(then (set (local parent) (local rows))))
+							(set (local cursor) (record.get (local value) end))
+							(set (local rows) (i32.add.wrapping (local rows) (i32 1)))))))
+			(let trailing (call json_skip_trivia (borrow-shared (local source)) (local cursor)))
+			(if
+				(:doc "A root followed by an unterminated comment is still invalid input.")
+				(u32.lt (u32 0) (record.get (local trailing) error))
+				(then (return (call parse_failure (local trailing)))))
+			(let after (record.get (local trailing) end))
+			(if
+				(:doc "Only trivia may follow the single complete value.")
+				(bool.not (i32.eq (local after) (slice.len (local source))))
+				(then (return (call parse_failure (call json_error_at (borrow-shared (local source)) (u32 10) (local after))))))
+			(return (record.make JsonParseResult (rows (local rows)) (error (u32 0))
+				(start (record.get (local root) start)) (end (local cursor))))))
+
+	(fn
+		(:doc "Decode a validated key or string span returned by json_parse from the same source. A short output view preserves the written UTF-8 prefix and identifies the first scalar that did not fit.")
+		json_decode_string
+		(params (source (shared-slice u8)) (start i32) (end i32) (output (mut-slice u8)))
+		(returns JsonStringResult)
+		(body
+			(let token (record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0))))
+			(let decoded (call decode_string (borrow-shared (local source)) (local token) (borrow-mut (local output))))
+			(let-mut error (u32 0))
+			(if
+				(:doc "A validated span can only fail decoding when its output is too short.")
+				(u32.lt (u32 0) (record.get (local decoded) error))
+				(then (set (local error) (u32 12))))
+			(return (record.make JsonStringResult
+				(written (record.get (local decoded) written)) (error (local error))
+				(start (record.get (local decoded) start)) (end (record.get (local decoded) end)))))))

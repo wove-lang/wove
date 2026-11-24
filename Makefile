@@ -22,10 +22,14 @@ HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex)
-JSON_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove $(UTF8_MODULE)
+JSON_WRITER_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove $(UTF8_MODULE)
+JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove \
+	$(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(UTF8_MODULE)
 JSON_FIXTURES := tests/stage-2/json
 JSON_CASES := $(JSON_FIXTURES)/cases.tsv
-JSON_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors utf8)
+JSON_WRITER_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors)
+JSON_READER_PROGRAMS := $(addprefix $(STAGE2)/json/,reader reader_errors)
+JSON_PROGRAMS := $(JSON_WRITER_PROGRAMS) $(JSON_READER_PROGRAMS) $(STAGE2)/json/utf8
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -96,10 +100,15 @@ $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(HASHING_S
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
 
 # Build JSON fixtures separately from the Stage 2 compiler entry.
-$(JSON_PROGRAMS): $(STAGE2)/json/%: $(JSON_FIXTURES)/%.wove $(JSON_SOURCES) $(SEED) $(STAGE1)/runtime.o
+$(JSON_PROGRAMS): $(STAGE2)/json/%: $(JSON_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
+
+# Keep scanner and decoder changes out of the standalone writer dependency set.
+$(JSON_WRITER_PROGRAMS): $(JSON_WRITER_SOURCES)
+$(JSON_READER_PROGRAMS): $(JSON_READER_SOURCES)
+$(STAGE2)/json/utf8: $(UTF8_MODULE)
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
