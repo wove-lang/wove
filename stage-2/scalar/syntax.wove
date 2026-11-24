@@ -12,6 +12,7 @@
 
 	(struct EntryRead (fields (operand i32) (start i32) (end i32) (error u32)))
 	(struct StatementRead (fields (kind u32) (binding i32) (value i32) (start i32) (end i32) (error u32)))
+	(struct BinaryOperator (fields (operand u32) (result u32) (symbol u8)))
 	(struct DecimalSpelling (fields (digits i32) (negative bool)))
 
 	(fn
@@ -30,34 +31,66 @@
 						(i32.add.wrapping (local start) (i32 6)) (u8 105) (u8 110) (u8 103)))))))
 
 	(fn
-		(:doc `Read the operation code from a complete signed i32 operator spelling.`)
-		i32_operator_keyword
+		(:doc `Read an exact two-byte comparison mnemonic after its scalar prefix.`)
+		comparison_suffix
+		(params (source (shared-slice u8)) (start i32) (equal u32))
+		(returns u32)
+		(body
+			(let first (slice.load (local source) (local start)))
+			(let second (slice.load (local source) (i32.add.wrapping (local start) (i32 1))))
+			(if
+				(:doc "Recognize the equality suffix.")
+				(bool.and (u8.eq (local first) (u8 101)) (u8.eq (local second) (u8 113)))
+				(then (return (local equal))))
+			(if
+				(:doc "The less-than kind follows the equality kind for each scalar type.")
+				(bool.and (u8.eq (local first) (u8 108)) (u8.eq (local second) (u8 116)))
+				(then (return (u32.add.wrapping (local equal) (u32 1)))))
+			(return (u32 0))))
+
+	(fn
+		(:doc `Read a comparison keyword for i32, u8, or u32.`)
+		comparison_keyword
 		(params (source (shared-slice u8)) (start i32) (width i32))
 		(returns u32)
 		(body
 			(if
-				(:doc "Only comparisons and wrapping operations have the supported widths and i32 prefix.")
-				(bool.or
-					(bool.not (bool.or (i32.eq (local width) (i32 6)) (i32.eq (local width) (i32 16))))
+				(:doc "Byte comparisons are the only comparisons with a three-byte prefix.")
+				(bool.and (i32.eq (local width) (i32 5))
+					(call is_three_bytes (borrow-shared (local source)) (local start) (u8 117) (u8 56) (u8 46)))
+				(then (return (call comparison_suffix (borrow-shared (local source))
+					(i32.add.wrapping (local start) (i32 3)) (u32 26)))))
+			(if
+				(:doc "Both word comparisons have six bytes and share the 32. spelling.")
+				(bool.or (bool.not (i32.eq (local width) (i32 6)))
+					(bool.not (call is_three_bytes (borrow-shared (local source))
+						(i32.add.wrapping (local start) (i32 1)) (u8 51) (u8 50) (u8 46))))
+				(then (return (u32 0))))
+			(let prefix (slice.load (local source) (local start)))
+			(let mnemonic (i32.add.wrapping (local start) (i32 4)))
+			(if
+				(:doc "The i32 prefix selects signed comparisons.")
+				(u8.eq (local prefix) (u8 105))
+				(then (return (call comparison_suffix (borrow-shared (local source)) (local mnemonic) (u32 18)))))
+			(if
+				(:doc "The u32 prefix selects unsigned comparisons.")
+				(u8.eq (local prefix) (u8 117))
+				(then (return (call comparison_suffix (borrow-shared (local source)) (local mnemonic) (u32 28)))))
+			(return (u32 0))))
+
+	(fn
+		(:doc `Read the operation code from a complete signed i32 wrapping keyword.`)
+		wrapping_keyword
+		(params (source (shared-slice u8)) (start i32) (width i32))
+		(returns u32)
+		(body
+			(if
+				(:doc "The wrapping forms have a fixed width and the i32 prefix.")
+				(bool.or (bool.not (i32.eq (local width) (i32 16)))
 					(bool.not (bool.and
 						(call is_three_bytes (borrow-shared (local source)) (local start) (u8 105) (u8 51) (u8 50))
 						(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 46)))))
 				(then (return (u32 0))))
-			(if
-				(:doc "The two comparison mnemonics consume the rest of a short tag.")
-				(i32.eq (local width) (i32 6))
-				(then
-					(let first (slice.load (local source) (i32.add.wrapping (local start) (i32 4))))
-					(let second (slice.load (local source) (i32.add.wrapping (local start) (i32 5))))
-					(if
-						(:doc "Recognize i32.eq.")
-						(bool.and (u8.eq (local first) (u8 101)) (u8.eq (local second) (u8 113)))
-						(then (return (u32 18))))
-					(if
-						(:doc "Recognize i32.lt.")
-						(bool.and (u8.eq (local first) (u8 108)) (u8.eq (local second) (u8 116)))
-						(then (return (u32 19))))
-					(return (u32 0))))
 			(if
 				(:doc "Only the explicit wrapping arithmetic spelling is supported.")
 				(bool.not (call is_wrapping_suffix (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 7))))
@@ -74,20 +107,46 @@
 			(return (u32 0))))
 
 	(fn
-		(:doc `Return the exact result type of a signed i32 binary operator, or zero for another kind.`)
-		binary_result_type
+		(:doc `Describe both operand types, the result type, and the C symbol of a binary expression.
+
+		The operand field applies to both operands. A zero result marks a
+		non-operator. Equality uses the equals byte twice when emitted.`)
+		binary_operator
 		(params (kind u32))
-		(returns u32)
+		(returns BinaryOperator)
 		(body
 			(if
-				(:doc "Signed equality and ordering produce a bool.")
-				(bool.or (u32.eq (local kind) (u32 18)) (u32.eq (local kind) (u32 19)))
-				(then (return (u32 12))))
+				(:doc "Wrapping addition keeps the signed width.")
+				(u32.eq (local kind) (u32 20))
+				(then (return (record.make BinaryOperator (operand (u32 5)) (result (u32 5)) (symbol (u8 43))))))
 			(if
-				(:doc "Wrapping addition and subtraction keep their i32 width.")
-				(bool.or (u32.eq (local kind) (u32 20)) (u32.eq (local kind) (u32 21)))
-				(then (return (u32 5))))
-			(return (u32 0))))
+				(:doc "Wrapping subtraction keeps the signed width.")
+				(u32.eq (local kind) (u32 21))
+				(then (return (record.make BinaryOperator (operand (u32 5)) (result (u32 5)) (symbol (u8 45))))))
+			(let-mut operand (u32 0))
+			(if
+				(:doc "The ordered pairs of comparison kinds share their operand type.")
+				(bool.or (u32.eq (local kind) (u32 18)) (u32.eq (local kind) (u32 19)))
+				(then (set (local operand) (u32 5))))
+			(if
+				(:doc "Both byte comparisons require exact u8 operands.")
+				(bool.or (u32.eq (local kind) (u32 26)) (u32.eq (local kind) (u32 27)))
+				(then (set (local operand) (u32 10))))
+			(if
+				(:doc "Both unsigned word comparisons require exact u32 operands.")
+				(bool.or (u32.eq (local kind) (u32 28)) (u32.eq (local kind) (u32 29)))
+				(then (set (local operand) (u32 11))))
+			(if
+				(:doc "Other expression kinds have no binary operator.")
+				(u32.eq (local operand) (u32 0))
+				(then (return (record.make BinaryOperator (operand (u32 0)) (result (u32 0)) (symbol (u8 0))))))
+			(let-mut symbol (u8 60))
+			(if
+				(:doc "The equality kind in each pair selects the equals symbol.")
+				(bool.or (u32.eq (local kind) (u32 18))
+					(bool.or (u32.eq (local kind) (u32 26)) (u32.eq (local kind) (u32 28))))
+				(then (set (local symbol) (u8 61))))
+			(return (record.make BinaryOperator (operand (local operand)) (result (u32 12)) (symbol (local symbol))))))
 
 	(fn
 		(:doc `Recognize the exact keywords of the scalar entry grammar.
@@ -96,8 +155,9 @@
 		local, and call. Return 10 through 14 for u8, u32, bool, true, and
 		false. Return 15 through 17 for let, let-mut, and set, and 18 through
 		21 for i32.eq, i32.lt, i32.add.wrapping, and i32.sub.wrapping.
-		Return 22 through 25 for if, then, else, and while. Other nodes and
-		absent indices return 0.`)
+		Return 22 through 25 for if, then, else, and while, and 26 through
+		29 for u8.eq, u8.lt, u32.eq, and u32.lt. Other nodes and absent
+		indices return 0.`)
 		entry_keyword
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (index i32))
 		(returns u32)
@@ -303,7 +363,12 @@
 							(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 108))
 							(call is_head_byte (borrow-shared (local source)) (local start) (i32 4) (u8 101)))))
 				(then (return (u32 25))))
-			(return (call i32_operator_keyword (borrow-shared (local source)) (local start) (local width)))))
+			(let comparison (call comparison_keyword (borrow-shared (local source)) (local start) (local width)))
+			(if
+				(:doc "Return a complete comparison keyword before checking wrapping arithmetic.")
+				(u32.lt (u32 0) (local comparison))
+				(then (return (local comparison))))
+			(return (call wrapping_keyword (borrow-shared (local source)) (local start) (local width)))))
 
 	(fn
 		(:doc `Associate an entry-reader result with its original source node.`)

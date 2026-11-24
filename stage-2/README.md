@@ -173,10 +173,12 @@ has the ABI signature `int main(void)`. Forward calls use checked
 prototypes, and nested calls evaluate from left to right.
 
 `(bool true)` and `(bool false)` are scalar literals.
-`i32.eq` and `i32.lt` compare signed operands and return `bool`.
-`i32.add.wrapping` and `i32.sub.wrapping` return the signed 32-bit
-result modulo 2^32. All four operators require two `i32` operands,
-each evaluated once, left to right. Emitted C widens the arithmetic,
+`i32.eq` and `i32.lt` compare signed operands. `u8.eq`, `u8.lt`,
+`u32.eq`, and `u32.lt` compare unsigned operands. Each comparison
+requires operands of its named scalar type and returns `bool`.
+`i32.add.wrapping` and `i32.sub.wrapping` take `i32` operands and
+return their signed 32-bit result modulo 2^32. Each binary operand is
+evaluated once, left to right. Emitted C widens the arithmetic,
 reduces it to 32 bits as unsigned, and produces an in-range signed result.
 
 A statement `(if condition (then ...) (else ...))` checks its condition
