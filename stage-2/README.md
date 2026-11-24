@@ -121,6 +121,19 @@ means the emitted prefix contains the entire source. Code 16 means the next
 token and its separator could not fit. In either case the prefix ends on a
 token boundary and the remaining output bytes retain their original values.
 
+Use `decode_string` from [the string decoder](source_strings.wove) with the
+original admitted byte view, a checked kind-2 token, and a writable byte slice.
+It writes the string value as UTF-8 without changing the source. Double-quoted
+values decode JSON escapes and combine a high and low surrogate into one
+scalar. Backtick values collapse doubled backticks and normalize CRLF and lone
+CR to LF.
+
+The result gives the written byte count and a view-relative span. On success
+the span covers the original token. A short output view returns code 16 and
+the source span of the next scalar. An unpaired surrogate returns code 17 and
+the span of its six-byte escape. In both cases the written prefix ends at a
+scalar boundary and the remaining output retains its previous bytes.
+
 `make stage-2` translates [the compiler root](wovec.wove) with the Python seed
 and links `build/stage-1/wovec` with Clang and the shared runtime. The root
 imports `admit_source` and `scan_token` from [the scanner](source_scan.wove).
@@ -157,3 +170,9 @@ The probe checks guard bytes around the output view and compares unwritten
 bytes against their original values. The
 [rendering fixtures](../tests/stage-2/source_renderings.tsv) compare the
 original and reparsed trees and tokens on each successful render.
+
+Use `--decode FILE [START END [OUTPUT_CAPACITY]]` with a view whose first
+token is a string. The first output row contains the written count, span start,
+span end, error, line, and column. The rest is the decoded prefix as raw bytes.
+The [decode fixtures](../tests/stage-2/source_decodings.tsv) check spans,
+compare successful values with Stage 1, and check the prefix on failure.

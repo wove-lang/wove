@@ -11,7 +11,7 @@ import sys
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "stage-1"))
-from syntax import TOKEN
+from syntax import TOKEN, parse
 
 KINDS = {"open": 40, "close": 41, "atom": 1, "string": 2}
 
@@ -186,9 +186,30 @@ def check_renderings(executable, directory, manifest):
 			assert tree_shape(executable, source, bounds) == tree_shape(executable, rendered), label
 
 
+# Compare exact decoded bytes and source spans, including prefixes on failure.
+def check_decodings(executable, directory, manifest):
+	source = directory / "decode-input.wove"
+	for label, raw, base, end, capacity, result, expected in fixture_rows(manifest):
+		parent = bytes.fromhex(raw)
+		source.write_bytes(parent)
+		start, stop = int(base), int(end)
+		expected_row = tuple(map(int, result.split()))
+		output, status = run_probe(executable, "--decode", source, (start, stop, int(capacity)))
+		header, delimiter, prefix = output.partition(b"\n")
+		assert delimiter and tuple(map(int, header.split(b"\t"))) == expected_row, (label, header)
+		expected_prefix = b"" if expected == "-" else bytes.fromhex(expected)
+		assert len(prefix) == expected_row[0] and prefix == expected_prefix, (label, prefix)
+		assert status == int(expected_row[3] != 0), label
+		# The seed is an independent reference for values representable in UTF-8.
+		if status == 0:
+			kind, _, _, spelling = next(seed_stream(parent[start:stop]))
+			value, = parse("(value " + spelling.decode("utf-8") + ")").operands
+			assert kind == 2 and value.quoted and prefix == value.text.encode("utf-8"), label
+
+
 # Compare checked-in inputs and generated layout variants end to end.
 def main():
-	executable, layouts, diagnostics, forms, trees, metadata, renderings, *sources = map(Path, sys.argv[1:])
+	executable, layouts, diagnostics, forms, trees, metadata, renderings, decodings, *sources = map(Path, sys.argv[1:])
 	for source in sources:
 		compare_stream(executable, source)
 
@@ -200,6 +221,7 @@ def main():
 		check_trees(executable, directory, trees, "--tree")
 		check_trees(executable, directory, metadata, "--metadata")
 		check_renderings(executable, directory, renderings)
+		check_decodings(executable, directory, decodings)
 
 
 if __name__ == "__main__":
