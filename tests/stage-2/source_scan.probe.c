@@ -1,6 +1,7 @@
 // Copyright (c) 2026 wove contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,8 @@
 #define source_kind wv_seed_fn_5
 #define scan_token wv_seed_fn_13
 #define admit_source wv_seed_fn_17
+#define source_diagnostic wv_seed_fn_19
+#define source_position wv_seed_fn_20
 
 typedef wv_seed_record_0 Token;
 
@@ -25,6 +28,7 @@ _Static_assert(_Generic(&admit_source, int32_t (*)(wvrt_slice): 1, default: 0), 
 _Static_assert(_Generic(((Token){0}).wv_field_0, uint32_t: 1, default: 0), "token kind type");
 _Static_assert(_Generic(((Token){0}).wv_field_1, int32_t: 1, default: 0), "token start type");
 _Static_assert(_Generic(((Token){0}).wv_field_2, int32_t: 1, default: 0), "token end type");
+_Static_assert(_Generic(((Token){0}).wv_field_3, uint32_t: 1, default: 0), "token error code type");
 
 typedef struct {
 	const char *label;
@@ -323,8 +327,105 @@ static void check_whitespace(void) {
 	}
 }
 
+// Emit numeric kinds, spans, and coordinates while leaving the source bytes in the input.
+static void write_token(wvrt_slice parent, int32_t view_start, Token token) {
+	const wv_seed_record_2 position = source_position(parent, view_start, token.wv_field_1);
+	printf("%" PRIu32 "\t%" PRId32 "\t%" PRId32 "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\n",
+		token.wv_field_0, token.wv_field_1, token.wv_field_2, token.wv_field_3,
+		position.wv_field_0, position.wv_field_1);
+}
+
+// Check UTF-8 once, then advance by each token's exclusive end.
+static int dump_tokens(wvrt_slice parent, int32_t start, int32_t end) {
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_slice input = wvrt_slice_range_u8(parent.wvrt_items, parent.wvrt_length, start, end, site);
+	const wv_seed_record_1 diagnostic = source_diagnostic(input);
+	if (diagnostic.wv_field_0 != 0) {
+		write_token(parent, start, (Token){3, diagnostic.wv_field_1, diagnostic.wv_field_2, diagnostic.wv_field_0});
+		return EXIT_FAILURE;
+	}
+
+	int32_t cursor = 0;
+	for (;;) {
+		const Token token = scan_token(input, cursor);
+		write_token(parent, start, token);
+		if (token.wv_field_0 == 0) {
+			return EXIT_SUCCESS;
+		}
+		if (token.wv_field_3 != 0) {
+			return EXIT_FAILURE;
+		}
+		if (token.wv_field_2 <= cursor) {
+			fputs("token scan did not advance\n", stderr);
+			return EXIT_FAILURE;
+		}
+		cursor = token.wv_field_2;
+	}
+}
+
+// Load the bytes unchanged so newline and UTF-8 offsets survive into the probe.
+static uint8_t *read_source(const char *filename, int32_t *length) {
+	FILE *input = fopen(filename, "rb");
+	if (input == NULL) {
+		return NULL;
+	}
+	long size = fseek(input, 0, SEEK_END) == 0 ? ftell(input) : -1;
+	if (size < 0 || size > INT32_MAX || fseek(input, 0, SEEK_SET) != 0) {
+		fclose(input);
+		return NULL;
+	}
+	uint8_t *bytes = malloc(size == 0 ? 1 : (size_t)size);
+	if (bytes != NULL && fread(bytes, 1, (size_t)size, input) != (size_t)size) {
+		free(bytes);
+		bytes = NULL;
+	}
+	fclose(input);
+	*length = (int32_t)size;
+	return bytes;
+}
+
+// Keep file subrange arguments in the scanner's signed byte-offset domain.
+static bool read_offset(const char *text, int32_t *offset) {
+	char *rest;
+	errno = 0;
+	long value = strtol(text, &rest, 10);
+	if (errno != 0 || rest == text || *rest != '\0' || value < 0 || value > INT32_MAX) {
+		return false;
+	}
+	*offset = (int32_t)value;
+	return true;
+}
+
+// Supply a whole file or one checked view to the same seed-built executable.
+static int token_stream_mode(int argc, char **argv) {
+	if ((argc != 3 && argc != 5) || strcmp(argv[1], "--tokens") != 0) {
+		fputs("usage: source_scan --tokens FILE [START END]\n", stderr);
+		return EXIT_FAILURE;
+	}
+
+	int32_t length;
+	uint8_t *bytes = read_source(argv[2], &length);
+	if (bytes == NULL) {
+		fputs("could not load source bytes\n", stderr);
+		return EXIT_FAILURE;
+	}
+	int32_t start = 0;
+	int32_t end = length;
+	if (argc == 5 && (!read_offset(argv[3], &start) || !read_offset(argv[4], &end) || start > end || end > length)) {
+		fputs("invalid source view\n", stderr);
+		free(bytes);
+		return EXIT_FAILURE;
+	}
+	int status = dump_tokens((wvrt_slice){bytes, length, sizeof(uint8_t)}, start, end);
+	free(bytes);
+	return status;
+}
+
 // Exercise complete inputs and checked views into a larger buffer.
-int main(void) {
+int main(int argc, char **argv) {
+	if (argc > 1) {
+		return token_stream_mode(argc, argv);
+	}
 	// Each complete input supplies its own logical byte length.
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
 		const ScanCase *test = &cases[i];

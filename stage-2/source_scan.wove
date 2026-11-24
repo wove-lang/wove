@@ -2,7 +2,9 @@
 ;; SPDX-License-Identifier: MIT OR Apache-2.0
 
 (module source_scan
-	(struct Token (fields (kind u32) (start i32) (end i32)))
+	(struct Token (fields (kind u32) (start i32) (end i32) (error u32)))
+	(struct SourceDiagnostic (fields (error u32) (start i32) (end i32)))
+	(struct SourcePosition (fields (line u32) (column u32)))
 
 	;; Match the seed's ASCII separators, U+0009–U+000D and U+001C–U+0020.
 	(fn is_ascii_whitespace
@@ -146,10 +148,11 @@
 
 	;; Keep the raw extent of a lexical error for the caller.
 	(fn lexical_error
-		(params (start i32) (end i32))
+		(params (code u32) (start i32) (end i32))
 		(returns Token)
 		(body
-			(return (record.make Token (kind (u32 3)) (start (local start)) (end (local end))))))
+			(return (record.make Token
+				(kind (u32 3)) (error (local code)) (start (local start)) (end (local end))))))
 
 	;; Validate quoted bytes while preserving the full spelling for the parser.
 	(fn scan_quoted
@@ -166,16 +169,16 @@
 					;; An unescaped quote completes the span just after the closing byte.
 					(if (u8.eq (local byte) (u8 34))
 						(then
-							(return (record.make Token (kind (u32 2)) (start (local start)) (end (local cursor))))))
+							(return (record.make Token (kind (u32 2)) (error (u32 0)) (start (local start)) (end (local cursor))))))
 					;; Raw ASCII control bytes end the error span just after the offending byte.
 					(if (u8.lt (local byte) (u8 32))
-						(then (return (call lexical_error (local start) (local cursor)))))
+						(then (return (call lexical_error (u32 4) (local start) (local cursor)))))
 					;; A backslash consumes its escape bytes before the next quote check.
 					(if (u8.eq (local byte) (u8 92))
 						(then
 							;; A trailing backslash reaches the view end without an escape byte.
 							(if (i32.eq (local cursor) (local length))
-								(then (return (call lexical_error (local start) (local length)))))
+								(then (return (call lexical_error (u32 3) (local start) (local length)))))
 							(let escape (slice.load (local source) (local cursor)))
 							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
 							;; A Unicode escape must supply exactly four hex digits.
@@ -187,18 +190,18 @@
 										(body
 											;; A clipped escape reports the view end.
 											(if (i32.eq (local cursor) (local length))
-												(then (return (call lexical_error (local start) (local length)))))
+												(then (return (call lexical_error (u32 3) (local start) (local length)))))
 											(let digit (slice.load (local source) (local cursor)))
 											(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))
 											;; Include the first invalid digit in the error span.
 											(if (bool.not (call is_hex_digit (local digit)))
-												(then (return (call lexical_error (local start) (local cursor)))))
+												(then (return (call lexical_error (u32 3) (local start) (local cursor)))))
 											(set (local digits) (i32.add.wrapping (local digits) (i32 1))))))
 								(else
 									;; Every other escape must belong to the short escape set.
 									(if (bool.not (call is_short_escape (local escape)))
-										(then (return (call lexical_error (local start) (local cursor)))))))))))
-			(return (call lexical_error (local start) (local length)))))
+										(then (return (call lexical_error (u32 3) (local start) (local cursor)))))))))))
+			(return (call lexical_error (u32 2) (local start) (local length)))))
 
 	;; Scan one raw token in a view already checked by admit_source.
 	(fn scan_token
@@ -212,13 +215,15 @@
 			(issue "https://github.com/wove-lang/wove/issues/31"))
 		(expect lexer.unicode_whitespace
 			(issue "https://github.com/wove-lang/wove/issues/33"))
+		(expect lexer.stream_parity
+			(issue "https://github.com/wove-lang/wove/issues/34"))
 		(body
 			(let start (call skip_whitespace (borrow-shared (local source)) (local cursor)))
 			(let length (slice.len (local source)))
 			;; Only the exact end cursor can return EOF without another checked load.
 			(if (i32.eq (local start) (local length))
 				(then
-					(return (record.make Token (kind (u32 0)) (start (local start)) (end (local start))))))
+					(return (record.make Token (kind (u32 0)) (error (u32 0)) (start (local start)) (end (local start))))))
 			(let byte (slice.load (local source) (local start)))
 			(let next (i32.add.wrapping (local start) (i32 1)))
 			;; Parentheses consume one byte and use their byte code as the token kind.
@@ -226,6 +231,7 @@
 				(then
 					(return (record.make Token
 						(kind (int.convert u32 (local byte)))
+						(error (u32 0))
 						(start (local start))
 						(end (local next))))))
 			;; Recognize a comment opener only when both semicolons are inside this view.
@@ -237,15 +243,15 @@
 				(then
 					(let text_start (i32.add.wrapping (local next) (i32 1)))
 					(let end (call line_comment_end (borrow-shared (local source)) (local text_start)))
-					(return (record.make Token (kind (u32 59)) (start (local start)) (end (local end))))))
+					(return (record.make Token (kind (u32 59)) (error (u32 0)) (start (local start)) (end (local end))))))
 			;; The opening quote selects the string scanner before interpreting any content.
 			(if (u8.eq (local byte) (u8 34))
 				(then (return (call scan_quoted (borrow-shared (local source)) (local start)))))
 			;; A semicolon that did not open a comment is a one-byte error.
 			(if (u8.eq (local byte) (u8 59))
-				(then (return (call lexical_error (local start) (local next)))))
+				(then (return (call lexical_error (u32 1) (local start) (local next)))))
 			(let end (call bare_atom_end (borrow-shared (local source)) (local next)))
-			(return (record.make Token (kind (u32 1)) (start (local start)) (end (local end))))))
+			(return (record.make Token (kind (u32 1)) (error (u32 0)) (start (local start)) (end (local end))))))
 
 	;; Classify an ASCII byte or a legal lead byte by the width of its scalar.
 	(fn utf8_width
@@ -311,30 +317,11 @@
 			(while (i32.lt (local cursor) (local length))
 				(body
 					(let lead (slice.load (local source) (local cursor)))
-					(let width (call utf8_width (local lead)))
-					(let remaining (i32.sub.wrapping (local length) (local cursor)))
-					;; Check the remaining width before adding it or reading any suffix byte.
-					(if (bool.or (i32.eq (local width) (i32 0)) (i32.lt (local remaining) (local width)))
+					(let width (call valid_utf8_width (borrow-shared (local source)) (local cursor) (local lead)))
+					;; Admission reports the lead of the first invalid sequence.
+					(if (i32.eq (local width) (i32 0))
 						(then (return (local cursor))))
-					(let next (i32.add.wrapping (local cursor) (local width)))
-					;; Only multibyte scalars have a restricted second byte.
-					(if (i32.lt (i32 1) (local width))
-						(then
-							(let second_index (i32.add.wrapping (local cursor) (i32 1)))
-							(let second (slice.load (local source) (local second_index)))
-							;; Report the lead rather than the byte that breaks the sequence.
-							(if (bool.not (call valid_utf8_second (local lead) (local second)))
-								(then (return (local cursor))))
-							(let-mut tail (i32.add.wrapping (local second_index) (i32 1)))
-							;; The rest of the verified span can contain only continuations.
-							(while (i32.lt (local tail) (local next))
-								(body
-									(let byte (slice.load (local source) (local tail)))
-									;; Keep errors at the first byte of the malformed scalar.
-									(if (bool.not (call is_utf8_continuation (local byte)))
-										(then (return (local cursor))))
-									(set (local tail) (i32.add.wrapping (local tail) (i32 1)))))))
-					(set (local cursor) (local next))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))
 			(return (i32 -1))))
 
 	;; Return the byte width of a seed separator at the cursor, or zero.
@@ -395,6 +382,87 @@
 							(u8.eq (local third) (u8 175)))))
 				(then (return (i32 3))))
 			(return (i32 0))))
+
+	;; Expose admission failures in the same diagnostic code space as lexical errors.
+	(fn source_diagnostic
+		(params (source (shared-slice u8)))
+		(returns SourceDiagnostic)
+		(body
+			(let start (call admit_source (borrow-shared (local source))))
+			;; Successful admission carries no primary span.
+			(if (i32.lt (local start) (i32 0))
+				(then
+					(return (record.make SourceDiagnostic (error (u32 0)) (start (i32 0)) (end (i32 0))))))
+			;; Anchor malformed UTF-8 at its lead byte, even when the sequence is clipped.
+			(let end (i32.add.wrapping (local start) (i32 1)))
+			(return (record.make SourceDiagnostic (error (u32 5)) (start (local start)) (end (local end))))))
+
+	;; Map a view-relative span start to its coordinates in the parent source.
+	(fn source_position
+		(params (parent (shared-slice u8)) (view_start i32) (span_start i32))
+		(returns SourcePosition)
+		(body
+			(let target (i32.add.wrapping (local view_start) (local span_start)))
+			(let-mut cursor (i32 0))
+			(let-mut line (u32 1))
+			(let-mut column (u32 1))
+			(let-mut previous_cr (bool false))
+			;; Only bytes before the requested start can advance its coordinates.
+			(while (i32.lt (local cursor) (local target))
+				(body
+					(let byte (slice.load (local parent) (local cursor)))
+					;; Count each physical line break once, including a CRLF pair.
+					(if (call is_line_ending (local byte))
+						(then
+							;; An LF paired with the previous CR continues the same break.
+							(if (bool.or (u8.eq (local byte) (u8 13)) (bool.not (local previous_cr)))
+								(then (set (local line) (u32.add.wrapping (local line) (u32 1)))))
+							(set (local column) (u32 1))
+							(set (local cursor) (i32.add.wrapping (local cursor) (i32 1))))
+						(else
+							(let-mut width (call valid_utf8_width (borrow-shared (local parent)) (local cursor) (local byte)))
+							;; Count malformed bytes individually to preserve subsequent line breaks.
+							(if (i32.eq (local width) (i32 0))
+								(then (set (local width) (i32 1))))
+							(let remaining (i32.sub.wrapping (local target) (local cursor)))
+							;; An offset inside a scalar still belongs to that scalar's column.
+							(if (i32.lt (local remaining) (local width))
+								(then (set (local cursor) (local target)))
+								(else
+									(set (local column) (u32.add.wrapping (local column) (u32 1)))
+									(set (local cursor) (i32.add.wrapping (local cursor) (local width)))))))
+					(set (local previous_cr) (u8.eq (local byte) (u8 13)))))
+			(return (record.make SourcePosition (line (local line)) (column (local column))))))
+
+	;; Return the complete UTF-8 scalar width or zero for a malformed sequence.
+	(fn valid_utf8_width
+		(params (source (shared-slice u8)) (cursor i32) (lead u8))
+		(returns i32)
+		(body
+			(let width (call utf8_width (local lead)))
+			(let remaining (i32.sub.wrapping (slice.len (local source)) (local cursor)))
+			;; Reject truncation before adding the width or reading any suffix bytes.
+			(if (bool.or (i32.eq (local width) (i32 0)) (i32.lt (local remaining) (local width)))
+				(then (return (i32 0))))
+			;; ASCII needs no continuation loads.
+			(if (i32.eq (local width) (i32 1))
+				(then (return (i32 1))))
+			(let second_index (i32.add.wrapping (local cursor) (i32 1)))
+			(let second (slice.load (local source) (local second_index)))
+			;; Apply the lead-specific lower and upper bounds on the second byte.
+			(if (bool.not (call valid_utf8_second (local lead) (local second)))
+				(then (return (i32 0))))
+			(let end (i32.add.wrapping (local cursor) (local width)))
+			(let-mut tail (i32.add.wrapping (local second_index) (i32 1)))
+			;; Check each remaining continuation within the verified span.
+			(while (i32.lt (local tail) (local end))
+				(body
+					(let byte (slice.load (local source) (local tail)))
+					;; Reject the whole scalar if a tail byte is not a continuation.
+					(if (bool.not (call is_utf8_continuation (local byte)))
+						(then (return (i32 0))))
+					(set (local tail) (i32.add.wrapping (local tail) (i32 1)))))
+			(return (local width))))
 
 	;; Supply the seed entry point while the fixture provides input slices.
 	(fn main
