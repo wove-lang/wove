@@ -12,15 +12,18 @@
 	Retain source-level call sites before either inspection or lowering.`)
 	scalar_plan
 
-	(use wove-file "../source/scan.wove" (only is_identifier_head (type SourceNode)))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts select_form (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
+	(use wove-file "./records.wove"
+		(only declaration_kind register_record find_record record_type record_index is_record_type
+			find_member read_member_operand (type ScalarRecord)))
 	(use wove-file "./flow.wove" (only block_statement moved_owner after_block (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type read_parameter_type decimal_scalar scalar_operator
-			is_byte_view_type is_reborrow_keyword (type ScalarOperator) (type EntryRead) (type StatementRead)))
+			is_byte_view_type is_reborrow_keyword is_scalar_name same_name (type ScalarOperator) (type EntryRead) (type StatementRead)))
 
 	(struct ScalarFunction
 		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
@@ -138,27 +141,6 @@
 			(return (record.make ScalarSignature (params (local first)) (result (local result))
 				(first_statement (local first_statement))
 				(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))))))
-
-	(fn
-		(:doc `Check that the source operand names an unquoted Wove identifier.`)
-		(:pragma (inline always))
-		is_scalar_name
-		(params (source (shared-slice u8)) (node SourceNode))
-		(returns bool)
-		(body
-			(return (bool.and (u32.eq (record.get (local node) kind) (u32 1))
-				(call is_identifier_head (borrow-shared (local source))
-					(record.get (local node) start) (record.get (local node) end))))))
-
-	(fn
-		(:doc `Compare the original spellings of two checked identifier nodes.`)
-		same_name
-		(params (source (shared-slice u8)) (left SourceNode) (right SourceNode))
-		(returns bool)
-		(body
-			(return (call same_bytes (borrow-shared (local source)) (record.get (local left) start)
-				(record.get (local left) end) (borrow-shared (local source)) (record.get (local right) start)
-				(record.get (local right) end)))))
 
 	(fn
 		(:doc `Look up a parameter within the owning function's contiguous parameter interval.`)
@@ -323,14 +305,14 @@
 			(return (call entry_at (local node) (local limit) (u32 0)))))
 
 	(fn
-		(:doc `Register selected signatures and reject duplicate or colliding identities.
+		(:doc `Register selected functions and record layouts in their separate namespaces.
 
 		Classify main as the ABI entry in an executable root. Library functions
 		follow ordinary scalar signature and call rules, including main.`)
-		read_functions
+		read_module_declarations
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (functions (mut-slice ScalarFunction))
-			(parameters (mut-slice ScalarParameter)) (file i32) (entry_module bool))
+			(parameters (mut-slice ScalarParameter)) (records (mut-slice ScalarRecord)) (file i32) (entry_module bool))
 		(returns EntryRead)
 		(body
 			(let module_name (slice.load (local nodes) (record.get (local module) name)))
@@ -340,44 +322,72 @@
 				(tree_limit (slice.len (local nodes))) (source_base (i32 0)) (module_id (local module_id))
 				(entry_module (local entry_module))))
 			(let-mut index (i32 0))
+			(let-mut next_function (i32 0))
 			(let-mut next_param (i32 0))
+			(let-mut next_record (i32 0))
 			(let-mut main (i32 -1))
 			(while
-				(:doc "Read every selected signature before resolving bodies and forward references.")
+				(:doc "Read every selected definition before resolving bodies and forward references.")
 				(i32.lt (local index) (record.get (local module) count))
 				(body
 					(let declaration (record.get (slice.load (local declarations) (local index)) node))
-					(let registered (call register_function (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local declaration) (local scope) (borrow-mut (local functions)) (local index)
-						(borrow-mut (local parameters)) (local next_param)))
 					(if
-						(:doc "Keep the rejected signature or declaration's original span.")
-						(u32.lt (u32 0) (record.get (local registered) error))
-						(then (return (local registered))))
-					(let function (slice.load (local functions) (local index)))
-					(if
-						(:doc "Remember the selected C entry independently of declaration order.")
-						(record.get (local function) entry)
-						(then (set (local main) (local declaration))))
-					(set (local next_param) (record.get (local registered) operand))
+						(:doc "Structs are types. Other declarations follow the existing signature checks.")
+						(u32.eq (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local declaration)) (u32 48))
+						(then
+							(let registered (call register_record (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local declaration) (local file) (local module_id) (borrow-mut (local records)) (local next_record)))
+							(if
+								(:doc "Return the first invalid type without publishing its layout.")
+								(u32.lt (u32 0) (record.get (local registered) error))
+								(then (return (local registered))))
+							(set (local next_record) (record.get (local registered) operand)))
+						(else
+							(let registered (call register_function (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local declaration) (local scope) (borrow-mut (local functions)) (local next_function)
+								(borrow-mut (local parameters)) (local next_param)))
+							(if
+								(:doc "Keep the rejected signature or declaration's original span.")
+								(u32.lt (u32 0) (record.get (local registered) error))
+								(then (return (local registered))))
+							(let function (slice.load (local functions) (local next_function)))
+							(if
+								(:doc "Remember the selected C entry independently of declaration order.")
+								(record.get (local function) entry)
+								(then (set (local main) (local declaration))))
+							(set (local next_param) (record.get (local registered) operand))
+							(set (local next_function) (i32.add.wrapping (local next_function) (i32 1)))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(if
-				(:doc "The executable root must define the ABI entry.")
+				(:doc "The executable root must define the ABI entry even if it only declares types.")
 				(bool.and (local entry_module) (i32.lt (local main) (i32 0)))
-				(then (return (call entry_at
-					(slice.load (local nodes) (record.get (slice.load (local functions) (i32 0)) name)) (i32 -1) (u32 22)))))
+				(then
+					(if
+						(:doc "A type-only module has no first function to identify.")
+						(i32.eq (local next_function) (i32 0))
+						(then (return (call entry_at (local module_name) (i32 -1) (u32 22)))))
+					(return (call entry_at
+						(slice.load (local nodes) (record.get (slice.load (local functions) (i32 0)) name)) (i32 -1) (u32 22)))))
 			(return (record.make EntryRead (operand (local main)) (start (i32 0)) (end (i32 0)) (error (u32 0)) (related (i32 -1))))))
 
 	(fn
 		(:doc `Match a checked value to its exact expected type.
 
-		Expectations 1 and 42 infer an integer type. Only the latter can
-		also introduce an owner through an allocation or move. A shared view
-		can read from either slice access mode. Zero marks unvisited rows.`)
+		Expectation 1 infers an integer. A local initializer (42) can
+		also copy a record, allocate, or move an owner. A field receiver
+		(53) can be any registered record. Zero marks unvisited rows.`)
 		value_matches_type
 		(params (expected u32) (actual u32))
 		(returns bool)
 		(body
+			(if
+				(:doc "A field receiver must be a registered named record.")
+				(u32.eq (local expected) (u32 53))
+				(then (return (call is_record_type (local actual)))))
+			(if
+				(:doc "A local can retain the defining type of a record value.")
+				(bool.and (u32.eq (local expected) (u32 42)) (call is_record_type (local actual)))
+				(then (return (bool true))))
 			(if
 				(:doc "An integer initializer or conversion operand can infer its width.")
 				(bool.or (u32.eq (local expected) (u32 1)) (u32.eq (local expected) (u32 42)))
@@ -1149,11 +1159,144 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn
+		(:doc `Check a constructor's complete named field set and seed values in source order.
+
+		A checked initializer wrapper records the native field ordinal
+		and links to its exact scalar operand for evaluation.`)
+		plan_record_make
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(name i32) (index i32) (file i32) (expected u32) (records (shared-slice ScalarRecord))
+			(expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A constructor starts with the name of its local record type.")
+				(i32.lt (local name) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let spelling (slice.load (local nodes) (local name)))
+			(if
+				(:doc "A type reference is a bare identifier.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
+				(then (return (call entry_at (local spelling) (i32 -1) (u32 24)))))
+			(let type_row (call find_record (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local file) (local spelling)))
+			(if
+				(:doc "Report an unavailable type at its original name.")
+				(i32.lt (local type_row) (i32 0))
+				(then (return (call entry_at (local spelling) (i32 -1) (u32 34)))))
+			(let type (call record_type (local type_row)))
+			(if
+				(:doc "The result carries the defining record identity.")
+				(bool.not (call value_matches_type (local expected) (local type)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let layout (slice.load (local records) (local type_row)))
+			(let first (record.get (local spelling) next_sibling))
+			(let-mut initializer (local first))
+			(let-mut count (i32 0))
+			(while
+				(:doc "Resolve and type each present initializer in its source order.")
+				(bool.not (i32.lt (local initializer) (i32 0)))
+				(body
+					(let member (slice.load (local nodes) (local initializer)))
+					(let checked (call read_member_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+					(if
+						(:doc "A malformed initializer keeps its own span.")
+						(u32.lt (u32 0) (record.get (local checked) error))
+						(then (return (local checked))))
+					(let field_name (slice.load (local nodes) (record.get (local member) first_child)))
+					(let field (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+						(record.get (local layout) first) (record.get (local layout) count) (local field_name)))
+					(let ordinal (record.get (local field) ordinal))
+					(if
+						(:doc "An unknown initializer points at the member name.")
+						(i32.lt (local ordinal) (i32 0))
+						(then (return (call entry_at (local field_name) (i32 -1) (u32 34)))))
+					(let-mut earlier (local first))
+					(while
+						(:doc "Each native member can appear only once in this constructor.")
+						(i32.lt (local earlier) (local initializer))
+						(body
+							(if
+								(:doc "Report the repeated initializer's name.")
+								(i32.eq (record.get (slice.load (local expressions) (local earlier)) target) (local ordinal))
+								(then (return (call entry_at (local field_name) (i32 -1) (u32 33)))))
+							(set (local earlier) (record.get (slice.load (local nodes) (local earlier)) next_sibling))))
+					(let value (record.get (local checked) operand))
+					(slice.store (local expressions) (local initializer)
+						(call expression_row (u32 51) (u32 0) (local ordinal) (local value) (i32 0) (i32 0) (bool false)))
+					(slice.store (local expressions) (local value)
+						(call expression_row (u32 0) (record.get (local field) type) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
+					(set (local count) (i32.add.wrapping (local count) (i32 1)))
+					(set (local initializer) (record.get (local member) next_sibling))))
+			(if
+				(:doc "A missing member has no operand span, so identify the constructor.")
+				(bool.not (i32.eq (local count) (record.get (local layout) count)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(slice.store (local expressions) (local index)
+				(call expression_row (u32 50) (local type) (local type_row) (local first) (i32 0) (i32 0) (bool false)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
+		(:doc `Resolve a named local record and give a field read its declared scalar type.`)
+		plan_record_get
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(receiver i32) (index i32) (expected u32) (caller ScalarFunction) (statement i32)
+			(parameters (shared-slice ScalarParameter)) (records (shared-slice ScalarRecord))
+			(statements (shared-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A field read starts with its receiver.")
+				(i32.lt (local receiver) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let reference (slice.load (local nodes) (local receiver)))
+			(let member (record.get (local reference) next_sibling))
+			(if
+				(:doc "Require exactly one field name after the receiver.")
+				(bool.or (i32.lt (local member) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local member)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) (u32 8) (u32 24)))
+			(if
+				(:doc "A field receiver is a named local in this slice.")
+				(u32.lt (u32 0) (record.get (local form) error))
+				(then (return (local form))))
+			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local reference) (record.get (local form) operand) (u32 53) (local receiver) (local caller) (local statement)
+				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+			(if
+				(:doc "Keep unknown or incompatible bindings at their own span.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (local checked))))
+			(let name (slice.load (local nodes) (local member)))
+			(if
+				(:doc "Field selection uses a bare identifier.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+			(let type (record.get (slice.load (local expressions) (local receiver)) type))
+			(let layout (slice.load (local records) (call record_index (local type))))
+			(let field (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local layout) first) (record.get (local layout) count) (local name)))
+			(let ordinal (record.get (local field) ordinal))
+			(if
+				(:doc "An unknown field points at the requested name.")
+				(i32.lt (local ordinal) (i32 0))
+				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+			(let result (record.get (local field) type))
+			(if
+				(:doc "The caller must accept the field's exact result type.")
+				(bool.not (call value_matches_type (local expected) (local result)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(slice.store (local expressions) (local index)
+				(call expression_row (u32 52) (local result) (local ordinal) (local receiver) (i32 0) (i32 0) (bool false)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn
 		(:doc `Check the scalar expression at a source row and keep its actual type.`)
 		plan_expression
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(index i32) (expected u32) (statement i32) (functions (shared-slice ScalarFunction))
-			(parameters (shared-slice ScalarParameter)) (bindings (shared-slice GraphBinding))
+			(parameters (shared-slice ScalarParameter)) (bindings (shared-slice GraphBinding)) (records (shared-slice ScalarRecord))
 			(statements (shared-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)) (view_start i32))
 		(returns EntryRead)
 		(body
@@ -1166,6 +1309,8 @@
 					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+			(let constructing (u32.eq (local tag) (u32 50)))
+			(let member_read (u32.eq (local tag) (u32 52)))
 			(let operator (call scalar_operator (local tag)))
 			(let operator_result (record.get (local operator) result))
 			(let-mut actual (local tag))
@@ -1190,7 +1335,8 @@
 				(bool.not
 					(bool.or (call value_matches_type (local expected) (local actual))
 						(bool.or (bool.or (local allocation) (u32.eq (local tag) (u32 33)))
-							(bool.or (u32.eq (local tag) (u32 8)) (u32.eq (local tag) (u32 9))))))
+							(bool.or (bool.or (local constructing) (local member_read))
+								(bool.or (u32.eq (local tag) (u32 8)) (u32.eq (local tag) (u32 9)))))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) (u32 24)))
 			(if
@@ -1198,6 +1344,19 @@
 				(u32.lt (u32 0) (record.get (local form) error))
 				(then (return (local form))))
 			(let operand (record.get (local form) operand))
+			(if
+				(:doc "Construct the record identified in the current file's type namespace.")
+				(local constructing)
+				(then (return (call plan_record_make (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local operand) (local index) (record.get (local caller) file) (local expected)
+					(borrow-shared (local records)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "Read the requested field from the receiver's defining layout.")
+				(local member_read)
+				(then (return (call plan_record_get (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local operand) (local index) (local expected) (local caller) (local statement)
+					(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements))
+					(borrow-mut (local expressions))))))
 			(if
 				(:doc "Only a local declaration can establish a new owning binding.")
 				(local allocation)
@@ -1343,7 +1502,7 @@
 		plan_value
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(root i32) (expected u32) (statement i32) (functions (shared-slice ScalarFunction))
-			(parameters (shared-slice ScalarParameter)) (bindings (shared-slice GraphBinding))
+			(parameters (shared-slice ScalarParameter)) (bindings (shared-slice GraphBinding)) (records (shared-slice ScalarRecord))
 			(statements (mut-slice ScalarStatement)) (expressions (mut-slice ScalarExpression))
 			(sites (mut-slice CallSite)) (site_start i32) (view_start i32))
 		(returns BodyPlan)
@@ -1380,7 +1539,7 @@
 						(then
 							(let checked (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local caller) (local index) (local type) (local statement) (borrow-shared (local functions))
-								(borrow-shared (local parameters)) (borrow-shared (local bindings))
+								(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))
 								(borrow-shared (local statements)) (borrow-mut (local expressions)) (local view_start)))
 							(if
 								(:doc "Preserve the first failing expression's source spans.")
@@ -1461,7 +1620,7 @@
 		plan_statement
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction) (index i32)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(bindings (shared-slice GraphBinding)) (statements (mut-slice ScalarStatement))
+			(bindings (shared-slice GraphBinding)) (records (shared-slice ScalarRecord)) (statements (mut-slice ScalarStatement))
 			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (site_count i32) (view_start i32) (previous_owner i32))
 		(returns BodyPlan)
 		(body
@@ -1516,7 +1675,7 @@
 				(then (set (local expected) (u32 40))))
 			(let checked (call plan_value (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (local value) (local expected) (local index) (borrow-shared (local functions))
-				(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-mut (local statements))
+				(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local statements))
 				(borrow-mut (local expressions)) (borrow-mut (local sites)) (local site_count) (local view_start)))
 			(if
 				(:doc "Abort before publishing a binding whose value fails checking.")
@@ -1539,7 +1698,7 @@
 		plan_function_body
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(bindings (shared-slice GraphBinding)) (statements (mut-slice ScalarStatement))
+			(bindings (shared-slice GraphBinding)) (records (shared-slice ScalarRecord)) (statements (mut-slice ScalarStatement))
 			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (site_start i32) (view_start i32))
 		(returns BodyPlan)
 		(body
@@ -1588,7 +1747,7 @@
 									(record.get (local node) end) (u32 24)))))
 							(let checked (call plan_statement (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local caller) (local index) (borrow-shared (local functions)) (borrow-shared (local parameters))
-								(borrow-shared (local bindings)) (borrow-mut (local statements)) (borrow-mut (local expressions))
+								(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local statements)) (borrow-mut (local expressions))
 								(borrow-mut (local sites)) (local site_count) (local view_start) (local previous_owner)))
 							(if
 								(:doc "Stop before planning any statements past the originating error.")
@@ -1627,7 +1786,7 @@
 		plan_bodies
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
-			(bindings (shared-slice GraphBinding)) (statements (mut-slice ScalarStatement))
+			(bindings (shared-slice GraphBinding)) (records (shared-slice ScalarRecord)) (statements (mut-slice ScalarStatement))
 			(expressions (mut-slice ScalarExpression)) (sites (mut-slice CallSite)) (view_start i32))
 		(returns BodyPlan)
 		(body
@@ -1639,7 +1798,7 @@
 				(body
 					(let checked (call plan_function_body (borrow-shared (local source)) (borrow-shared (local nodes))
 						(slice.load (local functions) (local function)) (borrow-shared (local functions))
-						(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-mut (local statements))
+						(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local statements))
 						(borrow-mut (local expressions)) (borrow-mut (local sites)) (local site_count) (local view_start)))
 					(if
 						(:doc "Report the earliest rejected body with the original file and span.")

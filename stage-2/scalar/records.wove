@@ -1,0 +1,238 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Register checked module-local scalar record layouts.
+
+	Retain the defining file, name, and first field in the source tree.
+	Resolve fields by original spelling and use declaration order for
+	their native ordinals. The record table is a zero-initialized prefix.`)
+	scalar_records
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts select_form (type SelectedDeclaration)))
+	(use wove-file "../emit/names.wove" (only record_identity))
+	(use wove-file "./syntax.wove"
+		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type (type EntryRead)))
+
+	(struct ScalarRecord (fields (name i32) (file i32) (identity u32) (first i32) (count i32)))
+	(struct ScalarMember (fields (ordinal i32) (type u32)))
+
+	(fn
+		(:doc `Recognize the type-code interval reserved for registered records.`)
+		(:pragma (inline always))
+		is_record_type
+		(params (type u32))
+		(returns bool)
+		(body (return (bool.not (u32.lt (local type) (u32 64))))))
+
+	(fn
+		(:doc `Encode a checked record row as a type distinct from the built-ins.`)
+		record_type
+		(params (row i32))
+		(returns u32)
+		(body (return (u32.add.wrapping (int.convert u32 (local row)) (u32 64)))))
+
+	(fn
+		(:doc `Recover the checked defining row from a named record type.`)
+		record_index
+		(params (type u32))
+		(returns i32)
+		(body (return (int.convert i32 (u32.sub.wrapping (local type) (u32 64))))))
+
+	(fn
+		(:doc `Classify a selected declaration by its original head.`)
+		declaration_kind
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32))
+		(returns u32)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
+				(slice.load (local nodes) (local declaration))))
+			(return (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local parts) head)))))
+
+	(fn
+		(:doc `Count selected records so single-file function and record tables have exact capacities.`)
+		count_records
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(declarations (shared-slice SelectedDeclaration)) (count i32))
+		(returns i32)
+		(body
+			(let-mut index (i32 0))
+			(let-mut records (i32 0))
+			(while
+				(:doc "Inactive and grouped declarations have already been filtered by the module reader.")
+				(i32.lt (local index) (local count))
+				(body
+					(let form (record.get (slice.load (local declarations) (local index)) node))
+					(if
+						(:doc "Structs occupy the type table and all other declarations follow signature checking.")
+						(u32.eq (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)) (u32 48))
+						(then (set (local records) (i32.add.wrapping (local records) (i32 1)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (local records))))
+
+	(fn
+		(:doc `Find a named record in the defining file's type namespace.`)
+		find_record
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(file i32) (name SourceNode))
+		(returns i32)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Only the populated prefix can contain a definition.")
+				(i32.lt (local index) (slice.len (local records)))
+				(body
+					(let record (slice.load (local records) (local index)))
+					(let declared (record.get (local record) name))
+					(if (i32.eq (local declared) (i32 0)) (then (return (i32 -1))))
+					(if
+						(:doc "Compare the exact source spelling in the owning file.")
+						(bool.and (i32.eq (local file) (record.get (local record) file))
+							(call same_name (borrow-shared (local source)) (local name) (slice.load (local nodes) (local declared))))
+						(then (return (local index))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (i32 -1))))
+
+	(fn
+		(:doc `Validate a named member form and return its single ordinary operand.`)
+		read_member_operand
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (member SourceNode))
+		(returns EntryRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+			(let head (record.get (local parts) head))
+			(let value (record.get (local parts) operands))
+			(if
+				(:doc "A member requires an identifier head and exactly one value.")
+				(bool.or (i32.lt (local head) (i32 0))
+					(bool.or (bool.not (call is_scalar_name (borrow-shared (local source)) (slice.load (local nodes) (local head))))
+						(bool.or (i32.lt (local value) (i32 0))
+							(bool.not (i32.lt (record.get (slice.load (local nodes) (local value)) next_sibling) (i32 0))))))
+				(then (return (call entry_at (local member) (i32 -1) (u32 24)))))
+			(let selection (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local member) (local parts) (bool false)))
+			(if
+				(:doc "Selection directives belong to declarations and cannot remove individual fields.")
+				(u32.lt (u32 0) (record.get (local selection) error))
+				(then (return (record.make EntryRead (operand (i32 -1))
+					(start (record.get (local selection) start)) (end (record.get (local selection) end))
+					(error (record.get (local selection) error)) (related (i32 -1))))))
+			(return (call entry_at (local member) (local value) (u32 0)))))
+
+	(fn
+		(:doc `Read a field type from an already validated declaration row.`)
+		member_type
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (member SourceNode))
+		(returns u32)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+			(return (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) operands)))))
+
+	(fn
+		(:doc `Resolve a member in the checked prefix of a record's field list.`)
+		find_member
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (count i32) (name SourceNode))
+		(returns ScalarMember)
+		(body
+			(let-mut field (local first))
+			(let-mut ordinal (i32 0))
+			(while
+				(:doc "Use the original member order for native ordinals.")
+				(i32.lt (local ordinal) (local count))
+				(body
+					(let item (slice.load (local nodes) (local field)))
+					(let head (slice.load (local nodes) (record.get (local item) first_child)))
+					(if
+						(:doc "Native naming does not affect member lookup.")
+						(call same_name (borrow-shared (local source)) (local head) (local name))
+						(then (return (record.make ScalarMember (ordinal (local ordinal))
+							(type (call member_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))))))
+					(set (local field) (record.get (local item) next_sibling))
+					(set (local ordinal) (i32.add.wrapping (local ordinal) (i32 1)))))
+			(return (record.make ScalarMember (ordinal (i32 -1)) (type (u32 0))))))
+
+	(fn
+		(:doc `Register one selected type after checking its scalar fields and stable identity.`)
+		register_record
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32)
+			(file i32) (module u32) (records (mut-slice ScalarRecord)) (index i32))
+		(returns EntryRead)
+		(body
+			(let node (slice.load (local nodes) (local declaration)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let name (record.get (local parts) operands))
+			(if
+				(:doc "A struct requires a name before its field list.")
+				(i32.lt (local name) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 22)))))
+			(let spelling (slice.load (local nodes) (local name)))
+			(let fields (record.get (local spelling) next_sibling))
+			(if
+				(:doc "There is exactly one fields operand after the record name.")
+				(bool.or (i32.lt (local fields) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local fields)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 22)))))
+			(if
+				(:doc "Reserve the supported native type spellings.")
+				(bool.or (bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
+					(bool.or (u32.lt (u32 0) (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)))
+						(call is_byte_view_type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)))))
+				(then (return (call entry_at (local spelling) (i32 -1) (u32 22)))))
+			(let identity (call record_identity (borrow-shared (local source)) (record.get (local spelling) start)
+				(record.get (local spelling) end) (local module)))
+			(let-mut previous (i32 0))
+			(while
+				(:doc "All record identities in the translation unit must be distinct.")
+				(i32.lt (local previous) (local index))
+				(body
+					(let prior (slice.load (local records) (local previous)))
+					(if
+						(:doc "Distinguish a repeated name in this file from a stable identity collision.")
+						(u32.eq (local identity) (record.get (local prior) identity))
+						(then
+							(let earlier (slice.load (local nodes) (record.get (local prior) name)))
+							(if
+								(:doc "A duplicate type name cannot introduce another layout.")
+								(bool.and (i32.eq (local file) (record.get (local prior) file))
+									(call same_name (borrow-shared (local source)) (local spelling) (local earlier)))
+								(then (return (call entry_at (local spelling) (i32 -1) (u32 33)))))
+							(return (call entry_at (local spelling) (i32 -1) (u32 32)))))
+					(set (local previous) (i32.add.wrapping (local previous) (i32 1)))))
+			(let list (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(slice.load (local nodes) (local fields)) (u32 49) (u32 22)))
+			(if
+				(:doc "Keep an invalid field list's own span.")
+				(u32.lt (u32 0) (record.get (local list) error))
+				(then (return (local list))))
+			(let first (record.get (local list) operand))
+			(let-mut field (local first))
+			(let-mut count (i32 0))
+			(while
+				(:doc "Check field declarations in order before publishing the layout.")
+				(bool.not (i32.lt (local field) (i32 0)))
+				(body
+					(let member (slice.load (local nodes) (local field)))
+					(let checked (call read_member_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+					(if
+						(:doc "Malformed member forms retain the offending span.")
+						(u32.lt (u32 0) (record.get (local checked) error))
+						(then (return (local checked))))
+					(let field_type (record.get (local checked) operand))
+					(if
+						(:doc "Copyable fields use one of the four exact scalar types.")
+						(u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local field_type)) (u32 0))
+						(then (return (call entry_at (slice.load (local nodes) (local field_type)) (i32 -1) (u32 23)))))
+					(let field_name (slice.load (local nodes) (record.get (local member) first_child)))
+					(let prior (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local first) (local count) (local field_name)))
+					(if
+						(:doc "Each spelling occupies one native member position.")
+						(bool.not (i32.lt (record.get (local prior) ordinal) (i32 0)))
+						(then (return (call entry_at (local field_name) (i32 -1) (u32 33)))))
+					(set (local count) (i32.add.wrapping (local count) (i32 1)))
+					(set (local field) (record.get (local member) next_sibling))))
+			(slice.store (local records) (local index)
+				(record.make ScalarRecord (name (local name)) (file (local file)) (identity (local identity))
+					(first (local first)) (count (local count))))
+			(return (call entry_at (local node) (i32.add.wrapping (local index) (i32 1)) (u32 0))))))

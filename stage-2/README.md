@@ -172,6 +172,13 @@ of that binding's exact type. The selected `main`
 has the ABI signature `int main(void)`. Forward calls use checked
 prototypes, and nested calls evaluate from left to right.
 
+A module-local `(struct Token (fields (kind u32) (start i32)))` defines
+a named, copyable record. Fields can use `bool`, `u8`, `i32`, or `u32`.
+`(record.make Token (kind (u32 40)) (start (i32 2)))` evaluates each
+initializer exactly once in the order written. Supply every field once
+with its declared type. A local stores the result by value, and
+`(record.get (local tok) start)` reads a field with its exact type.
+
 `(bool true)` and `(bool false)` are scalar literals.
 `i32.eq` and `i32.lt` compare signed operands. `u8.eq`, `u8.lt`,
 `u32.eq`, and `u32.lt` compare unsigned operands. Each comparison
@@ -287,13 +294,16 @@ become underscores.
 | Tag | Role | ID | Suffix |
 | --- | --- | --- | --- |
 | `f` | Function | Stable declaration hash | Function name |
+| `r` | Record | Stable declaration hash | Record name |
+| `m` | Record member | Zero-based position in its layout | Empty |
 | `p` | Parameter | Zero-based position in its signature | Parameter name |
 | `l` | Local | Declared name's original file-local tree row | Local name |
 | `t` | Expression temporary | Original expression's file-local tree row | Empty |
 
-For this single-module slice, hash the declared module name, the four-byte
-little-endian function kind, and the original function name using the
-archive's 31-bit FNV-1a. The ID is independent of source layout and
+For a single module, hash its declared name, the four-byte little-endian
+declaration kind, and the original declaration name using the archive's
+31-bit FNV-1a. Records use the archive's struct kind 1, and functions use
+kind 2. The ID is independent of source layout and
 declaration order. Detect collisions before writing C, even when the
 readable suffixes differ. Each resolved call keeps the callee's defining
 row and its own source node for later analysis.
@@ -306,12 +316,12 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | --- | --- | --- |
 | 16 | Short C output view | The selected entry |
 | 22 | Missing entry or unsupported declaration | The module, first function name, or offending declaration |
-| 23 | Unsupported signature | The parameter list, result, or offending signature form |
+| 23 | Unsupported signature or record field type | The parameter list, result, field type, or offending signature form |
 | 24 | Invalid, unsupported, or unreachable body form, or incompatible expression type | The offending form or expression |
 | 25 | Invalid scalar literal | The value or malformed literal form |
-| 32 | Stable declaration identity collision | The later function name |
-| 33 | Duplicate function, parameter, or local | The later name |
-| 34 | Unavailable function or binding | The requested name or incomplete reference |
+| 32 | Stable declaration identity collision | The later declaration name |
+| 33 | Duplicate function, parameter, local, record, or field | The later name |
+| 34 | Unavailable function, binding, record, or field | The requested name or incomplete reference |
 | 35 | Wrong call arity | The call expression |
 | 37 | Assignment to an immutable binding | The target name |
 | 39 | `ownership.use_after_move` | The attempted use, with the original move as a related span |
