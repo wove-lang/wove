@@ -52,6 +52,8 @@ wvrt_slice wvrt_slice_range_u8(const void *wvrt_items, int32_t wvrt_length,
 wvrt_slice wvrt_slice_range_u8_at_span(wvrt_slice wvrt_view, int32_t wvrt_start, int32_t wvrt_end,
 	int32_t wvrt_file, int32_t wvrt_span_start, int32_t wvrt_span_end);
 size_t wvrt_slice_offset(int32_t wvrt_length, int32_t wvrt_index, wvrt_location wvrt_site);
+size_t wvrt_slice_offset_at_span(int32_t wvrt_length, int32_t wvrt_index,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 uint8_t wvrt_slice_load_u8(const void *wvrt_items, int32_t wvrt_length, int32_t wvrt_index,
 	wvrt_location wvrt_site);
 uint8_t wvrt_slice_load_u8_at_span(wvrt_slice wvrt_view, int32_t wvrt_index,

@@ -216,6 +216,14 @@ the length traps before reading the slice, with the original file ID and
 half-open byte span of the load. C emitted for a shared view includes
 `wove_runtime.h`. Link the shared runtime when the code uses a checked load.
 
+A `(shared-slice Token)` parameter can refer to a named, copyable scalar
+record. Its C descriptor is also a `wvrt_slice`. Pass a whole view to
+another function with `(borrow-shared (local data))` and the same defining
+element type. `slice.len` counts records and `slice.load` checks its
+`i32` index before copying the selected record by value. A C caller
+supplies the original array of the emitted record type and its element
+count and size.
+
 Helpers can also take `(mut-slice u8)` parameters using `wvrt_mut_slice`.
 Pass one to a writable parameter with `(borrow-mut (local data))`, or
 to a shared parameter with `(borrow-shared (local data))`. An explicit
