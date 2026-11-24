@@ -38,6 +38,7 @@ static wvrt_array *wvrt_array_try_new(int32_t wvrtlength, size_t wvrtelement_siz
 	wvrt_array *wvrt_buffer = malloc(sizeof *wvrt_buffer);
 	if (wvrt_buffer == NULL) { return NULL; }
 	wvrt_buffer->wvrt_items = wvrt_calloc(wvrt_count, wvrtelement_size, wvrtelement_alignment);
+	// The descriptor owns no backing storage yet, so release it before returning failure.
 	if (wvrt_buffer->wvrt_items == NULL) {
 		free(wvrt_buffer);
 		return NULL;

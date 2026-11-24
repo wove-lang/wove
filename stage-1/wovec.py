@@ -10,23 +10,28 @@ from compiler import compile_source
 from syntax import SourceError
 
 
+# Use stdout for generated C and report source failures by line.
 def main() -> int:
-    """Use stdout for generated C and report source failures by line."""
-    if len(sys.argv) != 2:
-        print("usage: wovec.py SOURCE", file=sys.stderr)
-        return 1
-    filename = sys.argv[1]
-    try:
-        output = compile_source(Path(filename).read_text(encoding="utf-8"), filename)
-    except SourceError as error:
-        print(f"{filename}:{error.line}", file=sys.stderr)
-        return 1
-    except (OSError, UnicodeError) as error:
-        print(error, file=sys.stderr)
-        return 1
-    sys.stdout.write(output)
-    return 0
+	# The seed translates one source file per invocation.
+	if len(sys.argv) != 2:
+		print("usage: wovec.py SOURCE", file=sys.stderr)
+		return 1
+	filename = sys.argv[1]
+	# Buffer the translation so a rejected source emits no C.
+	try:
+		output = compile_source(Path(filename).read_text(encoding="utf-8"), filename)
+	# Show the line of a rejected source operation.
+	except SourceError as error:
+		print(f"{filename}:{error.line}", file=sys.stderr)
+		return 1
+	# Forward file and encoding errors from the source reader.
+	except (OSError, UnicodeError) as error:
+		print(error, file=sys.stderr)
+		return 1
+	sys.stdout.write(output)
+	return 0
 
 
+# Leave the entry point idle when another module imports it.
 if __name__ == "__main__":
-    sys.exit(main())
+	sys.exit(main())
