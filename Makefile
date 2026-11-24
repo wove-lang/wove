@@ -41,7 +41,10 @@ CLI_OPTION_PROGRAMS := $(addprefix $(STAGE2)/cli/,options options_errors)
 CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors) $(CLI_OPTION_PROGRAMS)
 CONFIG_FIXTURES := tests/stage-2/config
 CONFIG_PROGRAM := $(STAGE2)/config/project
-CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove project.wove schema.wove values.wove)
+CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove project.wove schema.wove values.wove)
+COMMAND_FIXTURES := $(CLI_FIXTURES)/command
+COMMAND_PROGRAM := $(STAGE2)/cli/command
+COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -79,7 +82,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) \
-		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) \
+		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv
@@ -90,8 +93,9 @@ test-stage-2-json: $(JSON_PROGRAMS)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/json" "$(JSON_CASES)"
 
 # Run the standalone typed argv fixtures with the seed manifest runner.
-test-stage-2-cli: $(CLI_PROGRAMS)
+test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/cli" "$(CLI_CASES)"
+	$(PYTHON) "$(COMMAND_FIXTURES)/check.py" "$(COMMAND_PROGRAM)" "$(COMMAND_FIXTURES)/cases.tsv"
 
 # Exercise the project loader with the checked-in config and standalone cases.
 test-stage-2-config: $(CONFIG_PROGRAM)
@@ -149,6 +153,15 @@ $(CONFIG_PROGRAM).c: $(CONFIG_FIXTURES)/project.wove $(CONFIG_SOURCES) $(JSON_RE
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
 $(CONFIG_PROGRAM): $(CONFIG_FIXTURES)/project.probe.c $(CONFIG_PROGRAM).c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+
+# Supply an argv arena and config bytes to the standalone command fixture.
+$(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOURCES) $(CONFIG_SOURCES) \
+	$(JSON_READER_SOURCES) $(SOURCE_SCAN_MODULE) $(SEED)
+	mkdir -p "$(@D)"
+	$(PYTHON) stage-1/wovec.py "$<" > "$@"
+
+$(COMMAND_PROGRAM): $(CLI_FIXTURES)/command.probe.c $(COMMAND_PROGRAM).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
