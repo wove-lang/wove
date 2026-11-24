@@ -11,6 +11,7 @@ STAGE2 := $(BUILD_DIR)/stage-2
 BOOTSTRAP_COMPILER := $(STAGE1)/wovec
 COMPILER_ROOT := stage-2/wovec.wove
 SOURCE_SCAN_MODULE := stage-2/source_scan.wove
+SOURCE_STRINGS_MODULE := stage-2/source_strings.wove
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -40,14 +41,15 @@ test-stage-2: stage-2
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
+		tests/stage-2/source_decodings.tsv \
 		stage-2/*.wove tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 
-# Translate the compiler root and regenerate C when its scanner module changes.
-$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SEED)
+# Translate the compiler root and regenerate C when either source module changes.
+$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
@@ -78,7 +80,7 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE)
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
-REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(ROUND_TRIP_PROVIDERS) \
+REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(SOURCE_STRINGS_MODULE) $(ROUND_TRIP_PROVIDERS) \
 	$(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
 

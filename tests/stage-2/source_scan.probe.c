@@ -22,17 +22,21 @@
 #define build_source_tree wv_seed_fn_30
 #define check_source_metadata wv_seed_fn_39
 #define render_source_tree wv_seed_fn_41
+#define decode_string wv_seed_fn_55
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
 typedef wv_seed_record_4 SourceNode;
 typedef wv_seed_record_5 RenderResult;
+typedef wv_seed_record_6 DecodeResult;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
 _Static_assert(_Generic(&source_kind, uint32_t (*)(wvrt_slice): 1, default: 0), "source kind type");
 _Static_assert(_Generic(&scan_token, Token (*)(wvrt_slice, int32_t): 1, default: 0), "scan token type");
 _Static_assert(_Generic(&admit_source, int32_t (*)(wvrt_slice): 1, default: 0), "source admission type");
+_Static_assert(_Generic(&decode_string, DecodeResult (*)(wvrt_slice, Token, wvrt_mut_slice): 1,
+	default: 0), "source decoder type");
 _Static_assert(_Generic(((Token){0}).wv_field_0, uint32_t: 1, default: 0), "token kind type");
 _Static_assert(_Generic(((Token){0}).wv_field_1, int32_t: 1, default: 0), "token start type");
 _Static_assert(_Generic(((Token){0}).wv_field_2, int32_t: 1, default: 0), "token end type");
@@ -362,38 +366,90 @@ static int dump_tree(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t
 	return result.wv_field_3 == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-// Render into an interior slice and check the guards and unwritten tail before reporting bytes.
+// Allocate an interior writable view with one sentinel byte at each edge.
+static uint8_t *guarded_output(int32_t capacity) {
+	const size_t size = (size_t)capacity + 2;
+	uint8_t *storage = malloc(size);
+	if (storage == NULL) {
+		fputs("could not allocate output buffer\n", stderr);
+		return NULL;
+	}
+	memset(storage, 0xa5, size);
+	return storage;
+}
+
+// Check the reported count, both guards, and every unwritten byte.
+static bool output_intact(const uint8_t *storage, int32_t capacity, int32_t written) {
+	if (written < 0 || written > capacity || storage[0] != 0xa5) {
+		fputs("write exceeded the output view\n", stderr);
+		return false;
+	}
+	// Start after the written prefix and include the right guard byte.
+	for (size_t offset = (size_t)written + 1; offset < (size_t)capacity + 2; ++offset) {
+		if (storage[offset] != 0xa5) {
+			fputs("unused output bytes were modified\n", stderr);
+			return false;
+		}
+	}
+	return true;
+}
+
+// Render into an interior slice and check the guards before reporting bytes.
 static int dump_render(wvrt_slice input, wvrt_slice nodes, int32_t capacity) {
 	if (capacity < 0) {
 		capacity = input.wvrt_length > INT32_MAX / 2 ? INT32_MAX : input.wvrt_length * 2;
 	}
-	const size_t size = (size_t)capacity + 2;
-	uint8_t *storage = malloc(size);
+	uint8_t *storage = guarded_output(capacity);
 	if (storage == NULL) {
-		fputs("could not allocate render buffer\n", stderr);
 		return EXIT_FAILURE;
 	}
-	memset(storage, 0xa5, size);
 	const wvrt_mut_slice output = {storage + 1, capacity, sizeof(uint8_t)};
 	const RenderResult result = render_source_tree(input, nodes, output);
 	const int32_t written = result.wv_field_0;
-	if (written < 0 || written > capacity || storage[0] != 0xa5) {
-		fputs("renderer exceeded the output view\n", stderr);
+	if (!output_intact(storage, capacity, written)) {
 		free(storage);
 		return EXIT_FAILURE;
-	}
-	// Start after the written prefix and include the right guard byte.
-	for (size_t offset = (size_t)written + 1; offset < size; ++offset) {
-		if (storage[offset] != 0xa5) {
-			fputs("renderer modified unused output bytes\n", stderr);
-			free(storage);
-			return EXIT_FAILURE;
-		}
 	}
 	printf("%" PRId32 "\t%" PRIu32 "\n", written, result.wv_field_1);
 	const size_t emitted = fwrite(storage + 1, 1, (size_t)written, stdout);
 	free(storage);
 	return result.wv_field_1 == 0 && emitted == (size_t)written ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+// Check the input and decode its first token into a guarded output view.
+static int dump_decode(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity) {
+	const wv_seed_record_1 diagnostic = source_diagnostic(input);
+	if (diagnostic.wv_field_0 != 0) {
+		write_span(parent, start, 0, diagnostic.wv_field_1, diagnostic.wv_field_2, diagnostic.wv_field_0);
+		return EXIT_FAILURE;
+	}
+	const Token token = scan_token(input, 0);
+	if (token.wv_field_3 != 0) {
+		write_span(parent, start, 0, token.wv_field_1, token.wv_field_2, token.wv_field_3);
+		return EXIT_FAILURE;
+	}
+	if (token.wv_field_0 != 2) {
+		fputs("expected a string token\n", stderr);
+		return EXIT_FAILURE;
+	}
+	if (capacity < 0) {
+		capacity = input.wvrt_length;
+	}
+	uint8_t *storage = guarded_output(capacity);
+	if (storage == NULL) {
+		return EXIT_FAILURE;
+	}
+	const wvrt_mut_slice output = {storage + 1, capacity, sizeof(uint8_t)};
+	const DecodeResult result = decode_string(input, token, output);
+	const int32_t written = result.wv_field_0;
+	if (!output_intact(storage, capacity, written)) {
+		free(storage);
+		return EXIT_FAILURE;
+	}
+	write_span(parent, start, (uint32_t)written, result.wv_field_1, result.wv_field_2, result.wv_field_3);
+	const size_t emitted = fwrite(storage + 1, 1, (size_t)written, stdout);
+	free(storage);
+	return result.wv_field_3 == 0 && emitted == (size_t)written ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 // Build and validate the original tree before supplying it to the renderer.
@@ -461,8 +517,10 @@ static int source_mode(int argc, char **argv) {
 	const bool metadata = strcmp(argv[1], "--metadata") == 0;
 	const bool tree = metadata || strcmp(argv[1], "--tree") == 0;
 	const bool render = strcmp(argv[1], "--render") == 0;
-	if ((argc != 3 && argc != 5 && !((tree || render) && argc == 6)) || (!tokens && !form && !tree && !render)) {
-		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render]"
+	const bool decode = strcmp(argv[1], "--decode") == 0;
+	const bool takes_capacity = tree || render || decode;
+	if ((argc != 3 && argc != 5 && !(takes_capacity && argc == 6)) || (!tokens && !form && !takes_capacity)) {
+		fputs("usage: source_scan [--tokens | --form | --tree | --metadata | --render | --decode]"
 			" FILE [START END [CAPACITY]]\n", stderr);
 		return EXIT_FAILURE;
 	}
@@ -494,6 +552,8 @@ static int source_mode(int argc, char **argv) {
 		status = dump_tree(parent, view, start, capacity, metadata);
 	} else if (render) {
 		status = render_view(view, capacity);
+	} else if (decode) {
+		status = dump_decode(parent, view, start, capacity);
 	} else {
 		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	}
