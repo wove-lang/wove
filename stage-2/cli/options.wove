@@ -1,0 +1,112 @@
+(module
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve the compiler's typed options from supplied argv, JSONC, and defaults.
+
+	Pass argv without the executable name. Use has_config to distinguish
+	an omitted file from an explicitly supplied empty document. Supply
+	scratch JSON rows and storage for one CompilerOptions row.
+
+	The CLI knows --human, --no-human, and --max-errors. The JSONC object
+	also accepts color. A successful result writes the effective options
+	to row zero. An error leaves that row intact.
+
+	Diagnostics report source 1 for JSONC with its original half-open span,
+	2 for argv with its zero-based argv and specification indices, and 3
+	for missing output storage. The error is the original parser or schema
+	code for sources 1 and 2, and 1 for missing storage. A zero source and
+	error indicate success. Unused coordinates are -1.`)
+	compiler_cli
+
+	(use wove-file "../config/compiler.wove"
+		(only (type CompilerOptions) compiler_defaults compiler_names_width compiler_option
+			write_compiler_names read_compiler_config))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "./argv.wove" (only (type ArgSpan) (type ArgSpec) (type ArgValue) parse_argv))
+
+	(struct OptionsResult (fields (source u32) (error u32) (start i32) (end i32) (argv_index i32) (spec_index i32)))
+
+	(fn
+		(:doc "Use the shared names for compiler options available on the command line.")
+		compiler_cli_specs
+		(params (specs (mut-slice ArgSpec)))
+		(returns void)
+		(body
+			(let-mut row (i32 0))
+			(while
+				(:doc "The first two rows describe the options shared between argv and config.")
+				(i32.lt (local row) (i32 2))
+				(body
+					(let option (call compiler_option (local row)))
+					(slice.store (local specs) (local row) (record.make ArgSpec
+						(form (record.get (local option) cli_form)) (value_kind (record.get (local option) value_kind))
+						(name_start (record.get (local option) start)) (name_end (record.get (local option) end))))
+					(set (local row) (i32.add.wrapping (local row) (i32 1)))))))
+
+	(fn
+		(:doc "Retain the coordinates appropriate to the original diagnostic source.")
+		options_result
+		(params (source u32) (error u32) (start i32) (end i32) (argv_index i32) (spec_index i32))
+		(returns OptionsResult)
+		(body (return (record.make OptionsResult (source (local source)) (error (local error))
+			(start (local start)) (end (local end)) (argv_index (local argv_index)) (spec_index (local spec_index))))))
+
+	(fn
+		(:doc "Apply explicitly present CLI values over the supplied base options.")
+		apply_cli_values
+		(params (base CompilerOptions) (values (shared-slice ArgValue)))
+		(returns CompilerOptions)
+		(body
+			(let-mut human (record.get (local base) human))
+			(let-mut max_errors (record.get (local base) max_errors))
+			(let cli_human (slice.load (local values) (i32 0)))
+			(let cli_max (slice.load (local values) (i32 1)))
+			(if
+				(:doc "Both --human and --no-human override the config value.")
+				(record.get (local cli_human) present)
+				(then (set (local human) (record.get (local cli_human) bool_value))))
+			(if
+				(:doc "An explicit zero is present and replaces any configured bound.")
+				(record.get (local cli_max) present)
+				(then (set (local max_errors) (record.get (local cli_max) u32_value))))
+			(return (record.make CompilerOptions (human (local human)) (max_errors (local max_errors))
+				(color (record.get (local base) color))))))
+
+	(fn
+		(:doc "Validate argv and the supplied config, then publish one effective options row.")
+		resolve_compiler_options
+		(params (argv_bytes (shared-slice u8)) (argv (shared-slice ArgSpan)) (has_config bool)
+			(config (shared-slice u8)) (nodes (mut-slice JsonNode)) (output (mut-slice CompilerOptions)))
+		(returns OptionsResult)
+		(body
+			(if
+				(:doc "Check the destination before either parser can publish a result.")
+				(i32.eq (slice.len (local output)) (i32 0))
+				(then (return (call options_result (u32 3) (u32 1) (i32 -1) (i32 -1) (i32 -1) (i32 -1)))))
+			(let-mut names (array.alloc u8 (call compiler_names_width)))
+			(call write_compiler_names (borrow-mut (local names)))
+			(let-mut specs (array.alloc ArgSpec (i32 2)))
+			(call compiler_cli_specs (borrow-mut (local specs)))
+			(let-mut values (array.alloc ArgValue (i32 2)))
+			(let cli (call parse_argv (borrow-shared (local argv_bytes)) (borrow-shared (local argv))
+				(borrow-shared (local names)) (borrow-shared (local specs)) (borrow-mut (local values))))
+			(if
+				(:doc "Forward argv errors before writing effective options.")
+				(u32.lt (u32 0) (record.get (local cli) error))
+				(then (return (call options_result (u32 2) (record.get (local cli) error) (i32 -1) (i32 -1)
+					(record.get (local cli) argv_index) (record.get (local cli) spec_index)))))
+			(if
+				(:doc "Validate the entire supplied config before applying CLI overrides.")
+				(local has_config)
+				(then
+					(let result (call read_compiler_config (borrow-shared (local config)) (borrow-mut (local nodes))
+						(borrow-shared (local names)) (borrow-mut (local output))))
+					(if
+						(:doc "Config errors retain their JSONC spans even for fields also supplied on argv.")
+						(u32.lt (u32 0) (record.get (local result) error))
+						(then (return (call options_result (u32 1) (record.get (local result) error)
+							(record.get (local result) start) (record.get (local result) end) (i32 -1) (i32 -1))))))
+				(else (slice.store (local output) (i32 0) (call compiler_defaults))))
+			(let base (slice.load (local output) (i32 0)))
+			(slice.store (local output) (i32 0) (call apply_cli_values (local base) (borrow-shared (local values))))
+			(return (call options_result (u32 0) (u32 0) (i32 -1) (i32 -1) (i32 -1) (i32 -1))))))
