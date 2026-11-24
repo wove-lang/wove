@@ -32,6 +32,7 @@ optional `(else ...)` block. Only the selected block executes. Each arm
 releases its local owners on exit, and a return releases all enclosing scopes.
 An outer binding is available after the branch when every continuing path
 still owns it. An omitted `else` contributes the incoming state.
+The seed rejects statements after a return or a branch whose arms both return.
 
 `slice.load` reads a `u8` from either kind of byte slice. `slice.store` needs
 a mutable byte slice and writes to the owner's storage. Both take an `i32`

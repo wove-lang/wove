@@ -418,14 +418,16 @@ class FunctionEmitter:
 		self.cleanup(self.scopes)
 		self.emit_line(exit_line)
 
-	# Evaluate statements in order until the current path returns.
+	# Walk statements in order and require each one to follow a continuing path.
 	def statements(self, nodes: tuple[Node, ...]) -> bool:
-		# A terminating statement has already emitted all required cleanup.
+		continues = True
+		# A terminating statement still lets the walker check for trailing statements.
 		for node in nodes:
-			# Subsequent statements are unreachable on a terminated path.
-			if not self.statement(node):
-				return False
-		return True
+			# Point to the first unreachable statement after a terminator.
+			if not continues:
+				raise SourceError(node.line)
+			continues = self.statement(node)
+		return continues
 
 	# Enter an arm's scope and drop its locals when the arm falls through.
 	def block(self, node: Form) -> bool:
@@ -457,6 +459,7 @@ class FunctionEmitter:
 
 		# An omitted else reaches the join with the incoming state.
 		else_continues = True
+		# Emit the explicit else in its own scope from the incoming state.
 		if else_arm is not None:
 			self.emit_line("} else {")
 			else_continues = self.block(else_arm)
