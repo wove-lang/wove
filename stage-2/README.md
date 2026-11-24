@@ -181,6 +181,11 @@ return their signed 32-bit result modulo 2^32. Each binary operand is
 evaluated once, left to right. Emitted C widens the arithmetic,
 reduces it to 32 bits as unsigned, and produces an in-range signed result.
 
+`u32.add.wrapping` and `u32.sub.wrapping` take exact `u32` operands
+and yield `u32` results modulo 2^32. Each operand runs once, left to
+right. Emitted C widens the operands to unsigned 64-bit arithmetic and
+keeps the low 32 bits.
+
 `(int.convert target value)` evaluates the integer operand once and
 preserves its numerical value when it fits the target `u8`, `i32`, or
 `u32`. A value outside the target range traps before the cast. The
