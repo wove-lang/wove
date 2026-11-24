@@ -298,6 +298,22 @@ class FunctionEmitter:
 		del self.loans[checkpoint:]
 		return result
 
+	# Keep right-hand evaluation inside its branch while checking it unconditionally.
+	def short_circuit(self, node: Form) -> Value:
+		left, right = form(node, arity=2).operands
+		first = self.typed(left, BOOL)
+		result = self.temporary(BOOL, first.c)
+		test = result.c if node.tag == "bool.and" else f"!{result.c}"
+		# The left result survives when the right operand is skipped.
+		self.emit_line(f"if ({test}) {{")
+		# Boolean operands cannot move enclosing owners, so only C temporaries need a scope.
+		self.scopes.append({})
+		second = self.typed(right, BOOL)
+		self.emit_line(f"{result.c} = {second.c};")
+		self.scopes.pop()
+		self.emit_line("}")
+		return result
+
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
 		expr = form(node)
@@ -309,6 +325,16 @@ class FunctionEmitter:
 			if spelling not in ("true", "false"):
 				raise SourceError(literal.line)
 			return Value(BOOL, spelling)
+
+		# Binary boolean expressions guard every operation in the right operand.
+		if expr.tag in ("bool.and", "bool.or"):
+			return self.short_circuit(expr)
+
+		# Negation requires a boolean and keeps its type.
+		if expr.tag == "bool.not":
+			operand, = form(expr, arity=1).operands
+			value = self.typed(operand, BOOL)
+			return self.temporary(BOOL, f"!{value.c}")
 
 		# Convert the decimal literal to a C-safe spelling.
 		if expr.tag in SCALAR_LIMITS:
