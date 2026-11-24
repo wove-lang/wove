@@ -54,6 +54,10 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
+# Rebuild imported fixtures when any of their provider sources change.
+$(STAGE1)/imports.round_trip.c: $(wildcard $(OWNERSHIP_TESTS)/imports/*.wove $(OWNERSHIP_TESTS)/imports/nested/*.wove)
+$(STAGE1)/imports.runtime_location.c: $(OWNERSHIP_TESTS)/slice.load_negative.wove
+
 $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -c "$<" -o "$@"

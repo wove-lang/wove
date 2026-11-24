@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 # Stage 1 seed
 
 The Python seed is an internal build tool for bootstrapping Stage 2.
-It reads one module of tagged IR forms and emits C11 to stdout.
+It reads an entry module and its local imports and emits one C11 translation unit to stdout.
 The subset covers scalar and record values, owned arrays, and call-scoped
 shared and exclusive slice borrows. Every path through a function with a result
 type returns a value. A `void` function can return without a value or complete
@@ -40,7 +40,7 @@ A `record.make` names the record type and supplies each field once, using its
 declared type. Initializer expressions run in the order written. Use
 `(record.get (local token) start)` to read a field as its declared scalar type.
 Bindings, arguments, and returns copy records by value and preserve the
-record's name as its type.
+record's defining declaration as its type.
 
 An `if` statement takes a boolean condition, a `(then ...)` block, and an
 optional `(else ...)` block. Only the selected block executes. Each arm
@@ -88,12 +88,26 @@ must pass, and a `(test)` marker in any `:pragma` entry excludes the target.
 The seed skips other directives, including `inline`, and leaves other metadata
 payloads for later stages.
 
+Use `(use wove-file "./source_scan.wove" (only scan_token (as source_kind
+lexer_kind)))` to select functions from a local file. The path resolves from
+the importing file. A bare name keeps its spelling, and `(as original local)`
+binds a new name to the original declaration and signature. `(only)` loads the
+file and binds no names. Each function resolves its helpers and types in its
+defining file. A provider supplies its own function declarations for selection.
+
+Bootstrap selection runs before the seed opens a provider. The seed loads
+each file once by identity, so multiple paths to the same module share its
+declarations and use its first resolved path. An active missing file or cycle is diagnosed at the importing
+`use` line. Errors inside an imported file use that file's spelling and line.
+The entry module supplies the executable's `main`.
+
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.
 Run `make test` to check the transfer, its allocation lifetime, and the borrow
 rejection cases. The runner reads fixture paths and expected results from
 [the case manifest](../tests/stage-1/cases.tsv). Each row specifies a mode,
 a source path relative to the manifest, and an exit status or diagnostic line.
+Diagnostic cases can also name the file where the diagnostic should appear.
 Trap cases match the runtime diagnostic at that line.
 Use decimal numbers without leading zeros for expected results.
 Tracked cases also run with the allocation probe.

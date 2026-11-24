@@ -4,8 +4,10 @@
 """Lower the first Wove ownership forms to C11."""
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import re
 
 from syntax import Atom, Form, Node, SourceError, form, identifier, parse
@@ -52,12 +54,25 @@ COMPARISON_OPS = {
 
 
 @dataclass(frozen=True)
+class RecordField:
+	kind: str
+	c_name: str
+
+
+# Record equality follows the defining declaration, including across file scopes.
+@dataclass(eq=False, frozen=True)
+class Record:
+	c_name: str
+	fields: dict[str, RecordField]
+
+
+@dataclass(frozen=True)
 class BufferType:
 	access: str
-	element: str
+	element: str | Record
 
 
-Type = str | BufferType
+Type = str | Record | BufferType
 
 
 @dataclass(frozen=True)
@@ -76,34 +91,30 @@ class Binding:
 class Function:
 	c_name: str
 	params: tuple[tuple[str, Type], ...]
-	result: str
+	result: str | Record
 	body: Form
 
 
 @dataclass(frozen=True)
-class RecordField:
-	kind: str
-	c_name: str
-
-
-@dataclass(frozen=True)
-class Record:
-	c_name: str
-	fields: dict[str, RecordField]
+class Module:
+	filename: str
+	records: dict[str, Record]
+	functions: dict[str, Function]
+	uses: list[Form]
+	bindings: dict[str, Function]
 
 
 # Scalars and scalar-only records can be passed without a loan or transfer.
-def copyable(kind: Type, records: dict[str, Record]) -> bool:
-	return isinstance(kind, str) and (kind in SCALAR_TYPES or kind in records)
+def copyable(kind: Type) -> bool:
+	return isinstance(kind, Record) or kind in SCALAR_TYPES
 
 
 # Arrays and slices share descriptor layouts while values retain their native types.
-def c_type(kind: Type, records: dict[str, Record]) -> str:
+def c_type(kind: Type) -> str:
 	# The descriptor depends on the access mode and carries a typed element count.
 	if isinstance(kind, BufferType):
 		return C_TYPE[kind.access]
-	record = records.get(kind)
-	return record.c_name if record is not None else C_TYPE[kind]
+	return kind.c_name if isinstance(kind, Record) else C_TYPE[kind]
 
 
 # Collect scalar fields in declaration order for the record's native layout.
@@ -142,8 +153,11 @@ def record_definition(record: Record) -> list[str]:
 # Read a copyable input or a shared or mutable view of a supported element.
 def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 	# Copyable types are written as bare symbols.
-	if isinstance(node, Atom) and not node.quoted and copyable(node.text, records):
-		return node.text
+	if isinstance(node, Atom) and not node.quoted:
+		kind = records.get(node.text, node.text)
+		# Keep nominal record identity in the signature.
+		if copyable(kind):
+			return kind
 	view = target_form(node, arity=1)
 	# Slice parameters specify a read or write loan.
 	if view.tag not in (SHARED, MUT):
@@ -152,11 +166,13 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 	# Keep the declared element type as part of the slice type.
 	if element != U8 and element not in records:
 		raise SourceError(node.line)
-	return BufferType(view.tag, element)
+	return BufferType(view.tag, records.get(element, element))
 
 
 # Read the signature before lowering calls, including forward calls.
-def read_function(node: Node, index: int, records: dict[str, Record]) -> tuple[str, Function]:
+def read_function(
+	node: Node, index: int, records: dict[str, Record], *, entry_module: bool
+) -> tuple[str, Function]:
 	name_node, params_node, returns_node, body_node = form(node, "fn", 4).operands
 	name = identifier(name_node)
 
@@ -169,15 +185,17 @@ def read_function(node: Node, index: int, records: dict[str, Record]) -> tuple[s
 			raise SourceError(param.line)
 		params[field.tag] = parameter_type(field.operands[0], records)
 	result_node, = target_form(returns_node, "returns", 1).operands
-	result = identifier(result_node)
+	result_name = identifier(result_node)
+	result = records.get(result_name, result_name)
 	# A function returns a copyable value or completes without a value.
-	if result != VOID and not copyable(result, records):
+	if result != VOID and not copyable(result):
 		raise SourceError(result_node.line)
-	# Keep the C entry point on its existing zero-argument i32 ABI.
-	if name == "main" and (params or result != I32):
+	entry = entry_module and name == "main"
+	# Keep the root's C entry point on its existing zero-argument i32 ABI.
+	if entry and (params or result != I32):
 		raise SourceError(node.line)
 
-	c_name = "main" if name == "main" else f"wv_seed_fn_{index}"
+	c_name = "main" if entry else f"wv_seed_fn_{index}"
 	return name, Function(c_name, tuple(params.items()), result, target_form(body_node, "body"))
 
 
@@ -197,12 +215,12 @@ def c_string(text: str) -> str:
 
 
 # Give each parameter a C name independently of its source spelling.
-def signature(function: Function, records: dict[str, Record]) -> str:
+def signature(function: Function) -> str:
 	params = ", ".join(
-		f"{c_type(kind, records)} wv_value_{index}"
+		f"{c_type(kind)} wv_value_{index}"
 		for index, (_, kind) in enumerate(function.params)
 	)
-	result = "int" if function.c_name == "main" else f"static {c_type(function.result, records)}"
+	result = "int" if function.c_name == "main" else f"static {c_type(function.result)}"
 	return f"{result} {function.c_name}({params or 'void'})"
 
 
@@ -232,7 +250,7 @@ class FunctionEmitter:
 	def temporary(self, kind: Type, expression: str) -> Value:
 		name = f"wv_value_{self.next_value}"
 		self.next_value += 1
-		self.emit_line(f"{c_type(kind, self.records)} {name} = {expression};")
+		self.emit_line(f"{c_type(kind)} {name} = {expression};")
 		return Value(kind, name)
 
 	# Resolve a live place and report failures at the operation using it.
@@ -251,7 +269,7 @@ class FunctionEmitter:
 		raise SourceError(line)
 
 	# Require the exact result type at the operation that consumes it.
-	def typed(self, node: Node, kind: str) -> Value:
+	def typed(self, node: Node, kind: Type) -> Value:
 		value = self.expression(node)
 		# Scalar arithmetic and calls need an explicit conversion between types.
 		if value.kind != kind:
@@ -267,7 +285,7 @@ class FunctionEmitter:
 				raise SourceError(line)
 
 	# Resolve a slice and check its permission to access the parent storage.
-	def slice(self, node: Node, line: int, writable: bool = False) -> tuple[Value, str]:
+	def slice(self, node: Node, line: int, writable: bool = False) -> tuple[Value, str | Record]:
 		binding = self.local(node, line)
 		value = binding.value
 		kind = value.kind
@@ -278,8 +296,10 @@ class FunctionEmitter:
 		return value, kind.element
 
 	# Index a native record only after the runtime verifies the signed element index.
-	def record_element(self, view: Value, element: str, index: Value, line: int, *, writable: bool = False) -> str:
-		native = c_type(element, self.records)
+	def record_element(
+		self, view: Value, element: str | Record, index: Value, line: int, *, writable: bool = False
+	) -> str:
+		native = c_type(element)
 		pointer = native if writable else f"const {native}"
 		offset = f"wvrt_slice_offset({view.c}.wvrt_length, {index.c}, {self.site(line)})"
 		return f"(({pointer} *){view.c}.wvrt_items)[{offset}]"
@@ -383,8 +403,7 @@ class FunctionEmitter:
 		if not node.operands:
 			raise SourceError(node.line)
 		name, *fields = node.operands
-		kind = identifier(name)
-		record = self.records.get(kind)
+		record = self.records.get(identifier(name))
 		# Only a declared record has a usable member layout.
 		if record is None:
 			raise SourceError(name.line)
@@ -402,15 +421,15 @@ class FunctionEmitter:
 		if len(initializers) != len(record.fields):
 			raise SourceError(node.line)
 		values = ", ".join(initializers.values()) or "0"
-		return self.temporary(kind, f"({record.c_name}){{{values}}}")
+		return self.temporary(record, f"({record.c_name}){{{values}}}")
 
 	# Read a scalar member from an evaluated record value.
 	def record_field(self, node: Form) -> Value:
 		target, name = form(node, arity=2).operands
 		value = self.expression(target)
-		record = self.records.get(value.kind) if isinstance(value.kind, str) else None
+		record = value.kind
 		# A field lookup needs the target's declared record type.
-		if record is None:
+		if not isinstance(record, Record):
 			raise SourceError(target.line)
 		field = record.fields.get(identifier(name))
 		# The declared type determines both the field's presence and scalar type.
@@ -494,7 +513,7 @@ class FunctionEmitter:
 		if expr.tag == "local":
 			binding = self.local(expr, node.line)
 			# Array and slice places need an explicit operation.
-			if not copyable(binding.value.kind, self.records):
+			if not copyable(binding.value.kind):
 				raise SourceError(node.line)
 			# Capture the value now even if a later statement writes to its slot.
 			if binding.writable:
@@ -504,12 +523,13 @@ class FunctionEmitter:
 		# Allocate one runtime array with the source location for traps.
 		if expr.tag == "array.alloc":
 			element_node, length = form(expr, arity=2).operands
-			element = identifier(element_node)
+			name = identifier(element_node)
+			element = self.records.get(name, name)
 			# The seed supports byte arrays and arrays of declared copyable records.
-			if element != U8 and element not in self.records:
+			if element != U8 and not isinstance(element, Record):
 				raise SourceError(node.line)
 			size = self.typed(length, I32)
-			native = c_type(element, self.records)
+			native = c_type(element)
 			site = self.site(node.line)
 			return self.temporary(
 				BufferType(OWNED, element), f"wvrt_array_new({size.c}, sizeof({native}), _Alignof({native}), {site})"
@@ -731,15 +751,18 @@ class FunctionEmitter:
 			raise SourceError(initializer.line)
 		writable = statement.tag == "let-mut"
 		# A mutable copyable binding needs its own slot.
-		if writable and copyable(value.kind, self.records):
+		if writable and copyable(value.kind):
 			value = self.temporary(value.kind, value.c)
 		scope[symbol] = Binding(value, writable=writable)
 		return True
 
 	# Emit the function and require a result from each value-returning exit path.
-	def emit(self) -> list[str]:
+	def emit(self, retained: tuple[str, ...] = ()) -> list[str]:
 		body = self.function.body
-		self.lines.append(signature(self.function, self.records) + " {")
+		self.lines.append(signature(self.function) + " {")
+		# Mark loaded provider functions as used while keeping their C linkage private.
+		for name in retained:
+			self.emit_line(f"(void){name};")
 		# A path reaching the end of the body may only exit a void function.
 		if self.statements(body.operands):
 			# A result must be supplied by an explicit return.
@@ -823,48 +846,187 @@ def selected_declarations(nodes: tuple[Node, ...]) -> Iterator[Form]:
 			yield declaration
 
 
-# Emit a complete C translation unit after the entire module succeeds.
-def compile_source(source: str, filename: str) -> str:
-	module = target_form(parse(source), "module")
-	# The module name precedes its declarations.
-	if not module.operands:
-		raise SourceError(module.line)
-	identifier(module.operands[0])
-	declarations = tuple(selected_declarations(module.operands[1:]))
-	records = {}
-	function_declarations = []
-	# Collect all active record types before validating function signatures.
-	for node in declarations:
-		# The remaining declarations are checked as functions.
-		if node.tag != "struct":
-			function_declarations.append(node)
-			continue
-		name, record = read_record(node, len(records))
-		# A module has one layout for each named record.
-		if name in records:
-			raise SourceError(node.line)
-		records[name] = record
+# Add the defining file to any line-only error from local parsing or lowering.
+@contextmanager
+def source_file(filename: str) -> Iterator[None]:
+	# Keep a nested import's diagnostic at its original file.
+	try:
+		yield
+	except SourceError as error:
+		# Most syntax and type checks only know the local line.
+		if error.filename is None:
+			error.filename = filename
+		raise
 
-	functions = {}
-	# Collect only selected signatures before translating any function body.
-	for index, node in enumerate(function_declarations):
-		symbol, function = read_function(node, index, records)
-		# A top-level name identifies exactly one function.
-		if symbol in functions:
-			raise SourceError(node.line)
-		functions[symbol] = function
-	# A generated executable needs its C entry point.
-	if "main" not in functions:
-		raise SourceError(module.line)
+
+# Read active declarations and establish the file's own signatures before loading providers.
+def read_module(
+	source: str, filename: str, record_index: int, function_index: int, *, entry: bool = False
+) -> Module:
+	# Parsing, declaration selection, and signature checks belong to this file.
+	with source_file(filename):
+		module = target_form(parse(source), "module")
+		# The module name precedes its declarations.
+		if not module.operands:
+			raise SourceError(module.line)
+		identifier(module.operands[0])
+		records = {}
+		function_declarations = []
+		uses = []
+		# Select active declarations before looking at any import's operands or path.
+		for node in selected_declarations(module.operands[1:]):
+			# Providers are loaded after the file's own types and functions are known.
+			if node.tag == "use":
+				uses.append(node)
+			# Read declared record types before validating function signatures.
+			elif node.tag == "struct":
+				name, record = read_record(node, record_index + len(records))
+				# A file has one layout for each named record.
+				if name in records:
+					raise SourceError(node.line)
+				records[name] = record
+			# All other active declarations must be functions.
+			else:
+				function_declarations.append(node)
+
+		functions = {}
+		# Read every local signature before translating any function body.
+		for index, node in enumerate(function_declarations, function_index):
+			symbol, function = read_function(node, index, records, entry_module=entry)
+			# A file has one declaration per function name.
+			if symbol in functions:
+				raise SourceError(node.line)
+			functions[symbol] = function
+		# The root supplies the executable entry point even when a provider defines main.
+		if entry and "main" not in functions:
+			raise SourceError(module.line)
+		return Module(filename, records, functions, uses, functions.copy())
+
+
+# Decode the seed's local-file provider and its explicit selection list.
+def read_use(node: Form) -> tuple[str, Form]:
+	provider, source, only = form(node, "use", 3).operands
+	# Stage 1 only opens Wove source files.
+	if identifier(provider) != "wove-file":
+		raise SourceError(provider.line)
+	# The path is a quoted string, including when it contains escaped characters.
+	if not isinstance(source, Atom) or not source.quoted:
+		raise SourceError(source.line)
+	return source.text, form(only, "only")
+
+
+# Bind provider declarations directly, so aliases keep the original type and identity.
+def bind_use(only: Form, provider: Module, importer: Module) -> None:
+	# Each item contributes one function name to the importer's scope.
+	for item in only.operands:
+		# A bare name uses the provider spelling locally.
+		if isinstance(item, Atom):
+			original = local = item
+		# A renamed import carries both the defining and local names.
+		else:
+			original, local = form(item, "as", 2).operands
+		function = provider.functions.get(identifier(original))
+		# A provider exposes only its own declarations to explicit file imports.
+		if function is None:
+			raise SourceError(original.line)
+		name = identifier(local)
+		# Local declarations and earlier import bindings share the same function scope.
+		if name in importer.bindings:
+			raise SourceError(local.line)
+		importer.bindings[name] = function
+
+
+# Read an active provider and distinguish its source errors from failures to open it.
+def read_provider(path: Path, filename: str, use: Form) -> str:
+	# File and encoding failures have different source origins.
+	try:
+		return path.read_text(encoding="utf-8")
+	except OSError:
+		raise SourceError(use.line) from None
+	except UnicodeDecodeError as error:
+		prefix = error.object[:error.start]
+		line = prefix.count(b"\n") + prefix.count(b"\r") - prefix.count(b"\r\n") + 1
+		raise SourceError(line, filename) from None
+
+
+# Identify files across spelling aliases, symbolic links, and hard links.
+def file_identity(path: Path) -> tuple[int, int]:
+	status = path.stat()
+	return status.st_dev, status.st_ino
+
+
+# Visit the active source graph in declaration order and keep the first defining path.
+def load_modules(root: Module, path: Path) -> list[Module]:
+	# The root text can also be supplied in memory under a prospective filename.
+	try:
+		root_identity = file_identity(path)
+	except FileNotFoundError:
+		root_identity = path
+	modules = {root_identity: root}
+	active = {root_identity}
+	stack = [(root_identity, path, iter(root.uses))]
+	record_index = len(root.records)
+	function_index = len(root.functions)
+	absolute_paths = Path(root.filename).is_absolute()
+	# Keep active importers on the stack until their last use has been processed.
+	while stack:
+		identity, path, uses = stack[-1]
+		use = next(uses, None)
+		# Leaving a file makes later paths to it shared dependencies.
+		if use is None:
+			active.remove(identity)
+			stack.pop()
+			continue
+		importer = modules[identity]
+		# An active edge or an invalid selection is diagnosed in this importer.
+		with source_file(importer.filename):
+			requested, only = read_use(use)
+			# Resolve from the file containing the use and collapse path aliases.
+			try:
+				target = (path.parent / requested).resolve(strict=True)
+				target_identity = file_identity(target)
+			except (OSError, RuntimeError, ValueError):
+				raise SourceError(use.line) from None
+			# An edge back into the current path is a cycle.
+			if target_identity in active:
+				raise SourceError(use.line)
+			provider = modules.get(target_identity)
+			# Read and declare each active provider once, even with an empty selection.
+			if provider is None:
+				filename = str(target) if absolute_paths else os.path.relpath(target)
+				source = read_provider(target, filename, use)
+				provider = read_module(source, filename, record_index, function_index)
+				modules[target_identity] = provider
+				record_index += len(provider.records)
+				function_index += len(provider.functions)
+				active.add(target_identity)
+				stack.append((target_identity, target, iter(provider.uses)))
+			bind_use(only, provider, importer)
+	return list(modules.values())
+
+
+# Emit a complete C translation unit after the source graph succeeds.
+def compile_source(source: str, filename: str) -> str:
+	root = read_module(source, filename, 0, 0, entry=True)
+	modules = load_modules(root, Path(filename).resolve()) if root.uses else [root]
+	functions = [function for module in modules for function in module.functions.values()]
+	retained = tuple(function.c_name for module in modules[1:] for function in module.functions.values())
 
 	lines = ['#include "wove_runtime.h"', ""]
-	# Define complete native layouts before functions use them by value.
-	for record in records.values():
-		lines.extend(record_definition(record))
-	lines.extend(signature(fn, records) + ";" for fn in functions.values())
+	# Define every native type before functions use it by value.
+	for module in modules:
+		# Each record is emitted only for its defining file.
+		for record in module.records.values():
+			lines.extend(record_definition(record))
+	lines.extend(signature(function) + ";" for function in functions)
 	lines.append("")
-	path = c_string(filename)
-	# Keep generated bodies in source order.
-	for fn in functions.values():
-		lines.extend(FunctionEmitter(fn, functions, records, path).emit())
+	# Resolve names and trap locations in the function's defining file.
+	for module in modules:
+		path = c_string(module.filename)
+		# Lower each body against its file's local types and selected function bindings.
+		with source_file(module.filename):
+			# Emit provider bodies only once, regardless of their local aliases.
+			for function in module.functions.values():
+				references = retained if function.c_name == "main" else ()
+				lines.extend(FunctionEmitter(function, module.bindings, module.records, path).emit(references))
 	return "\n".join(lines)
