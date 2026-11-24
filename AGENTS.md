@@ -9,20 +9,23 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 - Use Conventional Commits for every commit subject and pull request title. Use `type: description` or `type(scope): description`, for example `docs: define repository workflow`.
 - After the initial commit, make all changes on a separate branch and submit them through a pull request. Never push directly to `master`.
 
-## Code comments
+## Implementation notes
 
-Document each implementation function's purpose or an important invariant.
-For Wove functions under `stage-2/`, put a `:doc` entry first in the function's
-`with-meta` list. For other implementation code, place a descriptive comment
-above the function definition.
+In Wove modules under `stage-2/`, document each function and multiline
+control-flow form with a `(:doc "...")` entry at the start of its metadata
+prefix. Explain the form's purpose or an important invariant. Attach a
+standalone note to the existing form it describes.
 
-Add a descriptive comment immediately before each multiline control-flow block.
-Use the file's comment syntax, including `;;` in Wove.
+In implementation files written in other languages, place a descriptive
+comment above each function definition and immediately before each multiline
+control-flow block. Use the file's comment syntax.
 
-Purpose comments are optional under `tests/`.
+Purpose notes are optional under `tests/`.
 
 ## Copyright headers
 
-- Start each checked-in file with the Wove copyright and SPDX notice shown above, using the file's comment syntax.
-- Use `;;` for `.wove` sources and fixtures. Apply the same notice to other test files in their own comment syntax.
+- Start Wove source and fixtures with a module whose first two metadata entries are
+  `(:copyright "Copyright (c) 2026 wove contributors")` and
+  `(:license "SPDX-License-Identifier: MIT OR Apache-2.0")`, in that order.
+- Start other checked-in files with the same notices in their own comment syntax.
 - Keep a shebang on the first line when present. Preserve the archived license texts verbatim.

@@ -126,8 +126,8 @@ def read_record(node: Form, index: int) -> tuple[str, Record]:
 		raise SourceError(name_node.line)
 	fields = {}
 	# Only scalar fields participate in the seed's copyable record layout.
-	for field_index, field_node in enumerate(target_form(fields_node, "fields").operands):
-		field = target_form(field_node, arity=1)
+	for field_index, field_node in enumerate(checked_form(fields_node, "fields").operands):
+		field = checked_form(field_node, arity=1)
 		kind_node, = field.operands
 		kind = identifier(kind_node)
 		# A field name is an ordinary identifier and selects exactly one member.
@@ -158,7 +158,7 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 		# Keep nominal record identity in the signature.
 		if copyable(kind):
 			return kind
-	view = target_form(node, arity=1)
+	view = checked_form(node, arity=1)
 	# Slice parameters specify a read or write loan.
 	if view.tag not in (SHARED, MUT):
 		raise SourceError(node.line)
@@ -178,13 +178,13 @@ def read_function(
 
 	params = {}
 	# Preserve parameter order for the generated C signature.
-	for param in target_form(params_node, "params").operands:
-		field = target_form(param, arity=1)
+	for param in checked_form(params_node, "params").operands:
+		field = checked_form(param, arity=1)
 		# Each ordinary parameter name introduces a distinct binding.
 		if field.tag.startswith(":") or field.tag in params:
 			raise SourceError(param.line)
 		params[field.tag] = parameter_type(field.operands[0], records)
-	result_node, = target_form(returns_node, "returns", 1).operands
+	result_node, = checked_form(returns_node, "returns", 1).operands
 	result_name = identifier(result_node)
 	result = records.get(result_name, result_name)
 	# A function returns a copyable value or completes without a value.
@@ -196,7 +196,7 @@ def read_function(
 		raise SourceError(node.line)
 
 	c_name = "main" if entry else f"wv_seed_fn_{index}"
-	return name, Function(c_name, tuple(params.items()), result, target_form(body_node, "body"))
+	return name, Function(c_name, tuple(params.items()), result, checked_form(body_node, "body"))
 
 
 # Encode a source filename as a C literal, including arbitrary path bytes.
@@ -255,7 +255,7 @@ class FunctionEmitter:
 
 	# Resolve a live place and report failures at the operation using it.
 	def local(self, node: Node, line: int) -> Binding:
-		name, = target_form(node, "local", 1).operands
+		name, = checked_form(node, "local", 1).operands
 		symbol = identifier(name)
 		# The nearest declaration shadows any outer binding with the same name.
 		for scope in reversed(self.scopes):
@@ -312,8 +312,8 @@ class FunctionEmitter:
 	def borrow(self, node: Node, kind: BufferType) -> Value:
 		exclusive = kind.access == MUT
 		tag = "borrow-mut" if exclusive else "borrow-shared"
-		target_node, = target_form(node, tag, 1).operands
-		target = target_form(target_node)
+		target_node, = checked_form(node, tag, 1).operands
+		target = checked_form(target_node)
 		source = target
 		range_bounds = None
 		# A range projects the named source for a shared call argument.
@@ -410,7 +410,7 @@ class FunctionEmitter:
 		initializers = {}
 		# Resolve each initializer to its C member before evaluating its value.
 		for field_node in fields:
-			initializer = target_form(field_node, arity=1)
+			initializer = checked_form(field_node, arity=1)
 			field = record.fields.get(initializer.tag)
 			# A constructor supplies each declared member exactly once.
 			if field is None or initializer.tag in initializers:
@@ -439,7 +439,7 @@ class FunctionEmitter:
 
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
-		expr = node = target_form(node)
+		expr = node = checked_form(node)
 		# A boolean literal carries the same type as a comparison result.
 		if expr.tag == BOOL:
 			literal, = form(expr, arity=1).operands
@@ -649,8 +649,8 @@ class FunctionEmitter:
 		if len(node.operands) not in (2, 3):
 			raise SourceError(node.line)
 		test, then_node, *otherwise = node.operands
-		then_arm = target_form(then_node, "then")
-		else_arm = target_form(otherwise[0], "else") if otherwise else None
+		then_arm = checked_form(then_node, "then")
+		else_arm = checked_form(otherwise[0], "else") if otherwise else None
 		condition = self.typed(test, BOOL)
 
 		# Both arms start with the state after evaluating the condition.
@@ -675,7 +675,7 @@ class FunctionEmitter:
 	# Emit a pre-test loop with one body scope per iteration.
 	def loop(self, node: Form) -> None:
 		test, body_node = form(node, arity=2).operands
-		body = target_form(body_node, "body")
+		body = checked_form(body_node, "body")
 		incoming = self.moved.copy()
 		self.emit_line("while (true) {")
 		continues = self.block(body, test)
@@ -687,7 +687,7 @@ class FunctionEmitter:
 
 	# Lower a statement and report whether execution can continue past it.
 	def statement(self, node: Node) -> bool:
-		statement = node = target_form(node)
+		statement = node = checked_form(node)
 		# Branches emit and join their own lexical scopes.
 		if statement.tag == "if":
 			return self.conditional(statement)
@@ -785,63 +785,54 @@ def cfg_matches(node: Node) -> bool:
 	return not negated
 
 
-# Read one wrapper and select its target only in a declaration context.
-def metadata_target(wrapper: Form, *, declarations: bool = False) -> tuple[Form, bool]:
-	meta, target = form(wrapper, "with-meta", 2).operands
+# Apply only the seed's known selection pragmas on the enclosing declaration.
+def metadata_enabled(node: Form, *, declaration: bool = False) -> bool:
 	enabled = True
-	# Validation here covers the entry tag and leaves other metadata payloads opaque.
-	for node in form(meta, "meta").operands:
-		entry = form(node)
-		# The metadata list contains colon-prefixed forms.
-		if not entry.tag.startswith(":"):
-			raise SourceError(entry.line)
-		# Only pragma payloads participate in Stage 1 selection.
+	# Other metadata entries and unknown pragma payloads stay opaque to Stage 1.
+	for entry in node.metadata:
+		# Only pragma entries can select a declaration.
 		if entry.tag != ":pragma":
 			continue
-		# Check every known directive even when an earlier one excludes the target.
+		# Validate every known directive, including those after an exclusion.
 		for directive in entry.operands:
 			pragma = form(directive)
-			# Each cfg predicate must permit the bootstrap build.
+			# Each cfg must permit the bootstrap build.
 			if pragma.tag == "cfg":
 				predicate, = form(pragma, arity=1).operands
 				selected = cfg_matches(predicate)
-			# A test declaration is always excluded from the bootstrap build.
+			# Test declarations are excluded from the bootstrap build.
 			elif pragma.tag == "test":
 				form(pragma, arity=0)
 				selected = False
-			# Other directives are opaque to the seed.
+			# Leave the payload of an unknown directive uninterpreted.
 			else:
 				continue
-			# Selection runs on module declarations and groups before name resolution.
-			if not declarations:
+			# Only declarations and their groups support selection.
+			if not declaration:
 				raise SourceError(pragma.line)
 			enabled = selected and enabled
-	return form(target), enabled
+	return enabled
 
 
-# Strip metadata from a value or statement before inspecting its ordinary shape.
-def target_form(node: Node, tag: str | None = None, arity: int | None = None) -> Form:
-	# Peel nested wrappers without opening a new lexical scope.
-	while isinstance(node, Form) and node.tag == "with-meta":
-		node, _ = metadata_target(node)
-	return form(node, tag, arity)
+# Validate a form whose metadata does not select a declaration.
+def checked_form(node: Node, tag: str | None = None, arity: int | None = None) -> Form:
+	value = form(node, tag, arity)
+	metadata_enabled(value)
+	return value
 
 
 # Flatten active groups in source order before declaring any names.
 def selected_declarations(nodes: tuple[Node, ...]) -> Iterator[Form]:
-	# Walk only the selected declaration tree so excluded bodies stay opaque.
+	# Exclude declarations before opening imported files or validating bodies.
 	for node in nodes:
 		declaration = form(node)
-		# Only selected targets contribute declarations to the module.
-		if declaration.tag == "with-meta":
-			target, enabled = metadata_target(declaration, declarations=True)
-			# The selected target may wrap another declaration or a group.
-			if enabled:
-				yield from selected_declarations((target,))
-		# A selected group declares its items in the enclosing module.
-		elif declaration.tag == "decls":
+		# An inactive declaration or group contributes no definitions.
+		if not metadata_enabled(declaration, declaration=True):
+			continue
+		# A group declares its active children in the enclosing module.
+		if declaration.tag == "decls":
 			yield from selected_declarations(declaration.operands)
-		# Pass selected declarations to signature validation unchanged.
+		# Keep active declarations and their source locations intact.
 		else:
 			yield declaration
 
@@ -865,7 +856,7 @@ def read_module(
 ) -> Module:
 	# Parsing, declaration selection, and signature checks belong to this file.
 	with source_file(filename):
-		module = target_form(parse(source), "module")
+		module = checked_form(parse(source), "module")
 		# The module name precedes its declarations.
 		if not module.operands:
 			raise SourceError(module.line)
@@ -912,7 +903,7 @@ def read_use(node: Form) -> tuple[str, Form]:
 	# The path is a quoted string, including when it contains escaped characters.
 	if not isinstance(source, Atom) or not source.quoted:
 		raise SourceError(source.line)
-	return source.text, form(only, "only")
+	return source.text, checked_form(only, "only")
 
 
 # Bind provider declarations directly, so aliases keep the original type and identity.
@@ -924,7 +915,7 @@ def bind_use(only: Form, provider: Module, importer: Module) -> None:
 			original = local = item
 		# A renamed import carries both the defining and local names.
 		else:
-			original, local = form(item, "as", 2).operands
+			original, local = checked_form(item, "as", 2).operands
 		function = provider.functions.get(identifier(original))
 		# A provider exposes only its own declarations to explicit file imports.
 		if function is None:

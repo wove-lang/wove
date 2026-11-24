@@ -14,14 +14,14 @@
 // Match the seed's generated names to the scanner declarations.
 #define source_offset wv_seed_fn_4
 #define source_kind wv_seed_fn_5
-#define scan_token wv_seed_fn_13
-#define admit_source wv_seed_fn_17
-#define source_diagnostic wv_seed_fn_19
-#define source_position wv_seed_fn_20
-#define check_source_form wv_seed_fn_24
-#define build_source_tree wv_seed_fn_29
-#define check_source_metadata wv_seed_fn_41
-#define render_source_tree wv_seed_fn_43
+#define scan_token wv_seed_fn_12
+#define admit_source wv_seed_fn_16
+#define source_diagnostic wv_seed_fn_18
+#define source_position wv_seed_fn_19
+#define check_source_form wv_seed_fn_23
+#define build_source_tree wv_seed_fn_28
+#define check_source_metadata wv_seed_fn_37
+#define render_source_tree wv_seed_fn_39
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -82,35 +82,6 @@ static const TokenSpan semicolon_tokens[] = {{3, 0, 1}, {0, 1, 1}};
 static const TokenSpan delimiter_tokens[] = {
 	{1, 0, 1}, {3, 1, 2}, {1, 2, 3}, {2, 3, 6}, {1, 6, 7},
 	{40, 7, 8}, {1, 8, 9}, {41, 9, 10}, {0, 10, 10},
-};
-
-static const uint8_t comments_lf[] = ";; (\" \n(fn;; ) \"\nx)\n;; tail ";
-static const uint8_t comments_crlf[] = ";; (\" \r\n(fn;; ) \"\r\nx)\r\n;; tail ";
-static const uint8_t comments_cr[] = ";; (\" \r(fn;; ) \"\rx)\r;; tail ";
-static const uint8_t without_comments[] = "(fn x)";
-static const uint8_t comment_parent[] = "x;; tail\r\n(";
-
-static const TokenSpan single_line_ending_tokens[] = {
-	{59, 0, 6}, {40, 7, 8}, {1, 8, 10}, {59, 10, 16},
-	{1, 17, 18}, {41, 18, 19}, {59, 20, 28}, {0, 28, 28},
-};
-static const TokenSpan crlf_tokens[] = {
-	{59, 0, 6}, {40, 8, 9}, {1, 9, 11}, {59, 11, 17},
-	{1, 19, 20}, {41, 20, 21}, {59, 23, 31}, {0, 31, 31},
-};
-
-static const struct {
-	const char *label;
-	wvrt_slice input;
-	const TokenSpan *tokens;
-	size_t count;
-} comment_cases[] = {
-	{"LF comments", {comments_lf, sizeof(comments_lf) - 1, sizeof(uint8_t)},
-		single_line_ending_tokens, sizeof(single_line_ending_tokens) / sizeof(single_line_ending_tokens[0])},
-	{"CRLF comments", {comments_crlf, sizeof(comments_crlf) - 1, sizeof(uint8_t)},
-		crlf_tokens, sizeof(crlf_tokens) / sizeof(crlf_tokens[0])},
-	{"CR comments", {comments_cr, sizeof(comments_cr) - 1, sizeof(uint8_t)},
-		single_line_ending_tokens, sizeof(single_line_ending_tokens) / sizeof(single_line_ending_tokens[0])},
 };
 
 static const uint8_t quoted_stream[] = "\"\"(\"(; ;; )\"\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u0030\\uAbCd5\")x";
@@ -174,7 +145,6 @@ static const struct {
 	{"surrogate code point", {0xed, 0xa0, 0x80}, 3, 0},
 	{"code point above U+10FFFF", {0xf4, 0x90, 0x80, 0x80}, 4, 0},
 	{"invalid four-byte lead", {0xf5, 0x80, 0x80, 0x80}, 4, 0},
-	{"invalid byte in a comment", {'(', ')', ';', ';', 0xff}, 5, 4},
 	{"invalid sequence in a string", {'"', 'a', 0xe2, 0x82, '"'}, 5, 2},
 };
 static const uint8_t utf8_parent[] = {'x', ' ', 0xe2, 0x82, 0xac, 'y'};
@@ -219,11 +189,6 @@ static const uint8_t nonseparators[] = {
 	0xef, 0xbb, 0xbf, 'a', 0xe2, 0x80, 0x8b, 0xe2, 0x80, 0xaa, 'b',
 };
 static const TokenSpan nonseparator_tokens[] = {{1, 0, 11}, {0, 11, 11}};
-
-static const uint8_t unicode_comment[] = {
-	';', ';', 'a', 0xe2, 0x80, 0xa8, 'b', 0xe2, 0x80, 0xa9, 'c', 0xc2, 0x85, 'd', '\r', '\n', 'x',
-};
-static const TokenSpan unicode_comment_tokens[] = {{59, 0, 14}, {1, 16, 17}, {0, 17, 17}};
 
 // Compare the full offset and kind returned by the compiled Wove scanner.
 static void check(const char *label, wvrt_slice input, int32_t offset, uint32_t kind) {
@@ -278,33 +243,6 @@ static void check_tokens(const char *label, wvrt_slice input, const TokenSpan *t
 	int32_t cursor = 0;
 	for (size_t i = 0; i < count; ++i) {
 		cursor = check_token(label, input, cursor, tokens[i]);
-	}
-}
-
-// Compare kinds and spellings after omitting the raw comment tokens.
-static void check_significant_tokens(const char *label, wvrt_slice raw, wvrt_slice plain) {
-	const uint8_t *raw_bytes = raw.wvrt_items;
-	const uint8_t *plain_bytes = plain.wvrt_items;
-	int32_t raw_cursor = 0;
-	int32_t plain_cursor = 0;
-	while (true) {
-		const TokenSpan actual = read_token(raw, raw_cursor);
-		raw_cursor = actual.end;
-		if (actual.kind == 59) {
-			continue;
-		}
-
-		const TokenSpan expected = read_token(plain, plain_cursor);
-		plain_cursor = expected.end;
-		int32_t width = actual.end - actual.start;
-		if (actual.kind != expected.kind || width != expected.end - expected.start
-			|| memcmp(raw_bytes + actual.start, plain_bytes + expected.start, (size_t)width) != 0) {
-			fprintf(stderr, "%s: significant token differs at byte %" PRId32 "\n", label, actual.start);
-			exit(EXIT_FAILURE);
-		}
-		if (actual.kind == 0) {
-			return;
-		}
 	}
 }
 
@@ -595,20 +533,6 @@ int main(int argc, char **argv) {
 	check_tokens("atom delimiters", (wvrt_slice){delimiters, sizeof(delimiters) - 1, sizeof(uint8_t)},
 		delimiter_tokens, sizeof(delimiter_tokens) / sizeof(delimiter_tokens[0]));
 
-	wvrt_slice plain = admit_view("significant token reference",
-		(wvrt_slice){without_comments, sizeof(without_comments) - 1, sizeof(uint8_t)});
-	for (size_t i = 0; i < sizeof(comment_cases) / sizeof(comment_cases[0]); ++i) {
-		check_tokens(comment_cases[i].label, comment_cases[i].input, comment_cases[i].tokens, comment_cases[i].count);
-		check_significant_tokens(comment_cases[i].label, comment_cases[i].input, plain);
-	}
-
-	wvrt_slice split_opener = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 2, site);
-	check_tokens("view splits comment opener", split_opener,
-		semicolon_tokens, sizeof(semicolon_tokens) / sizeof(semicolon_tokens[0]));
-	wvrt_slice empty_comment = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 3, site);
-	check_tokens("comment opener at EOF", empty_comment, &(TokenSpan){59, 0, 2}, 1);
-	wvrt_slice clipped_comment = wvrt_slice_range_u8(comment_parent, sizeof(comment_parent) - 1, 1, 6, site);
-	check_tokens("view ends inside comment", clipped_comment, &(TokenSpan){59, 0, 5}, 1);
 	wvrt_slice quoted = {quoted_stream, sizeof(quoted_stream) - 1, sizeof(uint8_t)};
 	check_tokens("quoted token stream", quoted, quoted_tokens, sizeof(quoted_tokens) / sizeof(quoted_tokens[0]));
 	for (size_t i = 0; i < sizeof(string_errors) / sizeof(string_errors[0]); ++i) {
@@ -639,8 +563,5 @@ int main(int argc, char **argv) {
 	wvrt_slice contiguous_atom = {nonseparators, sizeof(nonseparators), sizeof(uint8_t)};
 	check_tokens("BOM and adjacent non-whitespace", contiguous_atom,
 		nonseparator_tokens, sizeof(nonseparator_tokens) / sizeof(nonseparator_tokens[0]));
-	wvrt_slice unicode_in_comment = {unicode_comment, sizeof(unicode_comment), sizeof(uint8_t)};
-	check_tokens("Unicode separators inside a comment", unicode_in_comment,
-		unicode_comment_tokens, sizeof(unicode_comment_tokens) / sizeof(unicode_comment_tokens[0]));
 	return wove_fixture_main();
 }
