@@ -208,12 +208,22 @@ class FunctionEmitter:
 			raise SourceError(node.line)
 		return value
 
-	# Resolve a byte slice and grant stores only through an exclusive parameter.
+	# Check an access against loans held by earlier arguments of active calls.
+	def check_access(self, binding: Binding, exclusive: bool, line: int) -> None:
+		# Shared access can coexist with other shared access to the same place.
+		for parent, loan in self.loans:
+			# Any exclusive access conflicts with an outstanding loan of that place.
+			if parent is binding and (exclusive or loan == MUT):
+				raise SourceError(line)
+
+	# Resolve a byte slice and check its permission to access the parent storage.
 	def slice(self, node: Node, line: int, writable: bool = False) -> Value:
-		value = self.local(node, line).value
-		# Both view types can read, but only mut-slice carries write permission.
+		binding = self.local(node, line)
+		value = binding.value
+		# Slice operations need a view, and stores require its mutable type.
 		if value.kind not in (SHARED, MUT) or (writable and value.kind != MUT):
 			raise SourceError(line)
+		self.check_access(binding, writable, line)
 		return value
 
 	# Supply the source line to runtime checks emitted for this operation.
@@ -225,20 +235,20 @@ class FunctionEmitter:
 		tag = "borrow-mut" if kind == MUT else "borrow-shared"
 		target, = form(node, tag, 1).operands
 		binding = self.local(target, node.line)
-		# An exclusive loan requires a writable owner.
-		if binding.value.kind != OWNED or (kind == MUT and not binding.writable):
+		origin = binding.value
+		exclusive = kind == MUT
+		writable = binding.writable if origin.kind == OWNED else origin.kind == MUT
+		# Exclusive access comes from a writable owner or a mutable slice type.
+		if origin.kind not in (OWNED, SHARED, MUT) or (exclusive and not writable):
 			raise SourceError(node.line)
-
-		# Earlier argument loans remain active during nested calls.
-		for owner, prior in self.loans:
-			# Two loans of the same owner can coexist only when both are shared.
-			if owner is binding and (kind == MUT or prior == MUT):
-				raise SourceError(node.line)
+		self.check_access(binding, exclusive, node.line)
 		self.loans.append((binding, kind))
-		owner = binding.value.c
+
+		# Copy the pointer and extent so every reborrow uses the same storage.
+		fields = origin.c + ("->" if origin.kind == OWNED else ".")
 		return self.temporary(
-			kind, f"({C_TYPE[kind]}){{{owner}->wvrt_items, "
-			f"{owner}->wvrt_length, {owner}->wvrt_element_size}}"
+			kind, f"({C_TYPE[kind]}){{{fields}wvrt_items, "
+			f"{fields}wvrt_length, {fields}wvrt_element_size}}"
 		)
 
 	# Evaluate arguments left to right and end only this call's loans.
@@ -349,9 +359,10 @@ class FunctionEmitter:
 		if expr.tag == "move":
 			target, = form(expr, arity=1).operands
 			binding = self.local(target, node.line)
-			# A live loan keeps the original owner in place.
-			if binding.value.kind != OWNED or any(owner is binding for owner, _ in self.loans):
+			# Only an owner can transfer its allocation.
+			if binding.value.kind != OWNED:
 				raise SourceError(node.line)
+			self.check_access(binding, True, node.line)
 			result = self.temporary(OWNED, binding.value.c)
 			self.moved.add(binding)
 			self.emit_line(f"{binding.value.c} = NULL;")
