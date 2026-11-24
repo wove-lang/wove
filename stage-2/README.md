@@ -101,8 +101,10 @@ view, successful result, and shared node slice. Form heads use
 when the form is in its parent's prefix. For a module or function
 declaration, the contiguous prefix may follow its bare name. The legacy
 placement immediately after the tag is also accepted during migration.
-Other forms use the prefix immediately after the tag. Each entry keeps
-its order, parent link, spelling, and original byte span.
+Other forms use the prefix immediately after the tag. Name slots follow
+declaration ancestry through declaration groups and supported C bridges.
+An opaque payload can contain the same tags as ordinary data. Each entry
+keeps its order, parent link, spelling, and original byte span.
 
 | Code | Failure | Primary span |
 | --- | --- | --- |

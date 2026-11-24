@@ -81,6 +81,8 @@ Place its contiguous metadata prefix after the name and before ordinary
 fields, as in `(fn main (:doc "Return success.") (params) ...)`.
 During migration, a declaration can also put the whole prefix immediately
 after the tag. The same naming syntax applies to functions in C bridges.
+Declaration groups carry that context through their members. Opaque
+metadata payloads can use the same form tags as ordinary data.
 
 Other forms keep metadata immediately after the tag. For example,
 `(let (:doc "Keep the owner in this scope.") buffer (array.alloc u8 (i32 3)))`

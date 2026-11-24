@@ -20,15 +20,15 @@
 #define source_position wv_seed_fn_16
 #define check_source_form wv_seed_fn_19
 #define build_source_tree wv_seed_fn_24
-#define check_source_metadata wv_seed_fn_36
-#define render_source_tree wv_seed_fn_38
-#define decode_string wv_seed_fn_66
-#define form_parts wv_seed_fn_68
-#define read_module wv_seed_fn_77
-#define emit_module wv_seed_fn_102
-#define resolve_graph wv_seed_fn_119
-#define inspect_callers wv_seed_fn_294
-#define run_scalar_graph wv_seed_fn_314
+#define check_source_metadata wv_seed_fn_41
+#define render_source_tree wv_seed_fn_43
+#define decode_string wv_seed_fn_71
+#define form_parts wv_seed_fn_72
+#define read_module wv_seed_fn_81
+#define emit_module wv_seed_fn_106
+#define resolve_graph wv_seed_fn_123
+#define inspect_callers wv_seed_fn_298
+#define run_scalar_graph wv_seed_fn_318
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;

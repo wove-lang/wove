@@ -812,6 +812,147 @@
 			(return (u32 0))))
 
 	(fn
+		(:doc `Recognize a colon-tagged form by its checked head.`)
+		(:pragma (inline always))
+		is_metadata_form
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns bool)
+		(body
+			(if
+				(:doc "Only a form has a head to check.")
+				(bool.not (u32.eq (record.get (local node) kind) (u32 40)))
+				(then (return (bool false))))
+			(let head (slice.load (local nodes) (record.get (local node) first_child)))
+			(return (u8.eq (slice.load (local source) (record.get (local head) start)) (u8 58)))))
+
+	(fn
+		(:doc `A fixed declaration name is a bare identifier in the original view.`)
+		is_declaration_name
+		(params (source (shared-slice u8)) (node SourceNode))
+		(returns bool)
+		(body
+			(return (bool.and (u32.eq (record.get (local node) kind) (u32 1))
+				(call is_identifier_head (borrow-shared (local source))
+					(record.get (local node) start) (record.get (local node) end))))))
+
+	(fn
+		(:doc `Match the bare provider keyword shared by C bridge definitions and imports.`)
+		is_c_header_provider
+		(params (source (shared-slice u8)) (node SourceNode))
+		(returns bool)
+		(body
+			(let start (record.get (local node) start))
+			(let width (i32.sub.wrapping (record.get (local node) end) (local start)))
+			(return (bool.and (u32.eq (record.get (local node) kind) (u32 1))
+				(bool.and (i32.eq (local width) (i32 8))
+					(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 0) (u8 99))
+						(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 1) (u8 45))
+							(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 2) (u8 104))
+								(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 101))
+									(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 4) (u8 97))
+										(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 5) (u8 100))
+											(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 101))
+												(call is_head_byte (borrow-shared (local source)) (local start) (i32 7) (u8 114))))))))))))))
+
+	(fn
+		(:doc `Find the first ordinary child after the head and any legacy metadata.`)
+		first_ordinary_child
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (head SourceNode))
+		(returns i32)
+		(body
+			(let-mut index (record.get (local head) next_sibling))
+			(while
+				(:doc "Only a contiguous colon-tagged prefix comes before the first field.")
+				(bool.and (bool.not (i32.lt (local index) (i32 0)))
+					(call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local nodes) (local index))))
+				(body (set (local index) (record.get (slice.load (local nodes) (local index)) next_sibling))))
+			(return (local index))))
+
+	(fn
+		(:doc `Check that a C bridge member follows an actual provider and header.`)
+		is_c_bridge_member
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (head SourceNode) (start i32))
+		(returns bool)
+		(body
+			(let index (call first_ordinary_child (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))
+			(if
+				(:doc "A supported C bridge begins with its provider operand.")
+				(i32.lt (local index) (i32 0))
+				(then (return (bool false))))
+			(let provider (slice.load (local nodes) (local index)))
+			(let header (record.get (local provider) next_sibling))
+			(let from (record.get (local provider) start))
+			(let short (bool.and (u32.eq (record.get (local provider) kind) (u32 1))
+				(bool.and (i32.eq (i32.sub.wrapping (record.get (local provider) end) (local from)) (i32 1))
+					(u8.eq (slice.load (local source) (local from)) (u8 99)))))
+			(if
+				(:doc "The archived c and current c-header providers have the same two leading fields.")
+				(bool.or (i32.lt (local header) (i32 0))
+					(bool.not (bool.or (local short) (call is_c_header_provider (borrow-shared (local source)) (local provider)))))
+				(then (return (bool false))))
+			(let literal (slice.load (local nodes) (local header)))
+			(return (bool.and (u32.eq (record.get (local literal) kind) (u32 2))
+				(bool.not (i32.lt (local start) (record.get (local literal) end)))))))
+
+	(fn
+		(:doc `Follow declaration containers to a module or standalone declaration root.
+
+		Groups are transparent. A supported C bridge contributes members
+		after its header. All other enclosing forms keep their nested data
+		in the ordinary operand grammar.`)
+		function_declaration
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns bool)
+		(body
+			(let-mut index (record.get (local node) parent))
+			(let-mut start (record.get (local node) start))
+			(let-mut in_bridge (bool false))
+			(while
+				(:doc "Trace the entire ancestry before recognizing a function name slot.")
+				(bool.not (i32.lt (local index) (i32 0)))
+				(body
+					(let owner (slice.load (local nodes) (local index)))
+					(if
+						(:doc "A standalone declaration or group reaches the synthetic source root.")
+						(u32.eq (record.get (local owner) kind) (u32 0))
+						(then (return (bool true))))
+					(let parent (record.get (local owner) parent))
+					(let head (slice.load (local nodes) (record.get (local owner) first_child)))
+					(let kind (call declaration_head (borrow-shared (local source)) (local head)))
+					(if
+						(:doc "Only a source module owns declarations after its name field.")
+						(u32.eq (local kind) (u32 1))
+						(then
+							(let first (call first_ordinary_child (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))
+							(if
+								(:doc "A nested module-shaped payload never starts a declaration ancestry.")
+								(bool.or (i32.lt (local first) (i32 0))
+									(bool.not (u32.eq (record.get (slice.load (local nodes) (local parent)) kind) (u32 0))))
+								(then (return (bool false))))
+							(let name (slice.load (local nodes) (local first)))
+							(return (bool.and (call is_declaration_name (borrow-shared (local source)) (local name))
+								(bool.not (i32.lt (local start) (record.get (local name) end)))))))
+					(if
+						(:doc "Only a C bridge or declaration group can continue the ancestry.")
+						(u32.eq (local kind) (u32 4))
+						(then
+							(if
+								(:doc "A nested bridge or opaque provider cannot establish function declaration context.")
+								(bool.or (local in_bridge) (bool.not (call is_c_bridge_member
+									(borrow-shared (local source)) (borrow-shared (local nodes)) (local head) (local start))))
+								(then (return (bool false))))
+							(set (local in_bridge) (bool true)))
+						(else
+							(if
+								(:doc "A metadata entry, body, or arbitrary payload stops the declaration walk.")
+								(bool.not (u32.eq (local kind) (u32 3)))
+								(then (return (bool false))))))
+					(set (local start) (record.get (local owner) start))
+					(set (local index) (local parent))))
+			(return (bool false))))
+
+	(fn
 		(:doc `Return the name diagnostic code for actual module and function declarations.
 
 		A form that uses the same head as a parameter or field keeps its
@@ -838,27 +979,10 @@
 						(then (return (u32 19))))
 					(return (u32 0))))
 			(if
-				(:doc "A standalone function uses the declaration grammar.")
-				(local root)
-				(then (return (u32 22))))
-			(let owner_head (slice.load (local nodes) (record.get (local owner) first_child)))
-			(let kind (call declaration_head (borrow-shared (local source)) (local owner_head)))
-			(if
-				(:doc "Modules, decls groups, and bridges contain named function declarations.")
-				(bool.or (u32.eq (local kind) (u32 1))
-					(bool.or (u32.eq (local kind) (u32 3)) (u32.eq (local kind) (u32 4))))
+				(:doc "Only a complete declaration ancestry gives fn a fixed name slot.")
+				(call function_declaration (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))
 				(then (return (u32 22))))
 			(return (u32 0))))
-
-	(fn
-		(:doc `A fixed declaration name is a bare identifier in the original view.`)
-		is_declaration_name
-		(params (source (shared-slice u8)) (node SourceNode))
-		(returns bool)
-		(body
-			(return (bool.and (u32.eq (record.get (local node) kind) (u32 1))
-				(call is_identifier_head (borrow-shared (local source))
-					(record.get (local node) start) (record.get (local node) end))))))
 
 	(fn
 		(:doc `Use an existing row as the primary span of a structural diagnostic.`)
