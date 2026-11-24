@@ -73,14 +73,17 @@ half-open range of a named byte buffer or slice. The seed evaluates the
 storage starting at `start` and a length of `end - start`.
 Equal endpoints form an empty view, including at the end of the source.
 
-Guard module declarations with
-`(with-pragmas (pragmas (cfg bootstrap) (inline always)) target)`.
-A target can be a declaration or a `(decls ...)` group whose declarations
-share the enclosing module scope. Stage 1 always enables `bootstrap`.
-A target is included when all its `cfg` predicates are true, so
-`(cfg bootstrap)` selects its target and `(cfg (not bootstrap))` excludes it.
-Selection happens before name resolution and lowering. The seed ignores other
-tagged pragmas, including `inline`.
+Attach metadata to one target with `(with-meta (meta entries...) target)`.
+Entries are tagged forms such as `(:doc "text")`, `(:expect ...)`, and
+`(:pragma (cfg bootstrap) (inline always))`. Additional entries use the same
+colon-prefixed tag spelling. A wrapped statement or value keeps its normal
+scope and behavior.
+
+Stage 1 selects module declarations and `(decls ...)` groups before name
+resolution. It always enables `bootstrap`. All `cfg` predicates on a target
+must pass, and a `(test)` marker in any `:pragma` entry excludes the target.
+The seed skips other directives, including `inline`, and leaves other metadata
+payloads for later stages.
 
 Run `make stage-1` to translate and link the ownership example with Clang.
 The resulting `build/stage-1/ownership.transfer` exits with status 6.

@@ -68,7 +68,6 @@ class Function:
 	c_name: str
 	params: tuple[tuple[str, str], ...]
 	result: str
-	expectations: tuple[Form, ...]
 	body: Form
 
 
@@ -104,12 +103,12 @@ def read_record(node: Form, index: int) -> tuple[str, Record]:
 		raise SourceError(name_node.line)
 	fields = {}
 	# Only scalar fields participate in the seed's copyable record layout.
-	for field_index, field_node in enumerate(form(fields_node, "fields").operands):
-		field = form(field_node, arity=1)
+	for field_index, field_node in enumerate(target_form(fields_node, "fields").operands):
+		field = target_form(field_node, arity=1)
 		kind_node, = field.operands
 		kind = identifier(kind_node)
-		# Every source field name selects exactly one member.
-		if field.tag in fields:
+		# A field name is an ordinary identifier and selects exactly one member.
+		if field.tag.startswith(":") or field.tag in fields:
 			raise SourceError(field.line)
 		# Owning and borrowed fields require record lifetime rules beyond the seed.
 		if kind not in SCALAR_TYPES:
@@ -133,51 +132,27 @@ def parameter_type(node: Node, records: dict[str, Record]) -> str:
 	# Copyable types are written as bare symbols.
 	if isinstance(node, Atom) and not node.quoted and copyable(node.text, records):
 		return node.text
-	view = form(node, arity=1)
+	view = target_form(node, arity=1)
 	# Slice parameters specify their loan kind and byte element type.
 	if view.tag not in (SHARED, MUT) or identifier(view.operands[0]) != "u8":
 		raise SourceError(node.line)
 	return view.tag
 
 
-# Keep expectation metadata on its function, including issue and fixture IDs.
-def read_expectation(node: Node) -> Form:
-	expectation = form(node, "expect")
-	# The issue link is required and the fixture list is optional.
-	if len(expectation.operands) not in (2, 3):
-		raise SourceError(node.line)
-	name, issue, *fixture_list = expectation.operands
-	identifier(name)
-	url, = form(issue, "issue", 1).operands
-	# Keep the issue URL as a string in the expectation.
-	if not isinstance(url, Atom) or not url.quoted:
-		raise SourceError(url.line)
-	# Preserve optional fixture IDs as function metadata.
-	for tests in fixture_list:
-		# Each fixture ID is a symbol in the IR.
-		for test in form(tests, "tests").operands:
-			identifier(test)
-	return expectation
-
-
 # Read the signature before lowering calls, including forward calls.
 def read_function(node: Node, index: int, records: dict[str, Record]) -> tuple[str, Function]:
-	declaration = form(node, "fn")
-	# Require the name, parameters, result, and body before unpacking.
-	if len(declaration.operands) < 4:
-		raise SourceError(node.line)
-	name_node, params_node, returns_node, *metadata, body_node = declaration.operands
+	name_node, params_node, returns_node, body_node = form(node, "fn", 4).operands
 	name = identifier(name_node)
 
 	params = {}
 	# Preserve parameter order for the generated C signature.
-	for param in form(params_node, "params").operands:
-		field = form(param, arity=1)
-		# Each parameter introduces a distinct binding.
-		if field.tag in params:
+	for param in target_form(params_node, "params").operands:
+		field = target_form(param, arity=1)
+		# Each ordinary parameter name introduces a distinct binding.
+		if field.tag.startswith(":") or field.tag in params:
 			raise SourceError(param.line)
 		params[field.tag] = parameter_type(field.operands[0], records)
-	result_node, = form(returns_node, "returns", 1).operands
+	result_node, = target_form(returns_node, "returns", 1).operands
 	result = identifier(result_node)
 	# A function returns a copyable value or completes without a value.
 	if result != VOID and not copyable(result, records):
@@ -187,8 +162,7 @@ def read_function(node: Node, index: int, records: dict[str, Record]) -> tuple[s
 		raise SourceError(node.line)
 
 	c_name = "main" if name == "main" else f"wv_seed_fn_{index}"
-	expectations = tuple(read_expectation(item) for item in metadata)
-	return name, Function(c_name, tuple(params.items()), result, expectations, form(body_node, "body"))
+	return name, Function(c_name, tuple(params.items()), result, target_form(body_node, "body"))
 
 
 # Encode a source filename as a C literal, including arbitrary path bytes.
@@ -247,7 +221,7 @@ class FunctionEmitter:
 
 	# Resolve a live place and report failures at the operation using it.
 	def local(self, node: Node, line: int) -> Binding:
-		name, = form(node, "local", 1).operands
+		name, = target_form(node, "local", 1).operands
 		symbol = identifier(name)
 		# The nearest declaration shadows any outer binding with the same name.
 		for scope in reversed(self.scopes):
@@ -293,12 +267,13 @@ class FunctionEmitter:
 	# Hold this loan through the remaining argument evaluations and the call.
 	def borrow(self, node: Node, kind: str) -> Value:
 		tag = "borrow-mut" if kind == MUT else "borrow-shared"
-		target, = form(node, tag, 1).operands
+		target_node, = target_form(node, tag, 1).operands
+		target = target_form(target_node)
 		source = target
 		range_bounds = None
 		exclusive = kind == MUT
 		# A range projects the named source for a shared call argument.
-		if isinstance(target, Form) and target.tag == "slice.range":
+		if target.tag == "slice.range":
 			# The seed supports shared range loans.
 			if exclusive:
 				raise SourceError(node.line)
@@ -387,7 +362,7 @@ class FunctionEmitter:
 		initializers = {}
 		# Resolve each initializer to its C member before evaluating its value.
 		for field_node in fields:
-			initializer = form(field_node, arity=1)
+			initializer = target_form(field_node, arity=1)
 			field = record.fields.get(initializer.tag)
 			# A constructor supplies each declared member exactly once.
 			if field is None or initializer.tag in initializers:
@@ -416,7 +391,7 @@ class FunctionEmitter:
 
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
-		expr = form(node)
+		expr = node = target_form(node)
 		# A boolean literal carries the same type as a comparison result.
 		if expr.tag == BOOL:
 			literal, = form(expr, arity=1).operands
@@ -618,8 +593,8 @@ class FunctionEmitter:
 		if len(node.operands) not in (2, 3):
 			raise SourceError(node.line)
 		test, then_node, *otherwise = node.operands
-		then_arm = form(then_node, "then")
-		else_arm = form(otherwise[0], "else") if otherwise else None
+		then_arm = target_form(then_node, "then")
+		else_arm = target_form(otherwise[0], "else") if otherwise else None
 		condition = self.typed(test, BOOL)
 
 		# Both arms start with the state after evaluating the condition.
@@ -644,7 +619,7 @@ class FunctionEmitter:
 	# Emit a pre-test loop with one body scope per iteration.
 	def loop(self, node: Form) -> None:
 		test, body_node = form(node, arity=2).operands
-		body = form(body_node, "body")
+		body = target_form(body_node, "body")
 		incoming = self.moved.copy()
 		self.emit_line("while (true) {")
 		continues = self.block(body, test)
@@ -656,7 +631,7 @@ class FunctionEmitter:
 
 	# Lower a statement and report whether execution can continue past it.
 	def statement(self, node: Node) -> bool:
-		statement = form(node)
+		statement = node = target_form(node)
 		# Branches emit and join their own lexical scopes.
 		if statement.tag == "if":
 			return self.conditional(statement)
@@ -745,23 +720,57 @@ def cfg_matches(node: Node) -> bool:
 	return not negated
 
 
+# Read one wrapper and select its target only in a declaration context.
+def metadata_target(wrapper: Form, *, declarations: bool = False) -> tuple[Form, bool]:
+	meta, target = form(wrapper, "with-meta", 2).operands
+	enabled = True
+	# Validation here covers the entry tag and leaves other metadata payloads opaque.
+	for node in form(meta, "meta").operands:
+		entry = form(node)
+		# The metadata list contains colon-prefixed forms.
+		if not entry.tag.startswith(":"):
+			raise SourceError(entry.line)
+		# Only pragma payloads participate in Stage 1 selection.
+		if entry.tag != ":pragma":
+			continue
+		# Check every known directive even when an earlier one excludes the target.
+		for directive in entry.operands:
+			pragma = form(directive)
+			# Each cfg predicate must permit the bootstrap build.
+			if pragma.tag == "cfg":
+				predicate, = form(pragma, arity=1).operands
+				selected = cfg_matches(predicate)
+			# A test declaration is always excluded from the bootstrap build.
+			elif pragma.tag == "test":
+				form(pragma, arity=0)
+				selected = False
+			# Other directives are opaque to the seed.
+			else:
+				continue
+			# Selection runs on module declarations and groups before name resolution.
+			if not declarations:
+				raise SourceError(pragma.line)
+			enabled = selected and enabled
+	return form(target), enabled
+
+
+# Strip metadata from a value or statement before inspecting its ordinary shape.
+def target_form(node: Node, tag: str | None = None, arity: int | None = None) -> Form:
+	# Peel nested wrappers without opening a new lexical scope.
+	while isinstance(node, Form) and node.tag == "with-meta":
+		node, _ = metadata_target(node)
+	return form(node, tag, arity)
+
+
 # Flatten active groups in source order before declaring any names.
 def selected_declarations(nodes: tuple[Node, ...]) -> Iterator[Form]:
 	# Walk only the selected declaration tree so excluded bodies stay opaque.
 	for node in nodes:
 		declaration = form(node)
-		# A wrapper contributes its target only if every cfg allows bootstrapping.
-		if declaration.tag == "with-pragmas":
-			pragmas, target = form(declaration, arity=2).operands
-			enabled = True
-			# Read all cfg predicates even if an earlier one excludes the target.
-			for entry in form(pragmas, "pragmas").operands:
-				pragma = form(entry)
-				# Other tagged pragmas have no effect in the seed.
-				if pragma.tag == "cfg":
-					predicate, = form(pragma, arity=1).operands
-					enabled = cfg_matches(predicate) and enabled
-			# Resolve target declarations only after the whole guard passes.
+		# Only selected targets contribute declarations to the module.
+		if declaration.tag == "with-meta":
+			target, enabled = metadata_target(declaration, declarations=True)
+			# The selected target may wrap another declaration or a group.
 			if enabled:
 				yield from selected_declarations((target,))
 		# A selected group declares its items in the enclosing module.
@@ -774,7 +783,7 @@ def selected_declarations(nodes: tuple[Node, ...]) -> Iterator[Form]:
 
 # Emit a complete C translation unit after the entire module succeeds.
 def compile_source(source: str, filename: str) -> str:
-	module = form(parse(source), "module")
+	module = target_form(parse(source), "module")
 	# The module name precedes its declarations.
 	if not module.operands:
 		raise SourceError(module.line)

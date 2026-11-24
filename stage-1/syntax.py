@@ -38,6 +38,7 @@ TOKEN = re.compile(
 	r'(?P<string>"(?:\\[^\n]|[^"\\\n])*")|(?P<atom>[^\s();"]+)|(?P<invalid>.)'
 )
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
+TAG = re.compile(":?" + IDENTIFIER.pattern)
 
 
 # Read one IR tree and record each form's opening line.
@@ -66,7 +67,7 @@ def parse(source: str) -> Form:
 			if not children:
 				raise SourceError(start)
 			tag, *operands = children
-			node = Form(identifier(tag), tuple(operands), start)
+			node = Form(identifier(tag, TAG), tuple(operands), start)
 		# Keep string values distinct from symbols.
 		elif kind == "string":
 			# Decode escapes before storing the string value.
@@ -107,9 +108,9 @@ def form(node: Node, tag: str | None = None, arity: int | None = None) -> Form:
 	return node
 
 
-# Read a symbol, including dotted operation and expectation names.
-def identifier(node: Node) -> str:
-	# Only unquoted symbol characters can name IR entities.
-	if not isinstance(node, Atom) or node.quoted or not IDENTIFIER.fullmatch(node.text):
+# Read an identifier or a form tag with its permitted symbol spelling.
+def identifier(node: Node, pattern: re.Pattern[str] = IDENTIFIER) -> str:
+	# Only form heads accept the optional metadata prefix.
+	if not isinstance(node, Atom) or node.quoted or not pattern.fullmatch(node.text):
 		raise SourceError(node.line)
 	return node.text
