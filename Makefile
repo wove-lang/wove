@@ -44,7 +44,7 @@ CONFIG_PROGRAM := $(STAGE2)/config/project
 CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove project.wove schema.wove values.wove)
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
-COMMAND_SOURCES := $(addprefix stage-2/cli/,command.wove command_args.wove command_schema.wove command_values.wove)
+COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
 SOURCE_SCAN := $(STAGE2)/source_scan
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -156,7 +156,8 @@ $(CONFIG_PROGRAM): $(CONFIG_FIXTURES)/project.probe.c $(CONFIG_PROGRAM).c $(STAG
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Supply an argv arena and config bytes to the standalone command fixture.
-$(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(SEED)
+$(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOURCES) $(CONFIG_SOURCES) \
+	$(JSON_READER_SOURCES) $(SOURCE_SCAN_MODULE) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
