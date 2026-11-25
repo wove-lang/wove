@@ -249,7 +249,7 @@ endef
 $(STAGE2)/wovec.c: $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(BUNDLED_C_PROVIDERS) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py $(BUILD_VERSION) force-build-info
 	$(call build_versioned,mkdir -p "$(@D)"; $(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" "$(COMPILER_ROOT)" $(NATIVE_WOVE_SOURCES) --asset $(BUNDLED_C_PROVIDERS))
 
-# Link only the emitted native compiler, its host file bridges, and the runtime.
+# Link the emitted native compiler with the shared runtime.
 $(NATIVE_COMPILER): $(STAGE2)/wovec.c $(STAGE1)/runtime.o $(BUILD_VERSION) force-build-info
 	$(call build_versioned,$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -I runtime $(filter-out $(BUILD_VERSION) force-build-info,$^) -o "$@")
 
