@@ -24,15 +24,15 @@
 #define render_source_tree wv_seed_fn_44
 #define decode_string wv_seed_fn_74
 #define form_parts wv_seed_fn_75
-#define read_module_for_target wv_seed_fn_89
-#define emit_module wv_seed_fn_129
-#define resolve_graph_for_target wv_seed_fn_148
-#define default_selection wv_seed_fn_90
-#define target_os wv_seed_fn_91
-#define target_arch wv_seed_fn_92
-#define inspect_callers wv_seed_fn_422
-#define run_scalar_graph wv_seed_fn_451
-#define discover_graph_tests wv_seed_fn_459
+#define read_module_for_target wv_seed_fn_90
+#define emit_module wv_seed_fn_130
+#define resolve_graph_for_target wv_seed_fn_149
+#define default_selection wv_seed_fn_91
+#define target_os wv_seed_fn_92
+#define target_arch wv_seed_fn_93
+#define inspect_callers wv_seed_fn_424
+#define run_scalar_graph wv_seed_fn_453
+#define discover_graph_tests wv_seed_fn_461
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
