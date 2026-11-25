@@ -42,9 +42,9 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 | `(local name)` | Read a local, parameter, or visible immutable module binding. |
 | `(call name args...)` | Call a visible function. Arguments evaluate left to right. |
 | `(set (local name) value)` | Replace a mutable local with a value of its exact type. |
-| `(set (record.get place field) value)` | Stage 2. Replace an exact field through a mutable Wove record local or reference, including along a nested field path. |
-| `(record.make Type (field value) ...)` | Construct a record from typed field values in written order. |
-| `(record.get value field)` | Read a field with its declared type. |
+| `(set (struct.get place field) value)` | Stage 2. Replace an exact field through a mutable Wove record local or reference, including along a nested field path. |
+| `(struct.new Type (field value) ...)` | Construct a record from typed field values in written order. |
+| `(struct.get value field)` | Read a field with its declared type. |
 | `(array.alloc T count)` | Allocate an owned, zeroed buffer of `u8` or a supported copyable record type. `count` is `i32`. |
 | `(move (local buffer))` | Transfer ownership of a local buffer or, in Stage 2, hand a present native owner to a consuming C call. |
 | `(owner.is-null (local file))` | Stage 2. Test whether a native owner holds a missing handle. |
@@ -74,17 +74,17 @@ Stage 2 fixed arrays keep their elements inline and copy by value. Use
 `(array T extent)` for the type, with a builtin scalar `T` and a nonnegative
 decimal extent.
 
-- `(array.make (array u8 2) (u8 17) (u8 25))` lists the elements.
+- `(array.new (array u8 2) (u8 17) (u8 25))` lists the elements.
 - `(array.repeat (array u8 128) (u8 0))` evaluates one value and fills the array.
 - `(array.load value index)` reads an element.
 - `(array.store (local data) index value)` writes into a mutable local array.
-- `(array.store (record.get (local state) block) index value)` writes into
+- `(array.store (struct.get (local state) block) index value)` writes into
   an inline array field of a writable record.
 
 Stage 2 can borrow fixed integer arrays as matching slices. Supported element
 types are `i8`, `u8`, `i32`, `u32`, and `u64`.
 A fixed integer array field can also lend a matching slice
-with `(borrow-shared (record.get (local state) block))` or the mutable form.
+with `(borrow-shared (struct.get (local state) block))` or the mutable form.
 Sibling field paths can lend independently. A whole-record loan overlaps
 all of its fields.
 A Stage 2 function with result type `(owned-array u8)` can return a moved

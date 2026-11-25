@@ -233,11 +233,11 @@ the entry call. The wrapper releases the backing storage on return.
 A C bridge can expose fields of a native record with
 `(struct Stat (c-type "struct stat") (fields (st_size Offset)))`.
 Select its type and the relevant function with `use c-header`.
-`(let-mut info (record.make Stat))` zero-initializes storage of the
+`(let-mut info (struct.new Stat))` zero-initializes storage of the
 header's complete type with its native alignment. A `(mut-ref Stat)`
 C parameter takes `(borrow-mut (local info))` for the duration of the
 call. A `(shared-ref Stat)` takes a shared borrow and passes a const
-pointer. Subsequent `(record.get (local info) st_size)` reads the
+pointer. Subsequent `(struct.get (local info) st_size)` reads the
 native field with its declared Wove type. The C header verifies
 the field spelling and type, including the platform-specific
 timestamp members in the bundled Stat views.
@@ -247,13 +247,13 @@ a named, copyable record. Fields can hold scalar values, fixed arrays, or
 other Wove records. Named field types resolve in the defining module,
 including forward declarations and explicitly imported types. Inline
 record layouts must be acyclic.
-`(record.make Token (kind (u32 40)) (start (i32 2)))` evaluates each
+`(struct.new Token (kind (u32 40)) (start (i32 2)))` evaluates each
 initializer exactly once in the order written. Supply every field once
 with its declared type. A local stores the result by value, and
-`(record.get (local tok) start)` reads a field with its exact type. Chain
-`record.get` forms to reach nested fields.
+`(struct.get (local tok) start)` reads a field with its exact type. Chain
+`struct.get` forms to reach nested fields.
 
-Use `(set (record.get (local tok) start) (i32 8))` to assign a field of a
+Use `(set (struct.get (local tok) start) (i32 8))` to assign a field of a
 `let-mut` local. The same form accepts a nested field path and writes
 through to the original local. The right-hand value must have the
 field's exact type. Copies made by binding, calls, or returns retain
@@ -268,7 +268,7 @@ or an existing mutable reference. Reborrow a reference parameter with
 the same explicit forms to pass it to another call.
 
 A borrow can name a static field path such as
-`(borrow-mut (record.get (local state) pending))` to lend a nested
+`(borrow-mut (struct.get (local state) pending))` to lend a nested
 record. A fixed integer array field can lend a slice of
 the same element type. The path can start at a local or a record
 parameter, and a mutable loan needs a `let-mut` local or a mutable
@@ -288,7 +288,7 @@ can follow the signatures that refer to them.
 
 `(array element extent)` describes a fixed array of an exact builtin
 scalar type and a nonnegative decimal `i32` extent. Both are part of
-the type. Use `(array.make (array u8 2) (u8 17) (u8 25))` for a typed
+the type. Use `(array.new (array u8 2) (u8 17) (u8 25))` for a typed
 list and `(array.repeat (array u8 128) (u8 0))` to fill a fixed block.
 Lists evaluate their elements left to right. Repetition evaluates its
 initializer once, including at extent zero.
@@ -298,7 +298,7 @@ function parameter, or a return value. Binding, passing, and returning
 an array or a record containing one copy the value. `(array.load value index)`
 reads an element and `(array.store (local data) index value)` writes to
 a `let-mut` local. An indexed store can also use a field place such as
-`(array.store (record.get (local state) block) index byte)`. The field
+`(array.store (struct.get (local state) block) index byte)`. The field
 must belong to a mutable local or a mutable reference. The store holds
 that field exclusively during evaluation of the index and value.
 Disjoint sibling fields remain accessible. Both array operations take
