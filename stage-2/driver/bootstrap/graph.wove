@@ -3,18 +3,20 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Load the selected compiler-entry graph with the seed's bounded POSIX file ABI.
 
-	The shared resolver selects every edge. This module supplies file bytes,
-	identities, and edge rows, then sends the graph to the shared emitter.`)
+	The shared resolver selects every edge. This module supplies file bytes
+	and identities, keeps the suspended walk through workspace growth, and
+	sends the completed graph to the shared emitter.`)
 
 	(use wove-file "./files.wove" (only measure_file read_file_range))
 	(use wove-file "./emit.wove" (only emit_bootstrap_graph report_bootstrap))
+	(use wove-file "../graph_storage.wove" (only copy_disk_edges copy_graph_modules copy_graph_imports))
 	(use wove-file "../paths.wove" (only write_file_path))
 	(use wove-file "../bundled_paths.wove" (only
 		(value stdlib_path) (value stdio_path) (value unistd_path) (value spawn_path)
 		(value fcntl_path) (value errno_path) (value sys_stat_path) (value sys_wait_path)))
 	(use wove-file "../../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../../source/graph.wove" (only resolve_disk_graph (type GraphModule) (type GraphUse)
-		(type GraphSelector) (type GraphBinding) (type GraphResult) (type DiskEdge)))
+		(type GraphSelector) (type GraphBinding) (type GraphResult) (type DiskEdge) (type GraphProgress)))
 	(use wove-file "../../source/target.wove" (only (type SelectionContext)))
 	(use wove-file "../../source/scan.wove" (only (type Token)))
 	(use wove-file "../../source/strings.wove" (only decode_string))
@@ -94,27 +96,15 @@
 				(borrow-mut (local arena)) (borrow-mut (local files))))))
 
 	(fn copy_files
-		(:doc `Provide only initialized file descriptors to the resolver.`)
-		(params (source (shared-array SuppliedFile)) (files (mut-array SuppliedFile))) (returns void)
+		(:doc "Keep published file identities and spans when their table grows.")
+		(params (source (shared-array SuppliedFile)) (files (mut-array SuppliedFile)) (count i32)) (returns void)
 		(body
 			(let-mut index 0i32)
 			(while
-				(:doc `The destination covers exactly the known file count.`)
-				(i32.lt (local index) (array.len (local files)))
+				(:doc "Copy exactly the published file rows.")
+				(i32.lt (local index) (local count))
 				(body
 					(array.store (local files) (local index) (array.load (local source) (local index)))
-					(set (local index) (i32.add.wrapping (local index) 1i32))))))
-
-	(fn copy_edges
-		(:doc `Provide only initialized disk edges to the resolver.`)
-		(params (source (shared-array DiskEdge)) (edges (mut-array DiskEdge))) (returns void)
-		(body
-			(let-mut index 0i32)
-			(while
-				(:doc `The destination covers exactly the known edge count.`)
-				(i32.lt (local index) (array.len (local edges)))
-				(body
-					(array.store (local edges) (local index) (array.load (local source) (local index)))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))))
 
 	(fn find_file
@@ -223,61 +213,111 @@
 			(borrow-shared (array.range (local arena) (struct.get (local importer) path_start) (struct.get (local importer) path_end)))
 			(borrow-shared (local request)) (borrow-mut (local output))))))
 
+	(fn double_capacity
+		(:doc "Double a workspace capacity after the caller checks its upper bound.")
+		(params (capacity i32)) (returns i32)
+		(body (return (i32.add.wrapping (local capacity) (local capacity)))))
+
+	(fn grow_disk
+		(:doc "Copy the disk snapshots and committed resolver rows before continuing the pending operation.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (edges (shared-array DiskEdge)) (used DiskProgress)
+			(saved (mut-array GraphProgress)) (modules (shared-array GraphModule)) (bindings (shared-array GraphBinding))
+			(uses (shared-array GraphUse)) (selectors (shared-array GraphSelector))) (returns i32)
+		(body
+			(if
+				(:doc "The byte arena is the largest capacity and must retain signed offsets.")
+				(i32.lt 1073741823i32 (array.len (local arena)))
+				(then (return 1i32)))
+			(let-mut next_arena (array.alloc u8 (call double_capacity (array.len (local arena)))))
+			(let-mut next_files (array.alloc SuppliedFile (call double_capacity (array.len (local files)))))
+			(let-mut next_edges (array.alloc DiskEdge (call double_capacity (array.len (local edges)))))
+			(let-mut next_modules (array.alloc GraphModule (array.len (local next_files))))
+			(let capacity (call double_capacity (array.len (local bindings))))
+			(let-mut next_bindings (array.alloc GraphBinding (local capacity)))
+			(let-mut next_uses (array.alloc GraphUse (local capacity)))
+			(let-mut next_selectors (array.alloc GraphSelector (local capacity)))
+			(let copied (call append_bytes
+				(borrow-shared (array.range (local arena) 0i32 (struct.get (local used) bytes))) (borrow-mut (local next_arena)) 0i32))
+			(call copy_files (borrow-shared (local files)) (borrow-mut (local next_files)) (struct.get (local used) files))
+			(call copy_disk_edges (borrow-shared (local edges)) (borrow-mut (local next_edges)) (struct.get (local used) edges))
+			(let checkpoint (array.load (local saved) 0i32))
+			(call copy_graph_modules (local checkpoint) (borrow-shared (local modules)) (borrow-mut (local next_modules)))
+			(call copy_graph_imports (local checkpoint)
+				(borrow-shared (local bindings)) (borrow-shared (local uses)) (borrow-shared (local selectors))
+				(borrow-mut (local next_bindings)) (borrow-mut (local next_uses)) (borrow-mut (local next_selectors)))
+			(return (call walk_disk (borrow-mut (local next_arena)) (borrow-mut (local next_files)) (borrow-mut (local next_edges))
+				(call progress (local copied) (struct.get (local used) files) (struct.get (local used) edges) 0u32)
+				(borrow-mut (local saved)) (borrow-mut (local next_modules))
+				(borrow-mut (local next_bindings)) (borrow-mut (local next_uses)) (borrow-mut (local next_selectors))))))
+
 	(fn resolve_edges
-		(:doc `Use the shared native-selection walker on the current immutable byte prefix.`)
-		(params (arena (shared-array u8)) (length i32) (files (shared-array SuppliedFile))
-			(edges (shared-array DiskEdge)) (modules (mut-array GraphModule)) (bindings (mut-array GraphBinding))
+		(:doc `Use the shared native-selection walker on the initialized source and edge ranges.`)
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (edges (shared-array DiskEdge)) (length i32)
+			(saved (mut-array GraphProgress)) (modules (mut-array GraphModule)) (bindings (mut-array GraphBinding))
 			(uses (mut-array GraphUse)) (selectors (mut-array GraphSelector))) (returns GraphResult)
-		(body (return (call resolve_disk_graph (borrow-shared (array.range (local arena) 0i32 (local length)))
+		(body (return (call resolve_disk_graph
+			(borrow-shared (array.range (local arena) 0i32 (local length)))
 			(borrow-shared (local files)) 0i32
 			(struct.new SelectionContext (mode 0u32) (os (call bootstrap_os)) (arch (call bootstrap_arch)) (deployment -1i32))
-			(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
-			(borrow-mut (local selectors)) (borrow-shared (local edges))))))
+			(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))
+			(borrow-shared (local edges)) (borrow-mut (local saved))))))
 
 	(fn walk_disk
 		(:doc `Add one active edge per successful resolver request and emit only a complete graph.`)
-		(params (arena (mut-array u8)) (files (mut-array SuppliedFile)) (edges (mut-array DiskEdge))
-			(initial i32) (capacity i32)) (returns i32)
+		(params (arena (mut-array u8)) (files (mut-array SuppliedFile)) (edges (mut-array DiskEdge)) (initial DiskProgress)
+			(saved (mut-array GraphProgress)) (modules (mut-array GraphModule)) (bindings (mut-array GraphBinding))
+			(uses (mut-array GraphUse)) (selectors (mut-array GraphSelector))) (returns i32)
 		(body
-			(let-mut used_bytes (local initial))
-			(let-mut used_files 9i32)
-			(let-mut used_edges 0i32)
+			(let-mut used_bytes (struct.get (local initial) bytes))
+			(let-mut used_files (struct.get (local initial) files))
+			(let-mut used_edges (struct.get (local initial) edges))
 			(while
-				(:doc `Each iteration either publishes an edge, detects an error, or emits the resolved source.`)
+				(:doc `Each iteration publishes an edge, grows a workspace, reports a failure, or emits the source.`)
 				(bool true)
 				(body
+					(let used (call progress (local used_bytes) (local used_files) (local used_edges) 0u32))
 					(let-mut input (array.alloc SuppliedFile (local used_files)))
-					(call copy_files (borrow-shared (local files)) (borrow-mut (local input)))
+					(call copy_files (borrow-shared (local files)) (borrow-mut (local input)) (local used_files))
 					(let-mut targets (array.alloc DiskEdge (local used_edges)))
-					(call copy_edges (borrow-shared (local edges)) (borrow-mut (local targets)))
-					(let-mut modules (array.alloc GraphModule (local used_files)))
-					(let-mut bindings (array.alloc GraphBinding (local capacity)))
-					(let-mut uses (array.alloc GraphUse (local capacity)))
-					(let-mut selectors (array.alloc GraphSelector (local capacity)))
-					(let result (call resolve_edges (borrow-shared (local arena)) (local used_bytes)
-						(borrow-shared (local input)) (borrow-shared (local targets)) (borrow-mut (local modules))
+					(call copy_disk_edges (borrow-shared (local edges)) (borrow-mut (local targets)) (local used_edges))
+					(let result (call resolve_edges (borrow-shared (local arena)) (borrow-shared (local input))
+						(borrow-shared (local targets)) (local used_bytes) (borrow-mut (local saved)) (borrow-mut (local modules))
 						(borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))))
 					(let error (struct.get (local result) error))
 					(if
 						(:doc `The same emitter consumes the same published file and binding identities as native cc.`)
 						(u32.eq (local error) 0u32)
 						(then (return (call emit_bootstrap_graph (borrow-shared (local arena)) (local used_bytes)
-							(borrow-shared (local input)) (borrow-shared (local modules)) (borrow-shared (local bindings)) (local result)))))
-					(if (u32.eq (local error) 16u32) (then (return 2i32)))
+							(borrow-shared (local input))
+							(borrow-shared (local modules)) (borrow-shared (local bindings)) (local result)))))
+					(if
+						(:doc "Retry the suspended resolver operation after growing its tables.")
+						(u32.eq (local error) 16u32)
+						(then (return (call grow_disk (borrow-shared (local arena)) (borrow-shared (local files))
+							(borrow-shared (local edges)) (local used) (borrow-mut (local saved))
+							(borrow-shared (local modules)) (borrow-shared (local bindings))
+							(borrow-shared (local uses)) (borrow-shared (local selectors))))))
 					(if
 						(:doc `A non-request failure is complete and retains its original source span.`)
 						(i32.lt (struct.get (local result) path_start) 0i32)
-						(then (return (call report_bootstrap (borrow-shared (local arena)) (borrow-shared (local input))
+						(then (return (call report_bootstrap (borrow-shared (local arena))
+							(borrow-shared (local input))
 							(struct.get (local result) file) (local error) (struct.get (local result) start) (struct.get (local result) end)))))
-					(let next (call load_edge (local result)
-						(call progress (local used_bytes) (local used_files) (local used_edges) 0u32)
+					(let next (call load_edge (local result) (local used)
 						(borrow-mut (local arena)) (borrow-mut (local files)) (borrow-mut (local edges))))
 					(let loaded (struct.get (local next) error))
-					(if (u32.eq (local loaded) 16u32) (then (return 2i32)))
+					(if
+						(:doc "Keep the pending edge and the already loaded files while reserving more disk space.")
+						(u32.eq (local loaded) 16u32)
+						(then (return (call grow_disk (borrow-shared (local arena)) (borrow-shared (local files))
+							(borrow-shared (local edges)) (local used) (borrow-mut (local saved))
+							(borrow-shared (local modules)) (borrow-shared (local bindings))
+							(borrow-shared (local uses)) (borrow-shared (local selectors))))))
 					(if
 						(:doc `A file open failure refers to the use that originally requested the provider.`)
 						(u32.lt 0u32 (local loaded))
-						(then (return (call report_bootstrap (borrow-shared (local arena)) (borrow-shared (local input))
+						(then (return (call report_bootstrap (borrow-shared (local arena))
+							(borrow-shared (local input))
 							(struct.get (local result) file) (local loaded) (struct.get (local result) start) (struct.get (local result) end)))))
 					(set (local used_bytes) (struct.get (local next) bytes))
 					(set (local used_files) (struct.get (local next) files))
@@ -285,33 +325,38 @@
 			(return 1i32)))
 
 	(fn compile_bootstrap_graph
-		(:doc `Drive bounded workspace growth from an explicit canonical compiler source entry.`)
+		(:doc `Load the entry and bundled providers before starting a resumable disk walk.`)
 		(params (entry (shared-array u8))) (returns i32)
 		(body
 			(let-mut bytes 1048576i32)
-			(let-mut file_count 128i32)
-			(let-mut edge_count 1024i32)
-			(let-mut scratch 8192i32)
+			(let-mut file_capacity 128i32)
+			(let-mut edge_capacity 1024i32)
+			(let-mut table_capacity 8192i32)
 			(while
-				(:doc `The private compiler starts small for the real source tree and only grows on capacity errors.`)
+				(:doc "Reserve space for the entry and bundled providers before beginning discovery.")
 				(bool true)
 				(body
 					(let-mut arena (array.alloc u8 (local bytes)))
-					(let-mut files (array.alloc SuppliedFile (local file_count)))
-					(let-mut edges (array.alloc DiskEdge (local edge_count)))
+					(let-mut files (array.alloc SuppliedFile (local file_capacity)))
 					(let initial (call initial_files (borrow-shared (local entry)) (borrow-mut (local arena)) (borrow-mut (local files))))
-					(let-mut status 2i32)
 					(if (i32.eq (local initial) -1i32) (then (return 1i32)))
 					(if
-						(:doc `Graph traversal starts only after the entry and bundled providers are readable.`)
+						(:doc "The entry and every bundled provider belong to the initial snapshot.")
 						(i32.lt -1i32 (local initial))
-						(then (set (local status) (call walk_disk (borrow-mut (local arena)) (borrow-mut (local files))
-							(borrow-mut (local edges)) (local initial) (local scratch)))))
-					(if (bool.not (i32.eq (local status) 2i32)) (then (return (local status))))
+						(then
+							(let-mut edges (array.alloc DiskEdge (local edge_capacity)))
+							(let-mut saved (array.alloc GraphProgress 1i32))
+							(let-mut modules (array.alloc GraphModule (array.len (local files))))
+							(let-mut bindings (array.alloc GraphBinding (local table_capacity)))
+							(let-mut uses (array.alloc GraphUse (local table_capacity)))
+							(let-mut selectors (array.alloc GraphSelector (local table_capacity)))
+							(return (call walk_disk (borrow-mut (local arena)) (borrow-mut (local files)) (borrow-mut (local edges))
+								(call progress (local initial) 9i32 0i32 0u32) (borrow-mut (local saved)) (borrow-mut (local modules))
+								(borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))))))
 					(if (i32.lt 1073741823i32 (local bytes)) (then (return 1i32)))
-					(set (local bytes) (i32.add.wrapping (local bytes) (local bytes)))
-					(set (local file_count) (i32.add.wrapping (local file_count) (local file_count)))
-					(set (local edge_count) (i32.add.wrapping (local edge_count) (local edge_count)))
-					(set (local scratch) (i32.add.wrapping (local scratch) (local scratch)))))
+					(set (local bytes) (call double_capacity (local bytes)))
+					(set (local file_capacity) (call double_capacity (local file_capacity)))
+					(set (local edge_capacity) (call double_capacity (local edge_capacity)))
+					(set (local table_capacity) (call double_capacity (local table_capacity)))))
 			(return 1i32)))
 )
