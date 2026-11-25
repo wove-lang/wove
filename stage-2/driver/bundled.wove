@@ -1,7 +1,10 @@
 (module native_bundled_sources
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Pack the entry and the built-in C providers into the ordinary supplied-source table.")
+	(:doc `Pack the entry and the built-in C providers into the ordinary supplied-source table.
+
+	Both native graph paths use the same ordered path and source pairs.
+	The entry keeps identity zero and provider identities follow inventory order.`)
 
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../text/copy.wove" (only append_bytes))
@@ -10,25 +13,91 @@
 	(let stdio_path "/c-stdlib/stdio.wove")
 	(let unistd_path "/c-stdlib/unistd.wove")
 	(let spawn_path "/c-stdlib/spawn.wove")
+	(let fcntl_path "/c-stdlib/fcntl.wove")
+	(let errno_path "/c-stdlib/errno.wove")
+	(let sys_stat_path "/c-stdlib/sys_stat.wove")
+	(let sys_wait_path "/c-stdlib/sys_wait.wove")
+
+	(fn copy_provider_path
+		(:doc `Keep each virtual provider path in the same inventory as its source bytes.`)
+		(params (path (shared-slice u8))) (returns (owned-array u8))
+		(body
+			(let-mut bytes (array.alloc u8 (slice.len (local path))))
+			(let end (call append_bytes (borrow-shared (local path)) (borrow-mut (local bytes)) 0i32))
+			(return (move (local bytes)))))
+
+	(fn load_bundled_providers
+		(:doc `Load path and source pairs in identity order. Append new providers to preserve existing identities.`)
+		(:expect (tests "stage-2/cli/native/cases.tsv") (issues "gh:wove-lang/wove:316"))
+		(params) (returns (owned-array (owned-array u8)))
+		(body
+			(let-mut rows (array.alloc (owned-array u8) 16i32))
+			(slice.store (local rows) 0i32 (call copy_provider_path (borrow-shared (local stdlib_path))))
+			(let stdlib (embed "../c-stdlib/stdlib.wove"))
+			(slice.store (local rows) 1i32 (move (local stdlib)))
+
+			(slice.store (local rows) 2i32 (call copy_provider_path (borrow-shared (local stdio_path))))
+			(let stdio (embed "../c-stdlib/stdio.wove"))
+			(slice.store (local rows) 3i32 (move (local stdio)))
+
+			(slice.store (local rows) 4i32 (call copy_provider_path (borrow-shared (local unistd_path))))
+			(let unistd (embed "../c-stdlib/unistd.wove"))
+			(slice.store (local rows) 5i32 (move (local unistd)))
+
+			(slice.store (local rows) 6i32 (call copy_provider_path (borrow-shared (local spawn_path))))
+			(let spawn (embed "../c-stdlib/spawn.wove"))
+			(slice.store (local rows) 7i32 (move (local spawn)))
+
+			(slice.store (local rows) 8i32 (call copy_provider_path (borrow-shared (local fcntl_path))))
+			(let fcntl (embed "../c-stdlib/fcntl.wove"))
+			(slice.store (local rows) 9i32 (move (local fcntl)))
+
+			(slice.store (local rows) 10i32 (call copy_provider_path (borrow-shared (local errno_path))))
+			(let errno (embed "../c-stdlib/errno.wove"))
+			(slice.store (local rows) 11i32 (move (local errno)))
+
+			(slice.store (local rows) 12i32 (call copy_provider_path (borrow-shared (local sys_stat_path))))
+			(let sys_stat (embed "../c-stdlib/sys_stat.wove"))
+			(slice.store (local rows) 13i32 (move (local sys_stat)))
+
+			(slice.store (local rows) 14i32 (call copy_provider_path (borrow-shared (local sys_wait_path))))
+			(let sys_wait (embed "../c-stdlib/sys_wait.wove"))
+			(slice.store (local rows) 15i32 (move (local sys_wait)))
+
+			(return (move (local rows)))))
 
 	(fn bundled_file_count
-		(:doc "Count the entry and all bundled C provider rows.")
-		(params)
-		(returns i32)
-		(body (return 5i32)))
+		(:doc `Count the entry plus one file row per provider pair.`)
+		(params (providers (shared-slice (owned-array u8)))) (returns i32)
+		(body (return (i32.add.wrapping 1i32 (i32.div (slice.len (local providers)) 2i32)))))
 
-	(fn bundled_provider_width
-		(:doc "Reserve the canonical paths and the complete embedded provider sources.")
-		(params (stdlib (shared-slice u8)) (stdio (shared-slice u8)) (unistd (shared-slice u8)) (spawn (shared-slice u8)))
-		(returns i32)
+	(fn provider_row_width
+		(:doc `Measure one provider path or source through its stored byte owner.`)
+		(params (bytes (shared-slice u8))) (returns i32)
+		(body (return (slice.len (local bytes)))))
+
+	(fn bundled_input_width
+		(:doc `Measure the complete arena or return -1 if the signed source offsets cannot represent it.`)
+		(params (path (shared-slice u8)) (source (shared-slice u8))
+			(providers (shared-slice (owned-array u8)))) (returns i32)
 		(body
-			(let paths (i32.add.wrapping (slice.len (local stdlib_path))
-				(i32.add.wrapping (slice.len (local stdio_path))
-					(i32.add.wrapping (slice.len (local unistd_path)) (slice.len (local spawn_path))))))
-			(let sources (i32.add.wrapping (slice.len (local stdlib))
-				(i32.add.wrapping (slice.len (local stdio))
-					(i32.add.wrapping (slice.len (local unistd)) (slice.len (local spawn))))))
-			(return (i32.add.wrapping (local paths) (local sources)))))
+			(let path_width (slice.len (local path)))
+			(let source_width (slice.len (local source)))
+			(if
+				(:doc `Check the entry range before adding the ordered provider rows.`)
+				(i32.lt (i32.sub.wrapping 2147483647i32 (local path_width)) (local source_width))
+				(then (return -1i32)))
+			(let-mut total (i32.add.wrapping (local path_width) (local source_width)))
+			(let-mut index 0i32)
+			(while
+				(:doc `Each path and source range must fit before it can be published.`)
+				(i32.lt (local index) (slice.len (local providers)))
+				(body
+					(let width (call provider_row_width (borrow-shared (slice.load (local providers) (local index)))))
+					(if (i32.lt (i32.sub.wrapping 2147483647i32 (local total)) (local width)) (then (return -1i32)))
+					(set (local total) (i32.add.wrapping (local total) (local width)))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (local total))))
 
 	(fn write_supplied_entry
 		(:doc "Reserve row zero for the entry and keep all of its source offsets relative to its own view.")
@@ -55,18 +124,24 @@
 			(return (local source_end))))
 
 	(fn write_bundled_sources
-		(:doc "Register the entry and each C provider at a stable identity.")
-		(params (path (shared-slice u8)) (source (shared-slice u8)) (stdlib (shared-slice u8)) (stdio (shared-slice u8))
-			(unistd (shared-slice u8)) (spawn (shared-slice u8)) (arena (mut-slice u8)) (files (mut-slice SuppliedFile)))
-		(returns i32)
+		(:doc `Register the entry and all provider pairs through the same file table publication path.`)
+		(params (path (shared-slice u8)) (source (shared-slice u8)) (providers (shared-slice (owned-array u8)))
+			(arena (mut-slice u8)) (files (mut-slice SuppliedFile))) (returns i32)
 		(body
-			(let entry_end (call write_supplied_entry (borrow-shared (local path)) (borrow-shared (local source))
+			(let-mut end (call write_supplied_entry (borrow-shared (local path)) (borrow-shared (local source))
 				(borrow-mut (local arena)) (borrow-mut (local files))))
-			(let stdlib_end (call write_supplied_provider (borrow-shared (local stdlib_path)) (borrow-shared (local stdlib))
-				(borrow-mut (local arena)) (borrow-mut (local files)) (local entry_end) 1i32))
-			(let stdio_end (call write_supplied_provider (borrow-shared (local stdio_path)) (borrow-shared (local stdio))
-				(borrow-mut (local arena)) (borrow-mut (local files)) (local stdlib_end) 2i32))
-			(let unistd_end (call write_supplied_provider (borrow-shared (local unistd_path)) (borrow-shared (local unistd))
-				(borrow-mut (local arena)) (borrow-mut (local files)) (local stdio_end) 3i32))
-			(return (call write_supplied_provider (borrow-shared (local spawn_path)) (borrow-shared (local spawn))
-				(borrow-mut (local arena)) (borrow-mut (local files)) (local unistd_end) 4i32)))))
+			(let-mut index 0i32)
+			(let-mut identity 1i32)
+			(while
+				(:doc `The inventory keeps the virtual path immediately before its source bytes.`)
+				(i32.lt (local index) (slice.len (local providers)))
+				(body
+					(let source_index (i32.add.wrapping (local index) 1i32))
+					(set (local end) (call write_supplied_provider
+						(borrow-shared (slice.load (local providers) (local index)))
+						(borrow-shared (slice.load (local providers) (local source_index)))
+						(borrow-mut (local arena)) (borrow-mut (local files)) (local end) (local identity)))
+					(set (local index) (i32.add.wrapping (local index) 2i32))
+					(set (local identity) (i32.add.wrapping (local identity) 1i32))))
+			(return (local end))))
+)
