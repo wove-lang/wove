@@ -24,12 +24,15 @@
 #define render_source_tree wv_seed_fn_44
 #define decode_string wv_seed_fn_74
 #define form_parts wv_seed_fn_75
-#define read_module wv_seed_fn_85
-#define emit_module wv_seed_fn_115
-#define resolve_graph wv_seed_fn_132
-#define inspect_callers wv_seed_fn_411
-#define run_scalar_graph wv_seed_fn_440
-#define discover_graph_tests wv_seed_fn_448
+#define read_module_for_target wv_seed_fn_90
+#define emit_module wv_seed_fn_130
+#define resolve_graph_for_target wv_seed_fn_149
+#define default_selection wv_seed_fn_91
+#define target_os wv_seed_fn_92
+#define target_arch wv_seed_fn_93
+#define inspect_callers wv_seed_fn_424
+#define run_scalar_graph wv_seed_fn_453
+#define discover_graph_tests wv_seed_fn_461
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -39,19 +42,20 @@ typedef wv_seed_record_9 DecodeResult;
 typedef wv_seed_record_11 FormParts;
 typedef wv_seed_record_12 SelectedDeclaration;
 typedef wv_seed_record_13 ModuleRead;
-typedef wv_seed_record_15 EmitResult;
-typedef wv_seed_record_51 EmbedAsset;
-typedef wv_seed_record_16 GraphModule;
-typedef wv_seed_record_17 GraphBinding;
-typedef wv_seed_record_18 GraphUse;
-typedef wv_seed_record_19 GraphSelector;
-typedef wv_seed_record_20 GraphResult;
-typedef wv_seed_record_42 CallSite;
-typedef wv_seed_record_23 SuppliedFile;
-typedef wv_seed_record_54 CallerInspection;
-typedef wv_seed_record_58 GraphOutput;
-typedef wv_seed_record_59 DiscoveredTest;
-typedef wv_seed_record_60 TestDiscovery;
+typedef wv_seed_record_15 SelectionContext;
+typedef wv_seed_record_17 EmitResult;
+typedef wv_seed_record_52 EmbedAsset;
+typedef wv_seed_record_18 GraphModule;
+typedef wv_seed_record_19 GraphBinding;
+typedef wv_seed_record_20 GraphUse;
+typedef wv_seed_record_21 GraphSelector;
+typedef wv_seed_record_22 GraphResult;
+typedef wv_seed_record_43 CallSite;
+typedef wv_seed_record_25 SuppliedFile;
+typedef wv_seed_record_55 CallerInspection;
+typedef wv_seed_record_59 GraphOutput;
+typedef wv_seed_record_60 DiscoveredTest;
+typedef wv_seed_record_61 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
@@ -527,7 +531,7 @@ static void write_form_parts(wvrt_slice input, wvrt_slice nodes, int32_t index) 
 }
 
 // Read one module and report the original row indices of its active declarations.
-static int dump_module(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity, uint32_t mode) {
+static int dump_module(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity, SelectionContext context) {
 	FormCheck checked;
 	wvrt_array *storage = checked_source_tree(input, &checked);
 	const wvrt_slice nodes = {
@@ -544,7 +548,7 @@ static int dump_module(wvrt_slice parent, wvrt_slice input, int32_t start, int32
 	unsigned char *bytes = selected->wvrt_items;
 	memset(bytes, 0xa5, size);
 	const wvrt_mut_slice output = {bytes, capacity, sizeof(SelectedDeclaration)};
-	const ModuleRead result = read_module(input, nodes, checked, mode, output);
+	const ModuleRead result = read_module_for_target(input, nodes, checked, context, output);
 	const int32_t count = result.wv_field_1;
 	int status = EXIT_FAILURE;
 	// Report rows only when the count and untouched destination tail are valid.
@@ -585,7 +589,7 @@ typedef struct {
 } CheckedModule;
 
 // Prepare the same checked source and declaration views for compilation and inspection.
-static CheckedModule checked_module(wvrt_slice input, uint32_t mode) {
+static CheckedModule checked_module(wvrt_slice input, SelectionContext context) {
 	FormCheck checked;
 	wvrt_array *storage = checked_source_tree(input, &checked);
 	const wvrt_slice nodes = {
@@ -597,7 +601,7 @@ static CheckedModule checked_module(wvrt_slice input, uint32_t mode) {
 	const int32_t rows = nodes.wvrt_length;
 	wvrt_array *selected = wvrt_array_new(rows, sizeof(SelectedDeclaration), _Alignof(SelectedDeclaration), site);
 	const wvrt_mut_slice declarations = {selected->wvrt_items, rows, sizeof(SelectedDeclaration)};
-	const ModuleRead module = read_module(input, nodes, checked, mode, declarations);
+	const ModuleRead module = read_module_for_target(input, nodes, checked, context, declarations);
 	const wvrt_slice active = {selected->wvrt_items, module.wv_field_1, sizeof(SelectedDeclaration)};
 	return (CheckedModule){storage, selected, nodes, active, module};
 }
@@ -609,8 +613,8 @@ static void drop_checked_module(CheckedModule source) {
 }
 
 // Compile a checked module into a guarded C output view and report its result span.
-static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity, uint32_t mode) {
-	const CheckedModule source = checked_module(input, mode);
+static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity, SelectionContext context) {
+	const CheckedModule source = checked_module(input, context);
 	// Allow ordinary local helper modules without a fixture-supplied byte limit.
 	if (capacity < 0) {
 		capacity = 4096;
@@ -684,8 +688,8 @@ static void write_callers(CallerSources source, int32_t file, int32_t declaratio
 
 // Inspect a selected name and check that a short result preserves the supplied rows.
 static int dump_callers(wvrt_slice parent, wvrt_slice input, int32_t start, const char *name, int32_t capacity,
-	bool entry_module, uint32_t mode) {
-	const CheckedModule source = checked_module(input, mode);
+	bool entry_module, SelectionContext context) {
+	const CheckedModule source = checked_module(input, context);
 	if (capacity < 0) {
 		capacity = source.nodes.wvrt_length;
 	}
@@ -979,7 +983,7 @@ static int finish_tests(wvrt_slice arena, wvrt_slice supplied, wvrt_slice module
 }
 
 // Resolve a supplied graph before exposing bindings, compiled C, callers, or tests.
-static int graph_mode(int argc, char **argv, uint32_t mode) {
+static int graph_mode(int argc, char **argv, SelectionContext context) {
 	const bool emit = strcmp(argv[1], "--emit-graph") == 0;
 	const bool inspect = strcmp(argv[1], "--graph-callers") == 0;
 	const bool tests = strcmp(argv[1], "--graph-tests") == 0;
@@ -1028,7 +1032,7 @@ static int graph_mode(int argc, char **argv, uint32_t mode) {
 	wvrt_array *bindings = wvrt_array_new(capacity, sizeof(GraphBinding), _Alignof(GraphBinding), site);
 	wvrt_array *uses = wvrt_array_new(capacity, sizeof(GraphUse), _Alignof(GraphUse), site);
 	wvrt_array *selectors = wvrt_array_new(capacity, sizeof(GraphSelector), _Alignof(GraphSelector), site);
-	const GraphResult result = resolve_graph(arena, supplied, entry, mode,
+	const GraphResult result = resolve_graph_for_target(arena, supplied, entry, context,
 		(wvrt_mut_slice){modules->wvrt_items, module_capacity, sizeof(GraphModule)},
 		(wvrt_mut_slice){bindings->wvrt_items, capacity, sizeof(GraphBinding)},
 		(wvrt_mut_slice){uses->wvrt_items, capacity, sizeof(GraphUse)},
@@ -1060,7 +1064,7 @@ static int graph_mode(int argc, char **argv, uint32_t mode) {
 }
 
 // Supply a whole file or one checked view to the same seed-built executable.
-static int source_mode(int argc, char **argv, uint32_t mode) {
+static int source_mode(int argc, char **argv, SelectionContext context) {
 	const bool tokens = strcmp(argv[1], "--tokens") == 0;
 	const bool form = strcmp(argv[1], "--form") == 0;
 	const bool metadata = strcmp(argv[1], "--metadata") == 0;
@@ -1112,11 +1116,11 @@ static int source_mode(int argc, char **argv, uint32_t mode) {
 	} else if (decode) {
 		status = dump_decode(parent, view, start, capacity);
 	} else if (module) {
-		status = dump_module(parent, view, start, capacity, mode);
+		status = dump_module(parent, view, start, capacity, context);
 	} else if (emit) {
-		status = dump_c(parent, view, start, capacity, mode);
+		status = dump_c(parent, view, start, capacity, context);
 	} else if (callers) {
-		status = dump_callers(parent, view, start, argv[3], capacity, callers_root, mode);
+		status = dump_callers(parent, view, start, argv[3], capacity, callers_root, context);
 	} else {
 		status = tokens ? dump_tokens(parent, view, start) : dump_form(parent, view, start);
 	}
@@ -1124,30 +1128,58 @@ static int source_mode(int argc, char **argv, uint32_t mode) {
 	return status;
 }
 
-// Select the compilation mode once before dispatching the probe command.
+// Read fixture target names through the same classifiers used by Wove cfg.
+static bool probe_target(char **words, SelectionContext *context) {
+	const wvrt_slice os = {words[0], (int32_t)strlen(words[0]), sizeof(uint8_t)};
+	const wvrt_slice arch = {words[1], (int32_t)strlen(words[1]), sizeof(uint8_t)};
+	context->wv_field_1 = target_os(os);
+	context->wv_field_2 = target_arch(arch);
+	context->wv_field_3 = -1;
+	return (context->wv_field_1 != 0 || strcmp(words[0], "-") == 0) &&
+		(context->wv_field_2 != 0 || strcmp(words[1], "-") == 0) &&
+		(strcmp(words[2], "-") == 0 || read_offset(words[2], &context->wv_field_3));
+}
+
+// Read the mode and optional supplied target before dispatching one probe command.
 static int probe_command(int argc, char **argv) {
-	uint32_t mode = MODE_BOOTSTRAP;
-	// Existing probe calls default to bootstrap mode.
-	if (strcmp(argv[1], "--mode") == 0) {
+	SelectionContext context = default_selection(MODE_BOOTSTRAP);
+	// Either prefix can precede the other without resetting the selected context.
+	while (argc > 1) {
 		// A mode prefix needs a recognized value and a command.
-		if (argc < 4 || (strcmp(argv[2], "bootstrap") != 0 && strcmp(argv[2], "native") != 0 &&
-				strcmp(argv[2], "test") != 0)) {
-			fputs("usage: source_scan --mode {bootstrap|native|test} COMMAND ...\n", stderr);
-			return EXIT_FAILURE;
+		if (strcmp(argv[1], "--mode") == 0) {
+			// Validate the mode before advancing to the next prefix.
+			if (argc < 4 || (strcmp(argv[2], "bootstrap") != 0 && strcmp(argv[2], "native") != 0 &&
+					strcmp(argv[2], "test") != 0)) {
+				fputs("usage: source_scan --mode {bootstrap|native|test} COMMAND ...\n", stderr);
+				return EXIT_FAILURE;
+			}
+			context.wv_field_0 = strcmp(argv[2], "test") == 0 ? MODE_TEST :
+				(strcmp(argv[2], "native") == 0 ? MODE_NATIVE : MODE_BOOTSTRAP);
+			argc -= 2;
+			argv += 2;
+			continue;
 		}
-		mode = strcmp(argv[2], "test") == 0 ? MODE_TEST :
-			(strcmp(argv[2], "native") == 0 ? MODE_NATIVE : MODE_BOOTSTRAP);
-		argc -= 2;
-		argv += 2;
+		// A target prefix supplies canonical names and an encoded deployment version.
+		if (strcmp(argv[1], "--target") == 0) {
+			// Require a command after all three target words.
+			if (argc < 6 || !probe_target(argv + 2, &context)) {
+				fputs("usage: source_scan --target OS ARCH DEPLOYMENT COMMAND ...\n", stderr);
+				return EXIT_FAILURE;
+			}
+			argc -= 4;
+			argv += 4;
+			continue;
+		}
+		break;
 	}
 	// Test emission needs the supplied graph for inventory and defining-file paths.
-	if (mode == MODE_TEST && strcmp(argv[1], "--emit-c") == 0) {
+	if (context.wv_field_0 == MODE_TEST && strcmp(argv[1], "--emit-c") == 0) {
 		fputs("test mode emits native tests with --emit-graph\n", stderr);
 		return EXIT_FAILURE;
 	}
 	const bool graph = strcmp(argv[1], "--graph") == 0 || strcmp(argv[1], "--emit-graph") == 0 ||
 		strcmp(argv[1], "--graph-callers") == 0 || strcmp(argv[1], "--graph-tests") == 0;
-	return graph ? graph_mode(argc, argv, mode) : source_mode(argc, argv, mode);
+	return graph ? graph_mode(argc, argv, context) : source_mode(argc, argv, context);
 }
 
 // Exercise complete inputs and checked views into a larger buffer.
