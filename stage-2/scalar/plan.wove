@@ -2194,12 +2194,13 @@
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+			(let projected (u32.eq (local tag) (u32 52)))
 			(if
-				(:doc "Stores need a named place. Loads may also read a returned, constructed, or projected array.")
+				(:doc "Stores need a local or field place. Loads can also read a returned or constructed array.")
 				(bool.not (bool.or (u32.eq (local tag) (u32 8))
-					(bool.and (bool.not (local store))
-						(bool.or (bool.or (u32.eq (local tag) (u32 9)) (u32.eq (local tag) (u32 52)))
-							(call is_fixed_initializer (local tag))))))
+					(bool.or (local projected)
+						(bool.and (bool.not (local store))
+							(bool.or (u32.eq (local tag) (u32 9)) (call is_fixed_initializer (local tag)))))))
 				(then (return (call entry_at (local reference) (i32 -1) (u32 24)))))
 			(let checked (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (local receiver) (u32 42) (local statement)
@@ -2220,14 +2221,24 @@
 			(let element (int.convert u32 (record.get (local layout) first)))
 			(let-mut result (local element))
 			(if
-				(:doc "A store changes the original let-mut local and returns no value.")
+				(:doc "A store changes the original writable place and returns no value.")
 				(local store)
 				(then
 					(if
-						(:doc "Parameters and immutable locals cannot serve as array store destinations.")
-						(bool.not (bool.and (u32.eq (record.get (local array) kind) (u32 6))
-							(u32.eq (record.get (slice.load (local statements) (record.get (local checked) operand)) kind) (u32 16))))
-						(then (return (call entry_at (local reference) (i32 -1) (u32 24)))))
+						(:doc "A projected destination follows the same writable-place rules as field assignment.")
+						(local projected)
+						(then
+							(let place (call check_writable_field (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local receiver) (borrow-shared (local records)) (borrow-shared (local expressions))))
+							(if
+								(:doc "Preserve the source of an invalid or immutable field place.")
+								(u32.lt (u32 0) (record.get (local place) error))
+								(then (return (local place)))))
+						(else
+							(if
+								(:doc "A whole fixed array destination remains a mutable local.")
+								(bool.not (record.get (local array) mutable_place))
+								(then (return (call entry_at (local reference) (i32 -1) (u32 24)))))))
 					(slice.store (local expressions) (local value)
 						(call expression_row (u32 0) (local element) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
 					(set (local result) (u32 0)))
@@ -2711,6 +2722,34 @@
 			(return (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
 				(record.get (local parts) head)) (u32 52)))))
 
+	(fn check_writable_field
+		(:doc `Require a checked field projection to name writable Wove storage.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (place i32)
+			(records (shared-slice ScalarRecord)) (expressions (shared-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let root (call field_place_root (borrow-shared (local expressions)) (local place)))
+			(let value (slice.load (local expressions) (local root)))
+			(let original (slice.load (local nodes) (local root)))
+			(let kind (record.get (local value) kind))
+			(if
+				(:doc "A field of a temporary or non-local expression has no writable place.")
+				(bool.not (bool.or (u32.eq (local kind) (u32 6)) (u32.eq (local kind) (u32 2))))
+				(then (return (call entry_at (local original) (i32 -1) (u32 24)))))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local original)))
+			(let name (slice.load (local nodes) (record.get (local parts) operands)))
+			(if
+				(:doc "A mutable local or exclusive record reference supplies the original writable storage.")
+				(bool.not (call writable_record_place (local value)))
+				(then (return (call entry_at (local name) (i32 -1) (u32 37)))))
+			(let type (call record_receiver_type (record.get (local value) type)))
+			(let layout (slice.load (local records) (call record_index (local type))))
+			(if
+				(:doc "Ordinary Wove field places use Wove-defined layouts.")
+				(call is_native_record (local layout))
+				(then (return (call entry_at (local original) (i32 -1) (u32 24)))))
+			(return (call entry_at (slice.load (local nodes) (local place)) (local place) (u32 0)))))
+
 	(fn plan_field_place
 		(:doc `Check a field path rooted in a writable Wove local or mutable reference parameter.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
@@ -2724,33 +2763,8 @@
 				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 				(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions)) (local view_start)))
 			(if (u32.lt (u32 0) (record.get (local checked) error)) (then (return (local checked))))
-			(let root (call field_place_root (borrow-shared (local expressions)) (local place)))
-			(let value (slice.load (local expressions) (local root)))
-			(let original (slice.load (local nodes) (local root)))
-			(let kind (record.get (local value) kind))
-			(if
-				(:doc "A field of a temporary or non-local expression has no writable place.")
-				(bool.not (bool.or (u32.eq (local kind) (u32 6)) (u32.eq (local kind) (u32 2))))
-				(then (return (call entry_at (local original) (i32 -1) (u32 24)))))
-			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local original)))
-			(let name (slice.load (local nodes) (record.get (local parts) operands)))
-			(if
-				(:doc "Only a mutable reference parameter grants write access to its fields.")
-				(u32.eq (local kind) (u32 2))
-				(then
-					(if (call is_mutable_record_reference (record.get (local value) type))
-						(then (return (local checked))))
-					(return (call entry_at (local name) (i32 -1) (u32 37)))))
-			(if
-				(:doc "A nested write to a value needs its original let-mut local.")
-				(bool.not (record.get (local value) mutable_place))
-				(then (return (call entry_at (local name) (i32 -1) (u32 37)))))
-			(let layout (slice.load (local records) (call record_index (record.get (local value) type))))
-			(if
-				(:doc "Ordinary Wove field places use Wove-defined layouts.")
-				(call is_native_record (local layout))
-				(then (return (call entry_at (local original) (i32 -1) (u32 24)))))
-			(return (local checked))))
+			(return (call check_writable_field (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local place) (borrow-shared (local records)) (borrow-shared (local expressions))))))
 
 	(fn check_statement_target
 		(:doc `Check a declaration or assignment destination, including a nested field place.`)

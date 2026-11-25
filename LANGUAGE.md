@@ -77,6 +77,8 @@ decimal extent.
 - `(array.repeat (array u8 128) (u8 0))` evaluates one value and fills the array.
 - `(array.load value index)` reads an element.
 - `(array.store (local data) index value)` writes into a mutable local array.
+- `(array.store (record.get (local state) block) index value)` writes into
+  an inline array field of a writable record.
 
 Stage 2 can borrow fixed `u32` and `u64` local arrays as matching slices.
 A fixed `u8`, `u32`, or `u64` array field can also lend a matching slice

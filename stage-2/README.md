@@ -286,8 +286,12 @@ A fixed array keeps its elements inline and can be a record field, a
 function parameter, or a return value. Binding, passing, and returning
 an array or a record containing one copy the value. `(array.load value index)`
 reads an element and `(array.store (local data) index value)` writes to
-a `let-mut` local. Both take an exact `i32` index and trap at the access
-span if the index is outside the declared extent.
+a `let-mut` local. An indexed store can also use a field place such as
+`(array.store (record.get (local state) block) index byte)`. The field
+must belong to a mutable local or a mutable reference. The store holds
+that field exclusively during evaluation of the index and value.
+Disjoint sibling fields remain accessible. Both array operations take
+an exact `i32` index and trap at the access span when it is out of bounds.
 
 A fixed `u32` or `u64` local can lend all its elements to a function
 whose formal is a `shared-slice` or `mut-slice` of the same element type.
