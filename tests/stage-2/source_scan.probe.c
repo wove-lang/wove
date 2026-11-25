@@ -8,10 +8,10 @@
 #include <string.h>
 
 #define main wove_fixture_main
-#include "wovec.c"
+#include "source_scan.c"
 #undef main
 
-// Match the seed's generated names to the scanner declarations.
+// Match the seed's generated names to the fixture's imported declarations.
 #define source_offset wv_seed_fn_5
 #define source_kind wv_seed_fn_6
 #define scan_token wv_seed_fn_12
@@ -55,7 +55,7 @@ typedef wv_seed_record_63 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
-_Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
+_Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "source probe entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
 _Static_assert(_Generic(&source_kind, uint32_t (*)(wvrt_slice): 1, default: 0), "source kind type");
 _Static_assert(_Generic(&scan_token, Token (*)(wvrt_slice, int32_t): 1, default: 0), "scan token type");
