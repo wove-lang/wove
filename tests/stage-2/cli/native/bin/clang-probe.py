@@ -17,6 +17,10 @@ def main():
 	# An append records every launch, so retries or duplicate invocations fail the case.
 	with Path(os.environ["WOVE_CLANG_LOG"]).open("a", encoding="utf-8") as log:
 		log.write(json.dumps(arguments) + "\n")
+	# An AST query can synthesize a capture or fail before producing one.
+	if "-ast-dump=json" in arguments and ("WOVE_CLANG_AST_STATUS" in os.environ or "WOVE_CLANG_AST_OUTPUT" in os.environ):
+		sys.stdout.write(os.environ.get("WOVE_CLANG_AST_OUTPUT", ""))
+		return int(os.environ.get("WOVE_CLANG_AST_STATUS", "0"))
 	# A fixture can replace the tool with a staged-output and status probe.
 	if "WOVE_CLANG_STATUS" in os.environ:
 		output = Path(arguments[arguments.index("-o") + 1])

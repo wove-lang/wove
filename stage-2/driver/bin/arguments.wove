@@ -65,7 +65,7 @@
 		(body
 			(if
 				(:doc `Definitions must be one joined -D argument even when their value contains spaces.`)
-				(i32.eq (local rule) 14i32)
+				(bool.or (i32.eq (local rule) 14i32) (i32.eq (local rule) 22i32))
 				(then (return (call write_argument (borrow-shared (local value)) (borrow-shared (local define_prefix))
 					(borrow-mut (local output)) (local cursor)))))
 			(if
@@ -173,14 +173,72 @@
 				(then (return (call write_plain_argument (borrow-shared (local full_lto)) (borrow-mut (local output)) (local cursor)))))
 			(return (local cursor))))
 
+	(fn write_effective_options
+		(:doc "Append the one effective list selected for a compiler or linker rule.")
+		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
+			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(rule i32) (output (mut-slice u8)) (cursor i32))
+		(returns i32)
+		(body
+			(let-mut scope 3u32)
+			(if
+				(:doc "Retained C takes its definitions from cc, while binary options come from the build mode.")
+				(i32.eq (local rule) 22i32)
+				(then (set (local scope) 4u32)))
+			(let setting (call command_setting (local invocation) (borrow-shared (local arguments))
+				(borrow-shared (local nodes)) (borrow-shared (local settings)) (local scope) (local rule)))
+			(let origin (record.get (local setting) origin))
+			(if
+				(:doc "An explicit list, including an empty clear, wins over the project and built-in lists.")
+				(u32.eq (local origin) 2u32)
+				(then (return (call write_argv_options (borrow-shared (local bytes)) (borrow-shared (local arguments))
+					(record.get (local invocation) rows) (local setting) (local rule) (borrow-mut (local output)) (local cursor)))))
+			(if
+				(:doc "Use the selected project list when one was supplied.")
+				(u32.eq (local origin) 1u32)
+				(then (return (call write_config_options (borrow-shared (local config))
+					(borrow-shared (local nodes)) (record.get (local setting) row) (local rule) (borrow-mut (local output)) (local cursor)))))
+			(return (call write_default_options (record.get (local invocation) mode)
+				(record.get (local setting) count) (borrow-mut (local output)) (local cursor)))))
+
+	(fn write_feature_flags
+		(:doc "Apply the same feature definitions before generated code and header probes.")
+		(params (output (mut-slice u8)))
+		(returns i32)
+		(body
+			(let posix (call write_plain_argument (borrow-shared (local gnu_features)) (borrow-mut (local output)) 0i32))
+			(return (call write_plain_argument (borrow-shared (local darwin_features)) (borrow-mut (local output)) (local posix)))))
+
+	(fn write_probe_options
+		(:doc "Forward the C options and dialect that determine which native declarations are visible.")
+		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
+			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(bin bool) (output (mut-slice u8)))
+		(returns i32)
+		(body
+			(let start (call write_feature_flags (borrow-mut (local output))))
+			(let flags (call write_effective_options (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings)) 13i32
+				(borrow-mut (local output)) (local start)))
+			(let-mut define_rule 22i32)
+			(if
+				(:doc "Binary definitions use the selected build mode's list.")
+				(local bin)
+				(then (set (local define_rule) 14i32)))
+			(let defines (call write_effective_options (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings)) (local define_rule)
+				(borrow-mut (local output)) (local flags)))
+			(let dialect (call command_setting (local invocation) (borrow-shared (local arguments))
+				(borrow-shared (local nodes)) (borrow-shared (local settings)) 4u32 21i32))
+			(return (call write_standard (record.get (local dialect) scalar) (borrow-mut (local output)) (local defines)))))
+
 	(fn write_clang_arguments
 		(:doc `Write the fixed build invocation and apply each effective profile list exactly once.`)
 		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
 			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
 			(directory (shared-slice u8)) (unit (shared-slice u8)) (binary (shared-slice u8)) (output (mut-slice u8))) (returns i32)
 		(body
-			(let posix (call write_plain_argument (borrow-shared (local gnu_features)) (borrow-mut (local output)) 0i32))
-			(let platform (call write_plain_argument (borrow-shared (local darwin_features)) (borrow-mut (local output)) (local posix)))
+			(let platform (call write_feature_flags (borrow-mut (local output))))
 			(let include (call write_plain_argument (borrow-shared (local include_flag)) (borrow-mut (local output)) (local platform)))
 			(let search (call write_plain_argument (borrow-shared (local directory)) (borrow-mut (local output)) (local include)))
 			(let-mut end (local search))
@@ -202,26 +260,9 @@
 								(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 18i32))
 							(set (local end) (call write_lto (record.get (local lto) scalar) (borrow-mut (local output)) (local end)))
 							(set (local end) (call write_plain_argument (borrow-shared (local unit)) (borrow-mut (local output)) (local end)))))
-					(let setting (call command_setting (local invocation) (borrow-shared (local arguments))
-						(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 (local rule)))
-					(let origin (record.get (local setting) origin))
-					(if
-						(:doc `An explicit list, including an empty clear, wins over the project and built-in lists.`)
-						(u32.eq (local origin) 2u32)
-						(then
-							(set (local end) (call write_argv_options (borrow-shared (local bytes)) (borrow-shared (local arguments))
-								(record.get (local invocation) rows) (local setting) (local rule) (borrow-mut (local output)) (local end))))
-						(else
-							(if
-								(:doc `Use only the selected project list when one was supplied.`)
-								(u32.eq (local origin) 1u32)
-								(then
-									(set (local end) (call write_config_options (borrow-shared (local config))
-										(borrow-shared (local nodes)) (record.get (local setting) row) (local rule)
-										(borrow-mut (local output)) (local end))))
-								(else
-									(set (local end) (call write_default_options (record.get (local invocation) mode)
-										(record.get (local setting) count) (borrow-mut (local output)) (local end)))))))
+					(set (local end) (call write_effective_options (borrow-shared (local bytes)) (borrow-shared (local config))
+						(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
+						(local rule) (borrow-mut (local output)) (local end)))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(if
 				(:doc `Linux keeps the system math library as a separate link dependency.`)

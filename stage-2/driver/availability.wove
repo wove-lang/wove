@@ -1,0 +1,312 @@
+(module native_c_availability
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Check selected optional C functions before native graph emission.")
+
+	(use wove-file "./clang.wove" (only clang_program))
+	(use wove-file "./paths.wove" (only directory_width))
+	(use wove-file "./bin/arguments.wove" (only write_plain_argument))
+	(use wove-file "../c/headers.wove" (only c_header_form))
+	(use wove-file "../clang/query.wove" (only query_clang_header (type QuerySite)))
+	(use wove-file "../clang/index.wove" (only clang_declaration (type ClangIndex) (type ClangDeclaration)))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../source/scan.wove" (only (type Token)))
+	(use wove-file "../source/strings.wove" (only decode_string))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+
+	(struct Availability (fields (error u32) (file i32) (start i32) (end i32)))
+	(let function_kind "FunctionDecl")
+	(let quote_option "-iquote")
+
+	(fn selected_site
+		(:doc "Keep the original requested name when the use gives it a local alias.")
+		(params (binding GraphBinding))
+		(returns QuerySite)
+		(body (return (record.make QuerySite (file (record.get (local binding) owner))
+			(start (record.get (local binding) requested_start)) (end (record.get (local binding) requested_end))))))
+
+	(fn same_header
+		(:doc "Bindings referring to one selected header literal share a single observation.")
+		(params (left GraphBinding) (right GraphBinding))
+		(returns bool)
+		(body (return (bool.and (i32.eq (record.get (local left) header_file) (record.get (local right) header_file))
+			(bool.and (i32.eq (record.get (local left) header_start) (record.get (local right) header_start))
+				(i32.eq (record.get (local left) header_end) (record.get (local right) header_end)))))))
+
+	(fn native_function_available
+		(:doc "Look up the exact original C symbol, including the spelling selected by c-name.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (binding GraphBinding) (index ClangIndex)
+			(declarations (shared-slice ClangDeclaration)) (names (shared-slice u8)))
+		(returns bool)
+		(body
+			(let file (slice.load (local files) (record.get (local binding) file)))
+			(let base (record.get (local file) source_start))
+			(let start (i32.add.wrapping (local base) (record.get (local binding) native_start)))
+			(let end (i32.add.wrapping (local base) (record.get (local binding) native_end)))
+			(let found (call clang_declaration (local index) (borrow-shared (local declarations)) (borrow-shared (local names))
+				(borrow-shared (local function_kind)) (borrow-shared (slice.range (local arena) (local start) (local end)))))
+			(return (i32.lt -1i32 (record.get (local found) node)))))
+
+	(fn remember_header
+		(:doc "Record each selected function's result before releasing the captured AST.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(first i32) (present bool) (index ClangIndex) (declarations (shared-slice ClangDeclaration))
+			(names (shared-slice u8)) (results (mut-slice u8))) (returns void)
+		(body
+			(let header (slice.load (local bindings) (local first)))
+			(let-mut row (local first))
+			(while
+				(:doc "Walk in binding order and leave other headers for their first optional selection.")
+				(i32.lt (local row) (slice.len (local bindings)))
+				(body
+					(let candidate (slice.load (local bindings) (local row)))
+					(if
+						(:doc "Ordinary bindings and other headers do not depend on this query.")
+						(bool.and (record.get (local candidate) optional) (call same_header (local header) (local candidate)))
+						(then
+							(let-mut status 71u32)
+							(if
+								(:doc "Only a present header can supply an exact FunctionDecl.")
+								(bool.and (local present) (call native_function_available (borrow-shared (local arena))
+									(borrow-shared (local files)) (local candidate) (local index)
+									(borrow-shared (local declarations)) (borrow-shared (local names))))
+								(then (set (local status) 1u32)))
+							(slice.store (local results) (local row) (int.convert u8 (local status)))))
+					(set (local row) (i32.add.wrapping (local row) 1i32))))))
+
+	(fn lookup_header
+		(:doc "Grow bounded capture and reader storage when an otherwise usable header needs more room.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(first i32) (program (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8))
+			(results (mut-slice u8)))
+		(returns u32)
+		(body
+			(let empty (array.alloc u8 0i32))
+			(let site (call selected_site (slice.load (local bindings) (local first))))
+			(let-mut width 1048576i32)
+			(while
+				(:doc "Each iteration owns its own storage, and growth stops at sixteen mebibytes of stdout.")
+				(i32.lt (local width) 33554432i32)
+				(body
+					(let-mut capture (array.alloc u8 (local width)))
+					(let-mut nodes (array.alloc JsonNode (int.convert i32 (u32.shr (int.convert u32 (local width)) 3i32))))
+					(let-mut decls (array.alloc ClangDeclaration (int.convert i32 (u32.shr (int.convert u32 (local width)) 6i32))))
+					(let-mut names (array.alloc u8 (int.convert i32 (u32.shr (int.convert u32 (local width)) 1i32))))
+					(let query (call query_clang_header (borrow-shared (local program)) (borrow-shared (local options))
+						(borrow-shared (local header)) (borrow-shared (local empty)) (local site)
+						(borrow-mut (local capture)) (borrow-mut (local nodes)) (borrow-mut (local decls)) (borrow-mut (local names))))
+					(let error (record.get (local query) error))
+					(if
+						(:doc "A complete observation covers all the selected optional names for this header.")
+						(u32.eq (local error) 0u32)
+						(then
+							(call remember_header (borrow-shared (local arena)) (borrow-shared (local files))
+								(borrow-shared (local bindings)) (local first) (record.get (local query) present)
+								(record.get (local query) index) (borrow-shared (local decls)) (borrow-shared (local names))
+								(borrow-mut (local results)))
+							(return 0u32)))
+					(if
+						(:doc "A tool failure is separate from a successful query reporting an unavailable declaration.")
+						(u32.eq (local error) 4u32)
+						(then (return 72u32)))
+					(if
+						(:doc "A successful child must produce a valid header AST and presence fact.")
+						(u32.eq (local error) 6u32)
+						(then (return 73u32)))
+					(if
+						(:doc "Only capture or AST storage exhaustion is recoverable by allocating more space.")
+						(bool.not (bool.or (u32.eq (local error) 5u32) (u32.eq (local error) 7u32)))
+						(then (return 75u32)))
+					(set (local width) (i32.add.wrapping (local width) (local width)))))
+			(return 74u32)))
+
+	(fn probe_include_path
+		(:doc "Use the defining Wove file's directory for project headers in retained-only builds.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(binding GraphBinding) (canonical (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8))
+			(first i32) (program (shared-slice u8)) (source_directory bool) (results (mut-slice u8)))
+		(returns u32)
+		(body
+			(if
+				(:doc "System headers use the selected tool's options; bin uses the native build's include search.")
+				(bool.or (bool.not (local source_directory)) (u8.eq (slice.load (local header) 0i32) 60u8))
+				(then (return (call lookup_header (borrow-shared (local arena)) (borrow-shared (local files))
+					(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
+					(borrow-shared (local options)) (borrow-shared (local header)) (borrow-mut (local results))))))
+			(if
+				(:doc "The entry path may be virtual in the bundled graph; use its canonical input path.")
+				(i32.eq (record.get (local binding) header_file) 0i32)
+				(then (return (call lookup_quoted_header (borrow-shared (local arena)) (borrow-shared (local files))
+					(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
+					(borrow-shared (local options)) (borrow-shared (local header)) (borrow-shared (local canonical))
+					(borrow-mut (local results))))))
+			(let provider (slice.load (local files) (record.get (local binding) header_file)))
+			(return (call lookup_quoted_header (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
+				(borrow-shared (local options)) (borrow-shared (local header))
+				(borrow-shared (slice.range (local arena) (record.get (local provider) path_start) (record.get (local provider) path_end)))
+				(borrow-mut (local results))))))
+
+	(fn lookup_quoted_header
+		(:doc "Lend an additional quote-only search directory for the retained source's project include.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(first i32) (program (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8))
+			(defining_path (shared-slice u8)) (results (mut-slice u8)))
+		(returns u32)
+		(body
+			(let size (slice.len (local options)))
+			(if
+				(:doc "The added search option cannot follow an unterminated caller argument.")
+				(bool.and (i32.lt 0i32 (local size))
+					(bool.not (u8.eq (slice.load (local options) (i32.sub.wrapping (local size) 1i32)) 0u8)))
+				(then (return 75u32)))
+			(let directory (call directory_width (borrow-shared (local defining_path))))
+			(let width (u64.add.wrapping (int.convert u64 (slice.len (local options)))
+				(u64.add.wrapping (int.convert u64 (local directory)) 9u64)))
+			(if
+				(:doc "The complete packed list must fit the native slice ABI.")
+				(u64.lt 2147483647u64 (local width))
+				(then (return 75u32)))
+			(let-mut packed (array.alloc u8 (int.convert i32 (local width))))
+			(let start (call append_bytes (borrow-shared (local options)) (borrow-mut (local packed)) 0i32))
+			(let path (call write_plain_argument (borrow-shared (local quote_option)) (borrow-mut (local packed)) (local start)))
+			(let end (call write_plain_argument (borrow-shared (slice.range (local defining_path) 0i32 (local directory)))
+				(borrow-mut (local packed)) (local path)))
+			(if
+				(:doc "Reject a malformed native directory before passing its bytes to Clang.")
+				(i32.lt (local end) 0i32)
+				(then (return 75u32)))
+			(return (call lookup_header (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
+				(borrow-shared (slice.range (local packed) 0i32 (local end))) (borrow-shared (local header))
+				(borrow-mut (local results))))))
+
+	(fn probe_decoded_header
+		(:doc "Apply the same delimiter convention as C emission for a bare project path.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(first i32) (program (shared-slice u8)) (canonical (shared-slice u8)) (options (shared-slice u8))
+			(header (shared-slice u8)) (source_directory bool) (results (mut-slice u8)))
+		(returns u32)
+		(body
+			(let binding (slice.load (local bindings) (local first)))
+			(let form (call c_header_form (borrow-shared (local header))))
+			(if
+				(:doc "A probe accepts the same validated header path forms as emitted includes.")
+				(u32.eq (local form) 0u32)
+				(then (return 75u32)))
+			(if
+				(:doc "Already-delimited spellings preserve the provided include mode.")
+				(u32.eq (local form) 2u32)
+				(then (return (call probe_include_path (borrow-shared (local arena)) (borrow-shared (local files))
+					(borrow-shared (local bindings)) (local binding) (borrow-shared (local canonical))
+					(borrow-shared (local options)) (borrow-shared (local header)) (local first)
+					(borrow-shared (local program)) (local source_directory) (borrow-mut (local results))))))
+			(let length (slice.len (local header)))
+			(if
+				(:doc "Reserve space for both project quotes.")
+				(i32.lt 2147483645i32 (local length))
+				(then (return 75u32)))
+			(let-mut quoted (array.alloc u8 (i32.add.wrapping (local length) 2i32)))
+			(slice.store (local quoted) 0i32 34u8)
+			(let end (call append_bytes (borrow-shared (local header)) (borrow-mut (local quoted)) 1i32))
+			(slice.store (local quoted) (local end) 34u8)
+			(return (call probe_include_path (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (local binding) (borrow-shared (local canonical))
+				(borrow-shared (local options)) (borrow-shared (local quoted)) (local first)
+				(borrow-shared (local program)) (local source_directory) (borrow-mut (local results))))))
+
+	(fn probe_binding
+		(:doc "Decode the header from the selected bridge's own source file.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(first i32) (program (shared-slice u8)) (canonical (shared-slice u8)) (options (shared-slice u8))
+			(source_directory bool) (results (mut-slice u8)))
+		(returns u32)
+		(body
+			(let binding (slice.load (local bindings) (local first)))
+			(let file (slice.load (local files) (record.get (local binding) header_file)))
+			(let base (record.get (local file) source_start))
+			(let start (i32.add.wrapping (local base) (record.get (local binding) header_start)))
+			(let end (i32.add.wrapping (local base) (record.get (local binding) header_end)))
+			(let-mut spelling (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let decoded (call decode_string (borrow-shared (local arena))
+				(record.make Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
+				(borrow-mut (local spelling))))
+			(if
+				(:doc "Reject a malformed source key before assembling a tool invocation.")
+				(u32.lt 0u32 (record.get (local decoded) error))
+				(then (return 75u32)))
+			(return (call probe_decoded_header (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
+				(borrow-shared (local canonical)) (borrow-shared (local options))
+				(borrow-shared (slice.range (local spelling) 0i32 (record.get (local decoded) written))) (local source_directory)
+				(borrow-mut (local results))))))
+
+	(fn cached_status
+		(:doc "Read the selected binding's cached availability through a shared loan.")
+		(params (results (shared-slice u8)) (row i32)) (returns u32)
+		(body (return (int.convert u32 (slice.load (local results) (local row))))))
+
+	(fn verify_bindings
+		(:doc "Probe each selected header lazily and report the first failed optional selection in original order.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(first i32) (canonical (shared-slice u8)) (options (shared-slice u8)) (source_directory bool))
+		(returns Availability)
+		(body
+			(let program (call clang_program))
+			(let-mut results (array.alloc u8 (slice.len (local bindings))))
+			(let-mut row (local first))
+			(while
+				(:doc "A zero result has yet to be checked; one means the member was available.")
+				(i32.lt (local row) (slice.len (local bindings)))
+				(body
+					(let binding (slice.load (local bindings) (local row)))
+					(if
+						(:doc "Only an imported function with c_optional can trigger a query.")
+						(record.get (local binding) optional)
+						(then
+							(let-mut status (call cached_status (borrow-shared (local results)) (local row)))
+							(if
+								(:doc "Query at most once per header after a successful capture.")
+								(u32.eq (local status) 0u32)
+								(then
+									(set (local status) (call probe_binding (borrow-shared (local arena)) (borrow-shared (local files))
+										(borrow-shared (local bindings)) (local row) (borrow-shared (local program))
+										(borrow-shared (local canonical)) (borrow-shared (local options)) (local source_directory)
+										(borrow-mut (local results))))
+									(if
+										(:doc "Use the memoized exact lookup after a successful probe.")
+										(u32.eq (local status) 0u32)
+										(then (set (local status) (call cached_status (borrow-shared (local results)) (local row)))))))
+							(if
+								(:doc "An absent name and a failed probe both report the requesting source file.")
+								(u32.lt 1u32 (local status))
+								(then
+									(let site (call selected_site (local binding)))
+									(return (record.make Availability (error (local status))
+										(file (record.get (local site) file)) (start (record.get (local site) start))
+										(end (record.get (local site) end))))))))
+					(set (local row) (i32.add.wrapping (local row) 1i32))))
+			(return (record.make Availability (error 0u32) (file -1i32) (start 0i32) (end 0i32)))))
+
+	(fn check_optional_c_functions
+		(:doc "Leave graphs without selected optional functions on their filesystem-only path.")
+		(:expect (tests "stage-2/cli/native/cases.tsv" "stage-2/cli/native/bin.tsv") (issues "gh:wove-lang/wove:212"))
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(canonical (shared-slice u8)) (options (shared-slice u8)) (source_directory bool))
+		(returns Availability)
+		(body
+			(let-mut row 0i32)
+			(while
+				(:doc "Select the tool and allocate probe storage only if a binding needs availability.")
+				(i32.lt (local row) (slice.len (local bindings)))
+				(body
+					(if
+						(:doc "Once one optional selection is found, verify the rest of the published prefix in order.")
+						(record.get (slice.load (local bindings) (local row)) optional)
+						(then (return (call verify_bindings (borrow-shared (local arena)) (borrow-shared (local files))
+							(borrow-shared (local bindings)) (local row) (borrow-shared (local canonical))
+							(borrow-shared (local options)) (local source_directory)))))
+					(set (local row) (i32.add.wrapping (local row) 1i32))))
+			(return (record.make Availability (error 0u32) (file -1i32) (start 0i32) (end 0i32))))))
