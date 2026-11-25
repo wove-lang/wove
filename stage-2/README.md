@@ -571,6 +571,17 @@ bytes after an embedded NUL. An empty view passes a pointer to one NUL byte.
 C can read the temporary buffers until the call returns, when Wove releases
 their backing storage.
 
+Use `(:pragma (c_variadic first_tail_parameter))` to bind one typed use
+of a C variadic function. The named parameter follows at least one fixed
+parameter. Every Wove argument is required, including the named tail and
+all parameters that follow it. The tail keeps its declared Wove types
+through checking and capture. The emitter verifies the fixed prefix
+and result against the header's variadic prototype and lets Clang apply
+the target C ABI's default argument promotions at the call. This
+includes `open` and `openat` with the native `Mode` alias. Repeated
+boundaries must agree. A named boundary and `c_macro` cannot share a
+declaration.
+
 Use `(:pragma (c_bytes data count))` for a byte count or
 `(:pragma (c_bytes data size count))` for a product. The named dimensions
 accept `u8`, `i32`, or `u32` formals. After argument evaluation, both

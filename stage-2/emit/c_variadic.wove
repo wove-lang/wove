@@ -1,0 +1,79 @@
+(module emit_c_variadic
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Verify typed variadic bridge declarations against the included C prototypes.
+
+	The check uses the adapted C types of the fixed prefix. Calls keep the
+	declared tail values in typed temporaries so the C compiler applies
+	the selected target's default argument promotions.`)
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_bytes_mode))
+	(use wove-file "../scalar/plan.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "./records.wove" (only write_value_type))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text))
+
+	(let check_open "_Static_assert(_Generic(&(")
+	(let after_name "),")
+	(let before_formals "(*)(")
+	(let check_close "...):1,default:0),\"Wove C variadic prototype does not match its declared fixed prefix and result\");\n")
+	(let string_pointer "const char*")
+	(let shared_pointer "const void*")
+	(let mutable_pointer "void*")
+
+	(fn write_fixed_parameter_type
+		(:doc `Write the C argument type after applying a fixed formal's bridge contract.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(param ScalarParameter) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let mode (record.get (local param) c_mode))
+			(let type (record.get (local param) type))
+			(if
+				(:doc "String preparation passes a pointer to a NUL-terminated byte sequence.")
+				(call is_c_string_mode (local mode))
+				(then (return (call c_literal_text (borrow-shared (local string_pointer)) (borrow-mut (local output))
+					(local offset) (local writing)))))
+			(if
+				(:doc "The native byte-view ABI passes the backing pointer with its access mode.")
+				(call is_c_bytes_mode (local mode))
+				(then
+					(if
+						(:doc "A mutable byte view supplies a writable pointer.")
+						(u32.eq (local type) (u32 38))
+						(then (return (call c_literal_text (borrow-shared (local mutable_pointer)) (borrow-mut (local output))
+							(local offset) (local writing)))))
+					(return (call c_literal_text (borrow-shared (local shared_pointer)) (borrow-mut (local output))
+						(local offset) (local writing)))))
+			(return (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+
+	(fn write_c_variadic_check
+		(:doc `Require the header's real function pointer type to include the declared fixed prefix and ellipsis.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(parameters (shared-slice ScalarParameter)) (function ScalarFunction) (output (mut-slice u8))
+			(offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let name (slice.load (local nodes) (record.get (local function) name)))
+			(let-mut cursor (call c_literal_text (borrow-shared (local check_open)) (borrow-mut (local output)) (local offset) (local writing)))
+			(set (local cursor) (call c_span (borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end)
+				(borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call c_literal_text (borrow-shared (local after_name)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (record.get (local function) result)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(set (local cursor) (call c_literal_text (borrow-shared (local before_formals)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(let-mut parameter (record.get (local function) params))
+			(let tail (i32.add.wrapping (local parameter) (record.get (local function) c_variadic)))
+			(while
+				(:doc "The header describes only the fixed formals, in their declared order.")
+				(i32.lt (local parameter) (local tail))
+				(body
+					(set (local cursor) (call write_fixed_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (slice.load (local parameters) (local parameter))
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
+					(set (local parameter) (i32.add.wrapping (local parameter) (i32 1)))))
+			(return (call c_literal_text (borrow-shared (local check_close)) (borrow-mut (local output)) (local cursor) (local writing))))))
