@@ -6,7 +6,11 @@
 #endif
 #define _POSIX_C_SOURCE 200809L
 
-#include "process.h"
+// The compiler flags rename the emitted entry and interpose only its descriptor calls.
+#undef main
+#undef pipe
+#undef pipe2
+#undef open
 
 #undef NDEBUG
 #include <assert.h>
@@ -24,6 +28,7 @@
 #endif
 
 extern char **environ;
+int wove_capture_fixture(int argc, char **argv);
 
 static char *fixture;
 static bool force_fifo;
@@ -82,15 +87,10 @@ int wove_test_open(const char *path, int flags, ...) {
 
 // Verify a capture still completes normally while the interleaved launches run.
 static void check_capture(void) {
-	const uint8_t tool[] = "/usr/bin/printf";
-	const uint8_t arguments[] = "ok";
-	uint8_t output[2];
-	uint8_t result[5];
+	char *arguments[] = {fixture, "2", "0", "0", "ok", "/usr/bin/printf", "ok", NULL};
 	const int previous = observed_endpoints;
-	assert(wove_process_capture(tool, sizeof tool - 1, arguments, sizeof arguments,
-		output, sizeof output, result, sizeof result) == 0);
+	assert(wove_capture_fixture(7, arguments) == 42);
 	assert(observed_endpoints == previous + 2);
-	assert(output[0] == 'o' && output[1] == 'k' && result[0] == 2 && result[4] == 0);
 }
 
 // A child checks the descriptor number it would have inherited from the capture.
@@ -100,6 +100,7 @@ int main(int argc, char **argv) {
 		return fcntl(atoi(argv[1]), F_GETFD) == -1 && errno == EBADF ? 0 : 1;
 	}
 	fixture = argv[0];
+	assert(setenv("TMPDIR", ".", 1) == 0);
 	check_capture();
 	force_fifo = true;
 	check_capture();
