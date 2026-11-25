@@ -7,12 +7,12 @@
 
 #undef main
 
-int wove_fixture_main(void);
+int wove_fixture_main(int argc, char **argv);
 
 // Confirm that returning from Wove leaves the C library's stderr open.
-int main(void) {
+int main(int argc, char **argv) {
 	FILE *stream = stderr;
-	int status = wove_fixture_main();
+	int status = wove_fixture_main(argc, argv);
 	// Check the original descriptor before asking libc to write through the stream.
 	if (status != 42 || stderr != stream || fcntl(STDERR_FILENO, F_GETFD) == -1) {
 		return status == 42 ? 8 : status;

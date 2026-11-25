@@ -106,7 +106,7 @@ when the function takes no arguments. Selection pragmas apply to the
 owning function wherever they appear among its fields.
 
 ```lisp
-(fn main (returns i32) (params) (body (return 0i32))
+(fn succeed (returns i32) (params) (body (return 0i32))
   (:doc "Return success."))
 ```
 
@@ -217,13 +217,13 @@ of its body. Invoke it with a standalone `(call ...)` statement. The
 call checks its arguments, and either exit releases the helper's live
 local owners.
 
-An executable's `main` returns `i32`. A parameterless entry uses the ABI
-`int main(void)`. In native mode, `main` may receive a `(shared-slice u8)`
-followed by a `(shared-slice ArgSpan)`. The span record has `start` and `end`
-fields of type `i32` in that order. A type alias retains the defining record
-identity for calls to the [typed argv parser](cli/argv.wove).
+An executable's `main` takes a `(shared-slice u8)` and a
+`(shared-slice ArgSpan)` and returns `i32`. The span record has `start` and
+`end` fields of type `i32` in that order. A type alias retains the defining
+record identity for calls to the [typed argv parser](cli/argv.wove).
+Ordinary zero-argument functions use `(params)`.
 
-The native argv wrapper receives `int argc, char **argv`. It skips the
+Both compilers emit a host wrapper with `int main(int argc, char **argv)`. It skips the
 executable name and copies the original argument bytes without their C
 terminators. Each user argument has a half-open span in source order.
 The first row is index zero. Empty arguments have equal endpoints, and

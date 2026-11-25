@@ -25,41 +25,43 @@
 #define decode_string wv_seed_fn_77
 #define form_parts wv_seed_fn_80
 #define read_module_for_target wv_seed_fn_95
-#define emit_module wv_seed_fn_136
-#define resolve_graph_for_target wv_seed_fn_164
+#define emit_module wv_seed_fn_134
+#define resolve_graph_for_target wv_seed_fn_162
 #define default_selection wv_seed_fn_96
 #define target_os wv_seed_fn_97
 #define target_arch wv_seed_fn_98
-#define inspect_callers wv_seed_fn_654
-#define run_scalar_graph wv_seed_fn_668
-#define discover_graph_tests wv_seed_fn_676
+#define inspect_callers wv_seed_fn_652
+#define run_scalar_graph wv_seed_fn_666
+#define discover_graph_tests wv_seed_fn_674
 
-typedef wv_seed_record_0 Token;
-typedef wv_seed_record_3 FormCheck;
-typedef wv_seed_record_4 SourceNode;
-typedef wv_seed_record_5 RenderResult;
-typedef wv_seed_record_10 DecodeResult;
-typedef wv_seed_record_12 FormParts;
-typedef wv_seed_record_13 SelectedDeclaration;
-typedef wv_seed_record_14 ModuleRead;
-typedef wv_seed_record_16 SelectionContext;
-typedef wv_seed_record_18 EmitResult;
-typedef wv_seed_record_64 EmbedAsset;
-typedef wv_seed_record_19 GraphModule;
-typedef wv_seed_record_20 GraphBinding;
-typedef wv_seed_record_21 GraphUse;
-typedef wv_seed_record_22 GraphSelector;
-typedef wv_seed_record_23 GraphResult;
-typedef wv_seed_record_57 CallSite;
-typedef wv_seed_record_27 SuppliedFile;
-typedef wv_seed_record_67 CallerInspection;
-typedef wv_seed_record_69 GraphOutput;
-typedef wv_seed_record_70 DiscoveredTest;
-typedef wv_seed_record_71 TestDiscovery;
+typedef wv_seed_record_1 Token;
+typedef wv_seed_record_2 SourceDiagnostic;
+typedef wv_seed_record_3 SourcePosition;
+typedef wv_seed_record_4 FormCheck;
+typedef wv_seed_record_5 SourceNode;
+typedef wv_seed_record_6 RenderResult;
+typedef wv_seed_record_11 DecodeResult;
+typedef wv_seed_record_13 FormParts;
+typedef wv_seed_record_14 SelectedDeclaration;
+typedef wv_seed_record_15 ModuleRead;
+typedef wv_seed_record_17 SelectionContext;
+typedef wv_seed_record_19 EmitResult;
+typedef wv_seed_record_65 EmbedAsset;
+typedef wv_seed_record_20 GraphModule;
+typedef wv_seed_record_21 GraphBinding;
+typedef wv_seed_record_22 GraphUse;
+typedef wv_seed_record_23 GraphSelector;
+typedef wv_seed_record_24 GraphResult;
+typedef wv_seed_record_58 CallSite;
+typedef wv_seed_record_28 SuppliedFile;
+typedef wv_seed_record_68 CallerInspection;
+typedef wv_seed_record_70 GraphOutput;
+typedef wv_seed_record_71 DiscoveredTest;
+typedef wv_seed_record_72 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
-_Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "source probe entry type");
+_Static_assert(_Generic(&wove_fixture_main, int (*)(int, char **): 1, default: 0), "source probe entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
 _Static_assert(_Generic(&source_kind, uint32_t (*)(wvrt_slice): 1, default: 0), "source kind type");
 _Static_assert(_Generic(&scan_token, Token (*)(wvrt_slice, int32_t): 1, default: 0), "scan token type");
@@ -309,7 +311,7 @@ static void check_whitespace(void) {
 // Map a view-relative result to file coordinates and emit its numeric fields.
 static void write_span(wvrt_slice parent, int32_t view_start, uint32_t value, int32_t start, int32_t end,
 	uint32_t error) {
-	const wv_seed_record_2 position = source_position(parent, view_start, start);
+	const SourcePosition position = source_position(parent, view_start, start);
 	printf("%" PRIu32 "\t%" PRId32 "\t%" PRId32 "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\n",
 		value, start, end, error, position.wv_field_0, position.wv_field_1);
 }
@@ -317,14 +319,14 @@ static void write_span(wvrt_slice parent, int32_t view_start, uint32_t value, in
 // Report a body diagnostic's related span in the same source and coordinate space.
 static void write_related_span(wvrt_slice parent, int32_t view_start, int32_t file, int32_t start, int32_t end) {
 	if (start < 0) { return; }
-	const wv_seed_record_2 position = source_position(parent, view_start, start);
+	const SourcePosition position = source_position(parent, view_start, start);
 	printf("related\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRIu32 "\t%" PRIu32 "\n",
 		file, start, end, position.wv_field_0, position.wv_field_1);
 }
 
 // Check UTF-8 once, then advance by each token's exclusive end.
 static int dump_tokens(wvrt_slice parent, wvrt_slice input, int32_t start) {
-	const wv_seed_record_1 diagnostic = source_diagnostic(input);
+	const SourceDiagnostic diagnostic = source_diagnostic(input);
 	if (diagnostic.wv_field_0 != 0) {
 		write_span(parent, start, 3, diagnostic.wv_field_1, diagnostic.wv_field_2, diagnostic.wv_field_0);
 		return EXIT_FAILURE;
@@ -357,7 +359,7 @@ static int dump_form(wvrt_slice parent, wvrt_slice input, int32_t start) {
 
 // Emit a completed node's links with the position of its first byte in the parent.
 static void write_source_node(wvrt_slice parent, int32_t view_start, uint32_t index, SourceNode node) {
-	const wv_seed_record_2 position = source_position(parent, view_start, node.wv_field_1);
+	const SourcePosition position = source_position(parent, view_start, node.wv_field_1);
 	printf("%" PRIu32 "\t%" PRIu32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32 "\t%" PRId32
 		"\t%" PRIu32 "\t%" PRIu32 "\n", index, node.wv_field_0, node.wv_field_1, node.wv_field_2,
 		node.wv_field_3, node.wv_field_4, node.wv_field_5, position.wv_field_0, position.wv_field_1);
@@ -455,7 +457,7 @@ static int dump_render(wvrt_slice input, wvrt_slice nodes, int32_t capacity) {
 
 // Check the input and decode its first token into a guarded output view.
 static int dump_decode(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t capacity) {
-	const wv_seed_record_1 diagnostic = source_diagnostic(input);
+	const SourceDiagnostic diagnostic = source_diagnostic(input);
 	if (diagnostic.wv_field_0 != 0) {
 		write_span(parent, start, 0, diagnostic.wv_field_1, diagnostic.wv_field_2, diagnostic.wv_field_0);
 		return EXIT_FAILURE;
@@ -892,7 +894,7 @@ static void write_graph_error(wvrt_slice arena, const SuppliedFile *files, uint3
 	const SuppliedFile row = files[file];
 	const wvrt_location site = {__FILE__, __LINE__, 1};
 	const wvrt_slice source = wvrt_slice_range_u8(arena.wvrt_items, arena.wvrt_length, row.wv_field_3, row.wv_field_4, site);
-	const wv_seed_record_2 position = source_position(source, 0, start);
+	const SourcePosition position = source_position(source, 0, start);
 	printf("error %" PRIu32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRIu32 " %" PRIu32 "\n",
 		error, file, start, end, position.wv_field_0, position.wv_field_1);
 	write_related_span(source, 0, file, related_start, related_end);

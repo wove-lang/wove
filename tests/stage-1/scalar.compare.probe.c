@@ -29,7 +29,7 @@ static _Noreturn void fail(const char *operation) {
 }
 
 // Observe both boolean values through Wove calls and check numeric ordering.
-int main(void) {
+int main(int argc, char **argv) {
 	if (!literal_true() || literal_false()) { fail("boolean literals"); }
 	if (!u8_eq(40, 40) || u8_eq(40, 41)) { fail("u8.eq"); }
 	if (!u8_lt(127, 128) || !u8_lt(128, 255) || u8_lt(255, 128)) { fail("u8.lt"); }
@@ -42,5 +42,5 @@ int main(void) {
 	if (!u32_lt(0, high) || !u32_lt(high, UINT32_MAX) || u32_lt(high, 0)) {
 		fail("u32.lt");
 	}
-	return wove_fixture_main();
+	return wove_fixture_main(argc, argv);
 }

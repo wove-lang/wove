@@ -23,8 +23,8 @@ static _Noreturn void fail(const char *conversion) {
 }
 
 // Check widening and the dynamic endpoints of the narrowing paths.
-int main(void) {
-	if (wove_fixture_main() != UINT8_MAX) { fail("u8 to i32"); }
+int main(int argc, char **argv) {
+	if (wove_fixture_main(argc, argv) != UINT8_MAX) { fail("u8 to i32"); }
 	if (u8_to_u32(UINT8_MAX) != UINT32_C(255)) { fail("u8 to u32"); }
 	if (i32_to_u8(0) != 0 || i32_to_u8(255) != UINT8_MAX) { fail("i32 to u8"); }
 	if (u32_to_u8(0) != 0 || u32_to_u8(255) != UINT8_MAX) { fail("u32 to u8"); }

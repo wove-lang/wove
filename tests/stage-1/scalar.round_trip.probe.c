@@ -31,10 +31,10 @@ static _Noreturn void fail(const char *kind) {
 }
 
 // Inspect the full return values after Wove passes the boundary literals through calls.
-int main(void) {
+int main(int argc, char **argv) {
 	if (u8_min() != 0 || u8_max() != UINT8_MAX) { fail("u8"); }
 	if (i32_min() != INT32_MIN || i32_max() != INT32_MAX) { fail("i32"); }
 	if (u32_min() != 0 || u32_max() != UINT32_MAX) { fail("u32"); }
 	if (echo_u32(UINT32_C(2147483649)) != UINT32_C(2147483649)) { fail("u32 high bit"); }
-	return wove_fixture_main();
+	return wove_fixture_main(argc, argv);
 }
