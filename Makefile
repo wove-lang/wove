@@ -68,9 +68,9 @@ CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove projec
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove version.wove)
-NATIVE_WOVE_SOURCES = $(sort $(SOURCE_SCAN_MODULE) $(BYTE_MATCH_MODULE) $(SOURCE_MODULE_READER) $(SOURCE_STRINGS_MODULE) \
-	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) \
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove graph.wove output.wove)
+BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove)
+NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
 	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
@@ -88,7 +88,7 @@ SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
 BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
-SOURCE_PROBE_SOURCES := $(BOOTSTRAP_WOVE_SOURCES) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
+GRAPH_COMPILER_SOURCES := $(BOOTSTRAP_WOVE_SOURCES) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(TEST_DISCOVERY_MODULE) $(C_EMITTER_SOURCES) stage-2/emit/tests.wove $(HASHING_SOURCES)
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
@@ -196,7 +196,7 @@ test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 
 # Track the imports active in each seed root.
 $(STAGE1)/wovec.c: $(COMPILER_ROOT) $(BOOTSTRAP_WOVE_SOURCES) $(SEED)
-$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SOURCE_PROBE_SOURCES) $(SEED)
+$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(GRAPH_COMPILER_SOURCES) $(SEED)
 
 # Replace the generated C only after the seed succeeds.
 $(STAGE1)/wovec.c $(SOURCE_PROBE_C):
@@ -231,9 +231,9 @@ define build_versioned
 	fi
 endef
 
-# Ask the seed-built Stage 2 graph emitter to compile the root and its build asset.
-$(STAGE2)/wovec.c: $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py $(BUILD_VERSION) force-build-info
-	$(call build_versioned,mkdir -p "$(@D)"; $(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" "$(COMPILER_ROOT)" $(NATIVE_WOVE_SOURCES))
+# Ask the seed-built Stage 2 graph emitter to compile the root with its embedded assets.
+$(STAGE2)/wovec.c: $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(BUNDLED_C_PROVIDERS) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py $(BUILD_VERSION) force-build-info
+	$(call build_versioned,mkdir -p "$(@D)"; $(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" "$(COMPILER_ROOT)" $(NATIVE_WOVE_SOURCES) --asset $(BUNDLED_C_PROVIDERS))
 
 # Link only the emitted native compiler, its host file bridges, and the runtime.
 $(NATIVE_COMPILER): $(STAGE2)/wovec.c $(NATIVE_DRIVER)/host.c $(STAGE1)/runtime.o $(NATIVE_DRIVER)/host.h $(BUILD_VERSION) force-build-info
@@ -331,7 +331,7 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
-REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_PROBE_SOURCES) \
+REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) \
 	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))

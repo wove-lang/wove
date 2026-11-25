@@ -22,9 +22,10 @@
 	(use wove-file "../scalar/graph.wove" (only layout_trees signature_capacity prepare_graph (type ScalarTree)))
 	(use wove-file "./c.wove" (only write_translation_unit))
 	(use wove-file "./tests.wove" (only write_test_entry))
-	(use wove-file "./embeds.wove" (only bind_graph_embeds))
+	(use wove-file "./embeds.wove" (only bind_graph_embeds bind_module_embeds request_module_embeds))
 	(use wove-file "./text.wove" (only native_name_prefix_slot))
 	(use wove-file "./headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
+	(use wove-file "../source/assets.wove" (only (type EmbedAsset) (type EmbedCheck) embed_check))
 
 	(struct GraphOutput
 		(fields (count i32) (declaration i32) (file i32) (start i32) (end i32) (error u32)
@@ -281,6 +282,71 @@
 			(assets (shared-slice SuppliedFile)) (output (mut-slice u8)) (callers (mut-slice CallSite)))
 		(returns GraphOutput)
 		(body
+			(let-mut requests (array.alloc EmbedAsset (i32 0)))
+			(return (call run_graph (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
+				(local root) (local query_path) (borrow-shared (local name)) (borrow-shared (local assets))
+				(borrow-mut (local requests)) (u32 0) (borrow-mut (local output)) (borrow-mut (local callers))))))
+
+	(fn run_entry_graph
+		(:doc `Collect checked entry asset requests or emit the graph with their loaded byte ranges.
+
+		The executable entry supplies the Wove bodies in this graph. Reserve
+		a request slot for each source-tree row in that entry.`)
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
+			(bindings (shared-slice GraphBinding)) (resolved GraphResult)
+			(requests (mut-slice EmbedAsset)) (collect bool) (output (mut-slice u8)))
+		(returns GraphOutput)
+		(body
+			(let-mut assets (array.alloc SuppliedFile (i32 0)))
+			(let-mut callers (array.alloc CallSite (i32 0)))
+			(let-mut asset_mode (u32 2))
+			(if
+				(:doc "Measurement returns the checked paths before any native file I/O.")
+				(local collect)
+				(then (set (local asset_mode) (u32 1))))
+			(return (call run_graph (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
+				(i32 0) (i32 -1) (borrow-shared (slice.range (local arena) (i32 0) (i32 0)))
+				(borrow-shared (local assets)) (borrow-mut (local requests)) (local asset_mode)
+				(borrow-mut (local output)) (borrow-mut (local callers))))))
+
+	(fn bind_emission_assets
+		(:doc "Bind external asset rows or the byte ranges already loaded for the entry.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
+			(assets (shared-slice SuppliedFile)) (requests (shared-slice EmbedAsset)) (asset_mode u32)
+			(expressions (mut-slice ScalarExpression)))
+		(returns EmbedCheck)
+		(body
+			(if
+				(:doc "An ordinary supplied graph resolves its raw assets through the path table.")
+				(u32.eq (local asset_mode) (u32 0))
+				(then (return (call bind_graph_embeds (borrow-shared (local arena)) (borrow-shared (local files))
+					(borrow-shared (local modules)) (borrow-shared (local assets)) (borrow-mut (local expressions))))))
+			(let bound (call bind_module_embeds (slice.len (local arena)) (borrow-shared (local requests))
+				(borrow-mut (local expressions))))
+			(if
+				(:doc "Entry requests use arena offsets and the source diagnostic uses entry-relative offsets.")
+				(u32.lt (u32 0) (record.get (local bound) error))
+				(then
+					(let file (record.get (local bound) file))
+					(let base (record.get (slice.load (local files) (local file)) source_start))
+					(return (call embed_check (i32 0) (local file)
+						(i32.sub.wrapping (record.get (local bound) start) (local base))
+						(i32.sub.wrapping (record.get (local bound) end) (local base)) (record.get (local bound) error)))))
+			(return (local bound))))
+
+	(fn run_graph
+		(:doc `Plan the resolved graph once per operation for inspection, asset collection, or C emission.
+
+		Asset mode 0 binds supplied path rows. Mode 1 collects entry requests.
+		Mode 2 binds byte ranges loaded for those entry requests.`)
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
+			(bindings (shared-slice GraphBinding)) (resolved GraphResult) (root i32) (query_path i32) (name (shared-slice u8))
+			(assets (shared-slice SuppliedFile)) (requests (mut-slice EmbedAsset)) (asset_mode u32)
+			(output (mut-slice u8)) (callers (mut-slice CallSite)))
+		(returns GraphOutput)
+		(body
 			(let-mut trees (array.alloc ScalarTree (slice.len (local files))))
 			(let layout (call layout_trees (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local modules)) (borrow-shared (local bindings)) (borrow-mut (local trees))))
@@ -351,8 +417,15 @@
 					(return (call graph_output (record.get (local result) count) (record.get (local result) declaration)
 						(record.get (local result) file) (record.get (local result) start) (record.get (local result) end)
 						(record.get (local result) error)))))
-			(let embedded (call bind_graph_embeds (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local modules)) (borrow-shared (local assets)) (borrow-mut (local expressions))))
+			(if
+				(:doc "Return checked requests before binding assets or writing C.")
+				(u32.eq (local asset_mode) (u32 1))
+				(then
+					(let count (call request_module_embeds (borrow-shared (local expressions)) (borrow-mut (local requests))))
+					(return (call graph_output (local count) (i32 -1) (local root) (i32 0) (i32 0) (u32 0)))))
+			(let embedded (call bind_emission_assets (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-shared (local assets)) (borrow-shared (local requests))
+				(local asset_mode) (borrow-mut (local expressions))))
 			(if
 				(:doc "Asset diagnostics refer to the defining file and its original quoted operand.")
 				(u32.lt (u32 0) (record.get (local embedded) error))
