@@ -339,7 +339,10 @@ types with the same fields remain distinct. Record layout declarations
 can follow the signatures that refer to them.
 
 `(array element extent)` describes a fixed array of an exact builtin
-scalar type and a nonnegative decimal `i32` extent. Both are part of
+scalar type and a nonnegative `i32` extent. Use a bare decimal size or the
+name of a local or selectively imported immutable module integer. The
+defining initializer must be a literal that fits the extent range. Both
+the element type and resolved size are part of
 the type. Use `(array.new (array u8 2) (u8 17) (u8 25))` for a typed
 list and `(array.repeat (array u8 128) (u8 0))` to fill a fixed block.
 Lists evaluate their elements left to right. Repetition evaluates its
