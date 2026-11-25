@@ -4,6 +4,8 @@
 #include "wove_runtime.h"
 
 #include <errno.h>
+#include <float.h>
+#include <math.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +23,59 @@ static _Noreturn void wvrt_trap_at_span(int32_t wvrtfile, int32_t wvrtstart, int
 	fprintf(stderr, "file %" PRId32 " bytes [%" PRId32 ",%" PRId32 "): runtime error: %s\n",
 		wvrtfile, wvrtstart, wvrtend, wvrtmessage);
 	exit(EXIT_FAILURE);
+}
+
+// The native floating ABI uses IEEE binary32 and binary64 storage.
+_Static_assert(FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128 &&
+	sizeof(float) == sizeof(uint32_t), "Wove f32 requires native binary32");
+_Static_assert(DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024 &&
+	sizeof(double) == sizeof(uint64_t), "Wove f64 requires native binary64");
+
+// Reinterpret a word as binary32 without changing its representation.
+float wvrt_f32_from_bits(uint32_t wvrtbits) {
+	float wvrtvalue;
+	memcpy(&wvrtvalue, &wvrtbits, sizeof(wvrtvalue));
+	return wvrtvalue;
+}
+
+// Copy an f32 sign, exponent, and payload to its exact-width integer.
+uint32_t wvrt_f32_to_bits(float wvrtvalue) {
+	uint32_t wvrtbits;
+	memcpy(&wvrtbits, &wvrtvalue, sizeof(wvrtbits));
+	return wvrtbits;
+}
+
+// Reinterpret a wide word as binary64 without changing its representation.
+double wvrt_f64_from_bits(uint64_t wvrtbits) {
+	double wvrtvalue;
+	memcpy(&wvrtvalue, &wvrtbits, sizeof(wvrtvalue));
+	return wvrtvalue;
+}
+
+// Copy an f64 sign, exponent, and payload to its exact-width integer.
+uint64_t wvrt_f64_to_bits(double wvrtvalue) {
+	uint64_t wvrtbits;
+	memcpy(&wvrtbits, &wvrtvalue, sizeof(wvrtbits));
+	return wvrtbits;
+}
+
+// Check the open interval before the generated integer cast truncates toward zero.
+double wvrt_float_to_integer(double wvrtvalue, double wvrtlower, double wvrtupper,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Negating the ordered comparisons rejects NaN along with either overflow.
+	if (!(wvrtvalue > wvrtlower && wvrtvalue < wvrtupper)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
+	}
+	return wvrtvalue;
+}
+
+// Keep IEEE nonfinite values and reject finite overflow when rounding to binary32.
+float wvrt_f32_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Subnormals and ordinary rounding are part of the destination's native behavior.
+	if (isfinite(wvrtvalue) && (wvrtvalue < -FLT_MAX || wvrtvalue > FLT_MAX)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "floating conversion out of range");
+	}
+	return (float)wvrtvalue;
 }
 
 // A borrowed native handle must be present before it is passed to C.

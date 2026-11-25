@@ -26,13 +26,13 @@
 #define form_parts wv_seed_fn_80
 #define read_module_for_target wv_seed_fn_95
 #define emit_module wv_seed_fn_134
-#define resolve_graph_for_target wv_seed_fn_230
+#define resolve_graph_for_target wv_seed_fn_265
 #define default_selection wv_seed_fn_96
 #define target_os wv_seed_fn_97
 #define target_arch wv_seed_fn_98
-#define inspect_callers wv_seed_fn_686
-#define run_scalar_graph wv_seed_fn_702
-#define discover_graph_tests wv_seed_fn_710
+#define inspect_callers wv_seed_fn_706
+#define run_scalar_graph wv_seed_fn_722
+#define discover_graph_tests wv_seed_fn_730
 
 typedef wv_seed_record_1 Token;
 typedef wv_seed_record_2 SourceDiagnostic;
@@ -47,13 +47,13 @@ typedef wv_seed_record_15 ModuleRead;
 typedef wv_seed_record_17 SelectionContext;
 typedef wv_seed_record_19 EmitResult;
 typedef wv_seed_record_68 EmbedAsset;
-typedef wv_seed_record_22 GraphModule;
-typedef wv_seed_record_23 GraphBinding;
-typedef wv_seed_record_24 GraphUse;
-typedef wv_seed_record_25 GraphSelector;
-typedef wv_seed_record_26 GraphResult;
+typedef wv_seed_record_27 GraphModule;
+typedef wv_seed_record_28 GraphBinding;
+typedef wv_seed_record_29 GraphUse;
+typedef wv_seed_record_30 GraphSelector;
+typedef wv_seed_record_31 GraphResult;
 typedef wv_seed_record_63 CallSite;
-typedef wv_seed_record_31 SuppliedFile;
+typedef wv_seed_record_36 SuppliedFile;
 typedef wv_seed_record_71 CallerInspection;
 typedef wv_seed_record_73 GraphOutput;
 typedef wv_seed_record_75 DiscoveredTest;

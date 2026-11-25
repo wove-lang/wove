@@ -189,7 +189,7 @@ name lookup, type checking, C emission, and caller inspection.
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices. A value-returning function must
 return its declared type on every path. Helpers can accept and return `i8`,
-`u8`, `i32`, `u32`, `u64`, and `bool`. Expressions support exact-type
+`u8`, `i32`, `u32`, `u64`, `bool`, `f32`, and `f64`. Expressions support exact-type
 literals, binding reads, and direct calls. A local declared with `let` or
 `let-mut` takes its scalar type from its initializer and comes into scope
 afterwards. A `set`
@@ -197,7 +197,7 @@ requires an existing `let-mut` binding and a value of that binding's exact
 type. Forward calls use checked prototypes, and nested calls evaluate from
 left to right.
 
-An immutable module binding takes a typed integer literal, a quoted
+An immutable module binding takes a typed numeric literal, a quoted
 string, or a fixed-array initializer. Its name precedes metadata.
 
 ```lisp
@@ -412,6 +412,28 @@ elements. Signed values use two's complement. The byte order is explicit
 on every host, and the view may start at any byte offset. For example,
 `(u32.from.le-bytes (borrow-shared (array.range (local source) 1i32 5i32)))`
 reads four bytes starting at index one.
+
+Stage 2 uses native C `float` and `double` for `f32` and `f64` in locals,
+function signatures, struct fields, and C bridges. Write a typed decimal
+as `(f32 -2.5)` or `-2.5f32`. A decimal needs digits before the point and
+in each written fraction or exponent. Clang rounds the original digits at
+the written width and preserves a negative sign on zero.
+
+Use width-qualified `add`, `sub`, `mul`, `div`, and unary `neg` for native
+floating arithmetic. The `eq`, `ne`, `lt`, `le`, `gt`, and `ge` operators
+take two values of the named width and return `bool`. Eager operands evaluate
+once from left to right.
+
+Use `(f32.from.bits word)` and `(f32.to.bits value)` to copy the representation
+between `f32` and `u32`. The matching `f64` forms use `u64`. These operations
+retain signed zero and NaN payloads. For example, an STL coordinate read from
+little-endian bytes can widen with `(f64.from.f32 (f32.from.bits (local word)))`.
+
+The same `<destination>.from.<source>` syntax handles checked numeric conversions
+involving floats. Floating-to-integer conversions truncate toward zero and
+trap at the conversion span if the result cannot fit, including for NaN and
+infinity. `f32.from.f64` keeps native rounding, subnormals, and nonfinite
+values, and traps on finite values outside the binary32 range.
 
 Helpers can take `(shared-array u8)` parameters using the runtime's
 `wvrt_slice` ABI. Pass a named view to another helper with
@@ -717,6 +739,11 @@ in a typed temporary before expanding the original macro spelling.
 Argument expressions run once in source order even when the macro
 repeats or discards an operand. The invocation's result is stored in
 its declared Wove type.
+
+A read-only C bridge value can use `(let (:pragma (c_macro)) HUGE_VAL f64)`
+to bind a scalar expression macro. The emitted C checks the expansion's
+exact type without evaluating it. Each Wove read expands the original
+native name, including through an imported alias.
 
 Use `(:pragma (c_cstr parameter ...))` or `(:pragma (c_cstr_raw parameter ...))`
 after the bridge function name. Shared byte slices pass `const char *`.

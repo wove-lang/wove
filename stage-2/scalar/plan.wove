@@ -13,7 +13,7 @@
 
 	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value match_statement)))
 	(use wove-file "./matches.wove" (only plan_match_cases match_continues))
-	(use wove-file "../source/integer_ops.wove" (only read_integer_operation integer_byte_width is_integer_byte_conversion
+	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_conversion
 		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
 	(use wove-file "../source/strings.wove" (only decode_string))
@@ -29,7 +29,8 @@
 		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode
 		is_c_storage_mode is_c_storage_init_mode is_c_consuming_mode))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
-	(use wove-file "../source/types.wove" (only void_type is_builtin_integer builtin_type_keyword reference_mode))
+	(use wove-file "../source/types.wove" (only void_type is_builtin_integer is_builtin_float is_builtin_scalar builtin_type_keyword reference_mode))
+	(use wove-file "../source/float_ops.wove" (only float_literal_shape is_float_conversion (value float_literal)))
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type find_record record_type record_index is_record_type
@@ -78,6 +79,7 @@
 		(fields (count i32) (file i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
 
 	(let pending_row_move 106u32)
+	(let static_number 3u32)
 
 	(fn read_signature
 		(:doc `Resolve a named function's result before completing its signature and body shape.`)
@@ -503,7 +505,8 @@
 	(fn value_matches_type
 		(:doc `Match a checked value to its exact expected type.
 
-		Expectation 1 infers an integer. A local initializer (42) can
+		Expectation 1 infers an integer. A static number can also infer a float.
+		A local initializer (42) can
 		also copy a record, allocate, or move an owner. A field receiver
 		(53) resolves a record or reference for projection. Its eventual
 		access checks the loan against the completed path. A length or load receiver (55)
@@ -521,9 +524,13 @@
 			(if
 				(:doc "A local initializer can infer any supported copyable value or native owner.")
 				(bool.and (u32.eq (local expected) 42u32)
-					(bool.or (u32.eq (local actual) 12u32)
+					(bool.or (bool.or (u32.eq (local actual) 12u32) (call is_builtin_float (local actual)))
 						(bool.or (call is_record_type (local actual)) (call is_native_owner (local actual)))))
 				(then (return (bool true))))
+			(if
+				(:doc "A direct module literal can infer any supported numeric width.")
+				(u32.eq (local expected) (local static_number))
+				(then (return (bool.or (call is_builtin_integer (local actual)) (call is_builtin_float (local actual))))))
 			(if
 				(:doc "An integer initializer or conversion operand can infer its width.")
 				(bool.or (u32.eq (local expected) 1u32) (u32.eq (local expected) 42u32))
@@ -582,13 +589,46 @@
 					(local digits) (local end) (struct.get (local spelling) negative)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
+	(fn plan_floating_value
+		(:doc `Validate the decimal spelling and record the bytes used by C for direct rounding.`)
+		(params (source (shared-array u8)) (node SourceNode) (end i32) (type u32)
+			(index i32) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let start (struct.get (local node) start))
+			(let shape (call float_literal_shape (borrow-shared (local source)) (local start) (local end)))
+			(if
+				(:doc "An invalid float spelling points at the original atom including its suffix.")
+				(i32.eq (local shape) 0i32)
+				(then (return (call entry_at (local node) -1i32 25u32))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local float_literal) (local type) (local shape) -1i32 (local start) (local end) (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
 	(fn plan_suffixed_decimal
-		(:doc `Check the exact integer type named after a decimal atom's digits.`)
+		(:doc `Check the exact numeric type named after a decimal atom.`)
 		(params (source (shared-array u8)) (node SourceNode) (index i32) (expected u32)
 			(expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(let end (struct.get (local node) end))
+			(let start (struct.get (local node) start))
+			(if
+				(:doc "Check a float suffix separately so fractions and exponents remain in the decimal spelling.")
+				(i32.lt 3i32 (i32.sub.wrapping (local end) (local start)))
+				(then
+					(let suffix (i32.sub.wrapping (local end) 3i32))
+					(let type (call builtin_type_keyword (borrow-shared (local source)) (local suffix) 3i32))
+					(if
+						(:doc "Preserve the exact type and original span of the checked float atom.")
+						(call is_builtin_float (local type))
+						(then
+							(if
+								(:doc "A typed consumer can require another width.")
+								(bool.not (call value_matches_type (local expected) (local type)))
+								(then (return (call entry_at (local node) -1i32 24u32))))
+							(return (call plan_floating_value (borrow-shared (local source)) (local node) (local suffix)
+								(local type) (local index) (borrow-mut (local expressions))))))))
 			(let suffix (call decimal_suffix_start (borrow-shared (local source)) (struct.get (local node) start) (local end)))
 			(if
 				(:doc "Other atoms do not supply a scalar expression.")
@@ -639,6 +679,11 @@
 				(:doc "The typed list's magnitude must be an unquoted decimal atom.")
 				(bool.not (u32.eq (struct.get (local value) kind) 1u32))
 				(then (return (call entry_at (local value) -1i32 25u32))))
+			(if
+				(:doc "Check the float's complete spelling, retaining its written sign even on zero.")
+				(call is_builtin_float (local type))
+				(then (return (call plan_floating_value (borrow-shared (local source)) (local value) (struct.get (local value) end)
+					(local type) (local index) (borrow-mut (local expressions))))))
 			(return (call plan_decimal_value (borrow-shared (local source)) (local value) (struct.get (local value) end)
 				(local type) (local index) (borrow-mut (local expressions))))))
 
@@ -715,7 +760,7 @@
 			(if
 				(:doc "Only literals and value constructors can appear in static initializers.")
 				(bool.not (bool.or (bool.or (local fixed) (local record))
-					(bool.and (bool.or (call is_builtin_integer (local tag)) (u32.eq (local tag) 12u32))
+					(bool.and (call is_builtin_scalar (local tag))
 						(call value_matches_type (local expected) (local tag)))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) 24u32))
@@ -760,7 +805,7 @@
 				(then (return (call plan_binding_string (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local root) (borrow-mut (local expressions))))))
 			(let-mut index (local root))
-			(let-mut expected 1u32)
+			(let-mut expected (local static_number))
 			(if (u32.lt 0u32 (local array_type)) (then (set (local expected) (local array_type))))
 			(while
 				(:doc "Only planned initializer operands and field wrappers need to be visited.")
@@ -1084,7 +1129,7 @@
 						(bool.and (bool.not (u32.eq (local expected) 53u32))
 							(bool.and (bool.or (call is_record_type (local actual))
 								(bool.or (call is_native_integer (local actual))
-									(bool.or (call is_builtin_integer (local actual)) (u32.eq (local actual) 12u32))))
+									(call is_builtin_scalar (local actual))))
 								(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
 									(local index) (local statement) (local target) (bool true) -1i32 (bool false))))
 						(then (return (call entry_at (local node) -1i32 24u32))))
@@ -1497,7 +1542,7 @@
 				(call runtime_expression (local kind) (local type) (local node) (local word) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
-	(fn plan_integer_operand
+	(fn plan_conversion_operand
 		(:doc `Seed one evaluated operand and retain the exact result and runtime site.`)
 		(params (node SourceNode) (index i32) (value i32) (kind u32) (result u32) (operand_type u32)
 			(expected u32) (caller ScalarFunction) (view_start i32) (expressions (mut-array ScalarExpression)))
@@ -1513,8 +1558,8 @@
 				(call runtime_expression (local kind) (local result) (local node) (local value) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
-	(fn plan_named_integer_operation
-		(:doc `Check one typed integer or byte conversion using its explicit source and destination.`)
+	(fn plan_named_conversion
+		(:doc `Check a named conversion against its exact source and destination types.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
 			(head i32) (index i32) (tag u32) (expected u32) (caller ScalarFunction) (view_start i32)
 			(records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
@@ -1528,7 +1573,7 @@
 				(bool.or (i32.lt (local value) 0i32)
 					(i32.lt -1i32 (struct.get (array.load (local nodes) (local value)) next_sibling)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(let operation (call read_integer_operation (borrow-shared (local source)) (array.load (local nodes) (local head))))
+			(let operation (call read_named_conversion (borrow-shared (local source)) (array.load (local nodes) (local head))))
 			(let-mut result (struct.get (local operation) type))
 			(let-mut input (struct.get (local operation) operand))
 			(let-mut kind (local tag))
@@ -1555,7 +1600,7 @@
 						(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
 							(struct.get (local parts) head)) 35u32)
 						(then (set (local input) 35u32)))))
-			(return (call plan_integer_operand (local node) (local index) (local value) (local kind)
+			(return (call plan_conversion_operand (local node) (local index) (local value) (local kind)
 				(local result) (local input) (local expected) (local caller) (local view_start) (borrow-mut (local expressions))))))
 
 	(fn plan_conversion
@@ -1583,7 +1628,7 @@
 				(:doc "Point at the target spelling when it names an unsupported type.")
 				(bool.not (call value_matches_type 1u32 (local target_type)))
 				(then (return (call entry_at (local target_node) -1i32 24u32))))
-			(return (call plan_integer_operand (local node) (local index) (local value) 33u32
+			(return (call plan_conversion_operand (local node) (local index) (local value) 33u32
 				(local target_type) 1u32 (local expected) (local caller) (local view_start) (borrow-mut (local expressions))))))
 
 	(fn at_owner_use
@@ -2863,8 +2908,9 @@
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
 			(if
 				(:doc "Typed forms derive the exact result and operand types from their head.")
-				(bool.or (u32.eq (local tag) (local typed_integer_conversion)) (call is_integer_byte_conversion (local tag)))
-				(then (return (call plan_named_integer_operation (borrow-shared (local source)) (borrow-shared (local nodes))
+				(bool.or (call is_float_conversion (local tag))
+					(bool.or (u32.eq (local tag) (local typed_integer_conversion)) (call is_integer_byte_conversion (local tag))))
+				(then (return (call plan_named_conversion (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (struct.get (local parts) head) (local index) (local tag) (local expected) (local caller) (local view_start)
 					(borrow-shared (local records)) (borrow-mut (local expressions))))))
 			(if

@@ -28,6 +28,15 @@ typedef struct WvrtArray {
 typedef struct { const void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size; } wvrt_slice;
 typedef struct { void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size; } wvrt_mut_slice;
 
+// Exact native floating representations and checked numerical conversions.
+float wvrt_f32_from_bits(uint32_t wvrtbits);
+uint32_t wvrt_f32_to_bits(float wvrtvalue);
+double wvrt_f64_from_bits(uint64_t wvrtbits);
+uint64_t wvrt_f64_to_bits(double wvrtvalue);
+double wvrt_float_to_integer(double wvrtvalue, double wvrtlower, double wvrtupper,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+float wvrt_f32_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+
 int wvrt_run_host_entry(int argc, char **argv, size_t span_size,
 	void (*write_span)(void *, int32_t, int32_t, int32_t), int32_t (*entry)(wvrt_slice, wvrt_slice));
 
