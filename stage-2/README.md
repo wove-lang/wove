@@ -178,9 +178,10 @@ name lookup, type checking, C emission, and caller inspection.
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices. A value-returning function must
 return its declared type on every path. Helpers can accept and return `i8`,
-`u8`, `i32`, `u32`, and `bool`. Expressions support exact-type literals, binding reads,
-and direct calls. A local declared with `let` or `let-mut` takes its
-scalar type from its initializer and comes into scope afterwards. A `set`
+`u8`, `i32`, `u32`, `u64`, and `bool`. Expressions support exact-type
+literals, binding reads, and direct calls. A local declared with `let` or
+`let-mut` takes its scalar type from its initializer and comes into scope
+afterwards. A `set`
 requires an existing `let-mut` binding and a value of that binding's exact
 type. Forward calls use checked prototypes, and nested calls evaluate from
 left to right.
@@ -231,7 +232,7 @@ the field spelling and type, including the platform-specific
 timestamp members in the bundled Stat views.
 
 A module-local `(struct Token (fields (kind u32) (start i32)))` defines
-a named, copyable record. Fields can use `bool`, `i8`, `u8`, `i32`, or `u32`.
+a named, copyable record. Fields can use `bool`, `i8`, `u8`, `i32`, `u32`, or `u64`.
 `(record.make Token (kind (u32 40)) (start (i32 2)))` evaluates each
 initializer exactly once in the order written. Supply every field once
 with its declared type. A local stores the result by value, and
