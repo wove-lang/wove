@@ -1,0 +1,223 @@
+(module emit_embeds
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Link checked embed expressions to immutable asset ranges and emit fresh byte-owner initializers.`)
+
+	(use wove-file "../scalar/plan.wove" (only embed_expression (type ScalarExpression)))
+	(use wove-file "../source/assets.wove" (only decode_asset_path embed_check (type EmbedAsset) (type EmbedCheck)))
+	(use wove-file "../source/graph.wove" (only (type GraphModule)))
+	(use wove-file "../source/paths.wove" (only resolve_path (type SuppliedFile)))
+	(use wove-file "./runtime.wove" (only write_site_number close_runtime_call))
+	(use wove-file "./text.wove" (only c_byte))
+	(use wove-file "../hashing/base16.wove" (only base16_digit))
+
+	(fn embed_failure
+		(:doc `Translate a path token back from the arena into its defining source view.`)
+		(params (expression ScalarExpression) (base i32))
+		(returns EmbedCheck)
+		(body
+			(return (call embed_check (i32 0) (record.get (local expression) target)
+				(i32.sub.wrapping (record.get (local expression) asset_start) (local base))
+				(i32.sub.wrapping (record.get (local expression) asset_end) (local base)) (u32 67)))))
+
+	(fn embed_with_bytes
+		(:doc `Retain the original operation site while replacing the path span with its compiled bytes.`)
+		(params (expression ScalarExpression) (start i32) (end i32))
+		(returns ScalarExpression)
+		(body
+			(return (call embed_expression (record.get (local expression) target) (record.get (local expression) start)
+				(record.get (local expression) end) (local start) (local end)))))
+
+	(fn graph_embed_asset
+		(:doc `Resolve the asset in the defining module's reached directory against raw asset rows.`)
+		(params (arena (shared-slice u8)) (assets (shared-slice SuppliedFile))
+			(file SuppliedFile) (expression ScalarExpression))
+		(returns i32)
+		(body
+			(let start (record.get (local expression) asset_start))
+			(let end (record.get (local expression) asset_end))
+			(let-mut path (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let length (call decode_asset_path (borrow-shared (local arena)) (local start) (local end) (borrow-mut (local path))))
+			(if (i32.lt (local length) (i32 0)) (then (return (i32 -1))))
+			(return (call resolve_path (borrow-shared (local arena)) (borrow-shared (local assets))
+				(local file) (borrow-shared (slice.range (local path) (i32 0) (local length)))))))
+
+	(fn bind_graph_embeds
+		(:doc `Resolve the selected bodies' asset requests without admitting asset bytes as Wove modules.`)
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
+			(assets (shared-slice SuppliedFile)) (expressions (mut-slice ScalarExpression)))
+		(returns EmbedCheck)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Only checked embed rows can request assets.")
+				(i32.lt (local index) (slice.len (local expressions)))
+				(body
+					(let expression (slice.load (local expressions) (local index)))
+					(if
+						(:doc "Use the defining module even if a different module calls its function.")
+						(u32.eq (record.get (local expression) kind) (u32 60))
+						(then
+							(let file (record.get (local expression) target))
+							(let reached (record.get (slice.load (local modules) (local file)) path))
+							(let asset (call graph_embed_asset (borrow-shared (local arena)) (borrow-shared (local assets))
+								(slice.load (local files) (local reached)) (local expression)))
+							(if
+								(:doc "A missing asset is reported in the file containing the path token.")
+								(i32.lt (local asset) (i32 0))
+								(then (return (call embed_failure (local expression)
+									(record.get (slice.load (local files) (local file)) source_start)))))
+							(let found (slice.load (local assets) (local asset)))
+							(let canonical (slice.load (local assets) (record.get (local found) identity)))
+							(slice.store (local expressions) (local index)
+								(call embed_with_bytes (local expression) (record.get (local canonical) source_start)
+									(record.get (local canonical) source_end)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call embed_check (i32 0) (i32 -1) (i32 0) (i32 0) (u32 0)))))
+
+	(fn request_module_embeds
+		(:doc `Copy checked path spans into a table indexed by expression row for the native loader.`)
+		(params (expressions (shared-slice ScalarExpression)) (requests (mut-slice EmbedAsset)))
+		(returns i32)
+		(body
+			(let-mut index (i32 0))
+			(let-mut count (i32 0))
+			(while
+				(:doc "Skipped declarations and statements have no checked embed expression.")
+				(i32.lt (local index) (slice.len (local expressions)))
+				(body
+					(let expression (slice.load (local expressions) (local index)))
+					(if
+						(:doc "Record only genuine embed operands, independent of any opaque metadata.")
+						(u32.eq (record.get (local expression) kind) (u32 60))
+						(then
+							(slice.store (local requests) (local index)
+								(record.make EmbedAsset (path_start (record.get (local expression) asset_start))
+									(path_end (record.get (local expression) asset_end)) (bytes_start (i32 -1)) (bytes_end (i32 -1))))
+							(set (local count) (i32.add.wrapping (local count) (i32 1)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (local count))))
+
+	(fn bind_module_embeds
+		(:doc `Link one module's checked expressions to its preloaded asset ranges.`)
+		(params (arena_length i32) (assets (shared-slice EmbedAsset)) (expressions (mut-slice ScalarExpression)))
+		(returns EmbedCheck)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "The native loader keys its data by the same expression rows.")
+				(i32.lt (local index) (slice.len (local expressions)))
+				(body
+					(let expression (slice.load (local expressions) (local index)))
+					(if
+						(:doc "A selected embed requires one matching, bounded payload range.")
+						(u32.eq (record.get (local expression) kind) (u32 60))
+						(then
+							(if
+								(:doc "Without a supplied row, the requested file has no payload.")
+								(bool.not (i32.lt (local index) (slice.len (local assets))))
+								(then (return (call embed_failure (local expression) (i32 0)))))
+							(let asset (slice.load (local assets) (local index)))
+							(let start (record.get (local asset) bytes_start))
+							(let end (record.get (local asset) bytes_end))
+							(if
+								(:doc "Reject a mismatched request or invalid extent before writing the translation unit.")
+								(bool.or
+									(bool.not (bool.and (i32.eq (record.get (local asset) path_start) (record.get (local expression) asset_start))
+										(i32.eq (record.get (local asset) path_end) (record.get (local expression) asset_end))))
+									(bool.or (i32.lt (local start) (i32 0))
+										(bool.or (i32.lt (local end) (local start)) (i32.lt (local arena_length) (local end)))))
+								(then (return (call embed_failure (local expression) (i32 0)))))
+							(slice.store (local expressions) (local index)
+								(call embed_with_bytes (local expression) (local start) (local end)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call embed_check (i32 0) (i32 -1) (i32 0) (i32 0) (u32 0)))))
+
+	(fn open_asset_data
+		(:doc `Begin a static C byte array whose lifetime covers every evaluation of the embed.`)
+		(params (output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 115) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 116) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 97) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 116) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 105) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 99) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 99) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 111) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 110) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 115) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 116) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 117) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 105) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 110) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 116) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 56) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 95) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 116) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))
+			(return (local cursor))))
+
+	(fn write_asset_byte
+		(:doc `Write one exact byte as a hexadecimal C initializer with a trailing comma.`)
+		(params (byte u8) (output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut remainder (int.convert u32 (local byte)))
+			(let-mut high (u32 0))
+			(while
+				(:doc "Split the byte into two nibbles using the Stage 1 arithmetic subset.")
+				(bool.not (u32.lt (local remainder) (u32 16)))
+				(body
+					(set (local remainder) (u32.sub.wrapping (local remainder) (u32 16)))
+					(set (local high) (u32.add.wrapping (local high) (u32 1)))))
+			(let zero (call c_byte (borrow-mut (local output)) (local offset) (u8 48) (local writing)))
+			(let x (call c_byte (borrow-mut (local output)) (local zero) (u8 120) (local writing)))
+			(let upper (call c_byte (borrow-mut (local output)) (local x) (call base16_digit (local high)) (local writing)))
+			(let lower (call c_byte (borrow-mut (local output)) (local upper) (call base16_digit (local remainder)) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local lower) (u8 44) (local writing)))))
+
+	(fn write_asset_data
+		(:doc `Finish the static array declaration with the payload's exact byte values.`)
+		(:expect (issues "gh:wove-lang/wove:176"))
+		(params (arena (shared-slice u8)) (expression ScalarExpression) (output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let start (record.get (local expression) asset_start))
+			(let end (record.get (local expression) asset_end))
+			(let length (i32.sub.wrapping (local end) (local start)))
+			(let-mut cursor (local offset))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 91) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 93) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 123) (local writing)))
+			(if
+				(:doc "Standard C needs at least one initializer even for the zero-byte copy.")
+				(i32.eq (local length) (i32 0))
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 48) (local writing)))))
+			(let-mut index (local start))
+			(while
+				(:doc "Keep the payload's raw bytes in their original order.")
+				(i32.lt (local index) (local end))
+				(body
+					(set (local cursor) (call write_asset_byte (slice.load (local arena) (local index))
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))))
+
+	(fn close_embed_copy
+		(:doc `Give the runtime copy the exact count, including zero, and the original operation site.`)
+		(params (expression ScalarExpression) (output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let length (i32.sub.wrapping (record.get (local expression) asset_end) (record.get (local expression) asset_start)))
+			(let-mut digits (array.alloc u8 (i32 11)))
+			(let extent (call write_site_number (borrow-mut (local output)) (local offset) (local length)
+				(borrow-mut (local digits)) (local writing)))
+			(return (call close_runtime_call (borrow-mut (local output)) (local extent)
+				(record.get (local expression) target) (record.get (local expression) start) (record.get (local expression) end) (local writing))))))

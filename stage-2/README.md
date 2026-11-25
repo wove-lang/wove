@@ -610,6 +610,21 @@ gives the output count, defining file identity, and file-relative span.
 The [scalar graph fixtures](../tests/stage-2/scalar_graphs.tsv) check the
 native result, defining symbols, repeated imports, and original call spans.
 
+## Compile-time file embeds
+
+Use `(embed "./assets/payload.bin")` as an owning local initializer.
+The compiler resolves a quoted path relative to the module that contains it.
+Absolute paths also work. The result is a fresh owned byte buffer on every
+evaluation, with the file's original byte count and content. Emitted C
+carries the payload, so the asset can move after compilation.
+
+Only selected expressions request files. A missing, unreadable, or invalid
+selected path reports error 67 on the original path token. A trailing slash
+or a final `.` or `..` component requires a directory. The graph probe accepts
+trailing `--asset VIRTUAL_PATH FILE` triples with raw file bytes.
+Asset rows are separate from source modules and imports. Native `cc`
+reads disk assets for its explicit source file.
+
 ## Native tool capture
 
 [Process capture](io/process.wove) runs one executable and returns its exit

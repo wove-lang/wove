@@ -1,0 +1,83 @@
+(module native_cli_assets
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Load selected embeds into the native compiler's source arena.
+
+	Measure asset extents before allocation. Keep the source at the start
+	of the arena so existing source-tree offsets and diagnostics stay valid.`)
+
+	(use wove-file "../source/assets.wove" (only decode_asset_path embed_check (type EmbedAsset) (type EmbedCheck)))
+	(use c-header "./host.h" (only wove_cli_asset_size wove_cli_read_asset))
+
+	(fn copy_source_prefix
+		(:doc `Preserve the complete original source at byte zero before appending asset bytes.`)
+		(params (source (shared-slice u8)) (arena (mut-slice u8)))
+		(returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Only the original source prefix is copied here.")
+				(i32.lt (local index) (slice.len (local source)))
+				(body
+					(slice.store (local arena) (local index) (slice.load (local source) (local index)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn asset_unavailable
+		(:doc `Point file errors at the original quoted path, in the defining source.`)
+		(params (asset EmbedAsset))
+		(returns EmbedCheck)
+		(body
+			(return (call embed_check (i32 0) (i32 0)
+				(record.get (local asset) path_start) (record.get (local asset) path_end) (u32 67)))))
+
+	(fn load_input_assets
+		(:doc `Record asset ranges during measurement or load them into the reserved arena during writing.`)
+		(params (module (shared-slice u8)) (source (shared-slice u8)) (assets (mut-slice EmbedAsset))
+			(arena (mut-slice u8)) (writing bool))
+		(returns EmbedCheck)
+		(body
+			(let-mut total (slice.len (local source)))
+			(let capacity (slice.len (local arena)))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Only initialized request rows have a literal path span.")
+				(i32.lt (local index) (slice.len (local assets)))
+				(body
+					(let asset (slice.load (local assets) (local index)))
+					(let end (record.get (local asset) path_end))
+					(if
+						(:doc "Read a checked request relative to the source path given to cc.")
+						(i32.lt (i32 0) (local end))
+						(then
+							(let start (record.get (local asset) path_start))
+							(let-mut path (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+							(let length (call decode_asset_path (borrow-shared (local source)) (local start) (local end)
+								(borrow-mut (local path))))
+							(if
+								(:doc "Reject malformed path values before the host string conversion.")
+								(i32.lt (local length) (i32 0))
+								(then (return (call asset_unavailable (local asset)))))
+							(if
+								(:doc "Writing checks that the file can still be read at its measured size.")
+								(local writing)
+								(then
+									(let read (call wove_cli_read_asset (borrow-shared (local module))
+										(borrow-shared (slice.range (local path) (i32 0) (local length)))
+										(borrow-mut (local arena)) (local capacity)
+										(record.get (local asset) bytes_start) (record.get (local asset) bytes_end)))
+									(if (i32.lt (local read) (i32 0)) (then (return (call asset_unavailable (local asset))))))
+								(else
+									(let size (call wove_cli_asset_size (borrow-shared (local module))
+										(borrow-shared (slice.range (local path) (i32 0) (local length)))))
+									(if
+										(:doc "A missing file or an unrepresentable aggregate cannot supply a valid extent.")
+										(bool.or (i32.lt (local size) (i32 0))
+											(i32.lt (i32.sub.wrapping (i32 2147483647) (local total)) (local size)))
+										(then (return (call asset_unavailable (local asset)))))
+									(let finish (i32.add.wrapping (local total) (local size)))
+									(slice.store (local assets) (local index)
+										(record.make EmbedAsset (path_start (local start)) (path_end (local end))
+											(bytes_start (local total)) (bytes_end (local finish))))
+									(set (local total) (local finish))))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call embed_check (local total) (i32 0) (i32 0) (i32 0) (u32 0))))))

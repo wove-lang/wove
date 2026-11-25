@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -17,6 +18,7 @@ def read_cases(manifest):
 	label = None
 	prefix = False
 	native = None
+	assets = []
 	# A case header starts a new argv and stdout expectation.
 	for line in manifest.read_text(encoding="utf-8").splitlines():
 		if not line or line.startswith("#"):
@@ -25,18 +27,23 @@ def read_cases(manifest):
 		fields = payload.split("\t")
 		if kind == "case":
 			if label is not None:
-				yield label, arguments, expected, prefix, native
+				yield label, arguments, expected, prefix, native, assets
 			label, entry, capacity, *options = fields
 			command = options[0] if options else "--graph"
 			arguments = [command, entry, capacity, *options[1:]]
 			expected = []
 			prefix = False
 			native = None
+			assets = []
 		elif kind == "mode" and label is not None:
 			arguments[:0] = ["--mode", payload]
 		elif kind == "file" and label is not None:
 			identity, virtual_path, source = fields
 			arguments.extend((identity, virtual_path, source))
+		# Asset payloads are fixture data kept separate from the probe’s source rows.
+		elif kind == "asset" and label is not None:
+			path, contents = fields
+			assets.append((path, b"" if contents == "-" else bytes.fromhex(contents)))
 		elif kind == "native" and label is not None:
 			status, *flags = fields
 			native = flags, [(int(status), [], b"")]
@@ -55,7 +62,7 @@ def read_cases(manifest):
 		else:
 			raise ValueError(f"invalid graph manifest record {kind}")
 	if label is not None:
-		yield label, arguments, expected, prefix, native
+		yield label, arguments, expected, prefix, native, assets
 
 
 # Compile and run an emitted translation unit with the same compiler settings as the rest of the suite.
@@ -80,11 +87,30 @@ def check_native(probe, label, emitted, fixture_flags, executions):
 			assert (result.returncode, result.stdout, result.stderr) == (expected, b"", diagnostic), (label, result)
 
 
+# Materialize supplied assets for emission and move them before native verification.
+def run_graph(probe, arguments, assets):
+	context = TemporaryDirectory(prefix="assets-", dir=Path(probe).parent) if assets else nullcontext()
+	with context as directory:
+		paths = []
+		command = [probe, *arguments]
+		# Binary assets are independent of source file rows and may contain any bytes.
+		for index, (virtual, contents) in enumerate(assets):
+			path = Path(directory) / str(index)
+			path.write_bytes(contents)
+			paths.append(path)
+			command.extend(("--asset", virtual, str(path)))
+		result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+		# Retained C must compile and execute with every original asset path absent.
+		for path in paths:
+			path.rename(path.with_suffix(".moved"))
+		return result
+
+
 # Run each supplied graph through the seed-built executable.
 def check_manifest(probe, manifest):
 	# The fixture owns the graph, consumer mode, expected output, and optional native result.
-	for label, arguments, expected, prefix, native in read_cases(Path(manifest)):
-		run = subprocess.run([probe, *arguments], capture_output=True, text=True, timeout=30)
+	for label, arguments, expected, prefix, native, assets in read_cases(Path(manifest)):
+		run = run_graph(probe, arguments, assets)
 		status = int(expected[0].startswith("error "))
 		actual = run.stdout.splitlines()
 		if prefix:

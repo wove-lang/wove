@@ -27,8 +27,8 @@
 #define read_module wv_seed_fn_85
 #define emit_module wv_seed_fn_115
 #define resolve_graph wv_seed_fn_132
-#define inspect_callers wv_seed_fn_374
-#define run_scalar_graph wv_seed_fn_399
+#define inspect_callers wv_seed_fn_390
+#define run_scalar_graph wv_seed_fn_415
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -39,6 +39,7 @@ typedef wv_seed_record_11 FormParts;
 typedef wv_seed_record_12 SelectedDeclaration;
 typedef wv_seed_record_13 ModuleRead;
 typedef wv_seed_record_15 EmitResult;
+typedef wv_seed_record_50 EmbedAsset;
 typedef wv_seed_record_16 GraphModule;
 typedef wv_seed_record_17 GraphBinding;
 typedef wv_seed_record_18 GraphUse;
@@ -46,8 +47,8 @@ typedef wv_seed_record_19 GraphSelector;
 typedef wv_seed_record_20 GraphResult;
 typedef wv_seed_record_43 CallSite;
 typedef wv_seed_record_23 SuppliedFile;
-typedef wv_seed_record_51 CallerInspection;
-typedef wv_seed_record_55 GraphOutput;
+typedef wv_seed_record_53 CallerInspection;
+typedef wv_seed_record_57 GraphOutput;
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(void): 1, default: 0), "bootstrap entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -614,7 +615,8 @@ static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t ca
 	// Check both guards and the unwritten tail before exposing emitted bytes.
 	if (bytes != NULL) {
 		const wvrt_mut_slice output = {bytes + 1, capacity, sizeof(uint8_t)};
-		const EmitResult result = emit_module(input, source.nodes, source.module, source.active, 0, start, output);
+		const EmitResult result = emit_module(input, source.nodes, source.module, source.active, 0, start,
+			(wvrt_mut_slice){NULL, 0, sizeof(EmbedAsset)}, false, output);
 		const int32_t count = result.wv_field_0;
 		if (output_intact(bytes, capacity, count)) {
 			write_span(parent, start, (uint32_t)count, result.wv_field_1, result.wv_field_2, result.wv_field_3);
@@ -805,6 +807,28 @@ static bool read_graph_files(char **args, SuppliedFile *files, int32_t count, ui
 	return true;
 }
 
+// Append raw asset payloads without exposing their paths as graph modules.
+static bool read_graph_assets(char **args, SuppliedFile *assets, int32_t count, uint8_t **arena, int32_t *length) {
+	// Keep each supplied virtual path and its exact byte extent in the shared arena.
+	for (int32_t i = 0; i < count; ++i, args += 3) {
+		const char *path = args[1];
+		const int32_t start = *length;
+		// An asset row has no source-module identity and cannot be an alias row.
+		if (strcmp(args[0], "--asset") != 0 || path[0] != '/' || path[1] == '\0' ||
+				!append_graph_bytes(arena, length, path, strlen(path))) {
+			return false;
+		}
+		const int32_t payload = *length;
+		int32_t width;
+		uint8_t *bytes = read_source(args[2], &width);
+		const bool added = bytes != NULL && append_graph_bytes(arena, length, bytes, (size_t)width);
+		free(bytes);
+		if (!added) { return false; }
+		assets[i] = (SuppliedFile){i, start, payload, payload, *length};
+	}
+	return true;
+}
+
 // Expose reached module rows and binding origins with spellings from their owning files.
 static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t count,
 		const GraphModule *modules, const GraphBinding *bindings, GraphResult result) {
@@ -862,7 +886,7 @@ static void write_graph_error(wvrt_slice arena, const SuppliedFile *files, uint3
 }
 
 // Compile or inspect a resolved graph and check that the chosen destination remains bounded.
-static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice modules, wvrt_slice bindings,
+static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, wvrt_slice modules, wvrt_slice bindings,
 		GraphResult resolved, int32_t root, int32_t query, const char *name, int32_t capacity) {
 	const bool emit = query < 0;
 	const int32_t byte_capacity = emit ? capacity : 0;
@@ -877,7 +901,7 @@ static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice modules, 
 	const size_t site_bytes = (size_t)site_capacity * sizeof(CallSite);
 	memset(sites, 0xa5, site_bytes);
 	const GraphOutput result = run_scalar_graph(arena, files, modules, bindings, resolved, root, query,
-		(wvrt_slice){name, (int32_t)strlen(name), sizeof(uint8_t)},
+		(wvrt_slice){name, (int32_t)strlen(name), sizeof(uint8_t)}, assets,
 		(wvrt_mut_slice){bytes + 1, byte_capacity, sizeof(uint8_t)},
 		(wvrt_mut_slice){sites, site_capacity, sizeof(CallSite)});
 	const int32_t written = result.wv_field_0;
@@ -929,20 +953,28 @@ static int graph_mode(int argc, char **argv, bool bootstrap) {
 			((emit || inspect) && !read_offset(argv[first_file - 1], &output)) ||
 			(inspect && !read_offset(argv[4], &query))) {
 		fputs("usage: source_scan --graph ENTRY SCRATCH (IDENTITY PATH FILE)...\n"
-			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n"
+			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n", stderr);
 		return EXIT_FAILURE;
 	}
-	const int32_t count = (int32_t)((argc - first_file) / 3);
+	int first_asset = first_file;
+	// Source rows precede any raw asset rows so their canonical identities stay stable.
+	while (first_asset < argc && strcmp(argv[first_asset], "--asset") != 0) { first_asset += 3; }
+	const int32_t count = (int32_t)((first_asset - first_file) / 3);
+	const int32_t asset_count = (int32_t)((argc - first_asset) / 3);
+	if (count == 0 || (!emit && asset_count != 0)) { return EXIT_FAILURE; }
 	const wvrt_location site = {__FILE__, __LINE__, 1};
 	wvrt_array *file_storage = wvrt_array_new(count, sizeof(SuppliedFile), _Alignof(SuppliedFile), site);
 	SuppliedFile *files = file_storage->wvrt_items;
+	wvrt_array *asset_storage = wvrt_array_new(asset_count, sizeof(SuppliedFile), _Alignof(SuppliedFile), site);
 	uint8_t *bytes = NULL;
 	int32_t length = 0;
 	// Read original bytes once, then give Wove the supplied virtual identities and views.
-	if (!read_graph_files(argv + first_file, files, count, &bytes, &length)) {
+	if (!read_graph_files(argv + first_file, files, count, &bytes, &length) ||
+			!read_graph_assets(argv + first_asset, asset_storage->wvrt_items, asset_count, &bytes, &length)) {
 		fputs("could not load supplied graph\n", stderr);
 		free(bytes);
+		wvrt_array_drop(asset_storage);
 		wvrt_array_drop(file_storage);
 		return EXIT_FAILURE;
 	}
@@ -962,7 +994,8 @@ static int graph_mode(int argc, char **argv, bool bootstrap) {
 	if (result.wv_field_5 != 0) {
 		write_graph_error(arena, files, result.wv_field_5, result.wv_field_2, result.wv_field_3, result.wv_field_4, -1, -1);
 	} else if (emit || inspect) {
-		status = finish_graph(arena, supplied, (wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},
+		status = finish_graph(arena, supplied, (wvrt_slice){asset_storage->wvrt_items, asset_count, sizeof(SuppliedFile)},
+			(wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},
 			(wvrt_slice){bindings->wvrt_items, result.wv_field_1, sizeof(GraphBinding)}, result, files[entry].wv_field_0,
 			query, inspect ? argv[5] : "", output);
 	} else {
@@ -973,6 +1006,7 @@ static int graph_mode(int argc, char **argv, bool bootstrap) {
 	wvrt_array_drop(uses);
 	wvrt_array_drop(bindings);
 	wvrt_array_drop(modules);
+	wvrt_array_drop(asset_storage);
 	wvrt_array_drop(file_storage);
 	free(bytes);
 	return status;

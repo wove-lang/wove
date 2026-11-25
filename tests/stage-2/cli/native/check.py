@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 
 
 # Exercise one invocation with the project and files specified by its fixture row.
-def check_case(compiler, clang, fixtures, row):
+def check_case(compiler, clang, runtime, fixtures, row):
 	label, inputs, argv, status, target, retained, value, diagnostic = row
 	with TemporaryDirectory(prefix="native-cli-", dir=compiler.parent) as workspace:
 		root = Path(workspace)
@@ -22,7 +22,11 @@ def check_case(compiler, clang, fixtures, row):
 		for destination, source in json.loads(inputs).items():
 			path = root / destination
 			path.parent.mkdir(parents=True, exist_ok=True)
-			shutil.copyfile(fixtures / source, path)
+			# A hex value supplies exact raw input bytes without a checked-in binary.
+			if isinstance(source, dict):
+				path.write_bytes(bytes.fromhex(source["hex"]))
+			else:
+				shutil.copyfile(fixtures / source, path)
 		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
 			for argument in json.loads(argv)]
 		result = subprocess.run([compiler, *arguments], cwd=root, capture_output=True, timeout=30)
@@ -33,7 +37,7 @@ def check_case(compiler, clang, fixtures, row):
 		if retained != "-":
 			assert not result.stderr and artifacts == [retained], (label, result.stderr, artifacts)
 			program = root / "result"
-			subprocess.run([*clang, str(root / retained), "-o", str(program)], check=True, timeout=30)
+			subprocess.run([*clang, "-I", "runtime", str(root / retained), runtime, "-o", str(program)], check=True, timeout=30)
 			built = subprocess.run([program], capture_output=True, timeout=30)
 			assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), (label, built)
 		else:
@@ -46,10 +50,11 @@ def main():
 	compiler, manifest = (Path(value).resolve() for value in sys.argv[1:])
 	clang = [*shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang")), "-std=c11",
 		*shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))]
+	runtime = os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")
 	# The manifest supplies paths, argv, publication, and the expected diagnostic.
 	for line in manifest.read_text(encoding="utf-8").splitlines():
 		if line and not line.startswith("#"):
-			check_case(compiler, clang, manifest.parent, line.split("\t"))
+			check_case(compiler, clang, runtime, manifest.parent, line.split("\t"))
 
 
 if __name__ == "__main__":
