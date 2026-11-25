@@ -463,8 +463,8 @@ The loan lasts to the end of the binding's block. A shared view permits reads
 of the source and excludes writes, replacement, and moves. A mutable view
 also excludes reads through the source. Reborrows follow the same rule for
 their immediate parent view. Each scope exit, including `break`, `continue`,
-and `return`, ends its view loans. A view keeps its source storage and does
-not acquire an allocation.
+and `return`, ends its view loans. A view uses the source's existing storage.
+To borrow a range from a fixed inline array, first bind a view of the whole array.
 
 Helpers can take `(shared-array u8)` parameters using the runtime's
 `wvrt_slice` ABI. Pass a named view to another helper with
