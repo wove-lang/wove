@@ -1,0 +1,74 @@
+(module temporary_directory
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Create private temporary directories for native operations.")
+
+	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use c-header "<stdlib.h>" (only getenv))
+	(use (:pragma (cfg (os "linux"))) c-header "<stdlib.h>" (only mkdtemp))
+	(use (:pragma (cfg (os "macos"))) c-header "<unistd.h>" (only mkdtemp))
+
+	(let temporary_key "TMPDIR")
+	(let default_root "/tmp")
+	(let relative_prefix "./")
+
+	(fn create_under
+		(:doc "Create the private directory under an explicit nonempty root.")
+		(params (root (shared-slice u8)) (suffix (shared-slice u8)))
+		(returns (owned-array u8))
+		(body
+			(let root_length (slice.len (local root)))
+			(let suffix_length (slice.len (local suffix)))
+			(let-mut prefix_length 0i32)
+			(if
+				(:doc "A relative root needs a path prefix before it can become a tool operand.")
+				(bool.not (u8.eq (slice.load (local root) 0i32) 47u8))
+				(then (set (local prefix_length) (slice.len (local relative_prefix)))))
+			(if
+				(:doc "Keep both path components and the optional prefix inside one byte view.")
+				(i32.lt (i32.sub.wrapping (i32.sub.wrapping 2147483647i32 (local suffix_length))
+					(local prefix_length)) (local root_length))
+				(then
+					(let empty (array.alloc u8 0i32))
+					(return (move (local empty)))))
+			(let-mut path (array.alloc u8 (i32.add.wrapping (i32.add.wrapping (local root_length) (local suffix_length))
+				(local prefix_length))))
+			(if
+				(:doc "Make relative paths safe to pass to a frontend that interprets leading @ or -.")
+				(i32.lt 0i32 (local prefix_length))
+				(then (let next (call append_bytes (borrow-shared (local relative_prefix)) (borrow-mut (local path)) 0i32))))
+			(let start (call append_bytes (borrow-shared (local root)) (borrow-mut (local path)) (local prefix_length)))
+			(let end (call append_bytes (borrow-shared (local suffix)) (borrow-mut (local path)) (local start)))
+			(let created (call mkdtemp (borrow-mut (local path))))
+			(if
+				(:doc "An unsuccessful creation leaves no directory for the caller to remove.")
+				(owner.is-null (local created))
+				(then
+					(let empty (array.alloc u8 0i32))
+					(return (move (local empty)))))
+			(let directory (move (optional.unwrap (local created))))
+			(return (move (local directory)))))
+
+	(fn create_from_environment
+		(:doc "Treat an empty TMPDIR like an absent one.")
+		(params (root (shared-slice u8)) (suffix (shared-slice u8)))
+		(returns (owned-array u8))
+		(body
+			(if
+				(:doc "An empty environment entry uses the system temporary root.")
+				(i32.eq (slice.len (local root)) 0i32)
+				(then (return (call create_under (borrow-shared (local default_root)) (borrow-shared (local suffix))))))
+			(return (call create_under (borrow-shared (local root)) (borrow-shared (local suffix))))))
+
+	(fn create_temporary_directory
+		(:doc "Create a directory with a /name.XXXXXX suffix under TMPDIR or /tmp. The caller removes it.")
+		(params (suffix (shared-slice u8)))
+		(returns (owned-array u8))
+		(body
+			(let temporary (call getenv (borrow-shared (local temporary_key))))
+			(if
+				(:doc "An absent environment entry uses the system temporary root.")
+				(owner.is-null (local temporary))
+				(then (return (call create_under (borrow-shared (local default_root)) (borrow-shared (local suffix))))))
+			(let root (move (optional.unwrap (local temporary))))
+			(return (call create_from_environment (borrow-shared (local root)) (borrow-shared (local suffix)))))))

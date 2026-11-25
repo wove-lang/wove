@@ -599,6 +599,19 @@ and metadata in any order after the Wove name.
 The Wove selector uses the declared function name. Calls and C ABI checks use
 the target's C identifier. Without `c-name`, the two spellings are the same.
 
+The native `query_clang_header` API in `clang/query.wove` accepts a Clang
+executable, NUL-terminated target and include arguments, the header spelling,
+and the originating import span. It renders the embedded C probe, captures
+one AST document, and returns an index for exact `clang_declaration` lookup
+with the caller's declaration rows and decoded keys. For quoted project
+headers, pass the importing directory in the include options.
+
+A successful probe distinguishes present and absent headers through the
+probe's enum constant. Tool failures, truncated stdout, malformed probe
+output, and insufficient AST workspace have separate result codes. The
+query carries the import span for diagnostics and keeps the child status
+and JSON error details available to the caller.
+
 Bridge `const`, `let`, and `let-mut` declarations provide typed values
 from the C header. A bare selection tries functions first. Use
 `(value O_CLOEXEC)` or `(value (as errno error_indicator))` to select

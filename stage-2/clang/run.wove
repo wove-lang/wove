@@ -1,0 +1,134 @@
+(module clang_probe_run
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Stage one C translation unit and capture a bounded Clang AST dump.")
+
+	(use wove-file "../io/process.wove" (only run_process_capture))
+	(use wove-file "../io/temporary.wove" (only create_temporary_directory))
+	(use wove-file "../io/write.wove" (only write_all))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use c-header "<fcntl.h>" (only open O_CREAT O_EXCL O_WRONLY O_CLOEXEC (type Mode)))
+	(use c-header "<unistd.h>" (only close unlink rmdir))
+
+	(struct ClangRun (fields (error u32) (status i32) (length i32)))
+
+	(let directory_suffix "/wove-clang.XXXXXX")
+	(let source_suffix "/probe.c")
+	(let defaults "-pthread\u0000-std=c11\u0000")
+	(let ast_flags "-Wno-everything\u0000-Xclang\u0000-ast-dump=json\u0000-fsyntax-only\u0000-x\u0000c\u0000--\u0000")
+
+	(fn clang_run_at
+		(:doc "Keep the child status and the number of bytes that fit in the capture.")
+		(params (error u32) (status i32) (length i32))
+		(returns ClangRun)
+		(body (return (record.make ClangRun (error (local error)) (status (local status)) (length (local length))))))
+
+	(fn invoke_clang
+		(:doc "Forward complete caller arguments between the defaults and mandatory AST dump flags.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (path (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(let flags (i32.add.wrapping (slice.len (local defaults)) (slice.len (local ast_flags))))
+			(let path_length (slice.len (local path)))
+			(let option_length (slice.len (local options)))
+			(let limit (i32.sub.wrapping 2147483646i32 (local flags)))
+			(if
+				(:doc "Check the packed argv length before adding any component or its final terminator.")
+				(bool.or (i32.lt (local limit) (local path_length))
+					(i32.lt (i32.sub.wrapping (local limit) (local path_length)) (local option_length)))
+				(then (return (call clang_run_at 2u32 -1i32 0i32))))
+			(let end (i32.add.wrapping (i32.add.wrapping (local flags) (local path_length)) (local option_length)))
+			(let-mut arguments (array.alloc u8 (i32.add.wrapping (local end) 1i32)))
+			(let prefix (call append_bytes (borrow-shared (local defaults)) (borrow-mut (local arguments)) 0i32))
+			(let options_end (call append_bytes (borrow-shared (local options)) (borrow-mut (local arguments)) (local prefix)))
+			(let flag_end (call append_bytes (borrow-shared (local ast_flags)) (borrow-mut (local arguments)) (local options_end)))
+			(let path_end (call append_bytes (borrow-shared (local path)) (borrow-mut (local arguments)) (local flag_end)))
+			(slice.store (local arguments) (local path_end) 0u8)
+			(let captured (call run_process_capture (borrow-shared (local program)) (borrow-shared (local arguments))
+				(borrow-mut (local output))))
+			(let status (record.get (local captured) status))
+			(let length (record.get (local captured) length))
+			(if
+				(:doc "A launch, capture, or child failure takes precedence over parsing the child's bytes.")
+				(bool.not (i32.eq (local status) 0i32))
+				(then (return (call clang_run_at 4u32 (local status) (local length)))))
+			(if
+				(:doc "Distinguish a bounded capture from a malformed complete document.")
+				(record.get (local captured) overflow)
+				(then (return (call clang_run_at 5u32 (local status) (local length)))))
+			(return (call clang_run_at 0u32 (local status) (local length)))))
+
+	(fn write_probe
+		(:doc "Write and close the private source before launching, then remove it on every return.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (path (shared-slice u8))
+			(source (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(let flags (int.convert i32 (u32.or (u32.or (int.convert u32 (local O_CREAT)) (int.convert u32 (local O_EXCL)))
+				(u32.or (int.convert u32 (local O_WRONLY)) (int.convert u32 (local O_CLOEXEC))))))
+			(let descriptor (call open (borrow-shared (local path)) (local flags) (int.convert Mode 384i32)))
+			(if
+				(:doc "An unsuccessful exclusive open leaves no file owned by this query.")
+				(i32.lt (local descriptor) 0i32)
+				(then (return (call clang_run_at 3u32 -1i32 0i32))))
+			(let written (call write_all (local descriptor) (borrow-shared (local source))))
+			(let closed (call close (local descriptor)))
+			(if
+				(:doc "A partial write or failed close cannot be used for header inspection.")
+				(bool.not (bool.and (local written) (i32.eq (local closed) 0i32)))
+				(then
+					(let removed (call unlink (borrow-shared (local path))))
+					(return (call clang_run_at 3u32 -1i32 0i32))))
+			(let result (call invoke_clang (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local path)) (borrow-mut (local output))))
+			(let removed (call unlink (borrow-shared (local path))))
+			(if
+				(:doc "A failed cleanup is reported when no earlier error explains the failure.")
+				(bool.and (bool.not (i32.eq (local removed) 0i32)) (u32.eq (record.get (local result) error) 0u32))
+				(then (return (call clang_run_at 3u32 (record.get (local result) status) (record.get (local result) length)))))
+			(return (local result))))
+
+	(fn run_in_directory
+		(:doc "Construct the source path in the supplied private directory and remove the directory after use.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (directory (shared-slice u8))
+			(source (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(let parent (slice.len (local directory)))
+			(let suffix (slice.len (local source_suffix)))
+			(if
+				(:doc "A failed temporary directory creation leaves no path to clean.")
+				(i32.eq (local parent) 0i32)
+				(then (return (call clang_run_at 3u32 -1i32 0i32))))
+			(if
+				(:doc "Release the directory if its child path would exceed the byte view range.")
+				(i32.lt (i32.sub.wrapping 2147483647i32 (local suffix)) (local parent))
+				(then
+					(let removed (call rmdir (borrow-shared (local directory))))
+					(return (call clang_run_at 3u32 -1i32 0i32))))
+			(let-mut path (array.alloc u8 (i32.add.wrapping (local parent) (local suffix))))
+			(let next (call append_bytes (borrow-shared (local directory)) (borrow-mut (local path)) 0i32))
+			(let end (call append_bytes (borrow-shared (local source_suffix)) (borrow-mut (local path)) (local next)))
+			(let result (call write_probe (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local path)) (borrow-shared (local source)) (borrow-mut (local output))))
+			(let removed (call rmdir (borrow-shared (local directory))))
+			(if
+				(:doc "Report a failed directory removal if tool execution and capture succeeded.")
+				(bool.and (bool.not (i32.eq (local removed) 0i32)) (u32.eq (record.get (local result) error) 0u32))
+				(then (return (call clang_run_at 3u32 (record.get (local result) status) (record.get (local result) length)))))
+			(return (local result))))
+
+	(fn run_clang_probe
+		(:doc "Capture a Clang probe in a private workspace and remove the workspace before returning.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (source (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(let limit (slice.len (local options)))
+			(if
+				(:doc "Reject a missing final separator before mandatory flags can be joined to a caller argument.")
+				(bool.and (i32.lt 0i32 (local limit))
+					(bool.not (u8.eq (slice.load (local options) (i32.sub.wrapping (local limit) 1i32)) 0u8)))
+				(then (return (call clang_run_at 2u32 -1i32 0i32))))
+			(let directory (call create_temporary_directory (borrow-shared (local directory_suffix))))
+			(return (call run_in_directory (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local directory)) (borrow-shared (local source)) (borrow-mut (local output)))))))
