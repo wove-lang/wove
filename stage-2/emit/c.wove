@@ -34,7 +34,7 @@
 	(use wove-file "./c_arguments.wove" (only write_c_argument_call c_symbol_text))
 	(use wove-file "./c_variadic.wove" (only write_c_variadic_check))
 	(use wove-file "./c_formals.wove" (only write_fixed_c_checks))
-	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment)
+	(use wove-file "../scalar/flow.wove" (only after_block is_loop_exit (value break_statement) (type ScalarStatement) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies (type ScalarFunction) (type ScalarParameter) (type CallSite)))
@@ -43,10 +43,14 @@
 		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_i32_division open_slice_access open_shared_projection write_slice_length close_runtime_call
 			open_slice_offset write_slice_items open_array_allocation open_array_copy open_array_drop open_array_borrow))
 	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment c_cast c_i32_bias write_c_name write_decimal_literal
-			function_name_role write_temporary_name write_local_name open_static_value write_static_bytes))
+			function_name_role write_temporary_name write_local_name write_loop_label open_static_value write_static_bytes))
 
 	(struct EmitResult
 		(fields (written i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
+
+	(let c_goto "goto ")
+	(let c_continue "continue;")
+	(let c_loop_label_end ":;")
 
 	(let signed_wide_cast "(int64_t)")
 
@@ -1018,6 +1022,26 @@
 			(let statement (array.load (local statements) (local index)))
 			(let root (struct.get (local statement) value))
 			(let previous_owner (struct.get (local statement) previous_owner))
+			(let kind (struct.get (local statement) kind))
+			(if
+				(:doc "A loop exit releases just the owners introduced since the target loop was entered.")
+				(call is_loop_exit (local kind))
+				(then
+					(let loop (struct.get (local statement) target))
+					(let entry (array.load (local statements) (local loop)))
+					(let cleaned (call write_cleanup (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local statements)) (local previous_owner) (struct.get (local entry) previous_owner)
+						(local index) -1i32 (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
+					(if
+						(:doc "C continue restarts the nearest loop even inside a switch.")
+						(bool.not (u32.eq (local kind) (local break_statement)))
+						(then (return (call c_literal_text (borrow-shared (local c_continue))
+							(borrow-mut (local output)) (local cleaned) (local writing)))))
+					(let jump (call c_literal_text (borrow-shared (local c_goto))
+						(borrow-mut (local output)) (local cleaned) (local writing)))
+					(let label (call write_loop_label (borrow-shared (local source)) (local loop) (local tree_base)
+						(borrow-mut (local output)) (local jump) (local name_prefix) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local label) 59u8 (local writing)))))
 			(if
 				(:doc "A value-less return releases active owners without evaluating an expression.")
 				(i32.lt (local root) 0i32)
@@ -1028,7 +1052,6 @@
 					(let keyword (call c_text_fragment (borrow-mut (local output)) (local cleaned) 11u32 (local writing)))
 					(return (call c_byte (borrow-mut (local output)) (local keyword) 59u8 (local writing)))))
 			(let value (array.load (local expressions) (local root)))
-			(let kind (struct.get (local statement) kind))
 			(let loop (u32.eq (local kind) 25u32))
 			(let-mut cursor (local offset))
 			(let-mut condition_prefix 6u32)
@@ -1239,7 +1262,7 @@
 				(bool.or (bool.not (i32.lt (local index) 0i32)) (bool.not (i32.eq (local block) (local outer))))
 				(body
 					(if
-						(:doc "End a block even when it is empty or ends in a return.")
+						(:doc "End every checked block, including terminal or empty ones.")
 						(i32.lt (local index) 0i32)
 						(then
 							(let exit (call after_block (borrow-shared (local source)) (borrow-shared (local nodes)) (local block)))
@@ -1247,7 +1270,7 @@
 							(let entry (array.load (local statements) (struct.get (local exit) owner)))
 							(let matched (u32.eq (struct.get (local entry) kind) (local match_statement)))
 							(if
-								(:doc "Fallthrough releases the block's owners. A return releases its active scopes itself.")
+								(:doc "Fallthrough releases the block's owners. Explicit exits clean up their own scopes.")
 								(struct.get (local arm) falls_through)
 								(then (set (local cursor) (call write_cleanup
 									(borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local statements))
@@ -1270,6 +1293,15 @@
 										(local matched)
 										(then (set (local cursor) (call c_literal_text (borrow-shared (local c_switch_end))
 											(borrow-mut (local output)) (local cursor) (local writing)))))
+									(if
+										(:doc "Emit a destination after a loop targeted by any written break.")
+										(bool.and (u32.eq (struct.get (local entry) kind) 25u32)
+											(i32.lt -1i32 (struct.get (local entry) target)))
+										(then
+											(set (local cursor) (call write_loop_label (borrow-shared (local source)) (struct.get (local exit) owner)
+												(struct.get (local function) tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+											(set (local cursor) (call c_literal_text (borrow-shared (local c_loop_label_end))
+												(borrow-mut (local output)) (local cursor) (local writing)))))
 									(set (local block) (struct.get (local exit) block))
 									(set (local index) (struct.get (local exit) statement)))
 								(else

@@ -556,9 +556,17 @@ the conditional is terminal.
 A statement `(while condition (body ...))` evaluates its `bool` condition
 before each iteration, including the first. Each iteration has a fresh
 body scope. Updates to an outer mutable binding are visible to the next
-test. A return inside the loop exits the function. A loop can skip its
-body, so a value-returning function still needs a return on the path
-after the loop.
+test. A return inside the loop exits the function.
+
+`(break)` leaves the innermost loop and `(continue)` restarts it at its
+condition check. Both forms take no operands and require an enclosing loop.
+Each exit releases the active owners introduced in the iteration or its nested
+scopes. A continue preserves owners that were live at loop entry.
+
+A loop with a nonliteral predicate can skip its body. A literal
+`(while (bool true) (body ...))` reaches its successor only through a reachable
+break targeting that loop. A break in an inner loop or an arm excluded by a
+literal condition cannot make the outer loop continue.
 
 [FNV-1a](hashing/fnv1a.wove) exposes the immutable 31-bit seed `fnv1a_seed`
 and updates it one raw byte at a time with `fnv1a_byte`. The declaration
@@ -589,6 +597,7 @@ Native symbols and the ABI entry `main` retain their original spellings.
 | `p` | Parameter | Zero-based position in its signature | Parameter name |
 | `l` | Local | Declared name's original file-local tree row | Local name |
 | `t` | Expression temporary | Original expression's file-local tree row | Empty |
+| `j` | Loop break label | Loop statement's original file-local tree row | Empty |
 | `q` | Read-only C type alias | Binding name's tree row in the translation unit | Native name |
 | `b` | C-string call storage | Original call's file-local tree row | `a` for descriptors, `b` for backing storage |
 
