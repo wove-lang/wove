@@ -638,7 +638,7 @@ void wvrt_slice_store_u8_at_span(wvrt_mut_slice wvrtview, int32_t wvrtindex, uin
 	((uint8_t *)wvrtview.wvrt_items)[wvrt_offset] = wvrtvalue;
 }
 
-// All supported integers fit in the common signed domain, including high-bit u32 values.
+// The seed and small built-in conversions check bounds in a common signed domain.
 static bool wvrt_int_fits(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax) {
 	return wvrtmin <= wvrtvalue && wvrtvalue <= wvrtmax;
 }
@@ -656,6 +656,36 @@ int64_t wvrt_int_convert(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax,
 // Report a Stage 2 integer conversion at its original span.
 _Noreturn void wvrt_int_conversion_trap(int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
+}
+
+// Assemble an exact-width byte view using unsigned arithmetic and unaligned byte reads.
+uint64_t wvrt_int_from_bytes(wvrt_slice wvrtview, int32_t wvrtwidth, bool wvrtbigendian,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Check the extent before touching the first byte of the view.
+	if (wvrtwidth < 1 || wvrtwidth > 8 || wvrtview.wvrt_length != wvrtwidth ||
+		wvrtview.wvrt_element_size != sizeof(uint8_t) || wvrtview.wvrt_items == NULL) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer byte width mismatch");
+	}
+	const uint8_t *wvrtbytes = wvrtview.wvrt_items;
+	uint64_t wvrtbits = 0;
+	// Read the most significant byte first in either requested order.
+	for (int32_t wvrtindex = 0; wvrtindex < wvrtwidth; ++wvrtindex) {
+		int32_t wvrtoffset = wvrtbigendian ? wvrtindex : wvrtwidth - 1 - wvrtindex;
+		wvrtbits = (wvrtbits << 8) | wvrtbytes[wvrtoffset];
+	}
+	return wvrtbits;
+}
+
+// Interpret two's complement without an out-of-range unsigned-to-signed cast.
+int64_t wvrt_signed_from_bytes(wvrt_slice wvrtview, int32_t wvrtwidth, bool wvrtbigendian,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	uint64_t wvrtbits = wvrt_int_from_bytes(wvrtview, wvrtwidth, wvrtbigendian, wvrtfile, wvrtstart, wvrtend);
+	uint64_t wvrtsign = UINT64_C(1) << (wvrtwidth * 8 - 1);
+	// Positive encodings already fit the signed result type.
+	if (wvrtbits < wvrtsign) {
+		return (int64_t)wvrtbits;
+	}
+	return -INT64_C(1) - (int64_t)((wvrtsign - 1) - (wvrtbits - wvrtsign));
 }
 
 // Check Stage 2 conversions before the target-specific wrapper narrows the value.
