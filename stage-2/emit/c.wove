@@ -10,17 +10,18 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only skip_disabled_siblings (type ModuleRead) (type SelectedDeclaration)))
-	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_native_record native_record_borrow_kind is_native_integer is_record_slice record_slice_element is_readable_slice is_writable_slice is_array_owner array_owner_element (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_native_record native_record_borrow_kind is_native_integer is_typed_slice typed_slice_element is_readable_slice is_writable_slice is_array_owner array_owner_element (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type write_member_name write_record_layouts write_record_layout_argument))
-	(use wove-file "./arrays.wove" (only write_fixed_list write_fixed_repeat write_fixed_subscript))
+	(use wove-file "./arrays.wove" (only write_fixed_list write_fixed_repeat write_fixed_subscript write_fixed_slice captures_fixed_call_argument))
 	(use wove-file "../scalar/owners.wove" (only is_native_owner native_handle_borrow_kind))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset)))
 	(use wove-file "./embeds.wove" (only close_embed_copy request_module_embeds bind_module_embeds))
 	(use wove-file "./c_values.wove" (only has_c_values write_c_value_name))
-	(use wove-file "./bindings.wove" (only write_binding_name write_module_bindings))
+	(use wove-file "./bindings.wove" (only write_binding_name write_module_bindings write_local_name))
 	(use wove-file "./owners.wove" (only write_native_destructor write_native_handle_borrow))
 	(use wove-file "./c_arguments.wove" (only write_c_argument_call))
-	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement) (value c_value_expression) (value c_value_assignment)))
+	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement) (value c_value_expression) (value c_value_assignment)
+			(value fixed_shared_loan) (value fixed_mut_loan)))
 	(use wove-file "../scalar/plan.wove"
 		(only read_module_declarations plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
 	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword word_shift_type is_i32_division is_fixed_access is_fixed_initializer (type ScalarOperator)))
@@ -28,7 +29,7 @@
 		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_i32_division open_slice_access open_shared_projection write_slice_length close_runtime_call
 			open_slice_offset write_slice_items open_array_allocation open_array_copy open_array_drop open_array_borrow))
 	(use wove-file "./text.wove" (only c_byte c_span c_text_fragment c_cast c_i32_bias write_c_name write_decimal_literal
-			function_name_role parameter_name_role local_name_role write_temporary_name open_static_value write_static_bytes))
+			function_name_role parameter_name_role write_temporary_name open_static_value write_static_bytes))
 
 	(struct EmitResult
 		(fields (written i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
@@ -78,17 +79,6 @@
 				(int.convert u32 (record.get (local param) position)) (borrow-shared (local source))
 				(record.get (local name) start) (record.get (local name) end)))))
 
-	(fn write_local_name
-		(:doc `Write a local's name from its original source row and spelling.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (index i32) (tree_base i32)
-			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
-		(body
-			(let name (slice.load (local nodes) (local index)))
-			(return (call write_c_name (borrow-mut (local output)) (local offset) (local writing) (local name_prefix) (call local_name_role)
-				(int.convert u32 (i32.sub.wrapping (local index) (local tree_base))) (borrow-shared (local source))
-				(record.get (local name) start) (record.get (local name) end)))))
-
 	(fn write_scalar
 		(:doc `Write one checked leaf as a literal, binding reference, or slice reborrow.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (row ScalarExpression) (tree_base i32)
@@ -119,6 +109,11 @@
 				(u32.eq (local kind) (u32 45))
 				(then (return (call write_temporary_name (borrow-shared (local source))
 					(record.get (local row) first) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(if
+				(:doc "A fixed local provides inline storage and its compile-time length.")
+				(bool.or (u32.eq (local kind) (local fixed_shared_loan)) (u32.eq (local kind) (local fixed_mut_loan)))
+				(then (return (call write_fixed_slice (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local row) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "An array loan projects the owner's pointer without allocating.")
 				(record.get (local row) borrowed_owner)
@@ -344,10 +339,10 @@
 					(return (call write_slice_length (borrow-mut (local output)) (local cursor) (local writing)))))
 			(let type (record.get (slice.load (local expressions) (local receiver)) type))
 			(if
-				(:doc "A record access indexes the typed backing array after the span-aware bounds check.")
-				(call is_record_slice (local type))
-				(then (return (call write_record_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
-					(borrow-shared (local records)) (local expression) (call record_slice_element (local type)) (local tree_base)
+				(:doc "A typed access indexes the original backing array after the span-aware bounds check.")
+				(call is_typed_slice (local type))
+				(then (return (call write_typed_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (local expression) (call typed_slice_element (local type)) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(let index (record.get (slice.load (local nodes) (local receiver)) next_sibling))
 			(let open (call open_slice_access (borrow-mut (local output)) (local offset) (local kind) (local writing)))
@@ -368,8 +363,8 @@
 				(record.get (local expression) target) (record.get (local expression) start)
 				(record.get (local expression) end) (local writing)))))
 
-	(fn write_record_slice_access
-		(:doc `Read or replace one record in the original storage after checking the index.`)
+	(fn write_typed_slice_access
+		(:doc `Read or replace one element in the original storage after checking the index.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
 			(expression ScalarExpression) (element u32) (tree_base i32) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
@@ -661,8 +656,10 @@
 						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))))
 					(let row (slice.load (local expressions) (local index)))
 					(if
-						(:doc "Literals and bindings can be read directly without a separate evaluation step.")
-						(call requires_value_temporary (record.get (local row) kind))
+						(:doc "Use the temporary if evaluation captured this argument before a later operand.")
+						(bool.or (call requires_value_temporary (record.get (local row) kind))
+							(call captures_fixed_call_argument (local row)
+								(record.get (slice.load (local nodes) (local index)) next_sibling) (borrow-shared (local records))))
 						(then (set (local cursor) (call write_temporary_name
 							(borrow-shared (local source)) (local index) (local tree_base)
 							(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
@@ -812,10 +809,13 @@
 								(bool.and (call is_fixed_access (local parent_kind)) (i32.eq (local index) (record.get (local parent) first)))))
 							(let already_ready (bool.or (bool.or (local converted) (local repeated))
 								(bool.or (local direct_array) (record.get (local operator) short_circuit))))
+							(let copy_argument (bool.and (u32.eq (local parent_kind) (u32 3))
+								(call captures_fixed_call_argument (local expression) (record.get (local node) next_sibling)
+									(borrow-shared (local records)))))
 							(if
 								(:doc "Save an eager compound value or checked operand before moving to its sibling.")
 								(bool.and (bool.not (local already_ready))
-									(bool.or (call requires_value_temporary (local kind))
+									(bool.or (bool.or (local copy_argument) (call requires_value_temporary (local kind)))
 										(bool.or (u32.lt (u32 0) (record.get (local parent_operator) result))
 											(bool.or (call is_c_argument_call (local parent) (borrow-shared (local functions)))
 												(bool.or
@@ -1172,7 +1172,7 @@
 				(local function) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(let comma (call c_byte (borrow-mut (local output)) (local entry) (u8 44) (local writing)))
 			(let type (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (call record_slice_element (record.get (local span) type))
+				(borrow-shared (local records)) (call typed_slice_element (record.get (local span) type))
 				(borrow-mut (local output)) (local comma) (local name_prefix) (local writing)))
 			(let close (call c_byte (borrow-mut (local output)) (local type) (u8 41) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local close) (u8 10) (local writing)))))

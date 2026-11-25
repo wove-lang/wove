@@ -258,6 +258,21 @@ reads an element and `(array.store (local data) index value)` writes to
 a `let-mut` local. Both take an exact `i32` index and trap at the access
 span if the index is outside the declared extent.
 
+A fixed `u32` or `u64` local can lend all its elements to a function
+whose formal is a `shared-slice` or `mut-slice` of the same element type.
+For example, `(borrow-shared (local words))` supplies a matching
+`(shared-slice u64)` formal. A mutable loan uses
+`(borrow-mut (local words))` and requires a `let-mut` local. The
+descriptor carries the original backing storage and declared extent,
+including zero. Loans last through the call and follow the same
+exclusivity rules as other slice arguments.
+
+In the callee, `slice.len` counts elements and `slice.load` returns
+the declared word type. `slice.store` takes an exact word of that type
+and writes into the original fixed array through a mutable slice.
+A checked load or store reports an invalid `i32` index at the original
+operation span.
+
 `(bool true)` and `(bool false)` are scalar literals.
 `i32.eq` and `i32.lt` compare signed operands. `u8.eq`, `u8.lt`,
 `u32.eq`, and `u32.lt` compare unsigned operands. Each comparison
