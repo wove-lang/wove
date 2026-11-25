@@ -196,6 +196,12 @@ int32_t wove_cli_publish(const char *target, const char *profile, uint32_t mode,
 	return published ? 0 : -1;
 }
 
+// Write one complete text view and surface a stream error in the command status.
+int32_t wove_cli_stdout(const uint8_t *bytes, int32_t length) {
+	const bool written = fwrite(bytes, 1, (size_t)length, stdout) == (size_t)length;
+	return written && fflush(stdout) == 0 ? 0 : 1;
+}
+
 // Write the Wove serializer's original JSON bytes as one stderr record.
 int32_t wove_cli_stderr(const uint8_t *bytes, int32_t length) {
 	const bool written = fwrite(bytes, 1, (size_t)length, stderr) == (size_t)length;

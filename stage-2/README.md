@@ -643,6 +643,21 @@ terminating signal, or -1 on host failure. Consumers link
 [the POSIX bridge](io/process.c) and make its header available to the
 generated C translation unit.
 
+## Compiler version
+
+`wovec --version` and `wovec version` print
+`wovec <major>.<minor>.YYMMDD.HHMM-<git-short-hash>`. The release components
+live in [the version module](driver/version.wove). The build metadata uses
+the UTC author date of Git `HEAD` and the first seven lowercase hexadecimal
+digits of its revision.
+
+Make generates `build/version.txt`, or `version.txt` under the selected
+`BUILD_DIR`, before compiling the native entry. Set `WOVEC_BUILD_VERSION`
+to a valid `YYMMDD.HHMM-SHA` value for an explicit version or an archive
+without Git metadata. Identical content keeps the asset's modification time.
+The compiler embeds the generated line and reads its compiled bytes when
+printing the version.
+
 ## Native single-source compilation
 
 Run `make stage-2` to build `build/stage-2/wovec`. The seed-built Stage 2

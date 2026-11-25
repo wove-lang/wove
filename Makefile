@@ -7,6 +7,9 @@ GCC ?= gcc
 GCC_CXX ?= g++
 CFLAGS ?= -O2 -Wall -Wextra
 BUILD_DIR ?= build
+BUILD_VERSION := $(BUILD_DIR)/version.txt
+VERSION_GENERATOR := tools/build-info.sh
+VERSION_FIXTURES := tests/stage-2/version
 
 STAGE1 := $(BUILD_DIR)/stage-1
 STAGE2 := $(BUILD_DIR)/stage-2
@@ -62,7 +65,7 @@ CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove projec
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove)
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove version.wove)
 NATIVE_WOVE_SOURCES = $(sort $(SOURCE_SCAN_MODULE) $(SOURCE_MODULE_READER) $(SOURCE_STRINGS_MODULE) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
@@ -92,7 +95,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	}' "$(OWNERSHIP_CASES)")
 
 .PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
-.PHONY: test-stage-2-gcc test-stage-2-gcc-live test-stage-2-blake2b test-stage-2-native test-stage-2-process
+.PHONY: test-stage-2-gcc test-stage-2-gcc-live test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version force-build-info
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -107,7 +110,7 @@ test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process
+test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -141,6 +144,11 @@ test-stage-2-native: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-native: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-native: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
+
+# Check generated metadata and version invalidation in an isolated build.
+test-stage-2-version: $(NATIVE_COMPILER) $(BUILD_VERSION)
+	+sh "$(VERSION_FIXTURES)/check.sh" "$(MAKE)" "$(abspath $(BUILD_DIR))" "$(NATIVE_COMPILER)" "$(BUILD_VERSION)" \
+		"$(VERSION_FIXTURES)/cases.tsv" "$(abspath $(STAGE1))" "$(abspath $(SOURCE_SCAN))"
 
 # Exercise the project loader with the checked-in config and standalone cases.
 test-stage-2-config: $(CONFIG_PROGRAM)
@@ -193,13 +201,29 @@ $(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(STAGE1)/wovec.c $(STAGE1)/ru
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE1)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
-# Ask the seed-built Stage 2 graph emitter to compile the native compiler root.
-$(STAGE2)/wovec.c: $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py
-	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(COMPILER_ROOT)" $(NATIVE_WOVE_SOURCES)
+# Check the current Git commit or explicit override on each native build.
+force-build-info:
+
+$(BUILD_VERSION): $(VERSION_GENERATOR) force-build-info
+	@sh "$(VERSION_GENERATOR)" "$@"
+
+# Compare version bytes because older Make releases ignore subsecond mtime changes.
+define build_versioned
+	@set -eu; \
+	if [ ! -f "$@" ] || [ -n "$(filter-out force-build-info $(BUILD_VERSION),$?)" ] || \
+		! cmp -s "$(BUILD_VERSION)" "$@.version"; then \
+		$(1); \
+		cp "$(BUILD_VERSION)" "$@.version"; \
+	fi
+endef
+
+# Ask the seed-built Stage 2 graph emitter to compile the root and its build asset.
+$(STAGE2)/wovec.c: $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py $(BUILD_VERSION) force-build-info
+	$(call build_versioned,mkdir -p "$(@D)"; $(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" "$(COMPILER_ROOT)" $(NATIVE_WOVE_SOURCES))
 
 # Link only the emitted native compiler, its host file bridges, and the runtime.
-$(NATIVE_COMPILER): $(STAGE2)/wovec.c $(NATIVE_DRIVER)/host.c $(STAGE1)/runtime.o $(NATIVE_DRIVER)/host.h
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(NATIVE_DRIVER)" $(filter-out %.h,$^) -o "$@"
+$(NATIVE_COMPILER): $(STAGE2)/wovec.c $(NATIVE_DRIVER)/host.c $(STAGE1)/runtime.o $(NATIVE_DRIVER)/host.h $(BUILD_VERSION) force-build-info
+	$(call build_versioned,$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(NATIVE_DRIVER)" $(filter-out %.h $(BUILD_VERSION) force-build-info,$^) -o "$@")
 
 # Build utility-only Wove programs with the ordinary Python seed and runtime.
 $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove stage-2/hashing/%.wove $(SEED) $(STAGE1)/runtime.o

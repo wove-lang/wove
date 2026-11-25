@@ -17,6 +17,7 @@ int32_t wove_cli_read_project(uint8_t *bytes, int32_t length);
 bool wove_cli_valid_target(const char *target);
 int32_t wove_cli_publish(const char *target, const char *profile, uint32_t mode, const char *input,
 	const uint8_t *bytes, int32_t length);
+int32_t wove_cli_stdout(const uint8_t *bytes, int32_t length);
 int32_t wove_cli_stderr(const uint8_t *bytes, int32_t length);
 int32_t wove_cli_text(uint32_t text, uint8_t *bytes, int32_t capacity);
 
