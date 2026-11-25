@@ -8,9 +8,10 @@
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/types.wove" (only is_builtin_integer))
 	(use wove-file "../scalar/owners.wove" (only is_optional_byte_owner_type))
 	(use wove-file "../scalar/records.wove" (only record_index member_value_type is_record_type is_native_integer native_integer_index is_typed_slice is_writable_slice is_array_owner
-		is_fixed_array is_native_record native_field_type is_record_reference is_mutable_record_reference record_reference_target (type ScalarRecord)))
+		is_fixed_array is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_target (type ScalarRecord)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only (type ScalarParameter)))
 	(use wove-file "./owners.wove" (only write_bridge_result_type write_native_type))
@@ -62,24 +63,19 @@
 						(slice.load (local nodes) (record.get (local row) native))
 						(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
-				(:doc "Record references are pointers to the exact type with the requested const qualification.")
-				(call is_record_reference (local type))
+				(:doc "A place reference is a pointer to the exact C type with the requested access.")
+				(call is_place_reference (local type))
 				(then
-					(let row (slice.load (local records) (call record_index (call record_reference_target (local type)))))
 					(let-mut cursor (local offset))
 					(if
-						(:doc "Use const for a shared reference to the complete object.")
-						(bool.not (call is_mutable_record_reference (local type)))
+						(:doc "Use const for a shared reference to the original storage.")
+						(bool.not (call is_mutable_place_reference (local type)))
 						(then (set (local cursor) (call c_literal_text (borrow-shared (local c_const)) (borrow-mut (local output)) (local cursor) (local writing)))))
-					(if
-						(:doc "Use the defining C type for bridge records and the generated typedef for ordinary Wove records.")
-						(call is_native_record (local row))
-						(then (set (local cursor) (call write_native_type (borrow-shared (local source))
-							(slice.load (local nodes) (record.get (local row) native))
-							(borrow-mut (local output)) (local cursor) (local writing))))
-						(else (set (local cursor) (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes))
-							(local row) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
-					(return (call c_byte (borrow-mut (local output)) (local cursor) 42u8 (local writing)))))
+					(let target (call place_reference_target (borrow-shared (local records)) (local type)))
+					(let end (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local target) (borrow-mut (local output))
+						(local cursor) (local name_prefix) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local end) 42u8 (local writing)))))
 			(if
 				(:doc "Native values use their full C types. Wove-defined records use generated typedefs.")
 				(call is_record_type (local type))
@@ -156,17 +152,24 @@
 					(return (call c_byte (borrow-mut (local output)) (local dash) 62u8 (local writing)))))
 			(return (call c_byte (borrow-mut (local output)) (local offset) 46u8 (local writing)))))
 
-	(fn captures_record_argument
-		(:doc `Capture fixed arrays and mutable record locals before evaluating later call arguments.`)
+	(fn captures_value_argument
+		(:doc `Capture mutable scalar and record values and fixed arrays before later call arguments.`)
 		(params (row ScalarExpression) (next i32) (records (shared-slice ScalarRecord)))
 		(returns bool)
 		(body
 			(let type (record.get (local row) type))
-			(return (bool.and (i32.lt -1i32 (local next))
-				(bool.and (u32.eq (record.get (local row) kind) 6u32)
-					(bool.and (call is_record_type (local type))
-						(bool.or (record.get (local row) mutable_place)
-							(call is_fixed_array (slice.load (local records) (call record_index (local type)))))))))))
+			(if
+				(:doc "Only a local read with a later argument can need an early capture.")
+				(bool.or (i32.lt (local next) 0i32) (bool.not (u32.eq (record.get (local row) kind) 6u32)))
+				(then (return (bool false))))
+			(if
+				(:doc "Fixed arrays and mutable record locals retain their existing by-value capture rules.")
+				(call is_record_type (local type))
+				(then (return (bool.or (record.get (local row) mutable_place)
+					(call is_fixed_array (slice.load (local records) (call record_index (local type))))))))
+			(return (bool.and (record.get (local row) mutable_place)
+				(bool.or (call is_builtin_integer (local type))
+					(bool.or (call is_native_integer (local type)) (u32.eq (local type) 12u32)))))))
 
 	(fn write_field_place
 		(:doc `Write a checked Wove field path against its original binding.`)
@@ -177,7 +180,7 @@
 		(body
 			(let-mut root (record.get (slice.load (local expressions) (local place)) projection))
 			(let value (slice.load (local expressions) (local root)))
-			(let-mut reference (call is_record_reference (record.get (local value) type)))
+			(let-mut reference (call is_place_reference (record.get (local value) type)))
 			(let-mut cursor (local offset))
 			(if
 				(:doc "A projected parameter starts at its original formal.")
@@ -203,8 +206,8 @@
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(return (local cursor))))
 
-	(fn write_record_borrow
-		(:doc `Write the address of a checked record place or forward its existing pointer.`)
+	(fn write_place_borrow
+		(:doc `Write the address of a checked place or forward its existing pointer.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (row ScalarExpression)
 			(parameters (shared-slice ScalarParameter)) (expressions (shared-slice ScalarExpression))
 			(tree_base i32) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
@@ -212,7 +215,7 @@
 		(body
 			(let place (record.get (local row) projection))
 			(if
-				(:doc "Append the field path directly to the original binding when borrowing a subrecord.")
+				(:doc "Append the field path directly to the original binding.")
 				(i32.lt -1i32 (local place))
 				(then
 					(let open (call c_byte (borrow-mut (local output)) (local offset) 38u8 (local writing)))
@@ -231,7 +234,7 @@
 			(let-mut cursor (local offset))
 			(if
 				(:doc "A by-value formal lends its storage. A reference formal already holds the address.")
-				(bool.not (call is_record_reference (record.get (local parameter) type)))
+				(bool.not (call is_place_reference (record.get (local parameter) type)))
 				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 38u8 (local writing)))))
 			(return (call write_parameter_name (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local parameter) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
