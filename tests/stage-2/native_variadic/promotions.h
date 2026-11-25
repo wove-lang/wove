@@ -41,4 +41,18 @@ static inline int32_t copy_first(const volatile signed char *bytes, char *target
 	return 42;
 }
 
+// Write through four native byte pointers and consume one promoted tail value.
+static inline int32_t write_four(uint8_t *first, uint8_t *second, uint8_t *third, uint8_t *fourth, int32_t count, ...) {
+	va_list args;
+	va_start(args, count);
+	int expected = va_arg(args, int);
+	va_end(args);
+	if (count != 1 || expected != 42) { return 1; }
+	first[0] = (uint8_t)expected;
+	second[0] = 1;
+	third[0] = 2;
+	fourth[0] = 3;
+	return first[0];
+}
+
 #endif

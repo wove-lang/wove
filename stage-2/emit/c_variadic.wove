@@ -4,8 +4,9 @@
 	(:doc `Verify typed variadic bridge declarations against the included C prototypes.
 
 	The check uses the adapted C types of the fixed prefix and admits
-	compatible byte pointers for bounded views. Calls keep the
-	declared tail values in typed temporaries so the C compiler applies
+	compatible byte pointers for bounded views. Clang's transparent unions
+	match each byte pointer independently inside one function type. Calls use
+	the header declaration and keep the tail values in typed temporaries for
 	the selected target's default argument promotions.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
@@ -18,57 +19,39 @@
 	(let check_open "_Static_assert(_Generic(&(")
 	(let after_name "),")
 	(let before_formals "(*)(")
-	(let match_close "...):1,")
-	(let check_close "default:0),\"Wove C variadic prototype does not match its declared fixed prefix and result\");\n")
+	(let check_close "...):1,default:0),\"Wove C variadic prototype does not match its declared fixed prefix and result\");\n")
 	(let string_pointer "const char*")
-	(let const_qualifier "const ")
-	(let volatile_qualifier "volatile ")
-	(let void_pointer "void*")
-	(let char_pointer "char*")
-	(let signed_pointer "signed char*")
-	(let unsigned_pointer "unsigned char*")
+	(let byte_pointer_union "union __attribute__((__transparent_union__)){")
+	(let writable_pointer_members
+		`void*wvrt_p0;char*wvrt_p1;signed char*wvrt_p2;unsigned char*wvrt_p3;
+volatile void*wvrt_p4;volatile char*wvrt_p5;volatile signed char*wvrt_p6;volatile unsigned char*wvrt_p7;`)
+	(let readonly_pointer_members
+		`const void*wvrt_p8;const char*wvrt_p9;const signed char*wvrt_p10;const unsigned char*wvrt_p11;
+const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed char*wvrt_p14;const volatile unsigned char*wvrt_p15;}`)
 
 	(fn write_byte_pointer_type
-		(:doc `Write a compatible choice of void or character pointer with its pointee qualifiers.`)
-		(params (param ScalarParameter) (choice u8) (output (mut-slice u8)) (offset u32) (writing bool))
+		(:doc `Write a transparent union for one fixed byte view.
+
+		The union is used only in the type assertion. Its members preserve the
+		view's permitted pointee qualifiers. Generated calls use the declaration
+		from the header and pass the original backing pointer.`)
+		(params (param ScalarParameter) (output (mut-slice u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
-			(let variant (int.convert u32 (local choice)))
-			(let-mut cursor (local offset))
+			(let-mut cursor (call c_literal_text (borrow-shared (local byte_pointer_union))
+				(borrow-mut (local output)) (local offset) (local writing)))
 			(if
-				(:doc "Shared storage always needs const. Mutable storage may also lend read-only access.")
-				(bool.or (u32.eq (record.get (local param) type) (u32 34))
-					(u32.lt (u32 0) (u32.and (local variant) (u32 8))))
-				(then (set (local cursor) (call c_literal_text (borrow-shared (local const_qualifier))
+				(:doc "A mutable view can also satisfy writable pointer formals.")
+				(u32.eq (record.get (local param) type) (u32 38))
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local writable_pointer_members))
 					(borrow-mut (local output)) (local cursor) (local writing)))))
-			(if
-				(:doc "Adding volatile to either kind of view is a compatible pointer conversion.")
-				(u32.lt (u32 0) (u32.and (local variant) (u32 4)))
-				(then (set (local cursor) (call c_literal_text (borrow-shared (local volatile_qualifier))
-					(borrow-mut (local output)) (local cursor) (local writing)))))
-			(let element (u32.and (local variant) (u32 3)))
-			(if
-				(:doc "Void pointers are the backing storage ABI.")
-				(u32.eq (local element) (u32 0))
-				(then (return (call c_literal_text (borrow-shared (local void_pointer)) (borrow-mut (local output))
-					(local cursor) (local writing)))))
-			(if
-				(:doc "Plain char is distinct from signed and unsigned char.")
-				(u32.eq (local element) (u32 1))
-				(then (return (call c_literal_text (borrow-shared (local char_pointer)) (borrow-mut (local output))
-					(local cursor) (local writing)))))
-			(if
-				(:doc "A signed character pointer can view the same byte storage.")
-				(u32.eq (local element) (u32 2))
-				(then (return (call c_literal_text (borrow-shared (local signed_pointer)) (borrow-mut (local output))
-					(local cursor) (local writing)))))
-			(return (call c_literal_text (borrow-shared (local unsigned_pointer)) (borrow-mut (local output))
-				(local cursor) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local readonly_pointer_members))
+				(borrow-mut (local output)) (local cursor) (local writing)))))
 
 	(fn write_fixed_parameter_type
 		(:doc `Write the C argument type after applying a fixed formal's bridge contract.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
-			(param ScalarParameter) (choice u8) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+			(param ScalarParameter) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let mode (record.get (local param) c_mode))
@@ -80,69 +63,11 @@
 			(if
 				(:doc "The C header can use any compatible byte pointer for a bounded view.")
 				(call is_c_bytes_mode (local mode))
-				(then (return (call write_byte_pointer_type (local param) (local choice)
+				(then (return (call write_byte_pointer_type (local param)
 					(borrow-mut (local output)) (local offset) (local writing)))))
 			(return (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (record.get (local param) type)
 				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
-
-	(fn next_byte_pointer_choices
-		(:doc `Advance the fixed byte-pointer choices, carrying to the next byte view when a choice wraps.
-
-		Ordinary formals always retain their exact C type.`)
-		(params (parameters (shared-slice ScalarParameter)) (first i32) (choices (mut-slice u8)))
-		(returns bool)
-		(body
-			(let-mut position (i32 0))
-			(while
-				(:doc "Only fixed c_bytes formals contribute alternatives.")
-				(i32.lt (local position) (slice.len (local choices)))
-				(body
-					(let param (slice.load (local parameters) (i32.add.wrapping (local first) (local position))))
-					(if
-						(:doc "Shared views vary the element and volatile qualifier. Mutable views can also add const.")
-						(call is_c_bytes_mode (record.get (local param) c_mode))
-						(then
-							(let-mut limit (u32 8))
-							(if
-								(:doc "Mutable views add the four const and four const volatile choices.")
-								(u32.eq (record.get (local param) type) (u32 38))
-								(then (set (local limit) (u32 16))))
-							(let next (u32.add.wrapping (int.convert u32 (slice.load (local choices) (local position))) (u32 1)))
-							(if
-								(:doc "Keep the new choice when no carry is needed.")
-								(u32.lt (local next) (local limit))
-								(then
-									(slice.store (local choices) (local position) (int.convert u8 (local next)))
-									(return (bool true))))
-							(slice.store (local choices) (local position) (u8 0))))
-					(set (local position) (i32.add.wrapping (local position) (i32 1)))))
-			(return (bool false))))
-
-	(fn write_c_variadic_match
-		(:doc `Write one exact variadic function pointer association for the current byte-pointer choices.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
-			(parameters (shared-slice ScalarParameter)) (function ScalarFunction) (choices (shared-slice u8))
-			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
-		(body
-			(let-mut cursor (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (record.get (local function) result)
-				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
-			(set (local cursor) (call c_literal_text (borrow-shared (local before_formals)) (borrow-mut (local output)) (local cursor) (local writing)))
-			(let first (record.get (local function) params))
-			(let-mut position (i32 0))
-			(while
-				(:doc "The header describes only the fixed formals, in their declared order.")
-				(i32.lt (local position) (slice.len (local choices)))
-				(body
-					(let param (slice.load (local parameters) (i32.add.wrapping (local first) (local position))))
-					(set (local cursor) (call write_fixed_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (local param) (slice.load (local choices) (local position))
-						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
-					(set (local position) (i32.add.wrapping (local position) (i32 1)))))
-			(return (call c_literal_text (borrow-shared (local match_close)) (borrow-mut (local output)) (local cursor) (local writing)))))
 
 	(fn write_c_variadic_check
 		(:doc `Require the header's real function pointer type to include the declared fixed prefix and ellipsis.`)
@@ -156,21 +81,19 @@
 			(set (local cursor) (call c_span (borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end)
 				(borrow-mut (local output)) (local cursor) (local writing)))
 			(set (local cursor) (call c_literal_text (borrow-shared (local after_name)) (borrow-mut (local output)) (local cursor) (local writing)))
-			(let first (record.get (local function) params))
-			(let-mut choices (array.alloc u8 (record.get (local function) c_variadic)))
-			(let-mut more (bool true))
-			(let capacity (int.convert u32 (slice.len (local output))))
+			(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (record.get (local function) result)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(set (local cursor) (call c_literal_text (borrow-shared (local before_formals)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(let-mut parameter (record.get (local function) params))
+			(let tail (i32.add.wrapping (local parameter) (record.get (local function) c_variadic)))
 			(while
-				(:doc "Keep the fixed arity, result and ellipsis exact for every compatible byte-pointer combination.")
-				(local more)
+				(:doc "Each fixed formal contributes one type to the prototype, even when a byte view admits several pointers.")
+				(i32.lt (local parameter) (local tail))
 				(body
-					(if
-						(:doc "Stop measuring once the translation unit cannot fit.")
-						(u32.lt (local capacity) (local cursor))
-						(then (return (local cursor))))
-					(set (local cursor) (call write_c_variadic_match (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (borrow-shared (local parameters)) (local function)
-						(borrow-shared (local choices)) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-					(set (local more) (call next_byte_pointer_choices (borrow-shared (local parameters))
-						(local first) (borrow-mut (local choices))))))
+					(set (local cursor) (call write_fixed_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (slice.load (local parameters) (local parameter))
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
+					(set (local parameter) (i32.add.wrapping (local parameter) (i32 1)))))
 			(return (call c_literal_text (borrow-shared (local check_close)) (borrow-mut (local output)) (local cursor) (local writing))))))
