@@ -4,32 +4,29 @@
 	(:doc `Run one tool with an explicit environment and complete stdout saved to a private file.`)
 
 	(use wove-file "./process.wove" (only valid_program count_arguments argument_vector))
+	(use wove-file "./capture/descriptors.wove" (only move_above_stdio))
 	(use wove-file "./capture/child.wove" (only reap_capture_child))
-	(use c-header "<fcntl.h>" (only O_CREAT O_EXCL O_WRONLY))
-	(use c-header "<spawn.h>" (only (type Pid) (type Actions) (type Attributes) (type Mode)
-		posix_spawn_file_actions_init posix_spawn_file_actions_addopen posix_spawnattr_init posix_spawnp))
-	(use c-header "<unistd.h>" (only STDOUT_FILENO))
+	(use c-header "<fcntl.h>" (only open O_CREAT O_EXCL O_WRONLY O_CLOEXEC (type Mode)))
+	(use c-header "<spawn.h>" (only (type Pid) (type Actions) (type Attributes)
+		posix_spawn_file_actions_init posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addclose
+		posix_spawnattr_init posix_spawnp))
+	(use c-header "<unistd.h>" (only close STDOUT_FILENO))
 
-	(fn run_process_stdout_file
-		(:doc `Create stdout in the child's file actions, inherit stderr, and reap the child.`)
-		(params (program (shared-slice u8)) (arguments (shared-slice u8)) (path (shared-slice u8))
+	(fn spawn_to_writer
+		(:doc `Create the child's standard output from one already open descriptor. PATH retries can reuse it.`)
+		(params (program (shared-slice u8)) (vector (shared-slice (owned-array u8))) (writer i32)
 			(environment (shared-slice (owned-array u8)))) (returns i32)
 		(body
-			(if (bool.not (call valid_program (borrow-shared (local program)))) (then (return -1i32)))
-			(let count (call count_arguments (borrow-shared (local arguments))))
-			(if (i32.lt (local count) 0i32) (then (return -1i32)))
-			(let vector (call argument_vector (borrow-shared (local program)) (borrow-shared (local arguments)) (local count)))
 			(let-mut actions (native.alloc Actions))
 			(if
 				(:doc `The action owner needs successful initialization before it can be passed to spawn.`)
 				(bool.not (i32.eq (call posix_spawn_file_actions_init (borrow-mut (local actions))) 0i32))
 				(then (return -1i32)))
-			(let flags (int.convert i32 (u32.or (int.convert u32 (local O_CREAT))
-				(u32.or (int.convert u32 (local O_EXCL)) (int.convert u32 (local O_WRONLY))))))
 			(if
-				(:doc `Refuse to follow or replace any preexisting entry at the private trace path.`)
-				(bool.not (i32.eq (call posix_spawn_file_actions_addopen (borrow-mut (local actions))
-					(local STDOUT_FILENO) (borrow-shared (local path)) (local flags) (int.convert Mode 384i32)) 0i32))
+				(:doc `Duplicate the writer onto stdout before closing the original descriptor in the child.`)
+				(bool.not (bool.and
+					(i32.eq (call posix_spawn_file_actions_adddup2 (borrow-mut (local actions)) (local writer) (local STDOUT_FILENO)) 0i32)
+					(i32.eq (call posix_spawn_file_actions_addclose (borrow-mut (local actions)) (local writer)) 0i32)))
 				(then (return -1i32)))
 			(let-mut attributes (native.alloc Attributes))
 			(if
@@ -38,7 +35,34 @@
 				(then (return -1i32)))
 			(let-mut child (int.convert Pid 0i32))
 			(let result (call posix_spawnp (borrow-mut (local child)) (borrow-shared (local program))
-				(borrow-shared (local actions)) (borrow-shared (local attributes)) (borrow-shared (local vector)) (borrow-shared (local environment))))
+				(borrow-shared (local actions)) (borrow-shared (local attributes))
+				(borrow-shared (local vector)) (borrow-shared (local environment))))
 			(if (bool.not (i32.eq (local result) 0i32)) (then (return -1i32)))
-			(return (call reap_capture_child (int.convert i32 (local child))))))
+			(return (int.convert i32 (local child)))))
+
+	(fn run_process_stdout_file
+		(:doc `Open stdout before launching, inherit stderr, and reap the child after closing the parent's writer.`)
+		(params (program (shared-slice u8)) (arguments (shared-slice u8)) (path (shared-slice u8))
+			(environment (shared-slice (owned-array u8)))) (returns i32)
+		(body
+			(if (bool.not (call valid_program (borrow-shared (local program)))) (then (return -1i32)))
+			(let count (call count_arguments (borrow-shared (local arguments))))
+			(if (i32.lt (local count) 0i32) (then (return -1i32)))
+			(let vector (call argument_vector (borrow-shared (local program)) (borrow-shared (local arguments)) (local count)))
+			(let flags (int.convert i32 (u32.or (u32.or (int.convert u32 (local O_CREAT)) (int.convert u32 (local O_EXCL)))
+				(u32.or (int.convert u32 (local O_WRONLY)) (int.convert u32 (local O_CLOEXEC))))))
+			(let descriptor (call open (borrow-shared (local path)) (local flags) (int.convert Mode 384i32)))
+			(if (i32.lt (local descriptor) 0i32) (then (return -1i32)))
+			(let writer (call move_above_stdio (local descriptor)))
+			(if (i32.lt (local writer) 0i32) (then (return -1i32)))
+			(let child (call spawn_to_writer (borrow-shared (local program)) (borrow-shared (local vector))
+				(local writer) (borrow-shared (local environment))))
+			(let closed (call close (local writer)))
+			(if (i32.lt (local child) 0i32) (then (return -1i32)))
+			(let status (call reap_capture_child (local child)))
+			(if
+				(:doc `Reap the started child even if the parent could not close its copy of stdout.`)
+				(bool.not (i32.eq (local closed) 0i32))
+				(then (return -1i32)))
+			(return (local status))))
 )
