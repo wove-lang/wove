@@ -424,7 +424,7 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 
 # Keep required providers in the build graph even when a source file is missing.
 ROUND_TRIP_PROVIDERS := $(addprefix $(OWNERSHIP_TESTS)/imports/,left.wove right.wove nested/shared.wove)
-RUNTIME_LOCATION_PROVIDER := $(OWNERSHIP_TESTS)/slice.load_negative.wove
+RUNTIME_LOCATION_PROVIDER := $(OWNERSHIP_TESTS)/array.load_negative.wove
 C_HEADER_IMPORT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,imports.c_headers.wove imports/c_headers/provider.wove)
 C_HEADER_PROJECT_HEADERS := $(addprefix $(OWNERSHIP_TESTS)/imports/c_headers/,project.h link lookup.h tree/lookup.h tree/leaf/value.h)
 MODULE_BINDINGS_PROVIDER := $(OWNERSHIP_TESTS)/modules/bindings.wove

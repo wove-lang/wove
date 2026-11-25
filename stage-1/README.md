@@ -67,10 +67,11 @@ The new value has the same type as the binding.
 
 Allocate an owned buffer with `(array.alloc Token count)` for a declared
 copyable record, or use `u8` for a byte buffer. A whole-buffer loan preserves
-the buffer's element type in `(shared-slice Token)` or `(mut-slice Token)`.
-`slice.len` counts elements. `slice.load` copies one element by value.
-`slice.store` requires a mutable view and the exact declared element type.
-Both take an `i32` element index and trap before an out-of-bounds access.
+the buffer's element type in `(shared-array Token)` or `(mut-array Token)`.
+`array.len` counts elements of a live owner or view. `array.load` copies
+one element by value. `array.store` requires a mutable owner or exclusive
+view and the exact declared element type. Loads and stores take an `i32`
+element index and trap before an out-of-bounds access.
 
 Use `borrow-shared` to forward either kind of slice to a helper.
 Use `borrow-mut` to forward a mutable slice exclusively. A reborrow
@@ -78,8 +79,9 @@ uses the original storage, and its loan stays active through later
 arguments and the call. Shared loans permit reads of the parent.
 Exclusive loans suspend access to the parent until the helper returns.
 
-Use `(borrow-shared (slice.range (local source) start end))` to pass a
-half-open range of a named byte buffer or slice. The seed evaluates the
+Use `(borrow-shared (array.range (local source) start end))` to pass a
+half-open range of a named byte owner or view. Use `borrow-mut` with a
+writable owner or exclusive view to lend a writable range. The seed evaluates the
 `i32` endpoints once from left to right, then checks
 `0 <= start <= end <= source.len`. The helper sees the original
 storage starting at `start` and a length of `end - start`.
@@ -99,8 +101,8 @@ reads the bindings declared or selected in its defining file.
 
 A string initializes a shared `u8` slice backed by one static read-only
 table. Its length counts decoded UTF-8 bytes, with no added NUL. Use
-`(slice.load (local base16_alphabet) (local index))` with the ordinary
-slice bounds checks. The same place works with `slice.len` and
+`(array.load (local base16_alphabet) (local index))` with the ordinary
+slice bounds checks. The same place works with `array.len` and
 `borrow-shared`. Attempts to write a module binding fail at the source
 operation.
 
@@ -118,7 +120,7 @@ and one `body`, including explicit `(params)` for zero arguments.
   (body (return 0i32)))
 ```
 
-Application `main` takes a `(shared-slice u8)` and a shared slice of a
+Application `main` takes a `(shared-array u8)` and a shared slice of a
 record with exactly `(start i32)` and `(end i32)` in that order, and returns
 `i32`. The seed emits the same `int main(int argc, char **argv)` wrapper
 as Stage 2. It excludes the executable name and supplies two empty views

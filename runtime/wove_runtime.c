@@ -549,6 +549,33 @@ wvrt_slice wvrt_slice_range_u8_at_span(wvrt_slice wvrtview, int32_t wvrtstart, i
 	return wvrt_slice_subrange(wvrtview.wvrt_items, wvrtstart, wvrtend);
 }
 
+// Project a checked mutable byte range while retaining the backing address.
+static wvrt_mut_slice wvrt_mut_slice_subrange(void *wvrtitems, int32_t wvrtstart, int32_t wvrtend) {
+	uint8_t *wvrt_base = wvrtitems;
+	if (wvrtstart != 0) { wvrt_base += (size_t)wvrtstart; }
+	return (wvrt_mut_slice){wvrt_base, wvrtend - wvrtstart, sizeof(uint8_t)};
+}
+
+// Form a seed mutable view with a diagnostic at the range's original line.
+wvrt_mut_slice wvrt_mut_slice_range_u8(void *wvrtitems, int32_t wvrtlength,
+	int32_t wvrtstart, int32_t wvrtend, wvrt_location wvrtsite) {
+	// Do not derive an address before both endpoints have passed the bounds check.
+	if (!wvrt_slice_range_valid(wvrtlength, wvrtstart, wvrtend)) {
+		wvrt_trap(wvrtsite, "slice range out of bounds");
+	}
+	return wvrt_mut_slice_subrange(wvrtitems, wvrtstart, wvrtend);
+}
+
+// Form a native mutable view with the original source span.
+wvrt_mut_slice wvrt_mut_slice_range_u8_at_span(wvrt_mut_slice wvrtview, int32_t wvrtstart, int32_t wvrtend,
+	int32_t wvrtfile, int32_t wvrtspan_start, int32_t wvrtspan_end) {
+	// Bounds failures precede pointer arithmetic and entry into the callee.
+	if (!wvrt_slice_range_valid(wvrtview.wvrt_length, wvrtstart, wvrtend)) {
+		wvrt_trap_at_span(wvrtfile, wvrtspan_start, wvrtspan_end, "slice range out of bounds");
+	}
+	return wvrt_mut_slice_subrange(wvrtview.wvrt_items, wvrtstart, wvrtend);
+}
+
 // Check an element index in the signed slice length domain.
 static bool wvrt_slice_index_valid(int32_t wvrtlength, int32_t wvrtindex) {
 	return 0 <= wvrtindex && wvrtindex < wvrtlength;
