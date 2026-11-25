@@ -514,9 +514,10 @@ imports `admit_source` and `scan_token` from [the scanner](source/scan.wove).
 Its parameterless bootstrap entry admits an empty view and expects an EOF
 token.
 
-The [scanner fixture](../tests/stage-2/source_scan.probe.c) uses the same
-generated C. Run `make test-stage-2` to run the bootstrap entry and compare
-scanner streams with the Stage 1 lexer. The
+The seed translates a separate [Wove fixture root](../tests/stage-2/source_scan.wove)
+for the [C source probe](../tests/stage-2/source_scan.probe.c). The probe also
+supplies graph emission when building the native compiler. Run `make test-stage-2`
+to run the bootstrap entry and compare scanner streams with the Stage 1 lexer. The
 [layout fixtures](../tests/stage-2/lexer_layouts.tsv) supply indentation, line
 endings, and parent view bytes. The parity check compares token kinds and raw
 spellings. `make test` includes these checks.

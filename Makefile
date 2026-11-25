@@ -84,6 +84,11 @@ AST_FIXTURES := tests/support/ast
 AST_PROBE := $(STAGE2)/ast/probe
 GCC_FIXTURES := tests/stage-2/gcc
 SOURCE_SCAN := $(STAGE2)/source_scan
+SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
+SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
+BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
+SOURCE_PROBE_SOURCES := $(BOOTSTRAP_WOVE_SOURCES) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
+	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(TEST_DISCOVERY_MODULE) $(C_EMITTER_SOURCES) $(HASHING_SOURCES)
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 RUNTIME := runtime/wove_runtime.c
 RUNTIME_HEADER := runtime/wove_runtime.h
@@ -123,7 +128,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) stage-2/hashing/base16.wove $(BLAKE2B_SOURCES) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(PROCESS_MODULE) \
-		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
+		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv $(PROCESS_CASES) tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/hashing" "$(HASHING_CASES)"
@@ -187,21 +192,26 @@ test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 
-# Translate the compiler root and regenerate C when any source module changes.
-$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) \
-	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
-	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(TEST_DISCOVERY_MODULE) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(SEED)
+# Track the imports active in each seed root.
+$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(BOOTSTRAP_WOVE_SOURCES) $(SEED)
+$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SOURCE_PROBE_SOURCES) $(SEED)
+
+# Replace the generated C only after the seed succeeds.
+$(STAGE1)/wovec.c $(SOURCE_PROBE_C):
 	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@"
+	set -eu; \
+	c_output="$@.tmp.$$$$"; \
+	trap 'rm -f "$$c_output"' 0; \
+	$(PYTHON) stage-1/wovec.py "$<" > "$$c_output"; \
+	mv "$$c_output" "$@"
 
 # Link the seed-built compiler entry with the shared runtime.
 $(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime $^ -o "$@"
 
-# Give the scanner fixture access to the same generated scanner functions.
-$(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(STAGE1)/wovec.c $(STAGE1)/runtime.o
-	mkdir -p "$(@D)"
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(STAGE1)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+# Compile the C harness with its generated fixture and the shared runtime.
+$(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(SOURCE_PROBE_C) $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Check the current Git commit or explicit override on each native build.
 force-build-info:
@@ -317,10 +327,8 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
-REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
-	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
-	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(TEST_DISCOVERY_MODULE) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(ROUND_TRIP_PROVIDERS) \
-	$(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
+REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_PROBE_SOURCES) \
+	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
 
 $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)
