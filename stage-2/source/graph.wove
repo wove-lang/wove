@@ -42,6 +42,11 @@
 		(fields (modules i32) (bindings i32) (file i32) (start i32) (end i32) (error u32) (mode u32) (os u8) (arch u8) (deployment i32)
 			(path_start i32) (path_end i32)))
 	(struct DiskEdge (fields (file i32) (start i32) (target i32)))
+	(struct
+		(:doc "A suspended walk over committed table prefixes and its current depth-first frame.")
+		GraphProgress
+		(fields (files i32) (binding bool) (current i32) (pending_path i32) (pending_parent i32)
+			(modules i32) (bindings i32) (uses i32) (selectors i32)))
 	(struct FileRead
 		(fields (bindings i32) (uses i32) (selectors i32) (active bool) (start i32) (end i32) (error u32)))
 	(struct GraphRead (fields (next i32) (start i32) (end i32) (error u32) (file i32)))
@@ -792,31 +797,54 @@
 		(returns GraphResult)
 		(body
 			(let edges (array.alloc DiskEdge 0i32))
+			(let-mut progress (array.alloc GraphProgress 1i32))
 			(return (call walk_graph (borrow-shared (local arena)) (borrow-shared (local files)) (local entry) (local context)
 				(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
-				(borrow-mut (local selectors)) (bool false) (bool false) (borrow-shared (local edges))))))
+				(borrow-mut (local selectors)) (bool false) (bool false) (borrow-shared (local edges))
+				(borrow-mut (local progress))))))
 
 	(fn resolve_disk_graph
-		(:doc `Resolve a disk snapshot or return the first selected use with no cached target.
+		(:doc `Continue the depth-first disk walk or request the first active use with no cached target.
 
-		Each edge records its canonical importing file, original use start,
-		and a supplied target row. A nonnegative path_start marks a request
+		The caller keeps the progress cell and initialized rows across requests and
+		workspace growth, appending files and edges without changing older rows.
+		Once every Wove edge is known, a header-aware walk publishes the final
+		bindings in their original order. A nonnegative path_start marks a request
 		and the diagnostic span covers the complete importing use.`)
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (entry i32) (context SelectionContext)
 			(modules (mut-array GraphModule)) (bindings (mut-array GraphBinding))
-			(uses (mut-array GraphUse)) (selectors (mut-array GraphSelector)) (edges (shared-array DiskEdge)))
+			(uses (mut-array GraphUse)) (selectors (mut-array GraphSelector)) (edges (shared-array DiskEdge))
+			(progress (mut-array GraphProgress)))
 		(returns GraphResult)
 		(body
-			(let loaded (call walk_graph (borrow-shared (local arena)) (borrow-shared (local files)) (local entry) (local context)
-				(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
-				(borrow-mut (local selectors)) (bool true) (bool true) (borrow-shared (local edges))))
 			(if
-				(:doc "Return the next active file request or the first source failure during discovery.")
-				(u32.lt 0u32 (struct.get (local loaded) error))
-				(then (return (local loaded))))
+				(:doc "Resolve Wove imports before validating C header operations against the complete file table.")
+				(bool.not (struct.get (array.load (local progress) 0i32) binding))
+				(then
+					(let loaded (call walk_graph (borrow-shared (local arena)) (borrow-shared (local files)) (local entry) (local context)
+						(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
+						(borrow-mut (local selectors)) (bool true) (bool true) (borrow-shared (local edges))
+						(borrow-mut (local progress))))
+					(if
+						(:doc "The resolver can resume after the driver appends the requested edge or reserves space.")
+						(u32.lt 0u32 (struct.get (local loaded) error))
+						(then (return (local loaded))))
+					(call save_graph_progress (borrow-mut (local progress)) 0i32 (bool true) 0i32 -1i32 -1i32
+						0i32 0i32 0i32 0i32)))
 			(return (call walk_graph (borrow-shared (local arena)) (borrow-shared (local files)) (local entry) (local context)
 				(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
-				(borrow-mut (local selectors)) (bool true) (bool false) (borrow-shared (local edges))))))
+				(borrow-mut (local selectors)) (bool true) (bool false) (borrow-shared (local edges))
+				(borrow-mut (local progress))))))
+
+	(fn save_graph_progress
+		(:doc "Checkpoint table prefixes and the current operation so a short attempt can be retried in place.")
+		(params (progress (mut-array GraphProgress)) (files i32) (binding bool) (current i32)
+			(pending_path i32) (pending_parent i32) (modules i32) (bindings i32) (uses i32) (selectors i32))
+		(returns void)
+		(body
+			(array.store (local progress) 0i32 (struct.new GraphProgress (files (local files)) (binding (local binding))
+				(current (local current)) (pending_path (local pending_path)) (pending_parent (local pending_parent))
+				(modules (local modules)) (bindings (local bindings)) (uses (local uses)) (selectors (local selectors))))))
 
 	(fn walk_graph
 		(:doc `Resolve the reachable graph and publish file-local function bindings.
@@ -837,7 +865,8 @@
 			(issues "gh:wove-lang/wove:68" "gh:wove-lang/wove:138" "gh:wove-lang/wove:146" "gh:wove-lang/wove:190" "gh:wove-lang/wove:227"))
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (entry i32) (context SelectionContext)
 			(modules (mut-array GraphModule)) (bindings (mut-array GraphBinding))
-			(uses (mut-array GraphUse)) (selectors (mut-array GraphSelector)) (disk bool) (loading bool) (edges (shared-array DiskEdge)))
+			(uses (mut-array GraphUse)) (selectors (mut-array GraphSelector)) (disk bool) (loading bool)
+			(edges (shared-array DiskEdge)) (progress (mut-array GraphProgress)))
 		(returns GraphResult)
 		(body
 			(let length (array.len (local files)))
@@ -849,23 +878,33 @@
 				(:doc "Preflight module storage before clearing any state.")
 				(i32.lt (array.len (local modules)) (local length))
 				(then (return (call graph_result (local context) 0i32 0i32 -1i32 0i32 0i32 16u32))))
-			(let-mut index 0i32)
+			(let saved (array.load (local progress) 0i32))
+			(let initialized (struct.get (local saved) files))
+			(let-mut index (local initialized))
 			(while
-				(:doc "Callers can reuse module storage between graph walks.")
+				(:doc "Clear new identities while keeping the previously reached frames and providers.")
 				(i32.lt (local index) (local length))
 				(body
 					(array.store (local modules) (local index)
 						(struct.new GraphModule (state 0u32) (path -1i32) (order -1i32)
 							(parent -1i32) (next_use 0i32) (end_use 0i32) (active (bool false))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
-			(let-mut module_count 0i32)
-			(let-mut binding_count 0i32)
-			(let-mut use_count 0i32)
-			(let-mut selector_count 0i32)
+			(let-mut module_count (struct.get (local saved) modules))
+			(let-mut binding_count (struct.get (local saved) bindings))
+			(let-mut use_count (struct.get (local saved) uses))
+			(let-mut selector_count (struct.get (local saved) selectors))
 			(let root (struct.get (array.load (local files) (local entry)) identity))
-			(let-mut current (local root))
-			(let-mut pending_path (local entry))
-			(let-mut pending_parent -1i32)
+			(let-mut current (struct.get (local saved) current))
+			(let-mut pending_path (struct.get (local saved) pending_path))
+			(let-mut pending_parent (struct.get (local saved) pending_parent))
+			(let binding (bool.not (local loading)))
+			(if
+				(:doc "A fresh walk starts by reading the entry under its canonical identity.")
+				(i32.eq (local initialized) 0i32)
+				(then
+					(set (local current) (local root))
+					(set (local pending_path) (local entry))
+					(set (local pending_parent) -1i32)))
 			(while
 				(:doc "Parent links suspend importers while an unseen provider is being resolved.")
 				(bool.not (i32.lt (local current) 0i32))
@@ -883,8 +922,14 @@
 								(bool.not (bool.or (local loading) (struct.get (local file) bundled)))
 								(borrow-mut (local bindings)) (borrow-mut (local uses))
 								(borrow-mut (local selectors)) (local binding_count) (local use_count) (local selector_count)))
-							(set (local binding_count) (struct.get (local loaded) bindings))
 							(let error (struct.get (local loaded) error))
+							(if
+								(:doc "Keep the last complete table prefixes when an operation needs more space.")
+								(u32.eq (local error) 16u32)
+								(then (call save_graph_progress (borrow-mut (local progress)) (local length) (local binding) (local current)
+									(local pending_path) (local pending_parent) (local module_count) (local binding_count)
+									(local use_count) (local selector_count))))
+							(set (local binding_count) (struct.get (local loaded) bindings))
 							(if
 								(:doc "Admission, syntax, and declaration failures belong to the file being read.")
 								(u32.lt 0u32 (local error))
@@ -909,14 +954,13 @@
 					(let-mut importer (local current))
 					(let-mut provider -1i32)
 					(let-mut edge_index (local next))
+					(let exhausted (i32.eq (local next) (struct.get (local frame) end_use)))
 					(if
-						(:doc "An exhausted frame completes and resumes the edge that first reached it.")
-						(i32.eq (local next) (struct.get (local frame) end_use))
+						(:doc "An exhausted frame binds the edge that first reached it before resuming its parent.")
+						(local exhausted)
 						(then
-							(call update_frame (borrow-mut (local modules)) (local current) (local frame) 2u32 (local next))
 							(set (local importer) (struct.get (local frame) parent))
 							(set (local provider) (local current))
-							(set (local current) (local importer))
 							(if
 								(:doc "The parent's cursor already advanced past the pending edge.")
 								(bool.not (i32.lt (local importer) 0i32))
@@ -938,8 +982,14 @@
 												(borrow-shared (array.range (local arena) (local source_start) (local source_end)))
 												(local current) (local edge) (borrow-shared (local selectors))
 												(borrow-mut (local bindings)) (local binding_count) (local context)))
-											(set (local binding_count) (struct.get (local bound) next))
 											(let error (struct.get (local bound) error))
+											(if
+												(:doc "Keep the last complete table prefixes when an operation needs more space.")
+												(u32.eq (local error) 16u32)
+												(then (call save_graph_progress (borrow-mut (local progress)) (local length) (local binding) (local current)
+													(local pending_path) (local pending_parent) (local module_count) (local binding_count)
+													(local use_count) (local selector_count))))
+											(set (local binding_count) (struct.get (local bound) next))
 											(if
 												(:doc "Use the provider file for a defining error and the importer for a selection error.")
 												(u32.lt 0u32 (local error))
@@ -961,8 +1011,12 @@
 										(:doc "Suspend before opening the next active disk edge. Malformed uses have no request span.")
 										(bool.and (bool.and (local disk) (u32.eq (struct.get (local resolved) error) 27u32))
 											(i32.lt -1i32 (struct.get (local edge) path_start)))
-										(then (return (call disk_request (local context) (local module_count) (local binding_count)
-											(local current) (local edge)))))
+										(then
+											(call save_graph_progress (borrow-mut (local progress)) (local length) (local binding) (local current)
+												(local pending_path) (local pending_parent) (local module_count) (local binding_count)
+												(local use_count) (local selector_count))
+											(return (call disk_request (local context) (local module_count) (local binding_count)
+												(local current) (local edge)))))
 									(let error (struct.get (local resolved) error))
 									(if
 										(:doc "Path errors belong to the importing file.")
@@ -977,13 +1031,13 @@
 										(u32.eq (local state) 1u32)
 										(then (return (call graph_result (local context) (local module_count) (local binding_count) (local current)
 											(struct.get (local edge) start) (struct.get (local edge) end) 28u32))))
-									(call update_frame (borrow-mut (local modules)) (local current) (local frame) 1u32
-										(i32.add.wrapping (local next) 1i32))
 									(if
 										(:doc "Bind immediately for a completed provider or suspend this importer for a new one.")
 										(u32.eq (local state) 2u32)
 										(then (set (local provider) (local target)))
 										(else
+											(call update_frame (borrow-mut (local modules)) (local current) (local frame) 1u32
+												(i32.add.wrapping (local next) 1i32))
 											(set (local pending_parent) (local current))
 											(set (local pending_path) (local path))
 											(set (local current) (local target))))))))
@@ -1000,11 +1054,29 @@
 									(struct.get (local target) source_start) (struct.get (local target) source_end)))
 								(local importer) (local provider) (array.load (local uses) (local edge_index))
 								(borrow-shared (local selectors)) (borrow-mut (local bindings)) (local binding_count)))
-							(set (local binding_count) (struct.get (local bound) next))
 							(let error (struct.get (local bound) error))
+							(if
+								(:doc "Keep the last complete table prefixes when an operation needs more space.")
+								(u32.eq (local error) 16u32)
+								(then (call save_graph_progress (borrow-mut (local progress)) (local length) (local binding) (local current)
+									(local pending_path) (local pending_parent) (local module_count) (local binding_count)
+									(local use_count) (local selector_count))))
+							(set (local binding_count) (struct.get (local bound) next))
 							(if
 								(:doc "An unavailable or conflicting selection belongs to the importing file.")
 								(u32.lt 0u32 (local error))
 								(then (return (call graph_result (local context) (local module_count) (local binding_count) (local importer)
-									(struct.get (local bound) start) (struct.get (local bound) end) (local error)))))))))
+									(struct.get (local bound) start) (struct.get (local bound) end) (local error)))))))
+					(if
+						(:doc "Publish frame changes only after binding succeeds so capacity retries stay on this edge.")
+						(local exhausted)
+						(then
+							(call update_frame (borrow-mut (local modules)) (local current) (local frame) 2u32 (local next))
+							(set (local current) (local importer)))
+						(else
+							(if
+								(:doc "A cached provider was bound without entering another frame.")
+								(i32.lt -1i32 (local provider))
+								(then (call update_frame (borrow-mut (local modules)) (local current) (local frame) 1u32
+									(i32.add.wrapping (local next) 1i32))))))))
 			(return (call graph_result (local context) (local module_count) (local binding_count) -1i32 0i32 0i32 0u32)))))

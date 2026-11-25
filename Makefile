@@ -78,7 +78,7 @@ CONFIG_SOURCES := $(C_STANDARD_MODULE) $(addprefix stage-2/config/,compiler.wove
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove output.wove publication.wove platform.wove files.wove paths.wove disk.wove disk_files.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove header_origin.wove clang.wove)
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_storage.wove output.wove publication.wove platform.wove files.wove paths.wove disk.wove disk_files.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove header_origin.wove clang.wove)
 BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove unistd.wove spawn.wove fcntl.wove errno.wove sys_stat.wove sys_wait.wove)
 NATIVE_BUILD_ASSETS = runtime/wove_runtime.c runtime/wove_runtime.h $(CLANG_TEMPLATE)
 NATIVE_STDIO := stage-2/io/stdio.wove
@@ -116,7 +116,7 @@ SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
 BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
-BOOTSTRAP_DRIVER_SOURCES := $(addprefix $(NATIVE_DRIVER)/,bootstrap/entry.wove bootstrap/graph.wove bootstrap/emit.wove bootstrap/files.wove assets.wove paths.wove bundled_paths.wove) \
+BOOTSTRAP_DRIVER_SOURCES := $(addprefix $(NATIVE_DRIVER)/,bootstrap/entry.wove bootstrap/graph.wove bootstrap/emit.wove bootstrap/files.wove graph_storage.wove assets.wove paths.wove bundled_paths.wove) \
 	stage-2/text/copy.wove
 BOOTSTRAP_RUNTIME := runtime/wove_bootstrap.c
 GRAPH_COMPILER_SOURCES := $(BOOTSTRAP_WOVE_SOURCES) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
@@ -199,7 +199,9 @@ test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
 # Run native CLI cases in isolated work directories with the configured C toolchain.
 test-stage-2-native: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-native: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2-native: export WOVE_BUILD_CLANG = $(CLANG)
 test-stage-2-native: $(NATIVE_COMPILER)
+	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/discovery/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/standard.tsv"
