@@ -4,11 +4,13 @@
 	(:doc `Render fixed-array values and their checked accesses from evaluated operands.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "../scalar/records.wove" (only record_index (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only record_index is_record_type is_fixed_array typed_slice_element (type ScalarRecord)))
 	(use wove-file "../scalar/plan.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/flow.wove" (only (value fixed_mut_loan)))
 	(use wove-file "./records.wove" (only write_value_type))
-	(use wove-file "./text.wove" (only c_byte c_literal_text write_temporary_name))
-	(use wove-file "./runtime.wove" (only write_c_number close_runtime_call))
+	(use wove-file "./bindings.wove" (only write_local_name))
+	(use wove-file "./text.wove" (only c_byte c_literal_text c_type_text write_temporary_name))
+	(use wove-file "./runtime.wove" (only write_c_number close_runtime_call write_slice_items))
 
 	(let empty_value "{0}")
 	(let list_open "{{")
@@ -18,6 +20,60 @@
 	(let repeat_step ";++wvrt_repeat_index)")
 	(let repeat_destination ".wvrt_items[wvrt_repeat_index]=")
 	(let access_open ".wvrt_items[wvrt_array_index_at_span(")
+
+	(let fixed_shared_open "(wvrt_slice){")
+	(let fixed_mut_open "(wvrt_mut_slice){")
+	(let element_size_open ",sizeof(")
+	(let fixed_slice_close ")}")
+
+	(fn captures_fixed_call_argument
+		(:doc `Copy a fixed local before evaluating later arguments that may borrow and mutate it.`)
+		(params (row ScalarExpression) (next i32) (records (shared-slice ScalarRecord)))
+		(returns bool)
+		(body
+			(let type (record.get (local row) type))
+			(return (bool.and
+				(bool.and (i32.lt (i32 -1) (local next)) (u32.eq (record.get (local row) kind) (u32 6)))
+				(bool.and (call is_record_type (local type))
+					(call is_fixed_array (slice.load (local records) (call record_index (local type)))))))))
+
+	(fn write_fixed_slice
+		(:doc `Lend the inline storage of a fixed local as a typed slice descriptor.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (row ScalarExpression) (tree_base i32)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let length (record.get (local row) start))
+			(let empty (i32.eq (local length) (i32 0)))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "The borrow mode selects a writable or const descriptor.")
+				(u32.eq (record.get (local row) kind) (local fixed_mut_loan))
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local fixed_mut_open))
+					(borrow-mut (local output)) (local cursor) (local writing))))
+				(else (set (local cursor) (call c_literal_text (borrow-shared (local fixed_shared_open))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(if
+				(:doc "The aligned empty placeholder supplies an address but the slice has no accessible elements.")
+				(local empty)
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 38) (local writing)))))
+			(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local row) target) (local tree_base) (borrow-mut (local output))
+				(local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "A nonempty array lends the original inline elements without an aggregate copy.")
+				(bool.not (local empty))
+				(then (set (local cursor) (call write_slice_items (borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
+			(let-mut digits (array.alloc u8 (i32 11)))
+			(set (local cursor) (call write_c_number (borrow-mut (local output)) (local cursor) (local length)
+				(borrow-mut (local digits)) (local writing)))
+			(set (local cursor) (call c_literal_text (borrow-shared (local element_size_open))
+				(borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor)
+				(call typed_slice_element (record.get (local row) type)) (local writing)))
+			(return (call c_literal_text (borrow-shared (local fixed_slice_close))
+				(borrow-mut (local output)) (local cursor) (local writing)))))
 
 	(fn write_fixed_list
 		(:doc `Build an inline aggregate from the list's already evaluated elements.`)
