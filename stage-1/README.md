@@ -25,9 +25,10 @@ value is outside the selected type's range.
 `u32.sub.wrapping` compute modulo 2^32. Both operands and the result have
 the operation's named type.
 
-`u32.and` and `u32.or` combine two `u32` operands bitwise. `u32.shl`
-and `u32.shr` take a `u32` word and an exact `i32` count. All four
-return `u32` and evaluate both operands left to right. The left shift
+`u32.and`, `u32.or`, and `u32.xor` combine two `u32` words.
+`u32.not` complements one word. `u32.shl` and `u32.shr` take
+a `u32` word and an exact `i32` count. Each form returns `u32`
+and evaluates its operands from left to right. The left shift
 keeps the low 32 bits, and the right shift fills with zeroes. A count
 outside `[0, 32)` traps at the shift's source line.
 

@@ -57,6 +57,7 @@ BINARY_OPS = {
 	"u32.lt": (U32, BOOL, "<"),
 	"u32.and": (U32, U32, "&"),
 	"u32.or": (U32, U32, "|"),
+	"u32.xor": (U32, U32, "^"),
 }
 U32_SHIFT_OPS = {
 	"u32.shl": "<<",
@@ -545,6 +546,12 @@ class FunctionEmitter:
 			operand, = form(expr, arity=1).operands
 			value = self.typed(operand, BOOL)
 			return self.temporary(BOOL, f"!{value.c}")
+
+		# Discard promoted bits above the exact width of the complemented word.
+		if expr.tag == "u32.not":
+			operand, = form(expr, arity=1).operands
+			value = self.typed(operand, U32)
+			return self.temporary(U32, f"(uint32_t)~(uint64_t){value.c}")
 
 		# Function literals follow the same rules as module initializers.
 		if expr.tag in SCALAR_LIMITS:
