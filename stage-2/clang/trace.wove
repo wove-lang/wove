@@ -1,0 +1,96 @@
+(module clang_include_trace
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Read Clang's private include tree and preserve separate frontend diagnostics.")
+
+	(use wove-file "../io/stdio.wove" (only write_stderr_line))
+	(use c-header "<stdio.h>" (only fopen fread fgetc ferror (type Size)))
+
+	(let read_mode "rb")
+
+	(struct IncludeLine (fields (depth i32) (start i32) (end i32) (next i32)))
+
+	(fn read_trace
+		(:doc "Copy the complete diagnostic stream into the trace buffer and add a zero terminator.")
+		(params (path (shared-slice u8)) (trace (mut-slice u8))) (returns u32)
+		(body
+			(let stream (call fopen (borrow-shared (local path)) (borrow-shared (local read_mode))))
+			(if
+				(:doc "An unavailable private capture is a probe I/O failure.")
+				(owner.is-null (local stream))
+				(then (return 3u32)))
+			(let capacity (i32.sub.wrapping (slice.len (local trace)) 1i32))
+			(let read (int.convert i32 (call fread (borrow-mut (local trace)) (int.convert Size 1i32)
+				(int.convert Size (local capacity)) (borrow-shared (local stream)))))
+			(let next (call fgetc (borrow-shared (local stream))))
+			(if
+				(:doc "Propagate a stream failure independently of buffer exhaustion.")
+				(bool.not (i32.eq (call ferror (borrow-shared (local stream))) 0i32))
+				(then (return 3u32)))
+			(if
+				(:doc "Read one extra byte to distinguish an exactly full buffer from truncation.")
+				(i32.lt -1i32 (local next))
+				(then (return 5u32)))
+			(slice.store (local trace) (local read) 0u8)
+			(return 0u32)))
+
+	(fn include_line
+		(:doc "Read one line of Clang's -H trace. Ordinary diagnostics have depth zero.")
+		(params (trace (shared-slice u8)) (start i32) (length i32)) (returns IncludeLine)
+		(body
+			(let-mut end (local start))
+			(while
+				(:doc "The final diagnostic line may end at the capture boundary without a newline.")
+				(bool.and (i32.lt (local end) (local length))
+					(bool.not (u8.eq (slice.load (local trace) (local end)) 10u8)))
+				(body (set (local end) (i32.add.wrapping (local end) 1i32))))
+			(let-mut next (local end))
+			(if
+				(:doc "Advance past the line break only when it exists.")
+				(i32.lt (local end) (local length))
+				(then (set (local next) (i32.add.wrapping (local end) 1i32))))
+			(let-mut dots (local start))
+			(while
+				(:doc "Every leading dot contributes one include level.")
+				(bool.and (i32.lt (local dots) (local end)) (u8.eq (slice.load (local trace) (local dots)) 46u8))
+				(body (set (local dots) (i32.add.wrapping (local dots) 1i32))))
+			(if
+				(:doc "A real include entry has a space after one or more dots.")
+				(bool.and (bool.and (i32.lt (local start) (local dots)) (i32.lt (local dots) (local end)))
+					(u8.eq (slice.load (local trace) (local dots)) 32u8))
+				(then (return (record.make IncludeLine (depth (i32.sub.wrapping (local dots) (local start)))
+					(start (i32.add.wrapping (local dots) 1i32)) (end (local end)) (next (local next))))))
+			(return (record.make IncludeLine (depth 0i32) (start (local start)) (end (local end)) (next (local next))))))
+
+	(fn trace_length
+		(:doc "Count the captured bytes before the private terminator.")
+		(params (trace (shared-slice u8))) (returns i32)
+		(body
+			(let-mut length 0i32)
+			(while
+				(:doc "A bounded scan also handles an exhausted trace buffer.")
+				(bool.and (i32.lt (local length) (slice.len (local trace)))
+					(bool.not (u8.eq (slice.load (local trace) (local length)) 0u8)))
+				(body (set (local length) (i32.add.wrapping (local length) 1i32))))
+			(return (local length))))
+
+	(fn relay_trace_diagnostics
+		(:doc "Send Clang's error lines to the caller while keeping the include tree private.")
+		(params (trace (shared-slice u8))) (returns void)
+		(body
+			(let length (call trace_length (borrow-shared (local trace))))
+			(let-mut cursor 0i32)
+			(while
+				(:doc "Advance once per captured line in the original diagnostic order.")
+				(i32.lt (local cursor) (local length))
+				(body
+					(let line (call include_line (borrow-shared (local trace)) (local cursor) (local length)))
+					(if
+						(:doc "Depth-zero lines are emitted by the tool outside the include tree.")
+						(i32.eq (record.get (local line) depth) 0i32)
+						(then
+							(let written (call write_stderr_line (borrow-shared (slice.range (local trace)
+								(record.get (local line) start) (record.get (local line) end)))))))
+					(set (local cursor) (record.get (local line) next))))
+			(return)))
+)

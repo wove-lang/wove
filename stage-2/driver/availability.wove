@@ -9,7 +9,8 @@
 	(use wove-file "../c/headers.wove" (only c_header_form))
 	(use wove-file "../c/probe.wove" (only (value header_begin)))
 	(use wove-file "../clang/query.wove" (only query_clang_frontend (type QuerySite)))
-	(use wove-file "../clang/index.wove" (only clang_declaration (type ClangIndex) (type ClangDeclaration)))
+	(use wove-file "../clang/index.wove" (only clang_declaration clang_matches_declaration (type ClangIndex) (type ClangDeclaration)))
+	(use wove-file "./header_origin.wove" (only declaration_in_earlier_include))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes include_position write_includes (type CInclude)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
@@ -38,25 +39,50 @@
 			(bool.and (i32.eq (record.get (local left) header_start) (record.get (local right) header_start))
 				(i32.eq (record.get (local left) header_end) (record.get (local right) header_end)))))))
 
+	(fn matching_native_function
+		(:doc "Accept a declaration emitted by this header or recovered from its earlier include subtree.")
+		(params (ast (shared-slice u8)) (nodes (shared-slice JsonNode)) (index ClangIndex) (boundary i32)
+			(declarations (shared-slice ClangDeclaration)) (names (shared-slice u8)) (name (shared-slice u8))
+			(trace (shared-slice u8))) (returns bool)
+		(body
+			(let-mut row (record.get (local index) entries))
+			(while
+				(:doc "Consider each exact redeclaration until one has the required origin.")
+				(i32.lt 0i32 (local row))
+				(body
+					(set (local row) (i32.sub.wrapping (local row) 1i32))
+					(let entry (slice.load (local declarations) (local row)))
+					(if
+						(:doc "An unrelated declaration with the same name cannot establish availability.")
+						(bool.and (call clang_matches_declaration (local entry) (borrow-shared (local names))
+							(borrow-shared (local function_kind)) (borrow-shared (local name)))
+							(bool.or (i32.lt (local boundary) (record.get (local entry) node))
+								(call declaration_in_earlier_include (borrow-shared (local ast)) (record.get (local index) start)
+									(borrow-shared (local nodes)) (record.get (local entry) node) (borrow-shared (local trace)))))
+						(then (return (bool true))))))
+			(return (bool false))))
+
 	(fn native_function_available
 		(:doc "Look up the exact original C symbol, including the spelling selected by c-name.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (binding GraphBinding) (index ClangIndex) (boundary i32)
-			(declarations (shared-slice ClangDeclaration)) (names (shared-slice u8)))
+			(declarations (shared-slice ClangDeclaration)) (names (shared-slice u8))
+			(ast (shared-slice u8)) (nodes (shared-slice JsonNode)) (trace (shared-slice u8)))
 		(returns bool)
 		(body
 			(let file (slice.load (local files) (record.get (local binding) file)))
 			(let base (record.get (local file) source_start))
 			(let start (i32.add.wrapping (local base) (record.get (local binding) native_start)))
 			(let end (i32.add.wrapping (local base) (record.get (local binding) native_end)))
-			(let found (call clang_declaration (local index) (borrow-shared (local declarations)) (borrow-shared (local names))
-				(borrow-shared (local function_kind)) (borrow-shared (slice.range (local arena) (local start) (local end)))))
-			(return (i32.lt (local boundary) (record.get (local found) node)))))
+			(return (call matching_native_function (borrow-shared (local ast)) (borrow-shared (local nodes))
+				(local index) (local boundary) (borrow-shared (local declarations)) (borrow-shared (local names))
+				(borrow-shared (slice.range (local arena) (local start) (local end))) (borrow-shared (local trace))))))
 
 	(fn remember_header
 		(:doc "Record each selected function's result before releasing the captured AST.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
 			(first i32) (present bool) (index ClangIndex) (boundary i32) (declarations (shared-slice ClangDeclaration))
-			(names (shared-slice u8)) (results (mut-slice u8))) (returns void)
+			(names (shared-slice u8)) (ast (shared-slice u8)) (nodes (shared-slice JsonNode)) (trace (shared-slice u8))
+			(results (mut-slice u8))) (returns void)
 		(body
 			(let header (slice.load (local bindings) (local first)))
 			(let-mut row (local first))
@@ -74,7 +100,8 @@
 								(:doc "Only a present header can supply an exact FunctionDecl.")
 								(bool.and (local present) (call native_function_available (borrow-shared (local arena))
 									(borrow-shared (local files)) (local candidate) (local index) (local boundary)
-									(borrow-shared (local declarations)) (borrow-shared (local names))))
+									(borrow-shared (local declarations)) (borrow-shared (local names)) (borrow-shared (local ast))
+									(borrow-shared (local nodes)) (borrow-shared (local trace))))
 								(then (set (local status) 1u32)))
 							(slice.store (local results) (local row) (int.convert u8 (local status)))))
 					(set (local row) (i32.add.wrapping (local row) 1i32))))))
@@ -93,12 +120,13 @@
 				(i32.lt (local width) 33554432i32)
 				(body
 					(let-mut capture (array.alloc u8 (local width)))
+					(let-mut trace (array.alloc u8 (local width)))
 					(let-mut nodes (array.alloc JsonNode (int.convert i32 (u32.shr (int.convert u32 (local width)) 3i32))))
 					(let-mut decls (array.alloc ClangDeclaration (int.convert i32 (u32.shr (int.convert u32 (local width)) 6i32))))
 					(let-mut names (array.alloc u8 (int.convert i32 (u32.shr (int.convert u32 (local width)) 1i32))))
 					(let query (call query_clang_frontend (borrow-shared (local program)) (borrow-shared (local options))
 						(borrow-shared (local directory)) (borrow-shared (local prefix)) (borrow-shared (local header)) (local site)
-						(borrow-mut (local capture)) (borrow-mut (local nodes)) (borrow-mut (local decls)) (borrow-mut (local names))))
+						(borrow-mut (local capture)) (borrow-mut (local nodes)) (borrow-mut (local decls)) (borrow-mut (local names)) (borrow-mut (local trace))))
 					(let error (record.get (local query) error))
 					(if
 						(:doc "A complete observation covers all the selected optional names for this header.")
@@ -115,6 +143,7 @@
 							(call remember_header (borrow-shared (local arena)) (borrow-shared (local files))
 								(borrow-shared (local bindings)) (local first) (record.get (local query) present)
 								(local index) (local boundary) (borrow-shared (local decls)) (borrow-shared (local names))
+								(borrow-shared (local capture)) (borrow-shared (local nodes)) (borrow-shared (local trace))
 								(borrow-mut (local results)))
 							(return 0u32)))
 					(if
