@@ -271,7 +271,18 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 def read_function(
 	name: str, node: Form, index: int, records: dict[str, Record], *, entry_module: bool
 ) -> Function:
-	_, params_node, returns_node, body_node = node.operands
+	fields = {}
+	# Keep each tagged field at its original line for validation and lowering.
+	for child in node.operands[1:]:
+		field = form(child)
+		# An unknown or repeated field is invalid at that occurrence.
+		if field.tag not in ("params", "returns", "body") or field.tag in fields:
+			raise SourceError(field.line)
+		fields[field.tag] = field
+	# An absent slot has no field location, so use the declaration line.
+	if len(fields) != 3:
+		raise SourceError(node.line)
+	params_node, returns_node, body_node = (fields[tag] for tag in ("params", "returns", "body"))
 
 	params = {}
 	# Preserve parameter order for the generated C signature.
@@ -1014,7 +1025,7 @@ def read_module(
 				values[name] = value
 			# Collect function names now and check their signatures after imports bind.
 			else:
-				name = identifier(form(node, "fn", 4).operands[0])
+				name = identifier(form(node, "fn").operands[0])
 				# A file has one declaration per function name in its function namespace.
 				if name in function_declarations:
 					raise SourceError(node.line)

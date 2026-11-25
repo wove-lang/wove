@@ -132,12 +132,13 @@ def read_form(children: list[Node], line: int, parents: list[tuple[int, list[Nod
 			operands.extend(children[:2])
 			children = children[2:]
 	prefix_open = True
-	# The first ordinary field closes the one contiguous metadata prefix.
+	interleaved = named and tag == "fn"
+	# Function metadata can appear between ordinary fields or after the last one.
 	for child in children:
 		# Metadata is attached to the declaration independently of its name and fields.
 		if is_metadata(child):
-			# A later colon-tagged form has no attachment point.
-			if not prefix_open:
+			# Other forms attach metadata only in a contiguous prefix.
+			if not (prefix_open or interleaved):
 				raise SourceError(child.line)
 			metadata.append(child)
 		else:

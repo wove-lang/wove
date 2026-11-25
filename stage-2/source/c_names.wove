@@ -8,15 +8,14 @@
 	(use wove-file "./imports.wove" (only is_import_name))
 	(use wove-file "./c_owners.wove" (only is_native_name))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier))
-	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "./functions.wove" (only collect_function_fields (type FunctionFields)))
 
-	(struct CFunctionOpening (fields (symbol i32) (params i32) (start i32) (end i32) (error u32)))
-	(let c_name "c-name")
-
+	(struct CFunctionOpening (fields (symbol i32) (params i32) (result i32) (start i32) (end i32) (error u32)))
 	(fn c_opening_at
-		(:doc "Keep an original error span or the checked symbol and parameters.")
-		(params (node SourceNode) (symbol i32) (params i32) (error u32)) (returns CFunctionOpening)
-		(body (return (record.make CFunctionOpening (symbol (local symbol)) (params (local params))
+		(:doc "Keep an original error span or the checked symbol and signature rows.")
+		(params (node SourceNode) (symbol i32) (fields FunctionFields) (error u32)) (returns CFunctionOpening)
+		(body (return (record.make CFunctionOpening (symbol (local symbol))
+			(params (record.get (local fields) params)) (result (record.get (local fields) result))
 			(start (record.get (local node) start)) (end (record.get (local node) end)) (error (local error))))))
 
 	(fn native_symbol_start
@@ -36,60 +35,58 @@
 			(return (record.get (local node) end))))
 
 	(fn c_function_opening
-		(:doc "Read an optional c-name field immediately before params using the checked-in corpus layout.")
+		(:doc "Read a bodyless signature and its optional explicit native symbol.")
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function FormParts))
 		(returns CFunctionOpening)
 		(body
 			(let name_index (record.get (local function) name))
 			(let name (slice.load (local nodes) (local name_index)))
-			(let first (record.get (local function) operands))
+			(let fields (call collect_function_fields (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local function) operands) (bool true)))
+			(let error (record.get (local fields) error))
 			(if
-				(:doc "A function without an explicit target uses its own portable C identifier.")
-				(i32.lt -1i32 (local first))
+				(:doc "Keep a repeated or unexpected field on its original source row.")
+				(u32.lt 0u32 (local error))
+				(then (return (call c_opening_at (slice.load (local nodes) (record.get (local fields) site))
+					-1i32 (local fields) (local error)))))
+			(let target (record.get (local fields) target))
+			(if
+				(:doc "An explicit target separates the Wove identifier from its native spelling.")
+				(i32.lt -1i32 (local target))
 				(then
-					(let field (slice.load (local nodes) (local first)))
+					(let field (slice.load (local nodes) (local target)))
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local field)))
-					(let tag (record.get (local parts) head))
-					(if
-						(:doc "Match the optional field by its complete form tag.")
-						(i32.lt -1i32 (local tag))
-						(then
-							(let head (slice.load (local nodes) (local tag)))
-							(if
-								(:doc "An explicit target separates the Wove identifier from its native spelling.")
-								(call same_bytes (borrow-shared (local source)) (record.get (local head) start) (record.get (local head) end)
-									(borrow-shared (local c_name)) 0i32 (slice.len (local c_name)))
-								(then (return (call checked_c_name (borrow-shared (local source)) (borrow-shared (local nodes))
-									(local name) (local field) (local parts)))))))))
+					(return (call checked_c_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local name) (local field) (local parts) (local fields)))))
 			(if (call is_native_name (borrow-shared (local source)) (local name))
-				(then (return (call c_opening_at (local name) (local name_index) (local first) 0u32))))
-			(return (call c_opening_at (local name) -1i32 -1i32 26u32))))
+				(then (return (call c_opening_at (local name) (local name_index) (local fields) 0u32))))
+			(return (call c_opening_at (local name) -1i32 (local fields) 26u32))))
 
 	(fn checked_c_name
 		(:doc "Accept one quoted, unescaped C identifier and preserve the diagnostic on an invalid field.")
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name SourceNode)
-			(field SourceNode) (parts FormParts)) (returns CFunctionOpening)
+			(field SourceNode) (parts FormParts) (fields FunctionFields)) (returns CFunctionOpening)
 		(body
 			(if (bool.not (call is_import_name (borrow-shared (local source)) (local name)))
-				(then (return (call c_opening_at (local name) -1i32 -1i32 26u32))))
+				(then (return (call c_opening_at (local name) -1i32 (local fields) 26u32))))
 			(let selected (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes)) (local field) (local parts)))
 			(if
 				(:doc "A native name field is not a declaration and cannot have selection pragmas.")
 				(u32.lt 0u32 (record.get (local selected) error))
-				(then (return (record.make CFunctionOpening (symbol -1i32) (params -1i32)
+				(then (return (record.make CFunctionOpening (symbol -1i32) (params -1i32) (result -1i32)
 					(start (record.get (local selected) start)) (end (record.get (local selected) end))
 					(error (record.get (local selected) error))))))
 			(let target (record.get (local parts) operands))
 			(if (i32.lt (local target) 0i32)
-				(then (return (call c_opening_at (local field) -1i32 -1i32 23u32))))
+				(then (return (call c_opening_at (local field) -1i32 (local fields) 23u32))))
 			(let symbol (slice.load (local nodes) (local target)))
 			(if
 				(:doc "The native lexer and emitter share one exact C identifier range.")
 				(bool.not (bool.and (u32.eq (record.get (local symbol) kind) 2u32)
 					(call is_c_identifier (borrow-shared (local source))
 						(call native_symbol_start (local symbol)) (call native_symbol_end (local symbol)))))
-				(then (return (call c_opening_at (local symbol) -1i32 -1i32 26u32))))
+				(then (return (call c_opening_at (local symbol) -1i32 (local fields) 26u32))))
 			(let extra (record.get (local symbol) next_sibling))
 			(if (i32.lt -1i32 (local extra))
-				(then (return (call c_opening_at (slice.load (local nodes) (local extra)) -1i32 -1i32 23u32))))
-			(return (call c_opening_at (local symbol) (local target) (record.get (local field) next_sibling) 0u32)))))
+				(then (return (call c_opening_at (slice.load (local nodes) (local extra)) -1i32 (local fields) 23u32))))
+			(return (call c_opening_at (local symbol) (local target) (local fields) 0u32)))))

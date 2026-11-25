@@ -21,7 +21,9 @@ directories named for their purpose, with short module filenames inside
 each group. For example, keep the Stage 2 scanner in `stage-2/source/scan.wove`.
 
 Write the bare name immediately after `module` and `fn`, including C bridge
-functions. Place their metadata prefix directly after that name.
+functions. Module metadata forms a contiguous prefix after the name. Function
+metadata and tagged fields can appear in any order after the name. Place the
+function's purpose note immediately after the name in new implementation code.
 
 Start a C bridge with `(bridge c-header "<header.h>"`. Place its metadata
 prefix after the quoted header and before its members.

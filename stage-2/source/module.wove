@@ -3,14 +3,14 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Read module declarations from the checked source tree.
 
-	Expose the metadata prefix and ordinary operands through the original node links.
+	Expose metadata and ordinary operands through the original node links.
 	Apply the compilation mode and flatten selected declaration groups in
 	source order. Mode 0 is native, mode 1 is bootstrap, and mode 2 is test.
 	Keep each declaration's original node index and direct test marker.`)
 
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "./scan.wove"
-		(only is_identifier_head is_metadata_form is_disabled_form named_form_error read_c_bridge_opening (type SourceNode) (type FormCheck)))
+		(only is_identifier_head is_metadata_form is_disabled_form declaration_head named_form_error read_c_bridge_opening (type SourceNode) (type FormCheck)))
 
 	(use wove-file "./target.wove" (only default_selection cfg_target_name cfg_deployment_limit (type SelectionContext)))
 
@@ -20,13 +20,45 @@
 		(fields (name i32) (count i32) (active bool) (start i32) (end i32) (error u32) (mode u32)))
 	(struct Selection (fields (active bool) (start i32) (end i32) (error u32) (test bool)))
 
+	(fn find_metadata
+		(:doc "Find the next metadata sibling, skipping ordinary fields only on a function declaration.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (interleaved bool))
+		(returns i32)
+		(body
+			(let-mut index (local first))
+			(while
+				(:doc "Follow the original sibling links until the next attached metadata entry.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let entry (slice.load (local nodes) (local index)))
+					(if
+						(:doc "All metadata entries are direct children of the owning form.")
+						(call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local entry))
+						(then (return (local index))))
+					(if
+						(:doc "For other forms the first ordinary field ends the prefix.")
+						(bool.not (local interleaved))
+						(then (return -1i32)))
+					(set (local index) (record.get (local entry) next_sibling))))
+			(return -1i32)))
+
+	(fn next_form_metadata
+		(:doc "Advance an attached metadata entry in its original source order.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parts FormParts) (entry SourceNode))
+		(returns i32)
+		(body
+			(let interleaved (bool.and (i32.lt -1i32 (record.get (local parts) name))
+				(u32.eq (call declaration_head (borrow-shared (local source))
+					(slice.load (local nodes) (record.get (local parts) head))) 2u32)))
+			(return (call find_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local entry) next_sibling) (local interleaved)))))
+
 	(fn form_parts
-		(:doc `Expose a checked form's name, metadata range, and remaining ordinary operands.
+		(:doc `Expose a checked form's name, first metadata entry, and first ordinary operand.
 
 		Each field is an original row index or -1. Modules, functions, and
 		module bindings have a name slot. C bridges have a header slot.
-		Walk metadata siblings up to the first ordinary field, then walk
-		ordinary siblings to the end.`)
+		Named functions can have metadata after their first ordinary field.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
 		(returns FormParts)
 		(body
@@ -63,6 +95,12 @@
 				(body
 					(set (local metadata) (local first))
 					(set (local cursor) (record.get (slice.load (local nodes) (local cursor)) next_sibling))))
+			(if
+				(:doc "If no metadata precedes a function's fields, look among its remaining siblings.")
+				(bool.and (i32.lt (local metadata) 0i32)
+					(bool.and (local named) (u32.eq (call declaration_head (borrow-shared (local source)) (local tag)) 2u32)))
+				(then (set (local metadata) (call find_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local cursor) (bool true)))))
 			(return (record.make FormParts (head (local head)) (metadata (local metadata))
 				(operands (local cursor)) (name (local name)) (header (local header))))))
 
@@ -355,7 +393,7 @@
 	(fn select_form
 		(:doc `Validate pragmas on a checked form and select it when the context permits.
 
-		Every known directive is checked in prefix order even after one excludes
+		Every known directive is checked in source order even after one excludes
 		the target. Other entries and unknown directive contents remain opaque.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(node SourceNode) (parts FormParts) (selectable bool) (context SelectionContext))
@@ -369,10 +407,9 @@
 			(let-mut active (bool true))
 			(let-mut test (bool false))
 			(let-mut index (record.get (local parts) metadata))
-			(let stop (record.get (local parts) operands))
 			(while
-				(:doc "Only rows in the metadata view may select this form.")
-				(bool.and (bool.not (i32.lt (local index) 0i32)) (bool.not (i32.eq (local index) (local stop))))
+				(:doc "Only attached metadata entries may select this form.")
+				(i32.lt -1i32 (local index))
 				(body
 					(let entry (slice.load (local nodes) (local index)))
 					(let head (slice.load (local nodes) (record.get (local entry) first_child)))
@@ -396,7 +433,8 @@
 									(set (local active) (bool.and (local active) (record.get (local result) active)))
 									(set (local test) (bool.or (local test) (record.get (local result) test)))
 									(set (local directive) (record.get (local item) next_sibling))))))
-					(set (local index) (record.get (local entry) next_sibling))))
+					(set (local index) (call next_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local parts) (local entry)))))
 			(return (call selection_at (local node) (local active) 0u32 (local test)))))
 
 	(fn validate_form_metadata

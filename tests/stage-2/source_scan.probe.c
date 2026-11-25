@@ -23,16 +23,16 @@
 #define check_source_metadata wv_seed_fn_45
 #define render_source_tree wv_seed_fn_47
 #define decode_string wv_seed_fn_77
-#define form_parts wv_seed_fn_78
-#define read_module_for_target wv_seed_fn_93
-#define emit_module wv_seed_fn_134
-#define resolve_graph_for_target wv_seed_fn_162
-#define default_selection wv_seed_fn_94
-#define target_os wv_seed_fn_95
-#define target_arch wv_seed_fn_96
-#define inspect_callers wv_seed_fn_650
-#define run_scalar_graph wv_seed_fn_664
-#define discover_graph_tests wv_seed_fn_672
+#define form_parts wv_seed_fn_80
+#define read_module_for_target wv_seed_fn_95
+#define emit_module wv_seed_fn_136
+#define resolve_graph_for_target wv_seed_fn_164
+#define default_selection wv_seed_fn_96
+#define target_os wv_seed_fn_97
+#define target_arch wv_seed_fn_98
+#define inspect_callers wv_seed_fn_654
+#define run_scalar_graph wv_seed_fn_668
+#define discover_graph_tests wv_seed_fn_676
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -44,18 +44,18 @@ typedef wv_seed_record_13 SelectedDeclaration;
 typedef wv_seed_record_14 ModuleRead;
 typedef wv_seed_record_16 SelectionContext;
 typedef wv_seed_record_18 EmitResult;
-typedef wv_seed_record_63 EmbedAsset;
+typedef wv_seed_record_64 EmbedAsset;
 typedef wv_seed_record_19 GraphModule;
 typedef wv_seed_record_20 GraphBinding;
 typedef wv_seed_record_21 GraphUse;
 typedef wv_seed_record_22 GraphSelector;
 typedef wv_seed_record_23 GraphResult;
-typedef wv_seed_record_56 CallSite;
+typedef wv_seed_record_57 CallSite;
 typedef wv_seed_record_27 SuppliedFile;
-typedef wv_seed_record_66 CallerInspection;
-typedef wv_seed_record_68 GraphOutput;
-typedef wv_seed_record_69 DiscoveredTest;
-typedef wv_seed_record_70 TestDiscovery;
+typedef wv_seed_record_67 CallerInspection;
+typedef wv_seed_record_69 GraphOutput;
+typedef wv_seed_record_70 DiscoveredTest;
+typedef wv_seed_record_71 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
