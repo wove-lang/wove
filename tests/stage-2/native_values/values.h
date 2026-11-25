@@ -15,6 +15,7 @@ static const int32_t test_readonly = 42;
 
 typedef const int32_t ReadonlyNumber;
 static ReadonlyNumber test_qualified = 42;
+static const int32_t test_explicit = 42;
 
 // Compare the Wove arguments with the actual header macros on this target.
 static inline bool check_flags(int32_t close_on_exec, int32_t nonblocking, int32_t no_entry) {

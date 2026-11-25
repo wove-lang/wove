@@ -429,6 +429,7 @@ Native symbols and the ABI entry `main` retain their original spellings.
 | `p` | Parameter | Zero-based position in its signature | Parameter name |
 | `l` | Local | Declared name's original file-local tree row | Local name |
 | `t` | Expression temporary | Original expression's file-local tree row | Empty |
+| `q` | Read-only C type alias | Binding name's tree row in the translation unit | Native name |
 | `b` | C-string call storage | Original call's file-local tree row | `a` for descriptors, `b` for backing storage |
 
 For a single module, hash its declared name, the four-byte little-endian

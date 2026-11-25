@@ -7,15 +7,17 @@
 	(use wove-file "../scalar/flow.wove" (only is_c_value_binding (type ScalarStatement)
 		(value c_constant_binding) (value c_writable_binding)))
 	(use wove-file "../scalar/owners.wove" (only is_native_owner))
-	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only is_native_integer (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type))
-	(use wove-file "./text.wove" (only c_byte c_span c_literal_text))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text write_c_name readonly_type_name_role))
 
 	(let constant_open "_Static_assert((")
 	(let constant_equal "|0)==(")
 	(let constant_sign_left "&&((0<")
 	(let constant_sign_cast ")==(0<(")
 	(let constant_close ")),\"Wove C constant must fit its declared type\");\n")
+	(let typedef_open "typedef ")
+	(let typedef_close ";\n")
 	(let storage_open "_Static_assert(")
 	(let generic_open "_Generic(")
 	(let generic_const "const ")
@@ -74,13 +76,24 @@
 			(set (local cursor) (call write_c_value_name (borrow-shared (local source)) (local name) (borrow-mut (local output)) (local cursor) (local writing)))
 			(return (call c_literal_text (borrow-shared (local constant_close)) (borrow-mut (local output)) (local cursor) (local writing)))))
 
-	(fn write_storage_match
-		(:doc `Match one compatible pointer type for a scalar lvalue or one native pointer value for a borrowed handle.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
-			(name SourceNode) (type u32) (handle bool) (qualified bool)
+	(fn write_readonly_type_name
+		(:doc `Give the qualified match a private typedef keyed by the original C binding name row.`)
+		(params (source (shared-slice u8)) (name SourceNode) (name_index i32)
 			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
+			(return (call write_c_name (borrow-mut (local output)) (local offset) (local writing)
+				(local name_prefix) (call readonly_type_name_role) (int.convert u32 (local name_index))
+				(borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end)))))
+
+	(fn write_storage_match
+		(:doc `Match one compatible pointer type for a scalar lvalue or one native pointer value for a borrowed handle.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(name_index i32) (type u32) (handle bool) (qualified bool)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let name (slice.load (local nodes) (local name_index)))
 			(let-mut cursor (call c_literal_text (borrow-shared (local generic_open)) (borrow-mut (local output)) (local offset) (local writing)))
 			(if
 				(:doc "A scalar must be addressable. A library-owned reference is already a pointer value.")
@@ -92,8 +105,13 @@
 				(:doc "The read-only alternative adds const to the declared scalar type.")
 				(local qualified)
 				(then (set (local cursor) (call c_literal_text (borrow-shared (local generic_const)) (borrow-mut (local output)) (local cursor) (local writing)))))
-			(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "Qualify the typedef so existing const in the original spelling is never repeated.")
+				(bool.and (local qualified) (call is_native_integer (local type)))
+				(then (set (local cursor) (call write_readonly_type_name (borrow-shared (local source))
+					(local name) (local name_index) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
+				(else (set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Only the scalar contract checks an address of storage.")
 				(local handle)
@@ -105,25 +123,39 @@
 		(:doc `Check a foreign lvalue or borrowed handle's type without evaluating the expression.
 
 		A read-only scalar can match its declared type or the const-qualified
-		type. Separate generic selections also work when a typedef already
-		carries const and both candidate pointer types are compatible.`)
+		type. Qualify native spellings through a typedef so const is idempotent.
+		Keep the two matches separate when both pointer types are compatible.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
-			(name SourceNode) (type u32) (is_writable bool)
+			(name_index i32) (type u32) (is_writable bool)
 			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let handle (call is_native_owner (local type)))
-			(let open (call c_literal_text (borrow-shared (local storage_open)) (borrow-mut (local output)) (local offset) (local writing)))
-			(let-mut cursor (call write_storage_match (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (local name) (local type) (local handle) (bool false)
-				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let readonly_scalar (bool.not (bool.or (local handle) (local is_writable))))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Keep the C type spelling intact in the typedef, including explicit or macro-expanded qualifiers.")
+				(bool.and (local readonly_scalar) (call is_native_integer (local type)))
+				(then
+					(set (local cursor) (call c_literal_text (borrow-shared (local typedef_open)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))
+					(set (local cursor) (call write_readonly_type_name (borrow-shared (local source))
+						(slice.load (local nodes) (local name_index)) (local name_index)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_literal_text (borrow-shared (local typedef_close)) (borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call c_literal_text (borrow-shared (local storage_open)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call write_storage_match (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local name_index) (local type) (local handle) (bool false)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(if
 				(:doc "Only read-only scalars accept const-qualified storage as an alternative.")
-				(bool.not (bool.or (local handle) (local is_writable)))
+				(local readonly_scalar)
 				(then
 					(set (local cursor) (call c_literal_text (borrow-shared (local storage_alternative)) (borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call write_storage_match (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (local name) (local type) (bool false) (bool true)
+						(borrow-shared (local records)) (local name_index) (local type) (bool false) (bool true)
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(return (call c_literal_text (borrow-shared (local storage_close)) (borrow-mut (local output)) (local cursor) (local writing)))))
 
@@ -133,14 +165,14 @@
 			(binding ScalarStatement) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
-			(let name (slice.load (local nodes) (record.get (local binding) target)))
+			(let name (record.get (local binding) target))
 			(let kind (record.get (local binding) kind))
 			(let type (record.get (local binding) type))
 			(if
 				(:doc "Constants must be integral and representable as the selected declared type.")
 				(u32.eq (local kind) (local c_constant_binding))
 				(then (return (call write_constant_check (borrow-shared (local source)) (borrow-shared (local nodes))
-					(borrow-shared (local records)) (local name) (local type)
+					(borrow-shared (local records)) (slice.load (local nodes) (local name)) (local type)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(return (call write_storage_check (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (local name) (local type) (u32.eq (local kind) (local c_writable_binding))
