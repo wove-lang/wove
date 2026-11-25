@@ -80,8 +80,9 @@ decimal extent.
 - `(array.store (record.get (local state) block) index value)` writes into
   an inline array field of a writable record.
 
-Stage 2 can borrow fixed `u8`, `u32`, and `u64` local arrays as matching slices.
-A fixed `u8`, `u32`, or `u64` array field can also lend a matching slice
+Stage 2 can borrow fixed integer arrays as matching slices. Supported element
+types are `i8`, `u8`, `i32`, `u32`, and `u64`.
+A fixed integer array field can also lend a matching slice
 with `(borrow-shared (record.get (local state) block))` or the mutable form.
 Sibling field paths can lend independently. A whole-record loan overlaps
 all of its fields.
