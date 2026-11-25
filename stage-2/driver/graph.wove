@@ -1,0 +1,180 @@
+(module native_cli_graph
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Resolve native C-header imports from the entry and the built-in provider sources.")
+
+	(use wove-file "./bundled.wove" (only bundled_path_width write_bundled_sources))
+	(use wove-file "./diagnostics.wove" (only report_source))
+	(use wove-file "./output.wove" (only publish_input))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile) normalize_path))
+	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)
+		(type GraphUse) (type GraphSelector) (type GraphResult) resolve_graph))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only (type SelectedDeclaration) form_parts))
+	(use wove-file "../source/imports.wove" (only import_keyword))
+	(use wove-file "../scalar/plan.wove" (only (type CallSite)))
+	(use wove-file "../emit/graph.wove" (only run_scalar_graph))
+
+	(fn has_c_header_use
+		(:doc "Find an active C-header use in the entry's selected declaration list.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(declarations (shared-slice SelectedDeclaration)) (count i32))
+		(returns bool)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Selection has already discarded inactive declarations.")
+				(i32.lt (local index) (local count))
+				(body
+					(let row (record.get (slice.load (local declarations) (local index)) node))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local nodes) (local row))))
+					(let head (slice.load (local nodes) (record.get (local parts) head)))
+					(let provider (record.get (local parts) operands))
+					(if
+						(:doc "The graph resolver will check the full use and its selectors.")
+						(bool.and (u32.eq (call import_keyword (borrow-shared (local source)) (local head)) (u32 2))
+							(bool.and (i32.lt (i32 -1) (local provider))
+								(u32.eq (call import_keyword (borrow-shared (local source))
+									(slice.load (local nodes) (local provider))) (u32 8))))
+						(then (return (bool true))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (bool false))))
+
+	(fn report_graph_source
+		(:doc "Report the entry with its argv spelling and a provider with its stable virtual path.")
+		(params (path (shared-slice u8)) (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
+			(file i32) (error u32) (start i32) (end i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "A positive file identity names one of the embedded providers.")
+				(bool.and (i32.lt (i32 0) (local file)) (i32.lt (local file) (slice.len (local files))))
+				(then
+					(let provider (slice.load (local files) (local file)))
+					(return (call report_source
+						(borrow-shared (slice.range (local arena) (record.get (local provider) path_start)
+							(record.get (local provider) path_end))) (local error) (local start) (local end) (u32 3)))))
+			(return (call report_source (borrow-shared (local path)) (local error) (local start) (local end) (u32 3)))))
+
+	(fn copy_graph_bindings
+		(:doc "Seal the initialized binding prefix in the exact view consumed by the scalar graph.")
+		(params (source (shared-slice GraphBinding)) (bindings (mut-slice GraphBinding)))
+		(returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "The destination size is the published binding count.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(slice.store (local bindings) (local index) (slice.load (local source) (local index)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn emit_c_graph
+		(:doc "Emit the selected graph and publish its first complete translation unit.")
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
+			(target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
+			(modules (shared-slice GraphModule)) (bindings (shared-slice GraphBinding)) (resolved GraphResult))
+		(returns i32)
+		(body
+			(let-mut assets (array.alloc SuppliedFile (i32 0)))
+			(let-mut callers (array.alloc CallSite (i32 0)))
+			(let-mut capacity (i32 4096))
+			(while
+				(:doc "Retry a short C output buffer within the signed slice range.")
+				(bool true)
+				(body
+					(let-mut output (array.alloc u8 (local capacity)))
+					(let result (call run_scalar_graph (borrow-shared (local arena)) (borrow-shared (local files))
+						(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
+						(i32 0) (i32 -1) (borrow-shared (slice.range (local arena) (i32 0) (i32 0)))
+						(borrow-shared (local assets)) (borrow-mut (local output)) (borrow-mut (local callers))))
+					(let error (record.get (local result) error))
+					(if
+						(:doc "Publish only a complete emission.")
+						(u32.eq (local error) (u32 0))
+						(then (return (call publish_input (borrow-shared (local path)) (borrow-shared (local target))
+							(borrow-shared (local profile)) (local mode) (local target_index)
+							(borrow-shared (slice.range (local output) (i32 0) (record.get (local result) count)))))))
+					(if
+						(:doc "Preserve source diagnostics and stop before growth could overflow.")
+						(bool.or (bool.not (u32.eq (local error) (u32 16))) (i32.lt (i32 1073741823) (local capacity)))
+						(then (return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
+							(borrow-shared (local files)) (record.get (local result) file) (local error)
+							(record.get (local result) start) (record.get (local result) end)))))
+					(set (local capacity) (i32.add.wrapping (local capacity) (local capacity)))))
+			(return (i32 1))))
+
+	(fn resolve_c_input
+		(:doc "Bind the entry's selections against the three registered sources.")
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
+			(target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (rows i32))
+		(returns i32)
+		(body
+			(let-mut modules (array.alloc GraphModule (slice.len (local files))))
+			(let-mut scratch (array.alloc GraphBinding (local rows)))
+			(let-mut uses (array.alloc GraphUse (local rows)))
+			(let-mut selectors (array.alloc GraphSelector (local rows)))
+			(let resolved (call resolve_graph (borrow-shared (local arena)) (borrow-shared (local files)) (i32 0) (u32 0)
+				(borrow-mut (local modules)) (borrow-mut (local scratch)) (borrow-mut (local uses)) (borrow-mut (local selectors))))
+			(if
+				(:doc "Failed selections retain their original file identity and byte span.")
+				(u32.lt (u32 0) (record.get (local resolved) error))
+				(then (return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (record.get (local resolved) file) (record.get (local resolved) error)
+					(record.get (local resolved) start) (record.get (local resolved) end)))))
+			(let-mut bindings (array.alloc GraphBinding (record.get (local resolved) bindings)))
+			(call copy_graph_bindings (borrow-shared (local scratch)) (borrow-mut (local bindings)))
+			(return (call emit_c_graph (borrow-shared (local path)) (borrow-shared (local target))
+				(borrow-shared (local profile)) (local mode) (local target_index) (borrow-shared (local arena))
+				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)))))
+
+	(fn prepare_bundled_input
+		(:doc "Allocate the source and path arena before registering the embedded modules.")
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8))
+			(mode u32) (target_index i32) (source (shared-slice u8)) (rows i32) (virtual (shared-slice u8))
+			(stdlib (shared-slice u8)) (stdio (shared-slice u8)))
+		(returns i32)
+		(body
+			(let entry_size (i32.add.wrapping (slice.len (local source)) (slice.len (local virtual))))
+			(let provider_size (i32.add.wrapping (slice.len (local stdlib)) (slice.len (local stdio))))
+			(let providers (i32.add.wrapping (local provider_size) (call bundled_path_width)))
+			(let total (i32.add.wrapping (local entry_size) (local providers)))
+			(if
+				(:doc "Check each sum before allocating or publishing any source range.")
+				(bool.or (i32.lt (local entry_size) (i32 0))
+					(bool.or (i32.lt (local provider_size) (i32 0))
+						(bool.or (i32.lt (local providers) (i32 0)) (i32.lt (local total) (i32 0)))))
+				(then (return (call report_source (borrow-shared (local path)) (u32 16) (i32 0) (i32 0) (u32 3)))))
+			(let-mut arena (array.alloc u8 (local total)))
+			(let-mut files (array.alloc SuppliedFile (i32 3)))
+			(let written (call write_bundled_sources (borrow-shared (local virtual)) (borrow-shared (local source))
+				(borrow-shared (local stdlib)) (borrow-shared (local stdio)) (borrow-mut (local arena)) (borrow-mut (local files))))
+			(return (call resolve_c_input (borrow-shared (local path)) (borrow-shared (local target))
+				(borrow-shared (local profile)) (local mode) (local target_index)
+				(borrow-shared (slice.range (local arena) (i32 0) (local written))) (borrow-shared (local files)) (local rows)))))
+
+	(fn compile_bundled_input
+		(:doc "Open the source graph with the checked-in C provider bytes embedded in this compiler.")
+		(:expect (tests "stage-2/cli/native/cases.tsv") (issues "gh:wove-lang/wove:221"))
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8))
+			(mode u32) (target_index i32) (source (shared-slice u8)) (rows i32))
+		(returns i32)
+		(body
+			(let width (slice.len (local path)))
+			(if
+				(:doc "The virtual path buffer reserves room for a leading slash.")
+				(i32.eq (local width) (i32 2147483647))
+				(then (return (call report_source (borrow-shared (local path)) (u32 16) (i32 0) (i32 0) (u32 3)))))
+			(let-mut virtual (array.alloc u8 (i32.add.wrapping (local width) (i32 1))))
+			(let end (call normalize_path (borrow-shared (local path)) (borrow-mut (local virtual)) (i32 0)))
+			(if
+				(:doc "An entry must have a nonempty normalized source path.")
+				(i32.lt (local end) (i32 1))
+				(then (return (call report_source (borrow-shared (local path)) (u32 27) (i32 0) (i32 0) (u32 3)))))
+			(let stdlib (embed "../c-stdlib/stdlib.wove"))
+			(let stdio (embed "../c-stdlib/stdio.wove"))
+			(return (call prepare_bundled_input (borrow-shared (local path)) (borrow-shared (local target))
+				(borrow-shared (local profile)) (local mode) (local target_index) (borrow-shared (local source))
+				(local rows) (borrow-shared (slice.range (local virtual) (i32 0) (local end)))
+				(borrow-shared (local stdlib)) (borrow-shared (local stdio)))))))

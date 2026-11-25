@@ -38,7 +38,7 @@ def check_case(compiler, clang, runtime, fixtures, row):
 			assert not result.stderr and artifacts == [retained], (label, result.stderr, artifacts)
 			program = root / "result"
 			subprocess.run([*clang, "-I", "runtime", str(root / retained), runtime, "-o", str(program)], check=True, timeout=30)
-			built = subprocess.run([program], capture_output=True, timeout=30)
+			built = subprocess.run([program], stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
 			assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), (label, built)
 		else:
 			assert not artifacts and result.stderr.count(b"\n") == 1, (label, artifacts, result.stderr)
@@ -51,10 +51,15 @@ def main():
 	clang = [*shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang")), "-std=c11",
 		*shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))]
 	runtime = os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")
-	# The manifest supplies paths, argv, publication, and the expected diagnostic.
-	for line in manifest.read_text(encoding="utf-8").splitlines():
-		if line and not line.startswith("#"):
-			check_case(compiler, clang, runtime, manifest.parent, line.split("\t"))
+	# Relocate the executable so its cases exercise an installed compiler outside the checkout.
+	with TemporaryDirectory(prefix="native-wovec-") as install:
+		installed = Path(install) / compiler.name
+		shutil.copy2(compiler, installed)
+		# The manifest supplies paths, argv, artifacts, and diagnostics.
+		for line in manifest.read_text(encoding="utf-8").splitlines():
+			# Ignore the manifest header and comments.
+			if line and not line.startswith("#"):
+				check_case(installed, clang, runtime, manifest.parent, line.split("\t"))
 
 
 if __name__ == "__main__":
