@@ -50,6 +50,7 @@ typedef struct {
 } wvrt_cstr_argument;
 
 char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrt_arguments, size_t wvrt_count);
+void wvrt_cstr_copy_back(wvrt_mut_slice wvrt_view, const char *wvrt_value);
 void wvrt_cstr_drop(char *wvrt_storage);
 
 void wvrt_check_c_bytes(wvrt_slice wvrt_view, int64_t wvrt_size, int64_t wvrt_count,
@@ -135,6 +136,8 @@ wvrt_array *wvrt_array_new_at_span(int32_t wvrt_length, size_t wvrt_element_size
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrt_length, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrt_bytes, int32_t wvrt_length,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_snapshot_borrowed_cstr_at_span(const char *wvrt_text,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_snapshot_cstr_at_span(char *wvrt_text, void (*wvrt_release)(void *),
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

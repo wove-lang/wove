@@ -111,6 +111,14 @@ char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrtarguments, size_t wvrtcount) {
 	return wvrt_storage;
 }
 
+// Restore only the original view bytes and keep the native call's errno.
+void wvrt_cstr_copy_back(wvrt_mut_slice wvrtview, const char *wvrtvalue) {
+	if (wvrtview.wvrt_length == 0) { return; }
+	const int wvrt_saved_errno = errno;
+	memcpy(wvrtview.wvrt_items, wvrtvalue, (size_t)wvrtview.wvrt_length);
+	errno = wvrt_saved_errno;
+}
+
 // Release the call's temporary storage while retaining the native call's errno.
 void wvrt_cstr_drop(char *wvrtstorage) {
 	const int wvrt_saved_errno = errno;
@@ -314,24 +322,42 @@ wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrtbytes, int32_t wvrtlength
 	return wvrt_result;
 }
 
+// Copy present native text into an independent owner, including an empty string.
+static wvrt_array *wvrt_try_copy_cstr(const char *wvrttext) {
+	const size_t wvrt_length = strlen(wvrttext);
+	if (wvrt_length > INT32_MAX) { return NULL; }
+	wvrt_array *wvrt_result = wvrt_array_try_new((int32_t)wvrt_length, sizeof(uint8_t), _Alignof(uint8_t));
+	if (wvrt_result != NULL && wvrt_length != 0) { memcpy(wvrt_result->wvrt_items, wvrttext, wvrt_length); }
+	return wvrt_result;
+}
+
+// Report snapshot failure after releasing owned native storage, or restore the call's errno.
+static wvrt_array *wvrt_finish_cstr_snapshot(wvrt_array *wvrtresult, int wvrtsaved_errno,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	if (wvrtresult == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not snapshot C string"); }
+	errno = wvrtsaved_errno;
+	return wvrtresult;
+}
+
+// Copy a borrowed result while its C backing remains live.
+wvrt_array *wvrt_snapshot_borrowed_cstr_at_span(const char *wvrttext,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	if (wvrttext == NULL) { return NULL; }
+	const int wvrt_saved_errno = errno;
+	wvrt_array *wvrt_result = wvrt_try_copy_cstr(wvrttext);
+	return wvrt_finish_cstr_snapshot(wvrt_result, wvrt_saved_errno, wvrtfile, wvrtstart, wvrtend);
+}
+
 // Copy the native text before invoking its release, including on copy failure.
 static wvrt_array *wvrt_snapshot_cstr(char *wvrttext, void (*wvrtrelease)(void *),
 	void (*wvrtchars_release)(char *), int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	if (wvrttext == NULL) { return NULL; }
-	int wvrt_saved_errno = errno;
-	size_t wvrt_length = strlen(wvrttext);
-	wvrt_array *wvrt_result = NULL;
-	// A present empty string still receives its own non-null Wove owner.
-	if (wvrt_length <= INT32_MAX) {
-		wvrt_result = wvrt_array_try_new((int32_t)wvrt_length, sizeof(uint8_t), _Alignof(uint8_t));
-		if (wvrt_result != NULL && wvrt_length != 0) { memcpy(wvrt_result->wvrt_items, wvrttext, wvrt_length); }
-	}
+	const int wvrt_saved_errno = errno;
+	wvrt_array *wvrt_result = wvrt_try_copy_cstr(wvrttext);
 	// The checked bridge selects the matching release signature without a cast.
 	if (wvrtrelease != NULL) { wvrtrelease(wvrttext); }
 	else { wvrtchars_release(wvrttext); }
-	if (wvrt_result == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not snapshot C string"); }
-	errno = wvrt_saved_errno;
-	return wvrt_result;
+	return wvrt_finish_cstr_snapshot(wvrt_result, wvrt_saved_errno, wvrtfile, wvrtstart, wvrtend);
 }
 
 // Accept the standard free signature for an allocating C string.
