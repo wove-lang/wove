@@ -17,7 +17,7 @@
 	(use wove-file "./types.wove" (only source_builtin_type is_builtin_integer reference_mode))
 	(use wove-file "./c_owners.wove" (only is_native_name check_c_type))
 	(use wove-file "./c_records.wove" (only is_c_record read_c_record))
-	(use wove-file "./c_arguments.wove" (only c_byte_slice_type read_c_arguments (type CArgument)))
+	(use wove-file "./c_arguments.wove" (only c_byte_slice_type read_c_arguments mark_c_integer_argument (type CArgument)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 
 	(use wove-file "./target.wove" (only (type SelectionContext)))
@@ -332,17 +332,17 @@
 				(then (return (local checked))))
 			(return (call c_member_error (record.get (local name) start) (record.get (local name) end) (u32 23)))))
 
-	(fn read_c_integer_parameter
-		(:doc `Resolve a native value parameter in the defining bridge without borrowing it.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (context SelectionContext))
+	(fn read_c_bare_value
+		(:doc `Resolve an integer alias or, where allowed, a by-value pointer owner.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (context SelectionContext) (accept_owner bool))
 		(returns CMemberRead)
 		(body
 			(let checked (call read_c_named_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local bridge) (local context)))
 			(if
-				(:doc "Native value parameters in this slice must be integer aliases.")
+				(:doc "Inline C record views require a reference, and bare foreign values cannot own.")
 				(bool.and (u32.eq (record.get (local checked) error) (u32 0))
-					(bool.or (i32.lt (i32 -1) (record.get (local checked) drop_start))
+					(bool.or (bool.and (bool.not (local accept_owner)) (i32.lt (i32 -1) (record.get (local checked) drop_start)))
 						(call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
 							(slice.load (local nodes) (record.get (local checked) declaration)))))
 				(then (return (call c_member_error (record.get (local node) start) (record.get (local node) end) (u32 23)))))
@@ -354,10 +354,10 @@
 		(returns CMemberRead)
 		(body
 			(if
-				(:doc "Native integer aliases appear as bare names in the defining bridge.")
+				(:doc "Integer aliases and consuming owners appear as bare names.")
 				(u32.eq (record.get (local node) kind) (u32 1))
-				(then (return (call read_c_integer_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local bridge) (local context)))))
+				(then (return (call read_c_bare_value (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local bridge) (local context) (bool true)))))
 			(return (call read_c_reference_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local bridge) (local context)))))
 
@@ -416,6 +416,15 @@
 			(let-mut parameter (local first_parameter))
 			(let-mut count (i32 0))
 			(while
+				(:doc "Count the original formals before recording their checked types.")
+				(i32.lt (i32 -1) (local parameter))
+				(body
+					(set (local count) (i32.add.wrapping (local count) (i32 1)))
+					(set (local parameter) (record.get (slice.load (local nodes) (local parameter)) next_sibling))))
+			(let-mut arguments (array.alloc CArgument (local count)))
+			(let-mut index (i32 0))
+			(set (local parameter) (local first_parameter))
+			(while
 				(:doc "Each parameter has one supported type and a unique name in this signature.")
 				(bool.not (i32.lt (local parameter) (i32 0)))
 				(body
@@ -434,8 +443,9 @@
 						(then (return (call c_member_error (record.get (local choice) start) (record.get (local choice) end)
 							(record.get (local choice) error)))))
 					(let type_node (slice.load (local nodes) (local type)))
+					(let-mut integer (call is_builtin_integer (call source_builtin_type (borrow-shared (local source)) (local type_node))))
 					(if
-						(:doc "Other supported formals name a native alias or shared pointer resource from this bridge.")
+						(:doc "Resolve native aliases and resource types in their defining bridge.")
 						(bool.not (bool.or (call is_c_scalar (borrow-shared (local source)) (local type_node))
 							(u32.lt (u32 0) (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))))
 						(then
@@ -444,7 +454,13 @@
 							(if
 								(:doc "Preserve type lookup and contract errors from the defining source.")
 								(u32.lt (u32 0) (record.get (local handle) error))
-								(then (return (local handle))))))
+								(then (return (local handle))))
+							(set (local integer) (bool.and (u32.eq (record.get (local type_node) kind) (u32 1))
+								(i32.lt (record.get (local handle) drop_start) (i32 0))))))
+					(if
+						(:doc "Only a built-in integer or a checked integer alias can supply an extent.")
+						(local integer)
+						(then (call mark_c_integer_argument (borrow-mut (local arguments)) (local index))))
 					(let name (slice.load (local nodes) (record.get (local parts) head)))
 					(let name_start (record.get (local name) start))
 					(let name_end (record.get (local name) end))
@@ -463,8 +479,7 @@
 								(then (return (call c_member_error (local name_start) (local name_end) (u32 33)))))
 							(set (local earlier) (record.get (local previous) next_sibling))))
 					(set (local parameter) (record.get (local item) next_sibling))
-					(set (local count) (i32.add.wrapping (local count) (i32 1)))))
-			(let-mut arguments (array.alloc CArgument (local count)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
 			(let contracts (call read_c_arguments (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local parts) (local first_parameter) (borrow-mut (local arguments))))
@@ -495,8 +510,8 @@
 			(if
 				(:doc "A plain type name resolves to an integer alias in this bridge.")
 				(u32.eq (record.get (local node) kind) (u32 1))
-				(then (return (call read_c_integer_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local bridge) (local context)))))
+				(then (return (call read_c_bare_value (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local bridge) (local context) (bool false)))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let mode (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
 			(if
