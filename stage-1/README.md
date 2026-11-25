@@ -13,9 +13,10 @@ type returns a value. A `void` function can return without a value or complete
 at the end of its body.
 A source rejection prints the filename and line.
 
-Write integer literals as typed decimal nodes such as `(u32 4294967295)`.
-The seed checks the range of each literal and preserves its exact type
-through local bindings, parameters, calls, and returns. Use
+Write `i8`, `u8`, `i32`, and `u32` literals as typed decimal nodes such as
+`(i8 -128)` or `(u32 4294967295)`. The seed checks the range of each
+literal and preserves its exact type through bindings, parameters, calls,
+and returns. Use
 `(int.convert i32 (local byte))` to explicitly convert between seed integers.
 The conversion preserves values that fit and traps at the source line when a
 value is outside the selected type's range.
@@ -35,7 +36,7 @@ as `bool` in every case. `(bool.not value)` negates one boolean. All three
 operations return `bool`.
 
 Declare a named record with `(struct Token (fields (kind u32) (start i32)
-(end i32)))`. Its fields can have type `bool`, `u8`, `i32`, or `u32`.
+(end i32)))`. Its fields can have type `bool`, `i8`, `u8`, `i32`, or `u32`.
 A `record.make` names the record type and supplies each field once, using its
 declared type. Initializer expressions run in the order written. Use
 `(record.get (local token) start)` to read a field as its declared scalar type.
@@ -76,18 +77,39 @@ half-open range of a named byte buffer or slice. The seed evaluates the
 storage starting at `start` and a length of `end - start`.
 Equal endpoints form an empty view, including at the end of the source.
 
-A `module` or `fn` declaration starts with its tag and bare name.
-Place its contiguous metadata prefix after the name and before ordinary
-fields, as in `(fn main (:doc "Return success.") (params) ...)`.
+A module-level `let` declares an immutable binding in its defining file.
+It takes a typed integer literal or a quoted string as its initializer.
+
+```lisp
+(let lowest_digit (i8 -1))
+(let base16_alphabet "0123456789abcdef")
+```
+
+Use `(local lowest_digit)` to read the scalar in a function. A local
+binding or parameter with the same name takes precedence. An imported
+function reads its own file's bindings, and `use` selects functions and
+types in the seed.
+
+A string initializes a shared `u8` slice backed by one static read-only
+table. Its length counts decoded UTF-8 bytes, with no added NUL. Use
+`(slice.load (local base16_alphabet) (local index))` with the ordinary
+slice bounds checks. The same place works with `slice.len` and
+`borrow-shared`. Attempts to write a module binding fail at the source
+operation.
+
+A `module`, `fn`, or module-level `let` declaration starts with its tag
+and bare name. Place its contiguous metadata prefix after the name and
+before ordinary fields, as in `(fn main (:doc "Return success.") (params) ...)`.
 The same naming syntax applies to functions in C bridges.
 Declaration groups carry that context through their members. Opaque
 metadata payloads can use the same form tags as ordinary data.
 
 Other forms keep metadata immediately after the tag. For example,
 `(let (:doc "Keep the owner in this scope.") buffer (array.alloc u8 (i32 3)))`
-binds `buffer` in the usual scope. In plain `let` and `let-mut`, the binding
-name follows the tag. Metadata entries use colon-prefixed tags such as
-`(:doc "text")`, `(:expect ...)`, and `(:pragma (cfg bootstrap) (inline always))`.
+binds `buffer` in the function body. In function-local `let` and `let-mut`
+without metadata, the binding name follows the tag. Metadata entries use
+colon-prefixed tags such as `(:doc "text")`, `(:expect ...)`, and
+`(:pragma (cfg bootstrap) (inline always))`.
 An entry before a declaration name or after an ordinary field is a source
 error. The retired `with-meta`, `meta`, and `;;` spellings remain invalid. Quoted text can contain semicolons.
 
