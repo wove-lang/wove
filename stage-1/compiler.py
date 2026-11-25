@@ -425,7 +425,7 @@ class FunctionEmitter:
 			raise SourceError(node.line)
 		return value
 
-	# Check an access against loans held by earlier arguments of active calls.
+	# Check an access against loans held during operand evaluation.
 	def check_access(self, binding: Binding, exclusive: bool, line: int) -> None:
 		# Shared access can coexist with other shared access to the same place.
 		for parent, loan in self.loans:
@@ -433,8 +433,8 @@ class FunctionEmitter:
 			if parent is binding and (exclusive or loan == MUT):
 				raise SourceError(line)
 
-	# Resolve the array place, check its permission, and return its descriptor field prefix.
-	def array_access(self, node: Node, line: int, writable: bool = False) -> tuple[str, str | Record]:
+	# Resolve the binding and descriptor for a permitted array access.
+	def array_access(self, node: Node, line: int, writable: bool = False) -> tuple[Binding, BufferType, str]:
 		binding = self.local(node, line)
 		value = binding.value
 		kind = value.kind
@@ -446,7 +446,7 @@ class FunctionEmitter:
 		if writable and not (binding.writable if owned else kind.access == MUT):
 			raise SourceError(line)
 		self.check_access(binding, writable, line)
-		return value.c + ("->" if owned else "."), kind.element
+		return binding, kind, value.c + ("->" if owned else ".")
 
 	# Index a native record only after the runtime verifies the signed element index.
 	def record_element(
@@ -713,13 +713,14 @@ class FunctionEmitter:
 		# Read the element count of the live owner or received view.
 		if expr.tag == "array.len":
 			target, = form(expr, arity=1).operands
-			fields, _ = self.array_access(target, node.line)
+			_, _, fields = self.array_access(target, node.line)
 			return self.temporary(I32, f"{fields}wvrt_length")
 
 		# Copy an element through either descriptor after checking its index.
 		if expr.tag == "array.load":
 			target, subscript = form(expr, arity=2).operands
-			fields, element = self.array_access(target, node.line)
+			_, kind, fields = self.array_access(target, node.line)
+			element = kind.element
 			index = self.typed(subscript, I32)
 			# A typed record access copies the entire element.
 			if element != U8:
@@ -885,12 +886,21 @@ class FunctionEmitter:
 			self.emit_return(statement)
 			return False
 
-		# Store directly into the mutable view's backing storage.
+		# Store directly into the backing storage of a mutable owner or view.
 		if statement.tag == "array.store":
 			target, subscript, operand = form(statement, arity=3).operands
-			fields, element = self.array_access(target, node.line, writable=True)
-			index = self.typed(subscript, I32)
-			value = self.typed(operand, element)
+			binding, kind, fields = self.array_access(target, node.line, writable=True)
+			element = kind.element
+			checkpoint = len(self.loans)
+			# Projecting a writable view of the owner reserves it through both operands.
+			if kind.access == OWNED:
+				self.loans.append((binding, MUT))
+			# Restore the enclosing loan prefix if either operand fails checking.
+			try:
+				index = self.typed(subscript, I32)
+				value = self.typed(operand, element)
+			finally:
+				del self.loans[checkpoint:]
 			# Keep the byte path for existing callers and use native assignment for records.
 			if element == U8:
 				self.emit_line(
