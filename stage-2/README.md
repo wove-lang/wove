@@ -604,13 +604,14 @@ repeats or discards an operand. The invocation's result is stored in
 its declared Wove type.
 
 Use `(:pragma (c_cstr parameter ...))` or `(:pragma (c_cstr_raw parameter ...))`
-after the bridge function name to pass one or more shared byte slices as
-`const char *`. After evaluating all arguments, the call copies each named
-slice and appends a NUL byte. Checked mode traps at the Wove argument span
-on an embedded NUL before calling C. Raw mode copies every byte, including
-bytes after an embedded NUL. An empty view passes a pointer to one NUL byte.
-C can read the temporary buffers until the call returns, when Wove releases
-their backing storage.
+after the bridge function name. Shared byte slices pass `const char *`.
+Mutable byte slices pass `char *`. After evaluating all arguments, the call
+copies each named slice and appends a NUL byte. Checked mode traps at the
+Wove argument span on an embedded NUL before calling C. Raw mode copies
+every byte, including bytes after an embedded NUL. An empty view passes a
+pointer to one NUL byte. After the call and any result snapshot, Wove copies
+back the original length of each mutable view and releases the temporary
+storage. Copy-back also runs when C returns null.
 
 Use `(:pragma (c_variadic first_tail_parameter))` to bind one typed use
 of a C variadic function. The named parameter follows at least one fixed
@@ -703,11 +704,13 @@ returns an error. Lexical cleanup drops any handle still present on the
 executed path. Later uses on any continuing path that could have
 transferred the owner point to the use and its earlier move.
 
-For an allocating C text result, `(:pragma (c_snapshot cstr (drop free)))`
-requires `(returns (optional (owned-array u8)))`. Copy the native bytes up
-to the first NUL and release a present C result exactly once. The release
-has C signature `void (void *)` or `void (char *)`. A null result stays
-absent, and an empty C string produces a present zero-length owner.
+Use `(:pragma (c_snapshot cstr))` for a borrowed C string result. Wove copies
+the bytes up to the first NUL while any argument backing is still live.
+Use `(:pragma (c_snapshot cstr (drop free)))` for an allocating result and
+release each present C result exactly once after copying. The release has C
+signature `void (void *)` or `void (char *)`. Both forms require
+`(returns (optional (owned-array u8)))`. C null stays absent and an empty C
+string produces a present zero-length owner.
 
 A fixed C signature can declare `(mut-ref T)` for writable scalar storage.
 Use `(borrow-mut (local value))` on a mutable local or borrow a writable

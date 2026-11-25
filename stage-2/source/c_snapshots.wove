@@ -1,7 +1,7 @@
 (module source_c_snapshots
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Read the allocating C text snapshot contract and its exact Wove result.`)
+	(:doc `Read borrowed and allocating C text snapshot contracts and their exact Wove result.`)
 
 	(use wove-file "./scan.wove" (only (type SourceNode)))
 	(use wove-file "./module.wove" (only form_parts source_keyword (type FormParts)))
@@ -9,7 +9,7 @@
 	(use wove-file "./types.wove" (only source_builtin_type))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 
-	(struct CSnapshot (fields (drop i32) (start i32) (end i32) (error u32)))
+	(struct CSnapshot (fields (active bool) (drop i32) (start i32) (end i32) (error u32)))
 
 	(let snapshot_keyword "c_snapshot")
 	(let text_kind "cstr")
@@ -59,25 +59,28 @@
 				(u32.eq (call source_builtin_type (borrow-shared (local source)) (local element)) 10u32)))))
 
 	(fn snapshot_at
-		(:doc `Retain either the checked release symbol or the offending source span.`)
-		(params (node SourceNode) (drop i32) (error u32))
+		(:doc `Retain whether text is copied, its optional release symbol, and the source span.`)
+		(params (node SourceNode) (active bool) (drop i32) (error u32))
 		(returns CSnapshot)
-		(body (return (record.make CSnapshot (drop (local drop)) (start (record.get (local node) start))
+		(body (return (record.make CSnapshot (active (local active)) (drop (local drop)) (start (record.get (local node) start))
 			(end (record.get (local node) end)) (error (local error))))))
 
-	(fn read_snapshot_drop
-		(:doc `Read cstr followed by exactly one drop directive naming a C function.`)
+	(fn read_snapshot_directive
+		(:doc `Read cstr with an optional drop directive naming a C release function.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (directive SourceNode) (start i32))
 		(returns CSnapshot)
 		(body
-			(if (i32.lt (local start) 0i32) (then (return (call snapshot_at (local directive) -1i32 23u32))))
+			(if (i32.lt (local start) 0i32) (then (return (call snapshot_at (local directive) (bool false) -1i32 23u32))))
 			(let kind (slice.load (local nodes) (local start)))
 			(let next (record.get (local kind) next_sibling))
 			(if
-				(:doc "This contract snapshots C text with a declared release.")
-				(bool.or (i32.lt (local next) 0i32)
-					(bool.not (call matches_atom (borrow-shared (local source)) (local kind) (borrow-shared (local text_kind)))))
-				(then (return (call snapshot_at (local directive) -1i32 23u32))))
+				(:doc "Only the C string snapshot kind is implemented here.")
+				(bool.not (call matches_atom (borrow-shared (local source)) (local kind) (borrow-shared (local text_kind))))
+				(then (return (call snapshot_at (local directive) (bool false) -1i32 23u32))))
+			(if
+				(:doc "An omitted drop contract means the native string is borrowed.")
+				(i32.lt (local next) 0i32)
+				(then (return (call snapshot_at (local directive) (bool true) -1i32 0u32))))
 			(let drop (slice.load (local nodes) (local next)))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local drop)))
 			(if
@@ -85,22 +88,23 @@
 				(bool.or (i32.lt -1i32 (record.get (local drop) next_sibling))
 					(bool.not (call has_head (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts)
 						(borrow-shared (local drop_keyword)))))
-				(then (return (call snapshot_at (local drop) -1i32 23u32))))
+				(then (return (call snapshot_at (local drop) (bool false) -1i32 23u32))))
 			(let release (record.get (local parts) operands))
 			(let symbol (slice.load (local nodes) (local release)))
 			(if
 				(:doc "Keep the symbol's defining span when it cannot name a C function.")
 				(bool.or (i32.lt -1i32 (record.get (local symbol) next_sibling))
 					(bool.not (call is_native_name (borrow-shared (local source)) (local symbol))))
-				(then (return (call snapshot_at (local symbol) -1i32 23u32))))
-			(return (call snapshot_at (local directive) (local release) 0u32))))
+				(then (return (call snapshot_at (local symbol) (bool false) -1i32 23u32))))
+			(return (call snapshot_at (local directive) (bool true) (local release) 0u32))))
 
 	(fn read_c_snapshot
-		(:doc `Check a selected signature for one allocating C-string snapshot contract.`)
+		(:doc `Check a selected signature for one borrowed or allocating C-string snapshot contract.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function FormParts) (result SourceNode))
 		(returns CSnapshot)
 		(body
-			(let-mut selected -1i32)
+			(let-mut active (bool false))
+			(let-mut drop -1i32)
 			(let-mut entry (record.get (local function) metadata))
 			(while
 				(:doc "Search only the checked metadata prefix for native result contracts.")
@@ -128,21 +132,20 @@
 										(then
 											(if
 												(:doc "Reject a second C snapshot at the repeated directive.")
-												(i32.lt -1i32 (local selected))
-												(then (return (call snapshot_at (local item) -1i32 23u32))))
-											(let current (call read_snapshot_drop (borrow-shared (local source)) (borrow-shared (local nodes))
+												(local active)
+												(then (return (call snapshot_at (local item) (bool false) -1i32 23u32))))
+											(let current (call read_snapshot_directive (borrow-shared (local source)) (borrow-shared (local nodes))
 												(local item) (record.get (local parts) operands)))
 											(if (u32.lt 0u32 (record.get (local current) error)) (then (return (local current))))
-											(set (local selected) (record.get (local current) drop))))
+											(set (local active) (bool true))
+											(set (local drop) (record.get (local current) drop))))
 									(set (local index) (record.get (local item) next_sibling))))))
 					(set (local entry) (record.get (local node) next_sibling))))
+			(let optional (call is_optional_byte_owner (borrow-shared (local source)) (borrow-shared (local nodes)) (local result)))
 			(if
 				(:doc "The snapshot and the optional byte owner result require each other.")
-				(bool.or
-					(bool.and (i32.lt -1i32 (local selected))
-						(bool.not (call is_optional_byte_owner (borrow-shared (local source)) (borrow-shared (local nodes)) (local result))))
-					(bool.and (i32.lt (local selected) 0i32)
-						(call is_optional_byte_owner (borrow-shared (local source)) (borrow-shared (local nodes)) (local result))))
-				(then (return (call snapshot_at (local result) -1i32 23u32))))
-			(return (call snapshot_at (local result) (local selected) 0u32))))
+				(bool.or (bool.and (local active) (bool.not (local optional)))
+					(bool.and (local optional) (bool.not (local active))))
+				(then (return (call snapshot_at (local result) (bool false) -1i32 23u32))))
+			(return (call snapshot_at (local result) (local active) (local drop) 0u32))))
 )
