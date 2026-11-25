@@ -241,9 +241,10 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		# Check optional probes before inspecting published artifacts.
 		if tool:
 			check_tool_calls(root, tool)
-		# A collision preserves every input and previous artifact with identical entries.
+		# Check-only runs and rejected publication preserve the existing entries and their contents.
 		if preserve:
-			assert result.stderr.count(b"\n") == 1, (label, result.stderr)
+			if result.returncode:
+				assert result.stderr.count(b"\n") == 1, (label, result.stderr)
 			after = publication_snapshot(root)
 			# The manifest already checked any compiler observation recorded by the wrapper.
 			if tool and ("arguments" in tool or "queries" in tool):
