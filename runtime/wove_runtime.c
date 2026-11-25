@@ -348,12 +348,17 @@ int64_t wvrt_int_convert(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax,
 	return wvrtvalue;
 }
 
+// Report a Stage 2 integer conversion at its original span.
+_Noreturn void wvrt_int_conversion_trap(int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
+}
+
 // Check Stage 2 conversions before the target-specific wrapper narrows the value.
 static int64_t wvrt_int_at_span(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	// Source identity and offsets describe the conversion in its original file.
 	if (!wvrt_int_fits(wvrtvalue, wvrtmin, wvrtmax)) {
-		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
+		wvrt_int_conversion_trap(wvrtfile, wvrtstart, wvrtend);
 	}
 	return wvrtvalue;
 }

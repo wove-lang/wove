@@ -9,14 +9,15 @@
 	(use wove-file "../c/arguments.wove" (only is_c_bytes_mode))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../scalar/plan.wove" (only (type ScalarFunction) (type ScalarParameter) (type ScalarExpression)))
-	(use wove-file "./runtime.wove" (only open_shared_projection close_runtime_call))
+	(use wove-file "../scalar/records.wove" (only is_native_integer))
+	(use wove-file "./runtime.wove" (only open_native_suffix open_shared_projection close_runtime_call))
 	(use wove-file "./text.wove" (only c_byte write_temporary_name))
 
-	(struct CActual (fields (node i32)))
+	(struct CActual (fields (node i32) (type u32)))
 
 	(fn open_c_byte_check
 		(:doc `Open the runtime's checked byte extent call.`)
-		(params (output (mut-slice u8)) (offset u32) (writing bool))
+		(params (output (mut-slice u8)) (offset u32) (native bool) (writing bool))
 		(returns u32)
 		(body
 			(let-mut cursor (local offset))
@@ -38,12 +39,16 @@
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 116) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 101) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 115) (local writing)))
-			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 40) (local writing)))
-			(return (local cursor))))
+			(if
+				(:doc "A native factor needs a check in its original C width.")
+				(local native)
+				(then (return (call open_native_suffix (borrow-mut (local output)) (local cursor) (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 40) (local writing)))))
 
 	(fn map_c_actuals
 		(:doc `Index the captured expression rows by their positions in the signature.`)
-		(params (nodes (shared-slice SourceNode)) (first i32) (output (mut-slice CActual)))
+		(params (nodes (shared-slice SourceNode)) (first i32) (parameters (shared-slice ScalarParameter))
+			(parameter_start i32) (output (mut-slice CActual)))
 		(returns void)
 		(body
 			(let-mut argument (local first))
@@ -52,7 +57,9 @@
 				(:doc "Arity checking established one actual for each formal.")
 				(i32.lt (local index) (slice.len (local output)))
 				(body
-					(slice.store (local output) (local index) (record.make CActual (node (local argument))))
+					(let formal (slice.load (local parameters) (i32.add.wrapping (local parameter_start) (local index))))
+					(slice.store (local output) (local index) (record.make CActual (node (local argument))
+						(type (record.get (local formal) type))))
 					(set (local argument) (record.get (slice.load (local nodes) (local argument)) next_sibling))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
 
@@ -65,7 +72,12 @@
 		(body
 			(let tree_base (record.get (local caller) tree_base))
 			(let mutable (u32.eq (record.get (local parameter) type) (u32 38)))
-			(let-mut cursor (call open_c_byte_check (borrow-mut (local output)) (local offset) (local writing)))
+			(let size (record.get (local parameter) c_size))
+			(let count (slice.load (local actuals) (record.get (local parameter) c_count)))
+			(let native (bool.or (call is_native_integer (record.get (local count) type))
+				(bool.and (i32.lt (i32 -1) (local size))
+					(call is_native_integer (record.get (slice.load (local actuals) (local size)) type)))))
+			(let-mut cursor (call open_c_byte_check (borrow-mut (local output)) (local offset) (local native) (local writing)))
 			(if
 				(:doc "Check a mutable descriptor through the same read-only runtime view.")
 				(local mutable)
@@ -77,7 +89,6 @@
 				(local mutable)
 				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
-			(let size (record.get (local parameter) c_size))
 			(if
 				(:doc "The count-only form uses an implicit byte size of one.")
 				(i32.lt (local size) (i32 0))
@@ -88,7 +99,7 @@
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
 			(set (local cursor) (call write_temporary_name (borrow-shared (local source))
-				(record.get (slice.load (local actuals) (record.get (local parameter) c_count)) node) (local tree_base)
+				(record.get (local count) node) (local tree_base)
 				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(let node (slice.load (local nodes) (local argument)))
 			(let source_base (record.get (local caller) source_base))
@@ -131,7 +142,8 @@
 		(body
 			(let arity (record.get (local callee) arity))
 			(let-mut actuals (array.alloc CActual (local arity)))
-			(call map_c_actuals (borrow-shared (local nodes)) (record.get (local expression) first) (borrow-mut (local actuals)))
+			(call map_c_actuals (borrow-shared (local nodes)) (record.get (local expression) first)
+				(borrow-shared (local parameters)) (record.get (local callee) params) (borrow-mut (local actuals)))
 			(return (call write_mapped_c_byte_checks (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local parameters)) (borrow-shared (local actuals)) (local caller) (local callee)
 				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing))))))
