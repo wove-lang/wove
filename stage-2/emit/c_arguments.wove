@@ -7,14 +7,15 @@
 	original or converted pointers in formal order, save the result, and release
 	any string backing allocation before the result can be consumed.`)
 
-	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_bytes_mode))
+	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_bytes_mode is_c_null_mode))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only (type ScalarFunction) (type ScalarParameter)))
-	(use wove-file "./text.wove" (only c_byte c_span c_text_fragment write_c_name write_temporary_name (type CNameRole)))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment write_c_name write_temporary_name (type CNameRole)))
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./runtime.wove" (only write_runtime_site write_c_number write_site_number write_slice_items))
+	(use wove-file "./c_snapshots.wove" (only open_c_snapshot close_c_snapshot))
 	(use wove-file "./c_bytes.wove" (only write_c_byte_checks))
 
 	(fn c_string_text
@@ -204,14 +205,18 @@
 					(set (local formal) (i32.add.wrapping (local formal) (i32 1)))))
 			(return (call c_string_text (borrow-mut (local output)) (local cursor) (u32 3) (local writing)))))
 
+	(let null_pointer "NULL")
+
 	(fn write_c_native_invocation
 		(:doc `Invoke the defining C function or macro with previously evaluated operands.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parameters (shared-slice ScalarParameter))
 			(records (shared-slice ScalarRecord))
-			(expression ScalarExpression) (callee ScalarFunction) (tree_base i32) (index i32)
+			(expression ScalarExpression) (callee ScalarFunction) (caller ScalarFunction) (index i32)
 			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
+			(let tree_base (record.get (local caller) tree_base))
+			(let drop (record.get (local callee) c_snapshot_drop))
 			(let macro (record.get (local callee) c_macro))
 			(let variadic (i32.lt (i32 0) (record.get (local callee) c_variadic)))
 			(let first (record.get (local expression) first))
@@ -237,6 +242,11 @@
 			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
 				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))
+			(if
+				(:doc "The snapshot wrapper copies the native return into the Wove result temporary.")
+				(i32.lt (i32 -1) (local drop))
+				(then (set (local cursor) (call open_c_snapshot (borrow-shared (local source))
+					(slice.load (local nodes) (local drop)) (borrow-mut (local output)) (local cursor) (local writing)))))
 			(if
 				(:doc "Enclose a macro expansion or the variadic callee's function name.")
 				(bool.or (local macro) (local variadic))
@@ -275,18 +285,36 @@
 							(set (local cursor) (call c_string_text (borrow-mut (local output)) (local cursor) (u32 5) (local writing)))
 							(set (local converted) (i32.add.wrapping (local converted) (i32 1))))
 						(else
-							(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local argument) (local tree_base)
-								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 							(if
-								(:doc "Pass the bounded view's original pointer with its const or mutable access.")
-								(call is_c_bytes_mode (local mode))
-								(then (set (local cursor) (call write_slice_items (borrow-mut (local output)) (local cursor) (local writing)))))))
+								(:doc "A checked null contributes a pointer constant and has no evaluated temporary.")
+								(call is_c_null_mode (local mode))
+								(then (set (local cursor) (call c_literal_text (borrow-shared (local null_pointer))
+									(borrow-mut (local output)) (local cursor) (local writing))))
+								(else
+									(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local argument) (local tree_base)
+										(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+									(if
+										(:doc "Pass the bounded view's original pointer with its const or mutable access.")
+										(call is_c_bytes_mode (local mode))
+										(then (set (local cursor) (call write_slice_items (borrow-mut (local output)) (local cursor) (local writing)))))))))
 					(set (local argument) (record.get (slice.load (local nodes) (local argument)) next_sibling))
 					(set (local formal) (i32.add.wrapping (local formal) (i32 1)))))
 			(if
 				(:doc "Close the extra parentheses around a macro expansion before ending the initializer.")
 				(local macro)
 				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))))
+			(if
+				(:doc "Close the native call before adding the snapshot release and original source span.")
+				(i32.lt (i32 -1) (local drop))
+				(then
+					(let site (slice.load (local nodes) (local index)))
+					(let base (record.get (local caller) source_base))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 41) (local writing)))
+					(set (local cursor) (call close_c_snapshot (borrow-shared (local source)) (slice.load (local nodes) (local drop))
+						(record.get (local caller) file) (i32.sub.wrapping (record.get (local site) start) (local base))
+						(i32.sub.wrapping (record.get (local site) end) (local base))
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))))
 			(return (call c_string_text (borrow-mut (local output)) (local cursor) (u32 7) (local writing)))))
 
 	(fn write_c_string_setup
@@ -338,7 +366,7 @@
 					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(set (local cursor) (call write_c_native_invocation (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local parameters)) (borrow-shared (local records))
-				(local expression) (local callee) (local tree_base) (local index)
+				(local expression) (local callee) (local caller) (local index)
 				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(if
 				(:doc "Keep the borrowed byte pointers in their caller's storage.")

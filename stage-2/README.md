@@ -671,6 +671,20 @@ returns an error. Lexical cleanup drops any handle still present on the
 executed path. Later uses on any continuing path that could have
 transferred the owner point to the use and its earlier move.
 
+For an allocating C text result, `(:pragma (c_snapshot cstr (drop free)))`
+requires `(returns (optional (owned-array u8)))`. Copy the native bytes up
+to the first NUL and release a present C result exactly once. The release
+has C signature `void (void *)` or `void (char *)`. A null result stays
+absent, and an empty C string produces a present zero-length owner.
+
+A fixed C signature can use `(c_null resolved)` for a byte-view formal.
+That slot requires bare `null` and passes C `NULL`, including when the
+slot also has a `c_cstr` conversion. For example, `(call realpath
+(borrow-shared (local path)) null)` uses the allocating libc path. Test
+the result with `(owner.is-null (local result))` and extract its byte
+owner with `(move (optional.unwrap (local result)))`. The unwrap traps
+at its source span if the result is absent.
+
 Each binding identifies the importing namespace and the name span in that
 file. Its target is the defining file identity and declaration node index
 in the defining source tree. Earlier reader diagnostics keep their codes
