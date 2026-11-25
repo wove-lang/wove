@@ -456,6 +456,20 @@ trap at the conversion span if the result cannot fit, including for NaN and
 infinity. `f32.from.f64` keeps native rounding, subnormals, and nonfinite
 values, and traps on finite values outside the binary32 range.
 
+A `for` statement has a binder, a source, and a body. A half-open range uses
+`(for (bind cursor) (range start end) (body ...))`. Both bounds must have the
+same type, `i32` or `u64`. The loop evaluates them once, left to right, and
+skips equal or reversed bounds.
+
+To read an array, use `(for (bind item) (borrow-shared (local data)) (body ...))`.
+The shared loan lasts for the loop, and the body gets a copy of each element
+in source order. Use `(bind index item)` for an additional `i32` position.
+The index starts at zero in the captured view, including a checked byte
+subrange such as `(borrow-shared (array.range (local data) start end))`.
+The bindings are immutable and scoped to the body. `continue` advances to
+the next iteration, and `break` and `return` release owners in the scopes
+being exited.
+
 A `let` can bind a shared or mutable view of a named local array or array
 parameter. The binding itself is immutable. A mutable view permits writes
 through its descriptor. For example, `(let window (borrow-mut (array.range

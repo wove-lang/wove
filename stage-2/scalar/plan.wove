@@ -14,6 +14,7 @@
 
 	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value match_statement)))
 	(use wove-file "./matches.wove" (only plan_match_cases match_continues))
+	(use wove-file "./loops.wove" (only read_for_names read_for_bounds iteration_binding find_iteration_binding))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_conversion
 		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
 	(use wove-file "../text/character.wove" (only decode_character))
@@ -48,14 +49,14 @@
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind
 			is_optional_byte_owner_type optional_unwrap_kind))
 	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan field_place_root (value local_slice_view) (value local_slice_projection) (type ScalarExpression)))
-	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop_exit is_c_value_binding (type ScalarStatement)
+	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding (type ScalarStatement)
 			(value c_writable_binding) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)
-			(value next_path) (value break_path) (value continue_path) (value break_statement)))
+			(value next_path) (value break_path) (value continue_path) (value break_statement) (value for_statement) (value for_binding)))
 	(use wove-file "./control.wove" (only enclosing_loop sequence_paths predicate_literal control_paths native_transfer_paths has_path repeats_loop))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type scalar_operator word_shift_type is_i32_division is_fixed_initializer
-			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
+			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead) (value for_range)))
 
 	(struct
 		(:doc `A checked signature and its defining source identity.
@@ -1051,7 +1052,7 @@
 		(:doc `Find the nearest declaration visible before a statement.
 
 		Search earlier siblings in the current block. At a block boundary,
-		resume before the enclosing if or while in its parent block. Every source
+		check iteration bindings before resuming in the enclosing block. Every source
 		statement appears after its previous siblings in the node table.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
 			(first i32) (statement i32) (name SourceNode))
@@ -1091,7 +1092,15 @@
 						(:doc "Parameters are resolved separately once all statement scopes have been searched.")
 						(local top)
 						(then (return -1i32)))
-					(set (local limit) (struct.get (array.load (local nodes) (local block)) parent))))
+					(let parent (struct.get (array.load (local nodes) (local block)) parent))
+					(if
+						(:doc "Header names are visible only after entering the loop body.")
+						(u32.eq (struct.get (array.load (local statements) (local parent)) kind) (local for_statement))
+						(then
+							(let binding (call find_iteration_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+								(struct.get (array.load (local statements) (local block)) target) (local name)))
+							(if (i32.lt -1i32 (local binding)) (then (return (local binding))))))
+					(set (local limit) (local parent))))
 			(return -1i32)))
 
 	(fn read_local_name
@@ -1361,9 +1370,15 @@
 						(then
 							(let prior (array.load (local nodes) (local binding)))
 							(let here (array.load (local nodes) (local index)))
+							(let-mut scope (struct.get (local prior) parent))
+							(let definition (array.load (local statements) (local binding)))
+							(if
+								(:doc "An iteration binding belongs to the body even though its name is written in the header.")
+								(u32.eq (struct.get (local definition) kind) (local for_binding))
+								(then (set (local scope) (struct.get (local definition) first))))
 							(if
 								(:doc "Preserve the later declaration's name span when their scopes coincide.")
-								(i32.eq (struct.get (local prior) parent) (struct.get (local here) parent))
+								(i32.eq (local scope) (struct.get (local here) parent))
 								(then (return (call entry_at (local name) -1i32 33u32))))
 							(return (call entry_at (local name) (local name_index) 0u32))))
 					(let target (array.load (local statements) (local binding)))
@@ -3786,6 +3801,94 @@
 				(local caller) (borrow-shared (local parameters)) (borrow-shared (local statements))
 				(local index) (local statement)))))
 
+	(fn plan_for
+		(:doc `Check the iterator before publishing its immutable body bindings.
+
+		Both forms prepare their source once. An array loop holds that view for its entire body.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
+			(index i32) (statement StatementRead) (functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord)) (statements (mut-array ScalarStatement))
+			(expressions (mut-array ScalarExpression)) (sites (mut-array CallSite)) (site_count i32) (view_start i32)
+			(previous_owner i32) (previous_loan i32))
+		(returns BodyPlan)
+		(body
+			(let node (array.load (local nodes) (local index)))
+			(let iterator (struct.get (local statement) value))
+			(let iterator_node (array.load (local nodes) (local iterator)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local iterator_node)))
+			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(let range (u32.eq (local tag) (local for_range)))
+			(if
+				(:doc "The array form must take a shared borrow for the whole iteration.")
+				(bool.not (bool.or (local range) (u32.eq (local tag) 35u32)))
+				(then (return (call body_error (local caller) (struct.get (local iterator_node) start)
+					(struct.get (local iterator_node) end) 24u32))))
+			(let names (call read_for_names (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local statement) binding) (bool.not (local range))))
+			(if (u32.lt 0u32 (struct.get (local names) error)) (then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local names)))))
+			(let block (call plan_control_blocks (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-mut (local statements)) (local node) (local iterator) (bool true)))
+			(if (u32.lt 0u32 (struct.get (local block) error)) (then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local block)))))
+			(let-mut value (local iterator))
+			(let-mut expected (local scoped_array_initializer))
+			(if
+				(:doc "Infer the lower bound's width before checking the upper bound.")
+				(local range)
+				(then
+					(let bounds (call read_for_bounds (borrow-shared (local source)) (borrow-shared (local nodes)) (local iterator_node)))
+					(if (u32.lt 0u32 (struct.get (local bounds) error)) (then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local bounds)))))
+					(set (local value) (struct.get (local bounds) operand))
+					(set (local expected) 1u32)))
+			(let checked (call plan_value (borrow-shared (local source)) (borrow-shared (local nodes)) (local caller)
+				(local value) (local expected) (local index) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local statements))
+				(borrow-mut (local expressions)) (borrow-mut (local sites)) (local site_count) (local view_start)))
+			(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
+			(let type (struct.get (array.load (local expressions) (local value)) type))
+			(let-mut count (struct.get (local checked) count))
+			(let-mut element (local type))
+			(if
+				(:doc "Both range bounds must have the same exact i32 or u64 type.")
+				(local range)
+				(then
+					(let lower (array.load (local nodes) (local value)))
+					(if
+						(:doc "An unsupported integer width points to the lower bound.")
+						(bool.not (bool.or (u32.eq (local type) 5u32) (u32.eq (local type) 54u32)))
+						(then (return (call body_error (local caller) (struct.get (local lower) start) (struct.get (local lower) end) 24u32))))
+					(let upper (call plan_value (borrow-shared (local source)) (borrow-shared (local nodes)) (local caller)
+						(struct.get (local lower) next_sibling) (local type) (local index) (borrow-shared (local functions))
+						(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))
+						(borrow-mut (local statements)) (borrow-mut (local expressions)) (borrow-mut (local sites)) (local count) (local view_start)))
+					(if (u32.lt 0u32 (struct.get (local upper) error)) (then (return (local upper))))
+					(set (local count) (struct.get (local upper) count)))
+				(else
+					(set (local element) (call slice_element_type (borrow-shared (local records)) (local type)))
+					(if
+						(:doc "Shared iteration copies plain values from the captured descriptor.")
+						(bool.not (bool.or (call is_builtin_scalar (local element))
+							(bool.or (call is_record_type (local element)) (call is_native_integer (local element)))))
+						(then (return (call body_error (local caller) (struct.get (local iterator_node) start)
+							(struct.get (local iterator_node) end) 24u32))))))
+			(let body (struct.get (local block) operand))
+			(let first (struct.get (local names) operand))
+			(let second (struct.get (array.load (local nodes) (local first)) next_sibling))
+			(let-mut first_type (local element))
+			(if
+				(:doc "The first name of an indexed pair receives an i32 position relative to the view.")
+				(i32.lt -1i32 (local second))
+				(then
+					(set (local first_type) 5u32)
+					(array.store (local statements) (local second) (call iteration_binding (local second) (local element) (local body)))))
+			(array.store (local statements) (local first) (call iteration_binding (local first) (local first_type) (local body)))
+			(let arm (array.load (local statements) (local body)))
+			(array.store (local statements) (local body) (call block_statement (struct.get (local arm) first) (local first) -1i32 (bool true)))
+			(array.store (local statements) (local index)
+				(struct.new ScalarStatement (kind (local for_statement)) (target -1i32) (value (local value))
+					(type (local type)) (first (local body)) (previous_owner (local previous_owner))
+					(falls_through (bool true)) (move_site -1i32) (paths (local next_path)) (previous_loan (local previous_loan))))
+			(return (call body_success (local count)))))
+
 	(fn plan_loop_exit
 		(:doc `Record a terminal edge and the enclosing loop whose entry owners remain live.`)
 		(params (nodes (shared-array SourceNode)) (statements (mut-array ScalarStatement))
@@ -3840,6 +3943,14 @@
 				(call is_loop_exit (local kind))
 				(then (return (call plan_loop_exit (borrow-shared (local nodes)) (borrow-mut (local statements))
 					(local caller) (local index) (local kind) (local previous_owner) (local previous_loan) (local site_count)))))
+			(if
+				(:doc "Iteration headers control their own binding and value checks.")
+				(u32.eq (local kind) (local for_statement))
+				(then (return (call plan_for (borrow-shared (local source)) (borrow-shared (local nodes)) (local caller)
+					(local index) (local statement) (borrow-shared (local functions)) (borrow-shared (local parameters))
+					(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local statements))
+					(borrow-mut (local expressions)) (borrow-mut (local sites)) (local site_count) (local view_start)
+					(local previous_owner) (local previous_loan)))))
 			(let field_place (call is_field_assignment (borrow-shared (local source)) (borrow-shared (local nodes)) (local statement)))
 			(let binding (call check_statement_target (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (local index) (local statement) (local field_place)
@@ -3990,6 +4101,10 @@
 		(returns i32)
 		(body
 			(let-mut cursor (local loop))
+			(if
+				(:doc "A for prepares its source once, so only transfers in its body can repeat.")
+				(u32.eq (struct.get (array.load (local statements) (local loop)) kind) (local for_statement))
+				(then (set (local cursor) (local block))))
 			(let end (struct.get (array.load (local nodes) (local block)) end))
 			(while
 				(:doc "Inspect checked operations in the predicate and the loop body.")
@@ -4047,7 +4162,7 @@
 								(local next_path) (struct.get (local arm) first) -1i32))
 							(array.store (local statements) (local block) (call statement_exit_state (local arm)
 								(struct.get (local arm) target) (local previous_owner) (local falls_through) (local paths)))
-							(let loop (u32.eq (struct.get (local owner) kind) 25u32))
+							(let loop (call is_loop (struct.get (local owner) kind)))
 							(if
 								(:doc "Fallthrough and continue must preserve the owners live at loop entry.")
 								(bool.and (bool.and (local loop) (call repeats_loop (local paths)))
@@ -4079,7 +4194,7 @@
 									(let paths (call control_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
 										(borrow-shared (local expressions)) (local owner)))
 									(if
-										(:doc "A literal true loop needs a reachable break to continue after its body.")
+										(:doc "Apply the completed loop's reachable successor state.")
 										(local loop)
 										(then (set (local falls_through) (call has_path (local paths) (local next_path))))
 										(else
@@ -4132,6 +4247,10 @@
 								(then (set (local index) (call skip_disabled_siblings (borrow-shared (local source))
 									(borrow-shared (local nodes)) (struct.get (local node) next_sibling))))
 								(else
+									(if
+										(:doc "The array iterator keeps its shared loan until control leaves the loop.")
+										(bool.and (u32.eq (local kind) (local for_statement)) (call is_readable_slice (struct.get (local statement) type)))
+										(then (set (local previous_loan) (local index))))
 									(set (local block) (local first))
 									(set (local index) (struct.get (array.load (local statements) (local block)) first))))))))
 			(if

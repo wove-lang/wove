@@ -20,6 +20,7 @@
 	(use wove-file "../source/numeric_ops.wove" (only is_integer_byte_conversion is_integer_byte_encoder))
 	(use wove-file "./integer_bytes.wove" (only write_integer_bytes_encode write_integer_bytes_decode))
 	(use wove-file "./arrays.wove" (only write_fixed_list write_fixed_repeat write_fixed_access write_fixed_slice write_fixed_length))
+	(use wove-file "./loops.wove" (only write_for_body))
 	(use wove-file "../scalar/owners.wove" (only is_native_owner native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind is_native_storage_write_loan
 			is_optional_byte_owner_type optional_unwrap_kind))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset)))
@@ -34,7 +35,7 @@
 	(use wove-file "./c_arguments.wove" (only write_c_argument_call c_symbol_text))
 	(use wove-file "./c_variadic.wove" (only write_c_variadic_check))
 	(use wove-file "./c_formals.wove" (only write_fixed_c_checks))
-	(use wove-file "../scalar/flow.wove" (only after_block is_loop_exit (value break_statement) (type ScalarStatement) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment)
+	(use wove-file "../scalar/flow.wove" (only after_block is_loop is_loop_exit (value break_statement) (value for_statement) (type ScalarStatement) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)))
 	(use wove-file "../scalar/loans.wove" (only is_local_slice_view (value local_slice_projection) (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies (type ScalarFunction) (type ScalarParameter) (type CallSite)))
@@ -1054,6 +1055,57 @@
 					(set (local owner) (struct.get (local row) previous_owner))))
 			(return (local cursor))))
 
+	(fn write_for_capture
+		(:doc `Evaluate one header value and save it before evaluating any following value.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (root i32) (slot i32) (caller ScalarFunction)
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let tree_base (struct.get (local caller) tree_base))
+			(let prepared (call write_nested_values (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local root) (local caller) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
+			(let initialized (call write_temporary_declaration (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local slot) (local tree_base) (struct.get (array.load (local expressions) (local root)) type)
+				(borrow-mut (local output)) (local prepared) (local name_prefix) (local writing)))
+			(let end (call write_value (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local initialized) (local name_prefix) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local end) 59u8 (local writing)))))
+
+	(fn write_for_statement
+		(:doc `Capture the shared source or the two bounds before opening the loop body.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (caller ScalarFunction)
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let statement (array.load (local statements) (local index)))
+			(let block (struct.get (local statement) first))
+			(let root (struct.get (local statement) value))
+			(let view (call is_readable_slice (struct.get (local statement) type)))
+			(let-mut cursor (call c_byte (borrow-mut (local output)) (local offset) 123u8 (local writing)))
+			(let-mut last (local root))
+			(if
+				(:doc "Finish the range's first evaluation before starting the second.")
+				(bool.not (local view))
+				(then
+					(set (local cursor) (call write_for_capture (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local root) (local index) (local caller) (borrow-shared (local functions)) (borrow-shared (local parameters))
+						(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output))
+						(local cursor) (local name_prefix) (local writing)))
+					(set (local last) (struct.get (array.load (local nodes) (local root)) next_sibling))))
+			(set (local cursor) (call write_for_capture (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local last) (local block) (local caller) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output))
+				(local cursor) (local name_prefix) (local writing)))
+			(return (call write_for_body (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local records))
+				(borrow-shared (local statements)) (local index) (local block) (struct.get (local caller) tree_base) (local view)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+
 	(fn write_statement
 		(:doc `Write one checked statement after evaluating its nested values.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (caller ScalarFunction)
@@ -1085,6 +1137,13 @@
 					(let label (call write_loop_label (borrow-shared (local source)) (local loop) (local tree_base)
 						(borrow-mut (local output)) (local jump) (local name_prefix) (local writing)))
 					(return (call c_byte (borrow-mut (local output)) (local label) 59u8 (local writing)))))
+			(if
+				(:doc "An iteration statement prepares its header before entering the body.")
+				(u32.eq (local kind) (local for_statement))
+				(then (return (call write_for_statement (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local index) (local caller) (borrow-shared (local functions)) (borrow-shared (local parameters))
+					(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "A value-less return releases active owners without evaluating an expression.")
 				(i32.lt (local root) 0i32)
@@ -1337,8 +1396,12 @@
 										(then (set (local cursor) (call c_literal_text (borrow-shared (local c_switch_end))
 											(borrow-mut (local output)) (local cursor) (local writing)))))
 									(if
+										(:doc "Close the scope holding the captured iterator before exposing a break destination.")
+										(u32.eq (struct.get (local entry) kind) (local for_statement))
+										(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 125u8 (local writing)))))
+									(if
 										(:doc "Emit a destination after a loop targeted by any written break.")
-										(bool.and (u32.eq (struct.get (local entry) kind) 25u32)
+										(bool.and (call is_loop (struct.get (local entry) kind))
 											(i32.lt -1i32 (struct.get (local entry) target)))
 										(then
 											(set (local cursor) (call write_loop_label (borrow-shared (local source)) (struct.get (local exit) owner)
