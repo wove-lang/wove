@@ -4,13 +4,11 @@
 	(:doc "Resolve native graphs with the bundled providers and emit one retained C unit.")
 
 	(use wove-file "./availability.wove" (only check_optional_c_functions (type Availability)))
-	(use wove-file "./assets.wove" (only copy_source_prefix load_graph_assets))
+	(use wove-file "./graph_emit.wove" (only emit_entry_graph))
 	(use wove-file "./bundled.wove" (only load_bundled_providers bundled_file_count bundled_input_width write_bundled_sources))
 	(use wove-file "./diagnostics.wove" (only report_source report_path_location
 		(value invalid_source) (value unreadable_asset)))
-	(use wove-file "./input_files.wove" (only check_asset_inputs check_header_inputs))
 	(use wove-file "./protection.wove" (only (type BuildProtection)))
-	(use wove-file "./output.wove" (only publish_input))
 	(use wove-file "./files.wove" (only canonical_path))
 	(use wove-file "./platform.wove" (only native_selection))
 	(use wove-file "./paths.wove" (only directory_width))
@@ -20,8 +18,6 @@
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only (type SelectedDeclaration) form_parts))
 	(use wove-file "../source/imports.wove" (only import_keyword))
-	(use wove-file "../source/assets.wove" (only (type EmbedAsset) (type EmbedCheck)))
-	(use wove-file "../emit/graph.wove" (only run_entry_graph))
 
 	(fn needs_provider_graph
 		(:doc "Find an active use of this provider kind or a C bridge that needs validation.")
@@ -105,102 +101,6 @@
 					(array.store (local bindings) (local index) (array.load (local source) (local index)))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))))
 
-	(fn emit_c_graph
-		(:doc "Emit the selected graph and publish its first complete translation unit.")
-		(params (path (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8)) (target_index i32)
-			(arena (shared-array u8)) (files (shared-array SuppliedFile))
-			(modules (shared-array GraphModule)) (bindings (shared-array GraphBinding)) (resolved GraphResult)
-			(requests (mut-array EmbedAsset)))
-		(returns i32)
-		(body
-			(let-mut capacity 4096i32)
-			(while
-				(:doc "Retry a short C output buffer within the signed slice range.")
-				(bool true)
-				(body
-					(let-mut output (array.alloc u8 (local capacity)))
-					(let result (call run_entry_graph (borrow-shared (local arena)) (borrow-shared (local files))
-						(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
-						(borrow-mut (local requests)) (bool false) (borrow-mut (local output))))
-					(let error (struct.get (local result) error))
-					(if
-						(:doc "Publish only a complete emission.")
-						(u32.eq (local error) 0u32)
-						(then (return (call publish_input (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
-							(borrow-shared (array.range (local output) 0i32 (struct.get (local result) count)))))))
-					(if
-						(:doc "Preserve source diagnostics and stop before growth could overflow.")
-						(bool.or (bool.not (u32.eq (local error) 16u32)) (i32.lt 1073741823i32 (local capacity)))
-						(then (return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
-							(borrow-shared (local files)) (struct.get (local result) file) (local error)
-							(struct.get (local result) start) (struct.get (local result) end)))))
-					(set (local capacity) (i32.add.wrapping (local capacity) (local capacity)))))
-			(return 1i32)))
-
-	(fn report_graph_asset
-		(:doc `Translate a failed asset request from arena offsets to the defining source view.`)
-		(params (path (shared-array u8)) (arena (shared-array u8)) (files (shared-array SuppliedFile)) (result EmbedCheck))
-		(returns i32)
-		(body
-			(let file (struct.get (local result) file))
-			(let base (struct.get (array.load (local files) (local file)) source_start))
-			(return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files))
-				(local file) (struct.get (local result) error)
-				(i32.sub.wrapping (struct.get (local result) start) (local base))
-				(i32.sub.wrapping (struct.get (local result) end) (local base)) (borrow-shared (local unreadable_asset))))))
-
-	(fn compile_graph_assets
-		(:doc "Load checked embeds relative to their defining source before graph emission.")
-		(params (path (shared-array u8)) (canonical (shared-array u8))
-			(destination (shared-array u8)) (staged (shared-array u8)) (protection BuildProtection) (target_index i32) (arena (shared-array u8)) (files (shared-array SuppliedFile))
-			(modules (shared-array GraphModule)) (bindings (shared-array GraphBinding)) (resolved GraphResult)
-			(requests (mut-array EmbedAsset)))
-		(returns i32)
-		(body
-			(let-mut none (array.alloc u8 0i32))
-			(let checked (call run_entry_graph (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
-				(borrow-mut (local requests)) (bool true) (borrow-mut (local none))))
-			(if
-				(:doc "Check the selected signatures and bodies before opening any file.")
-				(u32.lt 0u32 (struct.get (local checked) error))
-				(then (return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
-					(borrow-shared (local files)) (struct.get (local checked) file) (struct.get (local checked) error)
-					(struct.get (local checked) start) (struct.get (local checked) end)))))
-			(if
-				(:doc `cc has no tool invocation. bin checks the files Clang opens in its private build.`)
-				(i32.eq (array.len (local staged)) 0i32)
-				(then
-					(let header_conflict (call check_header_inputs (borrow-shared (local canonical)) (borrow-shared (local arena))
-						(borrow-shared (local files)) (borrow-shared (local bindings)) (local protection)))
-					(if (i32.lt 0i32 (local header_conflict)) (then (return (local header_conflict))))))
-			(if
-				(:doc "A graph with no embeds already has a complete arena.")
-				(i32.eq (struct.get (local checked) count) 0i32)
-				(then (return (call emit_c_graph (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
-					(borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local modules))
-					(borrow-shared (local bindings)) (local resolved) (borrow-mut (local requests))))))
-			(let asset_conflict (call check_asset_inputs (borrow-shared (local canonical)) (borrow-shared (local arena))
-				(borrow-shared (local files)) (borrow-shared (local requests)) (local protection)))
-			(if (i32.lt 0i32 (local asset_conflict)) (then (return (local asset_conflict))))
-			(let measured (call load_graph_assets (borrow-shared (local canonical)) (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-mut (local requests)) (borrow-mut (local none)) (bool false)))
-			(if
-				(:doc "A missing or invalid asset keeps its original file-relative operand span.")
-				(u32.lt 0u32 (struct.get (local measured) error))
-				(then (return (call report_graph_asset (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files)) (local measured)))))
-			(let-mut extended (array.alloc u8 (struct.get (local measured) count)))
-			(call copy_source_prefix (borrow-shared (local arena)) (borrow-mut (local extended)))
-			(let loaded (call load_graph_assets (borrow-shared (local canonical)) (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-mut (local requests)) (borrow-mut (local extended)) (bool true)))
-			(if
-				(:doc "A file that disappears or changes size cannot leave partially emitted C.")
-				(u32.lt 0u32 (struct.get (local loaded) error))
-				(then (return (call report_graph_asset (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files)) (local loaded)))))
-			(return (call emit_c_graph (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
-				(borrow-shared (local extended)) (borrow-shared (local files)) (borrow-shared (local modules))
-				(borrow-shared (local bindings)) (local resolved) (borrow-mut (local requests))))))
-
 	(fn report_availability
 		(:doc "Describe the failed probe or absent symbol at the original importing selection.")
 		(params (path (shared-array u8)) (arena (shared-array u8)) (files (shared-array SuppliedFile)) (result Availability))
@@ -243,7 +143,7 @@
 		(:doc `Pass the exact checked binding prefix and source rows to the graph emitter.`)
 		(params (path (shared-array u8)) (canonical (shared-array u8))
 			(destination (shared-array u8)) (staged (shared-array u8)) (probe_options (shared-array u8)) (protection BuildProtection) (target_index i32) (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
-			(scratch (shared-array GraphBinding)) (resolved GraphResult) (rows i32) (length i32)) (returns i32)
+			(scratch (shared-array GraphBinding)) (resolved GraphResult) (length i32)) (returns i32)
 		(body
 			(let-mut bindings (array.alloc GraphBinding (struct.get (local resolved) bindings)))
 			(call copy_graph_bindings (borrow-shared (local scratch)) (borrow-mut (local bindings)))
@@ -256,12 +156,27 @@
 				(u32.lt 0u32 (struct.get (local available) error))
 				(then (return (call report_availability (borrow-shared (local path)) (borrow-shared (local arena))
 					(borrow-shared (local files)) (local available)))))
-			(let-mut requests (array.alloc EmbedAsset (local rows)))
-			(return (call compile_graph_assets (borrow-shared (local path)) (borrow-shared (local canonical))
+			(let result (call emit_entry_graph (borrow-shared (local path)) (borrow-shared (local canonical))
 				(borrow-shared (local destination)) (borrow-shared (local staged)) (local protection) (local target_index)
 				(borrow-shared (array.range (local arena) 0i32 (local length)))
 				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings))
-				(local resolved) (borrow-mut (local requests))))))
+				(local resolved)))
+			(let error (struct.get (local result) error))
+			(if
+				(:doc "Keep native source and host asset failures in their existing diagnostic categories.")
+				(u32.lt 0u32 (local error))
+				(then
+					(let file (struct.get (local result) file))
+					(let start (struct.get (local result) start))
+					(let end (struct.get (local result) end))
+					(if
+						(:doc "Unavailable host assets use the defining file and quoted operand range.")
+						(struct.get (local result) asset)
+						(then (return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena))
+							(borrow-shared (local files)) (local file) (local error) (local start) (local end) (borrow-shared (local unreadable_asset))))))
+					(return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
+						(borrow-shared (local files)) (local file) (local error) (local start) (local end)))))
+			(return (struct.get (local result) status))))
 
 	(fn resolve_c_input
 		(:doc "Bind the entry's selections against the three registered sources.")
@@ -284,7 +199,7 @@
 			(return (call compile_resolved_graph (borrow-shared (local path)) (borrow-shared (local canonical))
 				(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options)) (local protection) (local target_index) (borrow-shared (local arena))
 				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local scratch))
-				(local resolved) (local rows) (array.len (local arena))))))
+				(local resolved) (array.len (local arena))))))
 
 	(fn prepare_bundled_input
 		(:doc "Allocate the source and path arena before registering the embedded modules.")
