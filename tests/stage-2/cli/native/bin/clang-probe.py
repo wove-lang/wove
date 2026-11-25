@@ -32,6 +32,10 @@ def main():
 			output.symlink_to(executable.name)
 		else:
 			output.write_bytes(b"partial native output")
+		# Only a fixture-supplied dependency is reported by a simulated frontend.
+		if "WOVE_CLANG_DEPENDENCY" in os.environ:
+			dependency = json.dumps(str(output.with_name(os.environ["WOVE_CLANG_DEPENDENCY"])))
+			sys.stdout.write(f'digraph "dependencies" {{\n  header_0 [ shape="box", label={dependency}];\n}}\n')
 		return int(os.environ["WOVE_CLANG_STATUS"])
 	clang = json.loads(os.environ["WOVE_REAL_CLANG"])
 	os.execvp(clang[0], [*clang, *arguments])

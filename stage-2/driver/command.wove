@@ -9,11 +9,15 @@
 
 	(use wove-file "./diagnostics.wove"
 		(only report_argv report_project (value project_file) (value explicit_target_required)
-			(value invalid_arguments) (value invalid_config) (value unreadable_file)))
+			(value invalid_arguments) (value invalid_config) (value unreadable_file) (value non_utf8_source) (value invalid_target)))
 	(use wove-file "./version.wove" (only is_version_argument print_version))
+	(use wove-file "./output.wove" (only retained_c_path valid_output_target))
+	(use wove-file "./protection.wove" (only protect_destinations protected_input report_input_collision))
+	(use wove-file "../source/scan.wove" (only admit_source))
 	(use wove-file "./source.wove" (only compile_input))
 	(use wove-file "./arguments.wove" (only frontend_capacity write_probe_options))
 	(use wove-file "./bin/build.wove" (only compile_binary))
+	(use wove-file "./bin/links.wove" (only check_link_inputs))
 	(use wove-file "./files.wove" (only file_stamp file_is_absent read_source_file))
 	(use wove-file "../cli/argv.wove" (only (type ArgSpan)))
 	(use wove-file "../cli/command/args.wove" (only first_command_argument (type CommandArgument)))
@@ -90,12 +94,44 @@
 						(bool.and (i32.lt -1i32 (local tool))
 							(u32.eq (record.get (slice.load (local arguments) (local tool)) scalar) 1u32))
 						(then (return (call report_argv 12u32 (record.get (slice.load (local arguments) (local tool)) argv_index)
-							(borrow-shared (local clang_required))))))
+							(borrow-shared (local clang_required))))))))
+			(let path_start (record.get (local input) start))
+			(let path_end (record.get (local input) end))
+			(let target_start (record.get (local target) start))
+			(let target_end (record.get (local target) end))
+			(let target_index (record.get (local target) argv_index))
+			(if
+				(:doc `A source diagnostic needs a UTF-8 argument spelling.`)
+				(i32.lt -1i32 (call admit_source (borrow-shared (slice.range (local bytes) (local path_start) (local path_end)))))
+				(then (return (call report_argv 3u32 (record.get (local input) argv_index) (borrow-shared (local non_utf8_source))))))
+			(if
+				(:doc `The final target component must fit the retained publication layout.`)
+				(bool.not (call valid_output_target (borrow-shared (slice.range (local bytes) (local target_start) (local target_end)))))
+				(then (return (call report_argv 3u32 (local target_index) (borrow-shared (local invalid_target))))))
+			(let retained (call retained_c_path (borrow-shared (slice.range (local bytes) (local target_start) (local target_end)))
+				(borrow-shared (slice.range (local bytes) (local start) (local end))) (record.get (local invocation) mode)))
+			(let protection (call protect_destinations
+				(borrow-shared (slice.range (local bytes) (local target_start) (local target_end))) (borrow-shared (local retained))))
+			(if
+				(:doc `Both publication paths protect the requested entry and its filesystem aliases.`)
+				(call protected_input (borrow-shared (slice.range (local bytes) (local path_start) (local path_end))) (local protection))
+				(then (return (call report_input_collision (borrow-shared (slice.range (local bytes) (local path_start) (local path_end)))))))
+			(if
+				(:doc `An existing project file supplies the invocation even when no named profile is selected.`)
+				(call protected_input (borrow-shared (local project_file)) (local protection))
+				(then (return (call report_input_collision (borrow-shared (local project_file))))))
+			(if
+				(:doc `Use the same checked destinations for native compilation and retained C.`)
+				(local bin)
+				(then
+					(let link_conflict (call check_link_inputs (borrow-shared (local bytes)) (borrow-shared (local config))
+						(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes))
+						(borrow-shared (local settings)) (local protection)))
+					(if (i32.lt 0i32 (local link_conflict)) (then (return (local link_conflict))))
 					(return (call compile_binary
-						(borrow-shared (slice.range (local bytes) (record.get (local input) start) (record.get (local input) end)))
-						(borrow-shared (slice.range (local bytes) (record.get (local target) start) (record.get (local target) end)))
-						(borrow-shared (slice.range (local bytes) (local start) (local end)))
-						(record.get (local input) argv_index) (record.get (local target) argv_index)
+						(borrow-shared (slice.range (local bytes) (local path_start) (local path_end)))
+						(borrow-shared (slice.range (local bytes) (local target_start) (local target_end)))
+						(borrow-shared (local retained)) (local protection) (local target_index)
 						(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 						(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))))))
 			(let no_stage (array.alloc u8 0i32))
@@ -105,11 +141,9 @@
 				(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes))
 				(borrow-shared (local settings)) (borrow-shared (local no_stage)) (borrow-mut (local options))))
 			(return (call compile_input
-				(borrow-shared (slice.range (local bytes) (record.get (local input) start) (record.get (local input) end)))
-				(borrow-shared (slice.range (local bytes) (record.get (local target) start) (record.get (local target) end)))
-				(borrow-shared (slice.range (local bytes) (local start) (local end))) (record.get (local invocation) mode)
-				(borrow-shared (local no_stage)) (borrow-shared (slice.range (local options) 0i32 (local option_end)))
-				(record.get (local input) argv_index) (record.get (local target) argv_index)))))
+				(borrow-shared (slice.range (local bytes) (local path_start) (local path_end)))
+				(borrow-shared (local retained)) (borrow-shared (local no_stage))
+				(borrow-shared (slice.range (local options) 0i32 (local option_end))) (local protection) (local target_index)))))
 
 	(fn run_native_build
 		(:doc `Read the optional project and resolve the host argv before opening the requested source.`)

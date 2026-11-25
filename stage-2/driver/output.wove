@@ -7,6 +7,7 @@
 		(value project_file) (value publish_failure)))
 	(use wove-file "../text/copy.wove" (only append_bytes))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "./files.wove" (only file_stamp read_source_file))
 	(use wove-file "./paths.wove" (only directory_width))
 	(use wove-file "./publication.wove" (only publish_file stage_file))
 
@@ -125,6 +126,15 @@
 				(borrow-shared (slice.range (local target) (i32.add.wrapping (local slash) 1i32) (slice.len (local target))))
 				(borrow-shared (local profile)) (local mode)))))
 
+	(fn retained_tree_end
+		(:doc `Locate the owned retained tree without recomputing its profile or target components.`)
+		(params (path (shared-slice u8))) (returns i32)
+		(body
+			(let width (slice.len (local path)))
+			(let suffix (slice.len (local source_suffix)))
+			(if (i32.lt (local width) (local suffix)) (then (return 0i32)))
+			(return (i32.sub.wrapping (local width) (local suffix)))))
+
 	(fn stage_native_unit
 		(:doc `Include the embedded runtime only in the private unit passed to Clang.`)
 		(params (path (shared-slice u8)) (output (shared-slice u8))) (returns bool)
@@ -140,24 +150,58 @@
 			(let written (call append_bytes (borrow-shared (local output)) (borrow-mut (local unit)) (local end)))
 			(return (call stage_file (borrow-shared (local path)) (borrow-shared (local unit))))))
 
+	(fn retain_c
+		(:doc `Publish one complete C unit after its inputs have cleared all applicable protection checks.`)
+		(params (path (shared-slice u8)) (destination (shared-slice u8)) (target_index i32) (output (shared-slice u8)))
+		(returns i32)
+		(body
+			(let published (call publish_file (borrow-shared (local destination)) (borrow-shared (local path))
+				(borrow-shared (local project_file)) (borrow-shared (local output))))
+			(if
+				(:doc `Failure to publish names the original output argument.`)
+				(bool.not (local published))
+				(then (return (call report_argv 65u32 (local target_index) (borrow-shared (local publish_failure))))))
+			(return 0i32)))
+
+	(fn retain_checked_unit
+		(:doc `Publish the staged C without the runtime include after native dependency validation.`)
+		(params (path (shared-slice u8)) (destination (shared-slice u8))
+			(staged (shared-slice u8)) (target_index i32)) (returns i32)
+		(body
+			(let stamp (call file_stamp (borrow-shared (local staged))))
+			(let width (record.get (local stamp) length))
+			(let prefix (slice.len (local runtime_include)))
+			(if
+				(:doc `The private unit must still be readable and have room for the generated prefix.`)
+				(i32.lt (local width) (local prefix))
+				(then (return (call report_argv 65u32 (local target_index) (borrow-shared (local publish_failure))))))
+			(let-mut unit (array.alloc u8 (local width)))
+			(if
+				(:doc `Check the complete read and the generated runtime prefix before retaining the unit.`)
+				(bool.not (bool.and (call read_source_file (borrow-shared (local staged)) (local stamp) (borrow-mut (local unit)))
+					(call same_bytes (borrow-shared (local unit)) 0i32 (local prefix)
+						(borrow-shared (local runtime_include)) 0i32 (local prefix))))
+				(then (return (call report_argv 65u32 (local target_index) (borrow-shared (local publish_failure))))))
+			(return (call retain_c (borrow-shared (local path)) (borrow-shared (local destination)) (local target_index)
+				(borrow-shared (slice.range (local unit) (local prefix) (local width)))))))
+
 	(fn publish_input
-		(:doc "Retain the completed unit and give a native build its immutable private copy.")
+		(:doc `Publish cc immediately, or keep the binary build private until Clang reports its dependencies.`)
 		(params (path (shared-slice u8)) (destination (shared-slice u8)) (staged (shared-slice u8)) (target_index i32) (output (shared-slice u8)))
 		(returns i32)
 		(body
 			(if
-				(:doc "An invalid or unrepresentable retained path cannot be sent to the writer.")
+				(:doc `An invalid or unrepresentable retained path cannot be sent to the writer.`)
 				(i32.eq (slice.len (local destination)) 0i32)
 				(then (return (call report_argv 65u32 (local target_index) (borrow-shared (local publish_failure))))))
-			(let published (call publish_file (borrow-shared (local destination)) (borrow-shared (local path))
-				(borrow-shared (local project_file)) (borrow-shared (local output))))
 			(if
-				(:doc "Failure to publish names the original output argument.")
-				(bool.not (local published))
-				(then (return (call report_argv 65u32 (local target_index) (borrow-shared (local publish_failure))))))
-			(if
-				(:doc `Only bin needs a private copy. Each Clang invocation must read the bytes emitted by its own build.`)
-				(bool.and (i32.lt 0i32 (slice.len (local staged)))
-					(bool.not (call stage_native_unit (borrow-shared (local staged)) (borrow-shared (local output)))))
-				(then (return (call report_argv 65u32 (local target_index) (borrow-shared (local publish_failure))))))
-			(return 0i32))))
+				(:doc `Only bin reserves a private translation unit.`)
+				(i32.lt 0i32 (slice.len (local staged)))
+				(then
+					(if
+						(:doc `No filesystem input may be replaced while emission is still private.`)
+						(bool.not (call stage_native_unit (borrow-shared (local staged)) (borrow-shared (local output))))
+						(then (return (call report_argv 65u32 (local target_index) (borrow-shared (local publish_failure))))))
+					(return 0i32)))
+			(return (call retain_c (borrow-shared (local path)) (borrow-shared (local destination))
+				(local target_index) (borrow-shared (local output)))))))

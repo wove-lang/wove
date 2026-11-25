@@ -1,0 +1,67 @@
+(module native_link_inputs
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Protect the exact explicit link files selected by command resolution.`)
+
+	(use wove-file "../arguments.wove" (only write_effective_options))
+	(use wove-file "../protection.wove" (only protected_input report_input_collision (type BuildProtection)))
+	(use wove-file "../diagnostics.wove" (only report_argv))
+	(use wove-file "../../cli/command/args.wove" (only (type CommandArgument)))
+	(use wove-file "../../cli/command/resolve.wove" (only command_setting (type CommandInvocation)))
+	(use wove-file "../../config/project.wove" (only (type ProjectSetting)))
+	(use wove-file "../../json/reader.wove" (only (type JsonNode)))
+
+	(let invalid_links "could not resolve native link inputs")
+
+	(fn check_link_inputs
+		(:doc `Pack the resolved link list as Clang sees it and check each filesystem operand before emission.`)
+		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
+			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(protection BuildProtection)) (returns i32)
+		(body
+			(let setting (call command_setting (local invocation) (borrow-shared (local arguments))
+				(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 17i32))
+			(let count (record.get (local setting) count))
+			(if
+				(:doc `A profile list has its count in the JSON children. Other lists report their item count directly.`)
+				(bool.and (i32.eq (local count) 0i32) (bool.not (u32.eq (record.get (local setting) origin) 1u32)))
+				(then (return 0i32)))
+			(let bytes_width (u64.add.wrapping (int.convert u64 (slice.len (local bytes))) (int.convert u64 (slice.len (local config)))))
+			(let width (u64.shl (local bytes_width) 2i32))
+			(if
+				(:doc `Each link adds at most the relative prefix and one terminator to its original source bytes.`)
+				(u64.lt 2147483647u64 (local width))
+				(then (return (call report_argv 70u32 0i32 (borrow-shared (local invalid_links))))))
+			(let-mut paths (array.alloc u8 (int.convert i32 (local width))))
+			(let length (call write_effective_options (borrow-shared (local bytes)) (borrow-shared (local config))
+				(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
+				17i32 (borrow-mut (local paths)) 0i32))
+			(if
+				(:doc `Reject an unrepresentable link spelling before writing any build artifact.`)
+				(i32.lt (local length) 0i32)
+				(then (return (call report_argv 70u32 0i32 (borrow-shared (local invalid_links))))))
+			(return (call check_link_paths (borrow-shared (slice.range (local paths) 0i32 (local length))) (local protection)))))
+
+	(fn check_link_paths
+		(:doc `Check each initialized path in the same packed order Clang receives it.`)
+		(params (paths (shared-slice u8)) (protection BuildProtection)) (returns i32)
+		(body
+			(let-mut start 0i32)
+			(let-mut cursor 0i32)
+			(while
+				(:doc `The packer guarantees exactly one terminator at the end of every path.`)
+				(i32.lt (local cursor) (slice.len (local paths)))
+				(body
+					(if
+						(:doc `Preserve the exact path prefix used to disambiguate flags or response files.`)
+						(u8.eq (slice.load (local paths) (local cursor)) 0u8)
+						(then
+							(if
+								(:doc `Stop before compilation or publication if an explicit link input aliases a destination.`)
+								(call protected_input (borrow-shared (slice.range (local paths) (local start) (local cursor)))
+									(local protection))
+								(then (return (call report_input_collision
+									(borrow-shared (slice.range (local paths) (local start) (local cursor)))))))
+							(set (local start) (i32.add.wrapping (local cursor) 1i32))))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+			(return 0i32))))

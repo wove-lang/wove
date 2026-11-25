@@ -48,6 +48,11 @@ def prepare_tool(root, clang, options, target):
 	# A successful simulated tool can supply a fixture-backed relative symlink.
 	if "tool_link_target" in options:
 		env["WOVE_CLANG_LINK_TARGET"] = str(root / options["tool_link_target"])
+	# A simulated successful tool can report a staged file as a consumed dependency.
+	env.pop("WOVE_CLANG_DEPENDENCY", None)
+	if "tool_dependency" in options:
+		env["WOVE_CLANG_DEPENDENCY"] = options["tool_dependency"]
+	env.update(options.get("environment", {}))
 	return env, previous
 
 
@@ -68,14 +73,20 @@ def check_tool_calls(root, options):
 			assert re.fullmatch(pattern, actual), (actual, pattern)
 
 
-# Check the retained unit, executable publication, and diagnostic.
-def check_binary(root, target, retained, value, diagnostic, result, patterns, previous):
-	artifacts = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.c") if path.is_file())
-	assert artifacts == [retained], artifacts
+# Check the retained unit, single tool launch, executable publication, and diagnostic.
+def check_binary(root, options, target, retained, value, diagnostic, result, patterns, previous, existing_c):
+	check_c_artifacts(root, retained, existing_c)
 	generated = (root / retained).read_text()
 	# Apply the same retained-C pattern checks used by cc fixtures.
 	for pattern, count in patterns.items():
 		assert len(re.findall(pattern, generated)) == count, pattern
+	# Additional outputs use manifest-supplied path and regex assertions.
+	for path, checks in options.get("files", {}).items():
+		content = (root / path).read_text()
+		for pattern in checks.get("matches", []):
+			assert re.search(pattern, content), (path, pattern)
+		for pattern in checks.get("omits", []):
+			assert not re.search(pattern, content), (path, pattern)
 	# Toolchain flags can request side outputs, which belong with retained C.
 	for stage in root.rglob(".wovec-bin.*"):
 		assert stage.parent == (root / retained).parent and not (stage / "program").exists(), stage
@@ -90,15 +101,49 @@ def check_binary(root, target, retained, value, diagnostic, result, patterns, pr
 	assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), built
 
 
+# Confirm that emission changed only the declared retained C path.
+def check_c_artifacts(root, retained, existing):
+	artifacts = {path.relative_to(root).as_posix() for path in root.rglob("*.c") if path.is_file()}
+	expected = set(existing)
+	if retained != "-":
+		expected.add(retained)
+	assert artifacts == expected, sorted(artifacts)
+	assert all((root / path).read_bytes() == data for path, data in existing.items() if path != retained)
+
+
+# Capture an entry without following its final symlink.
+def entry_snapshot(path):
+	# An absent target has no identity to preserve.
+	try:
+		stamp = path.lstat()
+	except (FileNotFoundError, NotADirectoryError):
+		return None
+	content = None
+	# Symlink spellings are part of the state publication must preserve.
+	if path.is_symlink():
+		content = os.readlink(path)
+	elif path.is_file():
+		content = path.read_bytes()
+	return (stamp.st_dev, stamp.st_ino, stamp.st_mode, content)
+
+
+# Capture all prior entries without traversing directory symlinks.
+def publication_snapshot(root):
+	return {path.relative_to(root): entry_snapshot(path) for path in root.rglob("*")}
+
+
 # Exercise one invocation with the project and files specified by its fixture row.
 def check_case(compiler, clang, runtime, fixtures, row):
 	label, inputs, argv, status, target, retained, value, diagnostic, *options = row
 	patterns = json.loads(options[0]) if options else {}
 	flags = json.loads(options[1]) if len(options) > 1 else []
 	tool = json.loads(options[2]) if len(options) > 2 else None
+	preserve = len(options) > 3 and options[3] == "preserve"
 	with TemporaryDirectory(prefix="native-cli-", dir=compiler.parent) as workspace:
 		root = Path(workspace)
-		entries = json.loads(inputs)
+		# Some Clang cases need the physical path of the isolated workspace.
+		physical = str(root.resolve())
+		entries = {path.replace("{workspace}", physical): source for path, source in json.loads(inputs).items()}
 		# Map fixture files to their supplied names in the command's working directory.
 		for destination, source in entries.items():
 			path = root / destination
@@ -122,26 +167,38 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		# Existing C paths can also be Wove inputs. A failed command must preserve their bytes.
 		existing_c = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.c") if path.is_file()}
 		stages = {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()}
-		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
+		arguments = [argument.replace("{workspace}", physical) if isinstance(argument, str) else bytes.fromhex(argument["hex"])
 			for argument in json.loads(argv)]
 		preserved = {root / path: (root / path).read_bytes() for path in (tool or {}).get("unchanged", [])}
 		env, previous = prepare_tool(root, clang, tool, target) if tool else (None, None)
+		before = publication_snapshot(root) if preserve else None
+		target_before = entry_snapshot(root / target)
 		result = subprocess.run([compiler, *arguments], cwd=root, env=env, capture_output=True, timeout=30)
 		assert (result.returncode, result.stdout) == (int(status), b""), (label, result)
 		assert all(path.read_bytes() == original for path, original in preserved.items()), label
 		# Check optional probes before inspecting published artifacts.
 		if tool:
 			check_tool_calls(root, tool)
+		# A collision preserves every input and previous artifact with identical entries.
+		if preserve:
+			assert result.stderr.count(b"\n") == 1, (label, result.stderr)
+			assert json.loads(result.stderr) == json.loads(diagnostic), (label, result.stderr)
+			after = publication_snapshot(root)
+			# The manifest already checked any compiler observation recorded by the wrapper.
+			if tool and ("arguments" in tool or "queries" in tool):
+				after.pop(Path("clang.jsonl"), None)
+			assert after == before, label
+			return
 		# Binary fixtures run the executable published by the compiler itself.
 		if tool and "arguments" in tool:
-			check_binary(root, target, retained, value, diagnostic, result, patterns, previous)
+			check_binary(root, tool, target, retained, value, diagnostic, result, patterns, previous, existing_c)
 			return
-		# cc retains C beside its requested target without creating the target itself.
-		assert not (root / target).exists(), (label, target)
-		artifacts = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.c") if path.is_file())
+		# cc leaves the requested target alone even when a file already occupies that path.
+		assert entry_snapshot(root / target) == target_before, (label, target)
+		check_c_artifacts(root, retained, existing_c)
 		assert {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()} == stages, label
 		if retained != "-":
-			assert not result.stderr and artifacts == [retained], (label, result.stderr, artifacts)
+			assert not result.stderr, (label, result.stderr)
 			generated = (root / retained).read_text()
 			# The case can count defining symbols without pinning installation-dependent hashes.
 			for pattern, count in patterns.items():
@@ -152,8 +209,7 @@ def check_case(compiler, clang, runtime, fixtures, row):
 			built = subprocess.run([program], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
 			assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), (label, built)
 		else:
-			assert artifacts == sorted(existing_c) and result.stderr.count(b"\n") == 1, (label, artifacts, result.stderr)
-			assert all((root / path).read_bytes() == data for path, data in existing_c.items()), label
+			assert result.stderr.count(b"\n") == 1, (label, result.stderr)
 			assert json.loads(result.stderr) == json.loads(diagnostic), (label, result.stderr)
 
 
