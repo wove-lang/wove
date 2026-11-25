@@ -1,0 +1,141 @@
+(module scalar_signatures
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Read the shared shape of scalar function and inline test signatures.
+
+	Keep the parameter, result type, and body rows in the original tree.
+	The scalar planner resolves the result type before completing the body
+	check. Test discovery only needs the literal void spelling.`)
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only skip_disabled_siblings))
+	(use wove-file "../source/types.wove" (only void_type))
+	(use wove-file "./syntax.wove" (only entry_at entry_form entry_keyword (type EntryRead)))
+
+	(struct SignatureHead (fields (params i32) (type_node i32) (body i32) (start i32) (end i32) (error u32)))
+	(struct ScalarSignature (fields (params i32) (result u32) (first_statement i32) (start i32) (end i32) (error u32) (body i32)))
+
+	(fn signature_error
+		(:doc `Carry an original source diagnostic through the signature reader.`)
+		(params (error EntryRead))
+		(returns ScalarSignature)
+		(body
+			(return (record.make ScalarSignature (params (i32 -1)) (result (u32 0)) (first_statement (i32 -1)) (body (i32 -1))
+				(start (record.get (local error) start)) (end (record.get (local error) end))
+				(error (record.get (local error) error))))))
+
+	(fn signature_head_error
+		(:doc `Carry the first invalid signature form or operand's original span.`)
+		(params (error EntryRead))
+		(returns SignatureHead)
+		(body
+			(return (record.make SignatureHead (params (i32 -1)) (type_node (i32 -1)) (body (i32 -1))
+				(start (record.get (local error) start)) (end (record.get (local error) end))
+				(error (record.get (local error) error))))))
+
+	(fn read_signature_head
+		(:doc `Read the parameter and result forms, leaving result type resolution to the caller.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(params i32) (empty_params bool))
+		(returns SignatureHead)
+		(body
+			(if
+				(:doc "The first form after the name declares the parameter list.")
+				(i32.lt (local params) (i32 0))
+				(then (return (call signature_head_error (call entry_at (local node) (i32 -1) (u32 23))))))
+			(let params_node (slice.load (local nodes) (local params)))
+			(let parameters (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local params_node) (u32 3) (u32 23)))
+			(if
+				(:doc "Preserve the original params diagnostic.")
+				(u32.lt (u32 0) (record.get (local parameters) error))
+				(then (return (call signature_head_error (local parameters)))))
+			(let first (record.get (local parameters) operand))
+			(if
+				(:doc "Tests and bootstrap entry points require an empty parameter list.")
+				(bool.and (local empty_params) (bool.not (i32.lt (local first) (i32 0))))
+				(then (return (call signature_head_error (call entry_at (local params_node) (i32 -1) (u32 23))))))
+			(let result_node (record.get (local params_node) next_sibling))
+			(if
+				(:doc "Every function declares its exact result type.")
+				(i32.lt (local result_node) (i32 0))
+				(then (return (call signature_head_error (call entry_at (local node) (i32 -1) (u32 23))))))
+			(let returns (slice.load (local nodes) (local result_node)))
+			(let signature (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local returns) (u32 4) (u32 23)))
+			(if
+				(:doc "Keep the return form's diagnostic before inspecting its operands.")
+				(u32.lt (u32 0) (record.get (local signature) error))
+				(then (return (call signature_head_error (local signature)))))
+			(let type_node (record.get (local signature) operand))
+			(if
+				(:doc "The returns form takes exactly one type.")
+				(bool.or (i32.lt (local type_node) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local type_node)) next_sibling) (i32 0))))
+				(then (return (call signature_head_error (call entry_at (local returns) (i32 -1) (u32 23))))))
+			(return (record.make SignatureHead (params (local first)) (type_node (local type_node))
+				(body (record.get (local returns) next_sibling))
+				(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))))))
+
+	(fn complete_signature
+		(:doc `Report signature errors first, then read the one body form for the resolved result type.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
+			(head SignatureHead) (result u32))
+		(returns ScalarSignature)
+		(body
+			(if
+				(:doc "A malformed head keeps the first diagnostic from the shared form reader.")
+				(u32.lt (u32 0) (record.get (local head) error))
+				(then (return (record.make ScalarSignature (params (i32 -1)) (result (u32 0))
+					(first_statement (i32 -1)) (body (i32 -1))
+					(start (record.get (local head) start)) (end (record.get (local head) end))
+					(error (record.get (local head) error))))))
+			(if
+				(:doc "An unsupported result type points at the type operand.")
+				(u32.eq (local result) (u32 0))
+				(then (return (call signature_error
+					(call entry_at (slice.load (local nodes) (record.get (local head) type_node)) (i32 -1) (u32 23))))))
+			(let body (record.get (local head) body))
+			(if
+				(:doc "One body follows the signature.")
+				(i32.lt (local body) (i32 0))
+				(then (return (call signature_error (call entry_at (local node) (i32 -1) (u32 24))))))
+			(let body_node (slice.load (local nodes) (local body)))
+			(let extra (record.get (local body_node) next_sibling))
+			(if
+				(:doc "Keep the first extra operand's span.")
+				(bool.not (i32.lt (local extra) (i32 0)))
+				(then (return (call signature_error
+					(call entry_at (slice.load (local nodes) (local extra)) (i32 -1) (u32 24))))))
+			(let statements (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local body_node) (u32 6) (u32 24)))
+			(if
+				(:doc "Forward an unsupported body form unchanged.")
+				(u32.lt (u32 0) (record.get (local statements) error))
+				(then (return (call signature_error (local statements)))))
+			(let first_statement (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local statements) operand)))
+			(if
+				(:doc "An empty body can only complete a void helper.")
+				(bool.and (i32.lt (local first_statement) (i32 0)) (bool.not (u32.eq (local result) (call void_type))))
+				(then (return (call signature_error (call entry_at (local body_node) (i32 -1) (u32 24))))))
+			(return (record.make ScalarSignature (params (record.get (local head) params)) (result (local result))
+				(first_statement (local first_statement)) (body (local body))
+				(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))))))
+
+	(fn read_test_signature
+		(:doc `Check that a discovered test takes no arguments, returns literal void, and has a body.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (params i32))
+		(returns ScalarSignature)
+		(body
+			(let head (call read_signature_head (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local params) (bool true)))
+			(let type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local head) type_node)))
+			(let-mut result (u32 0))
+			(if
+				(:doc "Tests have a fixed result type and need no type namespace.")
+				(u32.eq (local type) (call void_type))
+				(then (set (local result) (local type))))
+			(return (call complete_signature (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local head) (local result))))))
