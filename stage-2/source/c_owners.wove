@@ -182,11 +182,9 @@
 
 	(fn read_c_type_literal
 		(:doc `Read the single c-type string of a named native type declaration.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name SourceNode))
 		(returns COwnerRead)
 		(body
-			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-			(let name (slice.load (local nodes) (record.get (local parts) operands)))
 			(let index (record.get (local name) next_sibling))
 			(if (i32.lt (local index) (i32 0)) (then (return (call owner_read (i32 -1) (i32 -1) (local name) (u32 23)))))
 			(let form (slice.load (local nodes) (local index)))
@@ -204,45 +202,37 @@
 				(bool.or (bool.not (u32.eq (record.get (local value) kind) (u32 2)))
 					(bool.not (i32.lt (record.get (local value) next_sibling) (i32 0))))
 				(then (return (call owner_read (i32 -1) (i32 -1) (local value) (u32 23)))))
-			(return (call owner_read (local literal) (i32 -1) (local node) (u32 0)))))
+			(return (call owner_read (local literal) (i32 -1) (local value) (u32 0)))))
 
-	(fn read_c_owner
-		(:doc `Read the type literal and destructor operands of a named pointer owner member.`)
+	(fn read_c_type
+		(:doc `Read a native type literal and any explicit destructor using their original tree rows.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
 		(returns COwnerRead)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-			(let name (slice.load (local nodes) (record.get (local parts) operands)))
+			(let name_index (record.get (local parts) operands))
+			(if
+				(:doc "A native type must introduce a name.")
+				(i32.lt (local name_index) (i32 0))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local node) (u32 23)))))
+			(let name (slice.load (local nodes) (local name_index)))
 			(let drop (call owner_destructor (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts) (local name)))
 			(if (u32.lt (u32 0) (record.get (local drop) error)) (then (return (local drop))))
-			(if
-				(:doc "A pointer owner requires an explicit destructor.")
-				(i32.lt (record.get (local drop) drop) (i32 0))
-				(then (return (call owner_read (i32 -1) (i32 -1) (local name) (u32 23)))))
-			(let native (call read_c_type_literal (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let native (call read_c_type_literal (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)))
 			(if (u32.lt (u32 0) (record.get (local native) error)) (then (return (local native))))
 			(return (call owner_read (record.get (local native) native) (record.get (local drop) drop) (local node) (u32 0)))))
 
-	(fn check_c_owner
-		(:doc `Check a selected owner contract and admit only its decoded pointer type spelling.`)
+	(fn read_c_owner
+		(:doc `Read the contract of a pointer owner selected for emission.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
 		(returns COwnerRead)
 		(body
-			(let read (call read_c_owner (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-			(if (u32.lt (u32 0) (record.get (local read) error)) (then (return (local read))))
-			(let literal (slice.load (local nodes) (record.get (local read) native)))
-			(let start (record.get (local literal) start))
-			(let end (record.get (local literal) end))
-			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
-			(let value (call decode_string (borrow-shared (local source))
-				(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
-				(borrow-mut (local decoded))))
+			(let read (call read_c_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(if
-				(:doc "Reject invalid string escapes and non-pointer type expressions at the type operand.")
-				(bool.or (u32.lt (u32 0) (record.get (local value) error))
-					(bool.not (call is_c_pointer_spelling (borrow-shared (slice.range (local decoded) (i32 0)
-						(record.get (local value) written))))))
-				(then (return (call owner_read (i32 -1) (i32 -1) (local literal) (u32 23)))))
+				(:doc "A pointer owner requires an explicit destructor.")
+				(bool.and (u32.eq (record.get (local read) error) (u32 0))
+					(i32.lt (record.get (local read) drop) (i32 0)))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local node) (u32 23)))))
 			(return (local read))))
 
 	(fn is_c_integer_spelling
@@ -273,23 +263,12 @@
 					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
 			(return (local word))))
 
-	(fn check_c_integer_alias
-		(:doc `Check a non-owning alias's native representation before binding it as a copyable value.`)
+	(fn check_c_type
+		(:doc `Check the decoded C representation using the type's declared ownership contract.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
 		(returns COwnerRead)
 		(body
-			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-			(let name (record.get (local parts) operands))
-			(if
-				(:doc "A missing type name cannot introduce a native alias.")
-				(i32.lt (local name) (i32 0))
-				(then (return (call owner_read (i32 -1) (i32 -1) (local node) (u32 23)))))
-			(let drop (call owner_destructor (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts) (local node)))
-			(if
-				(:doc "Ownership metadata keeps this type in the pointer owner path.")
-				(bool.or (u32.lt (u32 0) (record.get (local drop) error)) (i32.lt (i32 -1) (record.get (local drop) drop)))
-				(then (return (call owner_read (i32 -1) (i32 -1) (local node) (u32 23)))))
-			(let read (call read_c_type_literal (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let read (call read_c_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(if (u32.lt (u32 0) (record.get (local read) error)) (then (return (local read))))
 			(let literal (slice.load (local nodes) (record.get (local read) native)))
 			(let start (record.get (local literal) start))
@@ -299,9 +278,18 @@
 				(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
 				(borrow-mut (local decoded))))
 			(if
-				(:doc "Only a valid native scalar spelling can be emitted.")
-				(bool.or (u32.lt (u32 0) (record.get (local value) error))
-					(bool.not (call is_c_integer_spelling (borrow-shared (slice.range (local decoded) (i32 0)
-						(record.get (local value) written))))))
+				(:doc "Attribute a failed decode to the native type operand.")
+				(u32.lt (u32 0) (record.get (local value) error))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local literal) (u32 23)))))
+			(let length (record.get (local value) written))
+			(let-mut valid (bool false))
+			(if
+				(:doc "The destructor contract selects pointer syntax. Copyable aliases use integer type words.")
+				(i32.lt (record.get (local read) drop) (i32 0))
+				(then (set (local valid) (call is_c_integer_spelling (borrow-shared (slice.range (local decoded) (i32 0) (local length))))))
+				(else (set (local valid) (call is_c_pointer_spelling (borrow-shared (slice.range (local decoded) (i32 0) (local length)))))))
+			(if
+				(:doc "Keep a bad representation at the original quoted operand.")
+				(bool.not (local valid))
 				(then (return (call owner_read (i32 -1) (i32 -1) (local literal) (u32 23)))))
 			(return (local read)))))

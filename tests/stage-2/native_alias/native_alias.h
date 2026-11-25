@@ -22,4 +22,9 @@ static inline int32_t check_count(size_t value) {
 	return value == SIZE_MAX ? 42 : 0;
 }
 
+// Return a full-width result only if the empty Wove slice was NUL-terminated.
+static inline size_t wide_text_count(const char *text) {
+	return text[0] == '\0' ? SIZE_MAX : 0;
+}
+
 #endif
