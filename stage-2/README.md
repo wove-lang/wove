@@ -610,8 +610,8 @@ The probe uses resolved C flags, definitions, and the selected C dialect.
 For a quoted project header, retained-only `cc` also searches the directory
 of the Wove bridge. A binary build probes from its private build directory
 with the same frontend arguments and staged runtime headers used for
-compilation. The probe uses preceding C includes in emission order.
-Dependency and compilation database output options apply to the final
+compilation. The probe uses preceding C includes in emission order and
+checks for declarations introduced by the selected header. Dependency and compilation database output options apply to the final
 build. Availability errors use the importing source span.
 
 | Code | Meaning |
