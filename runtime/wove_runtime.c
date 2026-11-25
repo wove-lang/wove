@@ -314,6 +314,44 @@ wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrtlength, int32_t wvrtfile, int3
 	return wvrt_array_new_at_span(wvrtlength, sizeof(uint8_t), _Alignof(uint8_t), wvrtfile, wvrtstart, wvrtend);
 }
 
+// Release the allocation stored in one owning row slot, including an empty slot.
+static void wvrt_drop_row(void *wvrt_slot) {
+	wvrt_array_drop(*(wvrt_array **)wvrt_slot);
+}
+
+// Allocate initialized pointer slots and register their recursive cleanup.
+wvrt_array *wvrt_array_new_rows_at_span(int32_t wvrtlength, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_array *wvrt_rows = wvrt_array_new_at_span(wvrtlength, sizeof(wvrt_array *), _Alignof(wvrt_array *),
+		wvrtfile, wvrtstart, wvrtend);
+	wvrt_array **wvrt_items = wvrt_rows->wvrt_items;
+	// Give each slot a typed null pointer before any replacement or cleanup.
+	for (int32_t wvrt_i = 0; wvrt_i < wvrtlength; ++wvrt_i) {
+		wvrt_items[wvrt_i] = NULL;
+	}
+	wvrt_rows->wvrt_drop_element = wvrt_drop_row;
+	return wvrt_rows;
+}
+
+// Lend an initialized row without transferring its owner.
+wvrt_slice wvrt_array_borrow_row_at_span(wvrt_slice wvrtrows, int32_t wvrtindex,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	size_t wvrt_offset = wvrt_slice_offset_at_span(wvrtrows.wvrt_length, wvrtindex, wvrtfile, wvrtstart, wvrtend);
+	wvrt_array *const *wvrt_items = wvrtrows.wvrt_items;
+	const wvrt_array *wvrt_row = wvrt_items[wvrt_offset];
+	// Unfilled slots have no borrowable byte storage.
+	if (wvrt_row == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "uninitialized byte row"); }
+	return wvrt_array_borrow_shared(wvrt_row);
+}
+
+// Transfer one fresh or moved row and retire the owner that previously occupied the slot.
+void wvrt_array_store_row_at_span(wvrt_mut_slice wvrtrows, int32_t wvrtindex, wvrt_array *wvrtrow,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	size_t wvrt_offset = wvrt_slice_offset_at_span(wvrtrows.wvrt_length, wvrtindex, wvrtfile, wvrtstart, wvrtend);
+	wvrt_array **wvrt_items = wvrtrows.wvrt_items;
+	wvrt_array_drop(wvrt_items[wvrt_offset]);
+	wvrt_items[wvrt_offset] = wvrtrow;
+}
+
 // Copy compiled bytes into a fresh owner on each evaluation.
 wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrtbytes, int32_t wvrtlength,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {

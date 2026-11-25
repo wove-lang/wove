@@ -25,13 +25,14 @@
 		is_c_storage_mode is_c_storage_init_mode is_c_consuming_mode))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
 	(use wove-file "../source/types.wove" (only void_type is_builtin_integer builtin_type_keyword reference_mode))
+	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type find_record record_type record_index is_record_type
 			find_member member_value_type read_member_operand fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
-			is_array_owner array_owner_type array_owner_element is_native_integer native_integer_type find_native_node (type ScalarRecord)
+			is_array_owner array_owner_type array_owner_element byte_rows_owner_type is_native_integer native_integer_type find_native_node (type ScalarRecord)
 			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target record_receiver_type place_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
-	(use wove-file "./signatures.wove" (only read_signature_head is_owned_byte_result complete_signature (type ScalarSignature)))
+	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
 	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind
 			is_optional_byte_owner_type optional_unwrap_kind))
@@ -70,6 +71,8 @@
 	(struct BodyPlan
 		(fields (count i32) (file i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
 
+	(let pending_row_move 106u32)
+
 	(fn read_signature
 		(:doc `Resolve a named function's result before completing its signature and body shape.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (params i32)
@@ -94,10 +97,25 @@
 							(borrow-shared (local records)) (borrow-shared (local bindings))
 							(record.get (local scope) file) (record.get (local scope) source_base) (local type_node)))))
 					(if
-						(:doc "A Wove helper can return ownership of a byte array.")
-						(bool.and (u32.eq (local result) 0u32)
-							(call is_owned_byte_result (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
-						(then (set (local result) (call array_owner_type 10u32))))
+						(:doc "A Wove helper can return an owned byte array or an owned array of byte rows.")
+						(u32.eq (local result) 0u32)
+						(then
+							(let type (slice.load (local nodes) (local type_node)))
+							(let element (call owned_element_node (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
+							(if
+								(:doc "An owner result retains the exact type of its single element.")
+								(i32.lt -1i32 (local element))
+								(then
+									(let element_type (slice.load (local nodes) (local element)))
+									(if
+										(:doc "An exact byte owner can transfer through a Wove helper.")
+										(u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element)) 10u32)
+										(then (set (local result) (call array_owner_type 10u32)))
+										(else
+											(if
+												(:doc "An owned row vector can transfer with all its rows.")
+												(call is_byte_owner_descriptor (borrow-shared (local source)) (borrow-shared (local nodes)) (local element_type))
+												(then (set (local result) (call byte_rows_owner_type))))))))))
 					(if
 						(:doc "The C entry requires i32 in every compilation mode.")
 						(bool.and (local entry) (bool.not (u32.eq (local result) 5u32)))
@@ -870,14 +888,21 @@
 								(u32.eq (local expected) (local c_handle_reference)))))
 						(then (return (call entry_at (local node) -1i32 24u32))))
 					(let byte_store (bool.and (u32.eq (local expected) 56u32) (u32.eq (local actual) 41u32)))
+					(let rows (u32.eq (local actual) (call byte_rows_owner_type)))
+					(let row_access (bool.and (local rows)
+						(bool.or (u32.eq (local expected) 55u32) (u32.eq (local expected) 56u32))))
 					(if
 						(:doc "A direct byte store checks its owner like a mutable byte reborrow.")
 						(local byte_store)
 						(then (set (local type) 38u32)))
 					(if
+						(:doc "A direct row access checks the same owner as an explicit row view.")
+						(local row_access)
+						(then (set (local type) (call typed_slice_type (call array_owner_type 10u32) (u32.eq (local expected) 56u32)))))
+					(if
 						(:doc "Project a local owner's storage for a call loan or a direct byte store.")
 						(bool.and (call is_array_owner (local actual))
-							(bool.or (local byte_store) (bool.or (local reborrow) (call is_typed_slice (local expected)))))
+							(bool.or (bool.or (local byte_store) (local row_access)) (bool.or (local reborrow) (call is_typed_slice (local expected)))))
 						(then
 							(let element (call slice_element_code (local type)))
 							(if
@@ -1490,6 +1515,13 @@
 							(set (local kind) 39u32)
 							(set (local type) 38u32)))))
 			(if
+				(:doc "A direct access to a row owner projects the complete typed row view.")
+				(bool.and (u32.eq (local actual) (call byte_rows_owner_type))
+					(bool.or (u32.eq (local expected) 55u32) (u32.eq (local expected) 56u32)))
+				(then
+					(set (local type) (call typed_slice_type (call array_owner_type 10u32) (u32.eq (local expected) 56u32)))
+					(set (local kind) (call call_loan_keyword (local type)))))
+			(if
 				(:doc "An earlier operand can hold a loan of this owner or mutable parameter.")
 				(bool.and (bool.or (local owner) (call is_writable_slice (local actual)))
 					(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
@@ -1836,6 +1868,31 @@
 					(local node) (local index) (local reference_index) (local caller) (local statement) (local expected)
 					(borrow-shared (local records)) (borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
+				(:doc "An indexed row lends its bytes while keeping the row owned by the vector.")
+				(bool.and (u32.eq (local expected) 35u32) (u32.eq (local tag) 37u32))
+				(then
+					(let access (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local reference) 37u32 24u32))
+					(if
+						(:doc "The indexed borrow has the same shape as a slice load.")
+						(u32.lt 0u32 (record.get (local access) error))
+						(then (return (local access))))
+					(let receiver (record.get (local access) operand))
+					(let checked (call plan_slice_access (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)
+						(local receiver) (local reference_index) 37u32 35u32 (local caller) (local statement) (local view_start)
+						(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+					(if
+						(:doc "Preserve the index form or row receiver diagnostic.")
+						(u32.lt 0u32 (record.get (local checked) error))
+						(then (return (local checked))))
+					(let origin (slice.load (local expressions) (local receiver)))
+					(slice.store (local expressions) (local index)
+						(record.make ScalarExpression (kind 45u32) (type 34u32) (target (record.get (local origin) target))
+							(first (local reference_index)) (start 0i32) (end 0i32) (negative (bool false))
+							(borrowed_owner (record.get (local origin) borrowed_owner)) (mutable_place (bool false))
+							(projection -1i32) (asset_start 0i32) (asset_end 0i32)))
+					(return (call entry_at (local node) (local index) 0u32))))
+			(if
 				(:doc "Use a checked byte range and evaluate both endpoints before handing the view to the callee.")
 				(bool.and (u32.eq (local expected) 35u32) (u32.eq (local tag) 44u32))
 				(then (return (call plan_range_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -1913,11 +1970,39 @@
 						(:doc "Use the exact element type from either access mode.")
 						(call is_typed_slice (local view))
 						(then (set (local element) (call slice_element_type (borrow-shared (local records)) (local view)))))
+					(let row (u32.eq (local element) (call array_owner_type 10u32)))
+					(let-mut value_kind 0u32)
+					(if
+						(:doc "A byte row can only be read as a shared loan of its byte storage.")
+						(bool.and (bool.not (local store)) (bool.or (local row) (u32.eq (local expected) 35u32)))
+						(then
+							(if
+								(:doc "Require the explicit shared borrow syntax on a row load.")
+								(bool.not (bool.and (local row) (u32.eq (local expected) 35u32)))
+								(then (return (call entry_at (local node) -1i32 24u32))))
+							(slice.store (local expressions) (local index)
+								(call runtime_expression (local kind) 34u32 (local node) (local receiver) (local caller) (local view_start)))
+							(return (call entry_at (local node) (local index) 0u32))))
+					(if
+						(:doc "Replacing an owned row requires a fresh or explicitly moved allocation.")
+						(bool.and (local store) (local row))
+						(then
+							(let value (slice.load (local nodes) (local stored)))
+							(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local value)))
+							(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+							(if
+								(:doc "An ordinary reference may never copy the stored owner pointer.")
+								(bool.not (bool.or (u32.eq (local tag) 9u32) (u32.eq (local tag) 43u32)))
+								(then (return (call entry_at (local value) -1i32 24u32))))
+							(if
+								(:doc "The value walk applies lexical ownership transfer to a moved row.")
+								(u32.eq (local tag) 43u32)
+								(then (set (local value_kind) (local pending_row_move))))))
 					(if
 						(:doc "A store checks its value as the element type at the value's own span.")
 						(local store)
 						(then (slice.store (local expressions) (local stored)
-							(call expression_row 0u32 (local element) -1i32 -1i32 0i32 0i32 (bool false))))
+							(call expression_row (local value_kind) (local element) -1i32 -1i32 0i32 0i32 (bool false))))
 						(else
 							(if
 								(:doc "A load's destination must accept the exact element type.")
@@ -1947,14 +2032,19 @@
 				(bool.or (i32.lt (local count) 0i32)
 					(bool.not (i32.lt (record.get (slice.load (local nodes) (local count)) next_sibling) 0i32)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+			(let-mut type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings))
 				(record.get (local caller) file) (record.get (local caller) source_base) (local element)))
 			(if
-				(:doc "Allocate bytes, Wove records, or exact native integers with their checked stride and alignment.")
-				(bool.not (bool.or (bool.or (u32.eq (local type) 10u32) (call is_native_integer (local type)))
-					(bool.and (call is_record_type (local type))
-						(bool.not (call is_native_record (slice.load (local records) (call record_index (local type))))))))
+				(:doc "An array of owned byte rows stores a distinct owner in each slot.")
+				(call is_byte_owner_descriptor (borrow-shared (local source)) (borrow-shared (local nodes)) (local element_node))
+				(then (set (local type) (call array_owner_type 10u32))))
+			(if
+				(:doc "Only bytes, byte owners, Wove records, and native integers have supported allocation layouts.")
+				(bool.not (bool.or (u32.eq (local type) (call array_owner_type 10u32))
+					(bool.or (bool.or (u32.eq (local type) 10u32) (call is_native_integer (local type)))
+						(bool.and (call is_record_type (local type))
+							(bool.not (call is_native_record (slice.load (local records) (call record_index (local type)))))))))
 				(then (return (call entry_at (local element_node) -1i32 24u32))))
 			(slice.store (local expressions) (local count)
 				(call expression_row 0u32 5u32 -1i32 -1i32 0i32 0i32 (bool false)))
@@ -2809,18 +2899,38 @@
 				(body
 					(let row (slice.load (local expressions) (local index)))
 					(let type (record.get (local row) type))
+					(let kind (record.get (local row) kind))
 					(if
-						(:doc "Visit seeded operands that have not been checked by their parent.")
-						(bool.and (u32.lt 0u32 (local type)) (u32.eq (record.get (local row) kind) 0u32))
+						(:doc "Visit typed operands and pending row moves that still need planning.")
+						(bool.or (u32.eq (local kind) (local pending_row_move))
+							(bool.and (u32.lt 0u32 (local type)) (u32.eq (local kind) 0u32)))
 						(then
-							(let checked (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local caller) (local index) (local type) (local statement) (borrow-shared (local functions))
-								(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))
-								(borrow-shared (local statements)) (borrow-mut (local expressions)) (local view_start)))
 							(if
-								(:doc "Preserve the first failing expression's source spans.")
-								(u32.lt 0u32 (record.get (local checked) error))
-								(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))))
+								(:doc "A row store may transfer one byte owner under the existing lexical move rules.")
+								(u32.eq (local kind) (local pending_row_move))
+								(then
+									(let move (call plan_move (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local caller) (local index) (local statement) 42u32 (borrow-shared (local parameters))
+										(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_count) (local view_start)))
+									(if
+										(:doc "Preserve move diagnostics and ensure the row takes only a byte owner.")
+										(u32.lt 0u32 (record.get (local move) error))
+										(then (return (local move))))
+									(if
+										(:doc "A move into a row slot must supply the same byte owner type as a fresh row.")
+										(bool.not (u32.eq (record.get (slice.load (local expressions) (local index)) type) (local type)))
+										(then
+											(let node (slice.load (local nodes) (local index)))
+											(return (call body_error (local caller) (record.get (local node) start) (record.get (local node) end) 24u32)))))
+								(else
+									(let checked (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local caller) (local index) (local type) (local statement) (borrow-shared (local functions))
+										(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))
+										(borrow-shared (local statements)) (borrow-mut (local expressions)) (local view_start)))
+									(if
+										(:doc "Preserve the first failing expression's source spans.")
+										(u32.lt 0u32 (record.get (local checked) error))
+										(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))))))
 					(let expression (slice.load (local expressions) (local index)))
 					(if
 						(:doc "Record every resolved call in source order, including a field receiver checked by its parent.")
