@@ -6,7 +6,6 @@
 #include "host.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,78 +14,6 @@
 #include <unistd.h>
 
 static const char project_file[] = "wovec.jsonc";
-
-// Size a regular input for the signed Wove slice ABI. Absence has its own status.
-int32_t wove_cli_input_size(const char *path) {
-	struct stat info;
-	// File and parent lookup errors other than absence are hard failures.
-	if (stat(path, &info) != 0) {
-		return errno == ENOENT ? -1 : -2;
-	}
-	return S_ISREG(info.st_mode) && info.st_size >= 0 && info.st_size < INT32_MAX
-		? (int32_t)info.st_size : -2;
-}
-
-// Read the measured byte count, reject trailing data, and close the stream.
-static int32_t read_exact(FILE *file, uint8_t *bytes, int32_t length) {
-	const bool complete = fread(bytes, 1, (size_t)length, file) == (size_t)length &&
-		fgetc(file) == EOF && !ferror(file);
-	const bool closed = fclose(file) == 0;
-	return complete && closed ? 0 : -1;
-}
-
-// Fill the caller's exact-length view and reject a file whose length changed.
-int32_t wove_cli_read_input(const char *path, uint8_t *bytes, int32_t length) {
-	FILE *file = fopen(path, "rb");
-	return file == NULL ? -1 : read_exact(file, bytes, length);
-}
-
-// Resolve a literal path against the defining module's directory using host path rules.
-static char *asset_path(const char *module, const char *request) {
-	if (request[0] == '/') { return strdup(request); }
-	const char *slash = strrchr(module, '/');
-	const size_t directory = slash == NULL ? 0 : (size_t)(slash - module) + 1;
-	const size_t width = strlen(request);
-	if (width >= SIZE_MAX - directory) { return NULL; }
-	char *path = malloc(directory + width + 1);
-	if (path == NULL) { return NULL; }
-	memcpy(path, module, directory);
-	memcpy(path + directory, request, width + 1);
-	return path;
-}
-
-// Query the raw asset's size without requiring it to be a Wove source file.
-int32_t wove_cli_asset_size(const char *module, const char *request) {
-	char *path = asset_path(module, request);
-	if (path == NULL) { return -1; }
-	const int32_t size = wove_cli_input_size(path);
-	free(path);
-	return size;
-}
-
-// Read the measured regular file into its bounded region in the compilation arena.
-int32_t wove_cli_read_asset(const char *module, const char *request, uint8_t *bytes,
-	int32_t length, int32_t start, int32_t end) {
-	if (start < 0 || end < start || end > length) { return -1; }
-	char *path = asset_path(module, request);
-	if (path == NULL) { return -1; }
-	const int descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-	free(path);
-	if (descriptor < 0) { return -1; }
-	struct stat info;
-	// A replaced path must still be a regular file of the measured extent.
-	if (fstat(descriptor, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size != end - start) {
-		close(descriptor);
-		return -1;
-	}
-	FILE *file = fdopen(descriptor, "rb");
-	// On failure, fdopen leaves the original descriptor owned by this function.
-	if (file == NULL) {
-		close(descriptor);
-		return -1;
-	}
-	return read_exact(file, bytes + start, end - start);
-}
 
 // Accept a single named directory component.
 static bool component(const char *name) {
