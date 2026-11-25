@@ -1110,6 +1110,18 @@ leaves any previous executable in place.
 The driver keeps optional Clang side outputs, such as a Darwin debug
 bundle, in a private per-build directory beside retained C when possible.
 
+Both commands check the requested target, retained C, and retained tree
+against the active inputs before publishing. The check follows existing
+file aliases and considers both the original input path and its canonical
+ancestors. It covers the entry, transitive imports, embed requests, project
+configuration, and selected local bridge headers. Binary builds check
+explicit link files before invoking Clang. The same invocation streams
+its resolved include graphs separately from the caller's make depfile
+settings. The driver checks their paths while the binary and generated
+C are still private. A collision reports
+code 71 with the conflicting input path and preserves prior artifacts.
+An unusable dependency trace reports code 72.
+
 ## Structured JSON diagnostics
 
 Use [the diagnostic record](diagnostics/record.wove) to retain an error's

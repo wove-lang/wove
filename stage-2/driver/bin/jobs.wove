@@ -1,0 +1,197 @@
+(module native_clang_jobs
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Read the frontend sysroot from Clang's job log. Clang removes this prefix from DOT paths.
+
+	The log uses two per-child environment settings. Caller dependency and
+	compilation database flags pass through to Clang with their original meaning.`)
+
+	(use c-header "<unistd.h>" (only environ))
+	(use wove-file "../files.wove" (only empty_path file_stamp read_source_file))
+	(use wove-file "../../io/process.wove" (only copy_argument))
+	(use wove-file "../../text/bytes.wove" (only same_bytes))
+	(use wove-file "../../text/copy.wove" (only append_bytes))
+
+	(let log_key "CC_PRINT_OPTIONS=")
+	(let path_key "CC_PRINT_OPTIONS_FILE=")
+	(let enable_log "CC_PRINT_OPTIONS=1")
+	(let sysroot_flag "\"-isysroot\"")
+	(let root_separator "/")
+
+	(fn has_key
+		(:doc `Match a complete environment key including its equals separator.`)
+		(params (entry (shared-slice u8)) (key (shared-slice u8))) (returns bool)
+		(body
+			(let width (slice.len (local key)))
+			(return (bool.and (bool.not (i32.lt (slice.len (local entry)) (local width)))
+				(call same_bytes (borrow-shared (local entry)) 0i32 (local width)
+					(borrow-shared (local key)) 0i32 (local width))))))
+
+	(fn trace_setting
+		(:doc `Identify the two entries managed in the child environment.`)
+		(params (entry (shared-slice u8))) (returns bool)
+		(body (return (bool.or (call has_key (borrow-shared (local entry)) (borrow-shared (local log_key)))
+			(call has_key (borrow-shared (local entry)) (borrow-shared (local path_key)))))))
+
+	(fn clang_trace_environment
+		(:doc `Build a child-owned environment without changing the running driver's environment.`)
+		(params (path (shared-slice u8))) (returns (owned-array (owned-array u8)))
+		(body
+			(let inherited (local environ))
+			(let-mut count 2i32)
+			(let-mut index 0i32)
+			(while
+				(:doc `Allocate exactly enough rows to keep all non-trace settings.`)
+				(i32.lt (local index) (slice.len (local inherited)))
+				(body
+					(if
+						(:doc `The private settings take the place of any previous trace values in this child.`)
+						(bool.not (call trace_setting (borrow-shared (slice.load (local inherited) (local index)))))
+						(then (set (local count) (i32.add.wrapping (local count) 1i32))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(let-mut rows (array.alloc (owned-array u8) (local count)))
+			(slice.store (local rows) 0i32 (call copy_argument (borrow-shared (local enable_log))))
+			(let-mut assignment (array.alloc u8 (i32.add.wrapping (slice.len (local path_key)) (slice.len (local path)))))
+			(let start (call append_bytes (borrow-shared (local path_key)) (borrow-mut (local assignment)) 0i32))
+			(let end (call append_bytes (borrow-shared (local path)) (borrow-mut (local assignment)) (local start)))
+			(slice.store (local rows) 1i32 (move (local assignment)))
+			(set (local index) 0i32)
+			(let-mut next 2i32)
+			(while
+				(:doc `Copy surviving environment entries with their exact byte values and original ordering.`)
+				(i32.lt (local index) (slice.len (local inherited)))
+				(body
+					(if
+						(:doc `Each retained row owns its own copy for the native call.`)
+						(bool.not (call trace_setting (borrow-shared (slice.load (local inherited) (local index)))))
+						(then
+							(slice.store (local rows) (local next)
+								(call copy_argument (borrow-shared (slice.load (local inherited) (local index)))))
+							(set (local next) (i32.add.wrapping (local next) 1i32))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (move (local rows)))))
+
+	(fn command_start
+		(:doc `Find the first logged command, skipping log markers and the integrated frontend notice.`)
+		(params (source (shared-slice u8))) (returns i32)
+		(body
+			(let-mut cursor 0i32)
+			(while
+				(:doc `Clang prefixes each argument line with space and a quoted executable.`)
+				(i32.lt (i32.add.wrapping (local cursor) 1i32) (slice.len (local source)))
+				(body
+					(if
+						(:doc `A quoted executable at the start of a line begins the command.`)
+						(bool.and (u8.eq (slice.load (local source) (local cursor)) 32u8)
+							(u8.eq (slice.load (local source) (i32.add.wrapping (local cursor) 1i32)) 34u8))
+						(then (return (i32.add.wrapping (local cursor) 1i32))))
+					(while
+						(:doc `Advance past a marker line without examining its contents as options.`)
+						(bool.and (i32.lt (local cursor) (slice.len (local source)))
+							(bool.not (u8.eq (slice.load (local source) (local cursor)) 10u8)))
+						(body (set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+					(if (i32.eq (local cursor) (slice.len (local source))) (then (return -1i32)))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+			(return -1i32)))
+
+	(fn quoted_end
+		(:doc `Find the end of a command argument, skipping the escaped byte after each backslash.`)
+		(params (source (shared-slice u8)) (start i32)) (returns i32)
+		(body
+			(let-mut cursor (i32.add.wrapping (local start) 1i32))
+			(while
+				(:doc `A trailing incomplete escape or an unclosed argument makes the log unusable.`)
+				(i32.lt (local cursor) (slice.len (local source)))
+				(body
+					(let byte (slice.load (local source) (local cursor)))
+					(if (u8.eq (local byte) 34u8) (then (return (i32.add.wrapping (local cursor) 1i32))))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))
+					(if
+						(:doc `Skip the escaped quote, backslash, or dollar sign emitted by LLVM's argument printer.`)
+						(bool.and (u8.eq (local byte) 92u8) (i32.lt (local cursor) (slice.len (local source))))
+						(then (set (local cursor) (i32.add.wrapping (local cursor) 1i32))))))
+			(return -1i32)))
+
+	(fn copy_sysroot
+		(:doc `Copy the logged argument bytes, decoding the driver's backslash escapes.`)
+		(params (source (shared-slice u8)) (start i32) (end i32)) (returns (owned-array u8))
+		(body
+			(let-mut cursor (local start))
+			(let-mut count (i32.sub.wrapping (local end) (local start)))
+			(while
+				(:doc `Count escapes to allocate the exact physical path length.`)
+				(i32.lt (local cursor) (local end))
+				(body
+					(if
+						(:doc `Each backslash marks the next byte as literal.`)
+						(u8.eq (slice.load (local source) (local cursor)) 92u8)
+						(then
+							(set (local count) (i32.sub.wrapping (local count) 1i32))
+							(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+			(let-mut output (array.alloc u8 (local count)))
+			(set (local cursor) (local start))
+			(let-mut index 0i32)
+			(while
+				(:doc `Keep every literal byte and remove only the command printer's escapes.`)
+				(i32.lt (local cursor) (local end))
+				(body
+					(if
+						(:doc `Logs escape this byte even when it is part of a filesystem name.`)
+						(u8.eq (slice.load (local source) (local cursor)) 92u8)
+						(then (set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+					(slice.store (local output) (local index) (slice.load (local source) (local cursor)))
+					(set (local index) (i32.add.wrapping (local index) 1i32))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+			(return (move (local output)))))
+
+	(fn first_job_sysroot
+		(:doc `Use the last sysroot option in the first frontend job. This native invocation shares one target environment.`)
+		(params (source (shared-slice u8))) (returns (owned-array u8))
+		(body
+			(let-mut cursor (call command_start (borrow-shared (local source))))
+			(let-mut start -1i32)
+			(let-mut end -1i32)
+			(let-mut value (bool false))
+			(while
+				(:doc `Printed command words are double-quoted and separated by one space.`)
+				(bool.and (bool.and (i32.lt -1i32 (local cursor)) (i32.lt (local cursor) (slice.len (local source))))
+					(u8.eq (slice.load (local source) (local cursor)) 34u8))
+				(body
+					(let limit (call quoted_end (borrow-shared (local source)) (local cursor)))
+					(if (i32.lt (local limit) 0i32) (then (return (call empty_path))))
+					(if
+						(:doc `The word after the flag is its path even when it happens to look like another option.`)
+						(local value)
+						(then
+							(set (local start) (i32.add.wrapping (local cursor) 1i32))
+							(set (local end) (i32.sub.wrapping (local limit) 1i32))
+							(set (local value) (bool false)))
+						(else
+							(set (local value) (call same_bytes (borrow-shared (local source)) (local cursor) (local limit)
+								(borrow-shared (local sysroot_flag)) 0i32 (slice.len (local sysroot_flag))))))
+					(set (local cursor) -1i32)
+					(if
+						(:doc `A newline or end of input ends the first job.`)
+						(bool.and (i32.lt (local limit) (slice.len (local source))) (u8.eq (slice.load (local source) (local limit)) 32u8))
+						(then (set (local cursor) (i32.add.wrapping (local limit) 1i32))))))
+			(if
+				(:doc `Clang defaults to the ordinary filesystem root when no sysroot is configured.`)
+				(i32.lt (local start) 0i32)
+				(then (return (call copy_argument (borrow-shared (local root_separator))))))
+			(return (call copy_sysroot (borrow-shared (local source)) (local start) (local end)))))
+
+	(fn read_job_sysroot
+		(:doc `Read Clang's complete private option log before reconstructing filesystem paths.`)
+		(params (path (shared-slice u8))) (returns (owned-array u8))
+		(body
+			(let stamp (call file_stamp (borrow-shared (local path))))
+			(let width (record.get (local stamp) length))
+			(if (i32.lt (local width) 1i32) (then (return (call empty_path))))
+			(let-mut source (array.alloc u8 (local width)))
+			(if
+				(:doc `A missing or unusable report gives no additional filesystem prefix.`)
+				(bool.not (call read_source_file (borrow-shared (local path)) (local stamp) (borrow-mut (local source))))
+				(then (return (call empty_path))))
+			(return (call first_job_sysroot (borrow-shared (local source))))))
+)

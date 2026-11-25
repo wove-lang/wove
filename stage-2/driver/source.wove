@@ -7,16 +7,19 @@
 	and write C with the shared emitter, keeping the file's original spans
 	on failure. Publish only a complete emitted translation unit.`)
 
-	(use wove-file "./diagnostics.wove" (only report_argv report_source
-		(value invalid_source) (value unreadable_file) (value non_utf8_source) (value invalid_target) (value unreadable_asset)))
-	(use wove-file "./output.wove" (only valid_output_target retained_c_path publish_input))
+	(use wove-file "./diagnostics.wove" (only report_source
+		(value invalid_source) (value unreadable_file) (value unreadable_asset)))
+	(use wove-file "./output.wove" (only publish_input))
+	(use wove-file "./input_files.wove" (only check_asset_inputs))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "./protection.wove" (only (type BuildProtection)))
 	(use wove-file "./disk.wove" (only compile_disk_graph))
 	(use wove-file "./files.wove" (only canonical_path file_stamp read_source_file))
 	(use wove-file "./platform.wove" (only native_selection))
 	(use wove-file "./graph.wove" (only needs_provider_graph compile_bundled_input))
 	(use wove-file "./assets.wove" (only copy_source_prefix load_input_assets))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset)))
-	(use wove-file "../source/scan.wove" (only admit_source check_source_form build_source_tree check_source_metadata (type SourceNode)))
+	(use wove-file "../source/scan.wove" (only check_source_form build_source_tree check_source_metadata (type SourceNode)))
 	(use wove-file "../source/module.wove" (only read_module_for_target (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../emit/c.wove" (only emit_module))
 
@@ -54,7 +57,7 @@
 	(fn compile_assets
 		(:doc `Collect checked embed requests, load selected assets, and emit from the resulting arena.`)
 		(params (path (shared-slice u8)) (canonical (shared-slice u8)) (destination (shared-slice u8)) (staged (shared-slice u8))
-			(target_index i32) (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
+			(protection BuildProtection) (target_index i32) (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)))
 		(returns i32)
 		(body
@@ -74,6 +77,10 @@
 				(then (return (call emit_input (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
 					(borrow-shared (local source)) (borrow-shared (local nodes))
 					(local module) (borrow-shared (local declarations)) (borrow-mut (local requests))))))
+			(let no_files (array.alloc SuppliedFile 0i32))
+			(let conflict (call check_asset_inputs (borrow-shared (local canonical)) (borrow-shared (local source))
+				(borrow-shared (local no_files)) (borrow-shared (local requests)) (local protection)))
+			(if (i32.lt 0i32 (local conflict)) (then (return (local conflict))))
 			(let measured (call load_input_assets (borrow-shared (local canonical)) (borrow-shared (local source))
 				(borrow-mut (local requests)) (borrow-mut (local none)) (bool false)))
 			(if
@@ -95,20 +102,11 @@
 				(local module) (borrow-shared (local declarations)) (borrow-mut (local requests))))))
 
 	(fn compile_input
-		(:doc `Validate both operands before reading the source and selecting the native module.`)
-		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
-			(staged (shared-slice u8)) (probe_options (shared-slice u8)) (input_index i32) (target_index i32))
+		(:doc `Read the checked entry and select the emitter while carrying its publication protection.`)
+		(params (path (shared-slice u8)) (destination (shared-slice u8)) (staged (shared-slice u8))
+			(probe_options (shared-slice u8)) (protection BuildProtection) (target_index i32))
 		(returns i32)
 		(body
-			(if
-				(:doc "Only a UTF-8 source path can appear in the JSON source location.")
-				(i32.lt -1i32 (call admit_source (borrow-shared (local path))))
-				(then (return (call report_argv 3u32 (local input_index) (borrow-shared (local non_utf8_source))))))
-			(if
-				(:doc "Reject a malformed output operand before opening the source.")
-				(bool.not (call valid_output_target (borrow-shared (local target))))
-				(then (return (call report_argv 3u32 (local target_index) (borrow-shared (local invalid_target))))))
-			(let destination (call retained_c_path (borrow-shared (local target)) (borrow-shared (local profile)) (local mode)))
 			(let canonical (call canonical_path (borrow-shared (local path))))
 			(let stamp (call file_stamp (borrow-shared (local canonical))))
 			(let length (record.get (local stamp) length))
@@ -140,8 +138,7 @@
 				(bool.and (u32.eq (record.get (local module) error) 0u32)
 					(call needs_provider_graph (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local declarations)) (record.get (local module) count) 3u32))
-				(then (return (call compile_disk_graph (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged))
-					(borrow-shared (local probe_options)) (local target_index)
+				(then (return (call compile_disk_graph (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options)) (local protection) (local target_index)
 					(borrow-shared (local canonical)) (borrow-shared (local source)) (local stamp)))))
 			(if
 				(:doc "C-header imports and declarations use the supplied-source graph with the embedded providers.")
@@ -149,7 +146,7 @@
 					(call needs_provider_graph (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local declarations)) (record.get (local module) count) 8u32))
 				(then (return (call compile_bundled_input (borrow-shared (local path)) (borrow-shared (local canonical))
-					(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options)) (local target_index) (borrow-shared (local source)) (local rows)))))
+					(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options)) (local protection) (local target_index) (borrow-shared (local source)) (local rows)))))
 			(return (call compile_assets (borrow-shared (local path)) (borrow-shared (local canonical))
-				(borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index) (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local destination)) (borrow-shared (local staged)) (local protection) (local target_index) (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local module) (borrow-shared (local declarations)))))))
