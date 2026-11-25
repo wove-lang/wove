@@ -629,6 +629,28 @@ original parameter list or result type. Ordinary native and bootstrap modes
 exclude test-only forms and imports. The Stage 1 seed also treats `test`
 as false when evaluating `cfg` predicates.
 
+## Inline test execution
+
+Use `--mode test --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...`
+to emit a test executable from the same supplied graph. The generated
+entry uses the discovery order and keeps the ordinary Wove `main` as
+an internal function. An empty inventory is valid.
+
+Link the emitted C with the Wove runtime and test runner.
+
+```sh
+clang -std=c11 -I runtime -I stage-2/test emitted.c runtime/wove_runtime.c \
+	stage-2/test/wove_test.c stage-2/io/process.c -o ./wove-tests
+./wove-tests
+```
+
+With no arguments the executable runs each test in a fresh process and
+reports status, defining path, function name, and child status in
+tab-separated rows. A failed test leaves later tests runnable and makes
+the overall status nonzero. Child stdout is drained and stderr is
+inherited. Pass one zero-based decimal test index to run that test
+directly, with status 2 for an invalid selection.
+
 ## Compile-time file embeds
 
 Use `(embed "./assets/payload.bin")` as an owning local initializer.

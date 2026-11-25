@@ -46,15 +46,20 @@ def read_cases(manifest):
 			assets.append((path, b"" if contents == "-" else bytes.fromhex(contents)))
 		elif kind == "native" and label is not None:
 			status, *flags = fields
-			native = flags, [(int(status), [], b"")]
+			native = flags, [(int(status), [], b"", b"")]
 		# Runtime traps use the same native recipe with exact stderr.
 		elif kind == "native-trap" and label is not None:
 			diagnostic, *flags = fields
-			native = flags, [(1, [], json.loads(diagnostic).encode("utf-8"))]
+			native = flags, [(1, [], b"", json.loads(diagnostic).encode("utf-8"))]
 		# Additional vectors reuse the compiled artifact and preserve empty arguments.
 		elif kind == "native-argv" and native is not None:
 			status, argv = fields
-			native[1].append((int(status), json.loads(argv), b""))
+			native[1].append((int(status), json.loads(argv), b"", b""))
+		# A program that reports results can attach expected streams to any invocation.
+		elif kind == "native-output" and native is not None:
+			stdout, stderr = (json.loads(field).encode("utf-8") for field in fields)
+			status, argv, _, _ = native[1][-1]
+			native[1][-1] = (status, argv, stdout, stderr)
 		# A native behavior case may assert just the probe’s leading rows.
 		elif kind in {"expect", "expect-prefix"} and label is not None:
 			prefix = prefix or kind == "expect-prefix"
@@ -82,9 +87,9 @@ def check_native(probe, label, emitted, fixture_flags, executions):
 		command = [*compiler, "-std=c11", *flags, "-I", "runtime", *fixture_flags, str(generated), runtime, "-o", str(program)]
 		subprocess.run(command, check=True, timeout=30)
 		# Reuse the compiled fixture for every supplied argument vector.
-		for expected, argv, diagnostic in executions:
+		for expected, argv, stdout, stderr in executions:
 			result = subprocess.run([program, *argv], capture_output=True, timeout=30)
-			assert (result.returncode, result.stdout, result.stderr) == (expected, b"", diagnostic), (label, result)
+			assert (result.returncode, result.stdout, result.stderr) == (expected, stdout, stderr), (label, result)
 
 
 # Materialize supplied assets for emission and move them before native verification.

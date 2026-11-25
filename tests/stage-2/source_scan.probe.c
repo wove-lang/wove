@@ -27,9 +27,9 @@
 #define read_module wv_seed_fn_85
 #define emit_module wv_seed_fn_115
 #define resolve_graph wv_seed_fn_132
-#define inspect_callers wv_seed_fn_394
-#define run_scalar_graph wv_seed_fn_419
-#define discover_graph_tests wv_seed_fn_434
+#define inspect_callers wv_seed_fn_396
+#define run_scalar_graph wv_seed_fn_421
+#define discover_graph_tests wv_seed_fn_426
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -50,8 +50,8 @@ typedef wv_seed_record_42 CallSite;
 typedef wv_seed_record_23 SuppliedFile;
 typedef wv_seed_record_54 CallerInspection;
 typedef wv_seed_record_58 GraphOutput;
-typedef wv_seed_record_62 DiscoveredTest;
-typedef wv_seed_record_63 TestDiscovery;
+typedef wv_seed_record_59 DiscoveredTest;
+typedef wv_seed_record_60 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
@@ -1137,9 +1137,9 @@ static int probe_command(int argc, char **argv) {
 		argc -= 2;
 		argv += 2;
 	}
-	// Test mode exposes the inventory before a native dispatch entry exists.
-	if (mode == MODE_TEST && (strcmp(argv[1], "--emit-c") == 0 || strcmp(argv[1], "--emit-graph") == 0)) {
-		fputs("test mode discovers tests with --graph-tests\n", stderr);
+	// Test emission needs the supplied graph for inventory and defining-file paths.
+	if (mode == MODE_TEST && strcmp(argv[1], "--emit-c") == 0) {
+		fputs("test mode emits native tests with --emit-graph\n", stderr);
 		return EXIT_FAILURE;
 	}
 	const bool graph = strcmp(argv[1], "--graph") == 0 || strcmp(argv[1], "--emit-graph") == 0 ||
