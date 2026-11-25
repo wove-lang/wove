@@ -19,8 +19,8 @@ and include arguments to the C probe. The inspector is built with the
 compiler's default host options so probe flags such as `-funsigned-char`
 affect the C translation unit.
 
-Both `query_gcc_header` and `query_clang_header` return the shared
-`HeaderQuery` from `stage-2/c/probe.wove`. Error 8 means plugin directory discovery failed.
+`query_gcc_header` returns `HeaderQuery` from `stage-2/c/probe.wove` with
+the same presence state, AST index, and import span as `query_clang_header`. Error 8 means plugin directory discovery failed.
 Error 9 means plugin compilation failed or did not produce a regular
 shared object. The shared query codes cover tool and plugin load failures,
 capture truncation, and malformed AST output. The private source and plugin
