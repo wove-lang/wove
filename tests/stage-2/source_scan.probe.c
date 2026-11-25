@@ -31,8 +31,8 @@
 #define target_os wv_seed_fn_95
 #define target_arch wv_seed_fn_96
 #define inspect_callers wv_seed_fn_434
-#define run_scalar_graph wv_seed_fn_463
-#define discover_graph_tests wv_seed_fn_471
+#define run_scalar_graph wv_seed_fn_464
+#define discover_graph_tests wv_seed_fn_472
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -858,6 +858,7 @@ static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t
 		const int32_t end = row.wv_field_2;
 		const char *name = (const char *)arena + files[owner].wv_field_3 + start;
 		const char *kind = row.wv_field_5 == 0 ? "binding" : "type-binding";
+		if (row.wv_field_5 == 2) { kind = "value-binding"; }
 		// Preserve the separate namespace when exposing C header bindings.
 		if (row.wv_field_6 == 8) {
 			kind = row.wv_field_5 == 0 ? "c-binding" : "c-type-binding";

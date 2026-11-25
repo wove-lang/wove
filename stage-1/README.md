@@ -86,9 +86,8 @@ It takes a typed integer literal or a quoted string as its initializer.
 ```
 
 Use `(local lowest_digit)` to read the scalar in a function. A local
-binding or parameter with the same name takes precedence. An imported
-function reads its own file's bindings, and `use` selects functions and
-types in the seed.
+binding or parameter with the same name takes precedence. Each function
+reads the bindings declared or selected in its defining file.
 
 A string initializes a shared `u8` slice backed by one static read-only
 table. Its length counts decoded UTF-8 bytes, with no added NUL. Use
@@ -150,6 +149,13 @@ lexer_kind)))` to select functions from a local file. The path resolves from
 the importing file. A bare name keeps its spelling, and `(as original local)`
 binds a new name to the original declaration and signature. `(only)` loads the
 file and binds no names.
+
+An unqualified selector can also import an immutable module binding.
+For example, `(only alphabet (as alphabet digits))` binds both names to
+the same read-only storage. Read either through `(local name)`. If the
+provider defines a function and value with the same name, the unqualified
+selector picks the function. Use `(value name)` or
+`(value (as name alias))` to select the value explicitly.
 
 Use `(type SourceNode)` or `(type (as SourceNode Node))` inside `only` to
 select a record type. A provider can have a function and a record with the

@@ -23,15 +23,17 @@
 
 	(struct GraphModule
 		(fields (state u32) (path i32) (order i32) (parent i32) (next_use i32) (end_use i32) (active bool)))
-	(struct GraphBinding
+	(struct
+		(:doc "A published name with a file-local name node in the owner and a declaration in the defining file.")
+		GraphBinding
 		(fields (owner i32) (start i32) (end i32) (file i32) (declaration i32) (namespace u32)
 			(provider u32) (header_start i32) (header_end i32) (native_start i32) (native_end i32)
 			(signature_start i32) (signature_end i32) (native_type i32) (drop_start i32) (drop_end i32)
-			(type_start i32) (type_end i32)))
+			(type_start i32) (type_end i32) (name_node i32)))
 	(struct GraphUse
 		(fields (start i32) (end i32) (path_start i32) (path_end i32) (first i32) (limit i32) (error u32) (provider u32)))
 	(struct GraphSelector
-		(fields (original_start i32) (original_end i32) (local_start i32) (local_end i32) (local_bare bool) (error u32) (namespace u32)))
+		(fields (original_start i32) (original_end i32) (local_start i32) (local_end i32) (local_bare bool) (error u32) (namespace u32) (local_node i32)))
 	(struct GraphResult
 		(fields (modules i32) (bindings i32) (file i32) (start i32) (end i32) (error u32) (mode u32) (os u8) (arch u8) (deployment i32)))
 	(struct FileRead
@@ -112,7 +114,7 @@
 		(returns GraphRead)
 		(body
 			(if
-				(:doc "A function or type definition needs a name.")
+				(:doc "Each definition needs a name.")
 				(i32.lt (local name) (i32 0))
 				(then (return (call graph_read (local count) (record.get (local node) start) (record.get (local node) end) (u32 26)))))
 			(let name_node (slice.load (local nodes) (local name)))
@@ -138,11 +140,11 @@
 					(header_start (i32 -1)) (header_end (i32 -1)) (native_start (i32 -1)) (native_end (i32 -1))
 					(signature_start (i32 -1)) (signature_end (i32 -1))
 					(native_type (i32 0)) (drop_start (i32 0)) (drop_end (i32 0))
-					(type_start (i32 0)) (type_end (i32 0))))
+					(type_start (i32 0)) (type_end (i32 0)) (name_node (local name))))
 			(return (call graph_read (i32.add.wrapping (local count) (i32 1)) (i32 0) (i32 0) (u32 0)))))
 
 	(fn collect_selectors
-		(:doc `Cache selector spans so a suspended importer can release its source tree.`)
+		(:doc `Cache selector spans and local name nodes before releasing the importer's source tree.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(first i32) (selectors (mut-slice GraphSelector)) (offset i32))
 		(returns GraphRead)
@@ -168,7 +170,8 @@
 							(slice.store (local selectors) (local count)
 								(record.make GraphSelector
 									(original_start (record.get (local selector) start)) (original_end (record.get (local selector) end))
-									(local_start (i32 -1)) (local_end (i32 -1)) (local_bare (bool false)) (error (local error)) (namespace (record.get (local selector) namespace))))
+									(local_start (i32 -1)) (local_end (i32 -1)) (local_bare (bool false)) (error (local error))
+									(namespace (record.get (local selector) namespace)) (local_node (i32 -1))))
 							(return (call graph_read (i32.add.wrapping (local count) (i32 1)) (i32 0) (i32 0) (u32 0)))))
 					(let original (slice.load (local nodes) (record.get (local selector) first)))
 					(let name (slice.load (local nodes) (record.get (local selector) second)))
@@ -177,7 +180,7 @@
 							(original_start (record.get (local original) start)) (original_end (record.get (local original) end))
 							(local_start (record.get (local name) start)) (local_end (record.get (local name) end))
 							(local_bare (u32.eq (record.get (local name) kind) (u32 1))) (error (u32 0))
-							(namespace (record.get (local selector) namespace))))
+							(namespace (record.get (local selector) namespace)) (local_node (record.get (local selector) second))))
 					(set (local count) (i32.add.wrapping (local count) (i32 1)))
 					(set (local index) (record.get (local item) next_sibling))))
 			(return (call graph_read (local count) (i32 0) (i32 0) (u32 0)))))
@@ -234,7 +237,7 @@
 			(let-mut selector_count (local selector_offset))
 			(let-mut index (i32 0))
 			(while
-				(:doc "Keep active use edges in source order and collect every local function and type name before binding.")
+				(:doc "Collect active edges and local definitions before resolving imported names.")
 				(i32.lt (local index) (local length))
 				(body
 					(let declaration (record.get (slice.load (local declarations) (local index)) node))
@@ -244,7 +247,8 @@
 						(slice.load (local nodes) (record.get (local parts) head))))
 					(if
 						(:doc "The local definition is visible to conflict checks on every edge.")
-						(bool.or (u32.eq (local tag) (u32 1)) (u32.eq (local tag) (u32 7)))
+						(bool.or (u32.eq (local tag) (u32 1))
+							(bool.or (u32.eq (local tag) (u32 7)) (u32.eq (local tag) (u32 12))))
 						(then
 							(let-mut namespace (u32 0))
 							(let-mut name (record.get (local parts) name))
@@ -254,6 +258,10 @@
 								(then
 									(set (local namespace) (u32 1))
 									(set (local name) (record.get (local parts) operands))))
+							(if
+								(:doc "An immutable module binding has its own value namespace.")
+								(u32.eq (local tag) (u32 12))
+								(then (set (local namespace) (u32 2))))
 							(let result (call collect_definition (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local node) (local name) (local declaration) (local file)
 								(local namespace) (borrow-mut (local bindings)) (local binding_count)))
@@ -362,6 +370,7 @@
 		(body
 			(let start (record.get (local selector) local_start))
 			(let end (record.get (local selector) local_end))
+			(let namespace (record.get (local target) namespace))
 			(if
 				(:doc "Validate the local spelling only after resolving the requested definition.")
 				(bool.not (bool.and (record.get (local selector) local_bare)
@@ -369,11 +378,11 @@
 				(then (return (call graph_read (local index) (local start) (local end) (u32 26)))))
 			(let existing (call find_binding
 				(borrow-shared (local source)) (borrow-shared (local source)) (local start) (local end)
-				(borrow-shared (local bindings)) (local index) (local importer) (bool false) (i32 0) (record.get (local selector) namespace)))
+				(borrow-shared (local bindings)) (local index) (local importer) (bool false) (i32 0) (local namespace)))
 			(if
 				(:doc "A conflict points at the new local spelling.")
 				(bool.or (bool.not (i32.lt (local existing) (i32 0)))
-					(bool.and (u32.eq (record.get (local selector) namespace) (u32 1))
+					(bool.and (u32.eq (local namespace) (u32 1))
 						(call is_reserved_type_name (borrow-shared (local source)) (local start) (local end))))
 				(then (return (call graph_read (local index) (local start) (local end) (u32 30)))))
 			(if
@@ -383,13 +392,14 @@
 			(slice.store (local bindings) (local index)
 				(record.make GraphBinding (owner (local importer)) (start (local start)) (end (local end))
 					(file (record.get (local target) file)) (declaration (record.get (local target) declaration))
-					(namespace (record.get (local selector) namespace)) (provider (record.get (local target) provider))
+					(namespace (local namespace)) (provider (record.get (local target) provider))
 					(header_start (record.get (local target) header_start)) (header_end (record.get (local target) header_end))
 					(native_start (record.get (local target) native_start)) (native_end (record.get (local target) native_end))
 					(signature_start (record.get (local target) signature_start)) (signature_end (record.get (local target) signature_end))
 					(native_type (record.get (local target) native_type))
 					(drop_start (record.get (local target) drop_start)) (drop_end (record.get (local target) drop_end))
-					(type_start (record.get (local target) type_start)) (type_end (record.get (local target) type_end))))
+					(type_start (record.get (local target) type_start)) (type_end (record.get (local target) type_end))
+					(name_node (record.get (local selector) local_node))))
 			(return (call graph_read (i32.add.wrapping (local index) (i32 1)) (i32 0) (i32 0) (u32 0)))))
 
 	(fn bind_edge
@@ -414,12 +424,19 @@
 						(:doc "Return a cached selector error after the provider and earlier selections succeed.")
 						(u32.lt (u32 0) (local error))
 						(then (return (call graph_read (local count) (local original_start) (local original_end) (local error)))))
-					(let definition (call find_binding
+					(let-mut definition (call find_binding
 						(borrow-shared (local provider_source)) (borrow-shared (local source))
 						(local original_start) (local original_end) (borrow-shared (local bindings))
 						(local count) (local provider) (bool true) (i32 0) (local namespace)))
 					(if
-						(:doc "An unavailable function or type points at its original requested name.")
+						(:doc "An unqualified selector uses a module value when no defining function matches.")
+						(bool.and (u32.eq (local namespace) (u32 0)) (i32.lt (local definition) (i32 0)))
+						(then (set (local definition) (call find_binding
+							(borrow-shared (local provider_source)) (borrow-shared (local source))
+							(local original_start) (local original_end) (borrow-shared (local bindings))
+							(local count) (local provider) (bool true) (i32 0) (u32 2)))))
+					(if
+						(:doc "An unavailable declaration points at its original requested name.")
 						(i32.lt (local definition) (i32 0))
 						(then (return (call graph_read (local count) (local original_start) (local original_end) (u32 29)))))
 					(let target (slice.load (local bindings) (local definition)))
@@ -455,6 +472,10 @@
 						(u32.lt (u32 0) (local error))
 						(then (return (call graph_read (local count) (local start) (local end) (local error)))))
 					(let namespace (record.get (local selector) namespace))
+					(if
+						(:doc "Explicit immutable value selectors apply to Wove files.")
+						(u32.eq (local namespace) (u32 2))
+						(then (return (call graph_read (local count) (local start) (local end) (u32 26)))))
 					(let member (call find_c_declaration (borrow-shared (local provider_source)) (borrow-shared (local nodes))
 						(local header) (borrow-shared (local source)) (local start) (local end) (local namespace) (local context)))
 					(let rejected (record.get (local member) error))
@@ -476,7 +497,8 @@
 						(signature_start (record.get (local member) signature_start)) (signature_end (record.get (local member) signature_end))
 						(native_type (record.get (local member) native_type))
 						(drop_start (record.get (local member) drop_start)) (drop_end (record.get (local member) drop_end))
-						(type_start (record.get (local member) type_start)) (type_end (record.get (local member) type_end))))
+						(type_start (record.get (local member) type_start)) (type_end (record.get (local member) type_end))
+						(name_node (i32 -1))))
 					(let published (call publish_binding (borrow-shared (local source)) (local selector) (local importer)
 						(local target) (borrow-mut (local bindings)) (local count)))
 					(if
