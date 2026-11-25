@@ -29,7 +29,8 @@
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
 	(use wove-file "./signatures.wove" (only read_signature_head is_owned_byte_result complete_signature (type ScalarSignature)))
 	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind))
-	(use wove-file "./flow.wove" (only block_statement moved_owner after_block (type ScalarStatement)))
+	(use wove-file "./flow.wove" (only block_statement moved_owner after_block is_c_value_binding (type ScalarStatement)
+			(value c_writable_binding) (value c_value_expression) (value c_value_assignment) (value c_handle_reference)))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar scalar_operator is_u32_shift is_fixed_initializer is_fixed_access
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name (type ScalarOperator) (type EntryRead) (type StatementRead)))
@@ -408,7 +409,8 @@
 		(53) can be any registered record. A length or load receiver (55)
 		can use any readable slice. A store receiver (56) needs a writable
 		slice or a local byte owner checked for mutable access.
-		An owner operand (57) can supply a transfer or a handle borrow. Zero marks unvisited rows.`)
+		An owner operand (57) transfers ownership. A C handle operand (58) can supply a call loan.
+		These expectations sit below the named record type range. Zero marks unvisited rows.`)
 		(params (expected u32) (actual u32))
 		(returns bool)
 		(body
@@ -444,8 +446,8 @@
 					(bool.and (bool.not (call is_writable_slice (local expected))) (call is_writable_slice (local actual))))
 				(then (return (u32.eq (call record_slice_element (local expected)) (call record_slice_element (local actual))))))
 			(if
-				(:doc "A move carries the source owner's exact type into the receiving local.")
-				(u32.eq (local expected) (u32 57))
+				(:doc "Both an owner transfer and a native borrow check the underlying owner identity.")
+				(bool.or (u32.eq (local expected) (u32 57)) (u32.eq (local expected) (local c_handle_reference)))
 				(then (return (call is_local_owner (local actual)))))
 			(return (u32.eq (local expected) (local actual)))))
 
@@ -730,7 +732,9 @@
 							(error (u32 39)) (related (local transfer))))))
 					(if
 						(:doc "Native pointer owners need a checked borrow or transfer before they can be read.")
-						(bool.and (call is_native_owner (local actual)) (bool.not (u32.eq (local expected) (u32 57))))
+						(bool.and (call is_native_owner (local actual))
+							(bool.not (bool.or (u32.eq (local expected) (u32 57))
+								(u32.eq (local expected) (local c_handle_reference)))))
 						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 					(let byte_store (bool.and (u32.eq (local expected) (u32 56)) (u32.eq (local actual) (u32 41))))
 					(if
@@ -783,6 +787,23 @@
 						(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
 					(let declaration (slice.load (local statements) (local module_binding)))
 					(let actual (record.get (local declaration) type))
+					(if
+						(:doc "Native values keep their C expression. Shared resources may only be read for a checked borrow.")
+						(call is_c_value_binding (record.get (local declaration) kind))
+						(then
+							(if
+								(:doc "A library-owned handle cannot become a local owner or satisfy a scalar expectation.")
+								(bool.not (call value_matches_type (local type) (local actual)))
+								(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+							(if
+								(:doc "A foreign handle can participate in a call loan, never in a move or local initializer.")
+								(bool.and (call is_native_owner (local actual))
+									(bool.not (u32.eq (local expected) (local c_handle_reference))))
+								(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+							(slice.store (local expressions) (local index)
+								(call expression_row (local c_value_expression) (local actual) (record.get (local declaration) target)
+									(i32 -1) (i32 0) (i32 0) (bool false)))
+							(return (call entry_at (local node) (local module_binding) (u32 0)))))
 					(if
 						(:doc "Shared static views can only satisfy read access.")
 						(bool.not (call value_matches_type (local type) (local actual)))
@@ -885,16 +906,21 @@
 						(i32.eq (record.get (local first) parent) (record.get (local here) parent))
 						(then (return (call entry_at (local name) (i32 -1) (u32 33)))))))
 			(if
-				(:doc "An assignment needs a mutable local. Identify an immutable module name explicitly.")
+				(:doc "Without a local or parameter, an assignment may target writable foreign storage.")
 				(local assigning)
 				(then
 					(let root (slice.load (local statements) (record.get (local caller) tree_base)))
+					(let module_binding (call find_module_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local statements)) (record.get (local root) first) (local name)))
 					(if
-						(:doc "A module binding cannot be assigned.")
-						(i32.lt (i32 -1) (call find_module_binding (borrow-shared (local source)) (borrow-shared (local nodes))
-							(borrow-shared (local statements)) (record.get (local root) first) (local name)))
+						(:doc "Report an unavailable name at the original assignment target.")
+						(i32.lt (local module_binding) (i32 0))
+						(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+					(if
+						(:doc "Only a C let-mut declaration permits assigning to a module value.")
+						(bool.not (u32.eq (record.get (slice.load (local statements) (local module_binding)) kind) (local c_writable_binding)))
 						(then (return (call entry_at (local name) (i32 -1) (u32 37)))))
-					(return (call entry_at (local name) (i32 -1) (u32 34)))))
+					(return (call entry_at (local name) (local module_binding) (u32 0)))))
 			(return (call entry_at (local name) (local name_index) (u32 0)))))
 
 	(fn find_defining_function
@@ -1359,7 +1385,7 @@
 	(fn plan_handle_borrow
 		(:doc `Borrow the exact live resource without transferring ownership.
 
-		Keep the local pointer as the borrow's operand. The borrow's own
+		Keep the evaluated local or header pointer as the loan's operand. The borrow's own
 		original span identifies a missing handle at runtime.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
 			(index i32) (reference_index i32) (caller ScalarFunction) (statement i32) (expected u32) (view_start i32)
@@ -1370,22 +1396,32 @@
 			(let reference (slice.load (local nodes) (local reference_index)))
 			(let named (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) (u32 8) (u32 24)))
 			(if
-				(:doc "A handle loan needs a named local owner.")
+				(:doc "A handle loan needs a named owner or library-owned pointer.")
 				(u32.lt (u32 0) (record.get (local named) error))
 				(then (return (local named))))
 			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)
-				(record.get (local named) operand) (u32 57) (local reference_index) (local caller) (local statement)
+				(record.get (local named) operand) (local c_handle_reference) (local reference_index) (local caller) (local statement)
 				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
 			(if
 				(:doc "A transfer remains related context for a borrow of a moved owner.")
 				(u32.lt (u32 0) (record.get (local checked) error))
 				(then (return (call at_owner_use (local checked) (local node)))))
+			(let resolved (slice.load (local expressions) (local reference_index)))
+			(let implicit (i32.eq (local index) (local reference_index)))
 			(if
-				(:doc "Compare defining resource identities even when the native pointer types are spelled alike.")
-				(bool.not (u32.eq (local expected) (record.get (slice.load (local expressions) (local reference_index)) type)))
+				(:doc "Only an existing foreign reference may be passed directly. Its defining resource must match.")
+				(bool.or (bool.not (u32.eq (local expected) (record.get (local resolved) type)))
+					(bool.and (local implicit) (bool.not (u32.eq (record.get (local resolved) kind) (local c_value_expression)))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let-mut pointer (local reference_index))
+			(if
+				(:doc "Use the name operand to evaluate a direct foreign reference before checking the handle.")
+				(local implicit)
+				(then
+					(set (local pointer) (record.get (local named) operand))
+					(slice.store (local expressions) (local pointer) (local resolved))))
 			(slice.store (local expressions) (local index)
-				(call runtime_expression (call native_handle_borrow_kind) (local expected) (local node) (local reference_index)
+				(call runtime_expression (call native_handle_borrow_kind) (local expected) (local node) (local pointer)
 					(local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
@@ -1440,6 +1476,18 @@
 			(expressions (mut-slice ScalarExpression)))
 		(returns EntryRead)
 		(body
+			(if
+				(:doc "A library-owned shared reference can be supplied directly to its native formal.")
+				(call is_native_owner (local expected))
+				(then
+					(let form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local form) head)))
+					(if
+						(:doc "Resolve a direct named reference without introducing a resource owner.")
+						(u32.eq (local tag) (u32 8))
+						(then (return (call plan_handle_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local node) (local index) (local index) (local caller) (local statement) (local expected) (local view_start)
+							(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))))
 			(let keyword (call call_loan_keyword (local expected)))
 			(let loan (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local keyword) (u32 24)))
@@ -2330,6 +2378,7 @@
 				(then (return (call body_error (local caller) (record.get (local binding) start)
 					(record.get (local binding) end) (record.get (local binding) error)))))
 			(let kind (record.get (local statement) kind))
+			(let-mut emitted_kind (local kind))
 			(let value (record.get (local statement) value))
 			(let-mut first (i32 -1))
 			(let-mut target (record.get (local binding) operand))
@@ -2339,6 +2388,10 @@
 				(u32.eq (local kind) (u32 17))
 				(then
 					(let declaration (slice.load (local statements) (local target)))
+					(if
+						(:doc "A foreign assignment writes the original C symbol instead of a generated local.")
+						(u32.eq (record.get (local declaration) kind) (local c_writable_binding))
+						(then (set (local emitted_kind) (local c_value_assignment))))
 					(set (local expected) (record.get (local declaration) type))
 					(set (local target) (record.get (local declaration) target))))
 			(if
@@ -2396,7 +2449,7 @@
 				(bool.not (i32.lt (local value) (i32 0)))
 				(then (set (local type) (record.get (slice.load (local expressions) (local value)) type))))
 			(slice.store (local statements) (local index)
-				(record.make ScalarStatement (kind (local kind)) (target (local target)) (value (local value))
+				(record.make ScalarStatement (kind (local emitted_kind)) (target (local target)) (value (local value))
 					(type (local type))
 					(first (local first)) (previous_owner (local previous_owner))
 					(falls_through (bool.not (u32.eq (local kind) (u32 7)))) (move_site (i32 -1))))

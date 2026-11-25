@@ -490,8 +490,8 @@ binding explicitly. Both aliases and direct selections use
 Function, type, and value selections use separate namespaces. Each
 selector binds a declaration defined by the provider.
 
-A `use c-header` selects functions and native types from a `bridge c-header` with the same
-decoded header key in the supplied source table. A key such as `"<stdlib.h>"`
+A `use c-header` selects functions, native types, and values from a
+`bridge c-header` with the same decoded header key in the supplied source table. A key such as `"<stdlib.h>"`
 or `"./project.h"` identifies one active bridge in a well-formed canonical file.
 Header lookup leaves Wove-file reachability unchanged. A selected declaration
 has `params` and `returns` forms. Both support exact `bool`, `u8`, `i32`, and
@@ -499,6 +499,21 @@ has `params` and `returns` forms. Both support exact `bool`, `u8`, `i32`, and
 native argument contract. Parameter names must be unique within the signature. The alias occupies the
 importing file's function namespace. Its binding keeps the defining declaration
 and the raw header, native symbol, and signature spans in that file.
+
+Bridge `const`, `let`, and `let-mut` declarations provide typed values
+from the C header. A bare selection tries functions first. Use
+`(value O_CLOEXEC)` or `(value (as errno error_indicator))` to select
+from the value namespace explicitly. Constants use the original C
+expression, and the generated C checks that it is an integer constant
+representable in its declared type. `let` provides live read-only
+access. `let-mut` also permits `(set (local error_indicator) (i32 0))`
+through the original C lvalue, including macro-backed `errno`.
+The right-hand value is evaluated before resolving the lvalue for the write.
+
+A bridge `(let stderr (shared-ref File))` exposes a library-owned
+pointer for a shared C parameter. Pass it directly as `(local stderr)`
+or with `(borrow-shared (local stderr))`. The call checks that the
+handle is present and keeps ownership with libc.
 
 The scalar graph compiler checks each C call against the selected Wove
 signature and evaluates its arguments once from left to right. The emitted
