@@ -1044,9 +1044,9 @@ def read_header_include(node: Form, directory: Path) -> str:
 	# Clang owns lookup when a search-relative candidate cannot be inspected.
 	except OSError:
 		anchored = False
-	# Anchor explicit paths and local files at the declaring module.
+	# Anchor local paths without collapsing parent traversal across symlinks.
 	if anchored:
-		spelling = os.path.normpath(candidate)
+		spelling = str(candidate)
 	# The containing directory can contain spaces but must fit a C header-name token.
 	if any(byte in spelling for byte in '"\r\n\0'):
 		raise SourceError(operand.line)
