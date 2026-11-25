@@ -13,7 +13,8 @@
 	(use wove-file "./blake2b/word.wove" (only (type Blake2bWord) word word_add word_less word_xor
 		word_append_byte write_word))
 	(use wove-file "./blake2b/compress.wove" (only blake2b_iv blake2b_compress))
-	(use wove-file "./base32hex/digest.wove" (only digest_base32hex digest_base32hex_width))
+	(use (:pragma (cfg (not bootstrap))) wove-file "./base32hex.wove"
+		(only digest_base32hex digest_base32hex_width))
 
 	(struct PendingPosition (fields (slot i32) (byte i32)))
 
@@ -151,8 +152,8 @@
 			(call blake2b_update (borrow-mut (local state)) (borrow-shared (local bytes)))))
 
 	(fn finalize_copy
-		(:doc "Finalize a writable copy and serialize the first four chaining words in little-endian order.")
-		(params (state (shared-slice Blake2bWord)) (copy (mut-slice Blake2bWord)) (output (mut-slice u8)))
+		(:doc "Copy the state and finalize the pending block in that copy.")
+		(params (state (shared-slice Blake2bWord)) (copy (mut-slice Blake2bWord)))
 		(returns void)
 		(body
 			(let-mut index (i32 0))
@@ -176,11 +177,17 @@
 					(slice.store (local copy) (local index) (call word (u32 0) (u32 0)))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(call advance_count (borrow-mut (local copy)) (local used))
-			(call blake2b_compress (borrow-mut (local copy)) (bool true))
-			(call write_word (borrow-mut (local output)) (i32 0) (slice.load (local copy) (i32 0)))
-			(call write_word (borrow-mut (local output)) (i32 8) (slice.load (local copy) (i32 1)))
-			(call write_word (borrow-mut (local output)) (i32 16) (slice.load (local copy) (i32 2)))
-			(call write_word (borrow-mut (local output)) (i32 24) (slice.load (local copy) (i32 3)))))
+			(call blake2b_compress (borrow-mut (local copy)) (bool true))))
+
+	(fn write_digest
+		(:doc "Serialize the first four finalized chaining words in little-endian order.")
+		(params (words (shared-slice Blake2bWord)) (output (mut-slice u8)))
+		(returns void)
+		(body
+			(call write_word (borrow-mut (local output)) (i32 0) (slice.load (local words) (i32 0)))
+			(call write_word (borrow-mut (local output)) (i32 8) (slice.load (local words) (i32 1)))
+			(call write_word (borrow-mut (local output)) (i32 16) (slice.load (local words) (i32 2)))
+			(call write_word (borrow-mut (local output)) (i32 24) (slice.load (local words) (i32 3)))))
 
 	(fn blake2b_digest
 		(:doc "Write 32 raw digest bytes without consuming the state. Return false if the output is short.")
@@ -192,21 +199,71 @@
 				(i32.lt (slice.len (local output)) (i32 32))
 				(then (return (bool false))))
 			(let-mut copy (array.alloc Blake2bWord (call blake2b_state_width)))
-			(call finalize_copy (borrow-shared (local state)) (borrow-mut (local copy)) (borrow-mut (local output)))
+			(call finalize_copy (borrow-shared (local state)) (borrow-mut (local copy)))
+			(call write_digest (borrow-shared (local copy)) (borrow-mut (local output)))
 			(return (bool true))))
 
+	(fn base32hex_word
+		(:doc "Read the four serialized little-endian bytes as one big-endian encoder word.")
+		(:pragma (cfg (not bootstrap)))
+		(params (word u32))
+		(returns u32)
+		(body
+			(return (u32.or
+				(u32.or (u32.shl (local word) (i32 24))
+					(u32.shl (u32.and (local word) (u32 65280)) (i32 8)))
+				(u32.or (u32.and (u32.shr (local word) (i32 8)) (u32 65280))
+					(u32.shr (local word) (i32 24)))))))
+
+	(fn base32hex_words
+		(:doc "Convert the finalized chaining words to the Base32hex encoder's word order.")
+		(:pragma (cfg (not bootstrap)))
+		(params (finalized (shared-slice Blake2bWord)))
+		(returns (array u32 8))
+		(body
+			(let first (slice.load (local finalized) (i32 0)))
+			(let second (slice.load (local finalized) (i32 1)))
+			(let third (slice.load (local finalized) (i32 2)))
+			(let fourth (slice.load (local finalized) (i32 3)))
+			(return (array.make (array u32 8)
+				(call base32hex_word (record.get (local first) low))
+				(call base32hex_word (record.get (local first) high))
+				(call base32hex_word (record.get (local second) low))
+				(call base32hex_word (record.get (local second) high))
+				(call base32hex_word (record.get (local third) low))
+				(call base32hex_word (record.get (local third) high))
+				(call base32hex_word (record.get (local fourth) low))
+				(call base32hex_word (record.get (local fourth) high))))))
+
+	(fn copy_digest
+		(:doc "Copy the encoded digest into a destination of known capacity.")
+		(:pragma (cfg (not bootstrap)))
+		(params (encoded (shared-slice u8)) (output (mut-slice u8)))
+		(returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Copy only the digest bytes into the caller's view.")
+				(i32.lt (local index) (slice.len (local encoded)))
+				(body
+					(slice.store (local output) (local index)
+						(slice.load (local encoded) (local index)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
 	(fn blake2b_finish
-		(:doc "Write the 52-byte uppercase Base32hex digest without consuming the state.")
+		(:doc "Write the 52-byte lowercase Base32hex digest without consuming the state.")
+		(:pragma (cfg (not bootstrap)))
 		(params (state (shared-slice Blake2bWord)) (output (mut-slice u8)))
 		(returns bool)
 		(body
+			(let width (call digest_base32hex_width))
 			(if
-				(:doc "Check the output length before computing the raw digest.")
-				(i32.lt (slice.len (local output)) (call digest_base32hex_width))
+				(:doc "Keep a short destination intact.")
+				(i32.lt (slice.len (local output)) (local width))
 				(then (return (bool false))))
-			(let-mut bytes (array.alloc u8 (i32 32)))
-			(if
-				(:doc "Pass the exact 32 digest bytes to the encoder.")
-				(call blake2b_digest (borrow-shared (local state)) (borrow-mut (local bytes)))
-				(then (return (call digest_base32hex (borrow-shared (local bytes)) (borrow-mut (local output))))))
-			(return (bool false)))))
+			(let-mut copy (array.alloc Blake2bWord (call blake2b_state_width)))
+			(call finalize_copy (borrow-shared (local state)) (borrow-mut (local copy)))
+			(let words (call base32hex_words (borrow-shared (local copy))))
+			(let encoded (call digest_base32hex (local words)))
+			(call copy_digest (borrow-shared (local encoded)) (borrow-mut (local output)))
+			(return (bool true)))))

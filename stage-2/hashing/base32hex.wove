@@ -1,24 +1,15 @@
 (module base32hex
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Encode a 31-bit ID as seven lowercase Base32hex digits.
+	(:doc `Encode fixed-width IDs and unpadded digests with lowercase Base32hex.`)
 
-	Use ASCII 0 through 9 and a through v. The first digit is 0 or 1
-	and leading zeroes are retained. Write into caller-provided bytes.`)
-
-	(use wove-file "./digits.wove" (only lowercase_ascii_digit))
+	(let alphabet "0123456789abcdefghijklmnopqrstuv")
 
 	(fn base32hex31_width
 		(:doc `Return the fixed width in bytes of a 31-bit ID encoding.`)
 		(params)
 		(returns i32)
 		(body (return (i32 7))))
-
-	(fn base32hex_digit
-		(:doc `Map a value from zero to 31 into the lowercase Base32hex alphabet.`)
-		(params (digit u32))
-		(returns u8)
-		(body (return (call lowercase_ascii_digit (local digit)))))
 
 	(fn encode_base32hex31
 		(:doc `Write all seven digits at the requested byte offset.
@@ -35,33 +26,66 @@
 					(bool.or (i32.lt (local start) (i32 0))
 						(i32.lt (i32.sub.wrapping (slice.len (local output)) (local start)) (local width))))
 				(then (return (bool false))))
-			(let-mut first (u8 48))
-			(if
-				(:doc "Only bit 30 contributes to the leading digit of a 31-bit value.")
-				(bool.not (u32.lt (local identity) (u32 1073741824)))
-				(then (set (local first) (u8 49))))
-			(slice.store (local output) (local start) (local first))
-			(let twice (u32.add.wrapping (local identity) (local identity)))
-			(let-mut word (u32.add.wrapping (local twice) (local twice)))
-			(let-mut index (i32.add.wrapping (local start) (i32 1)))
-			(let end (i32.add.wrapping (local start) (local width)))
+			(slice.store (local output) (local start)
+				(slice.load (local alphabet) (int.convert i32 (u32.shr (local identity) (i32 30)))))
+			(slice.store (local output) (i32.add.wrapping (local start) (i32 1))
+				(slice.load (local alphabet) (int.convert i32 (u32.and (u32.shr (local identity) (i32 25)) (u32 31)))))
+			(slice.store (local output) (i32.add.wrapping (local start) (i32 2))
+				(slice.load (local alphabet) (int.convert i32 (u32.and (u32.shr (local identity) (i32 20)) (u32 31)))))
+			(slice.store (local output) (i32.add.wrapping (local start) (i32 3))
+				(slice.load (local alphabet) (int.convert i32 (u32.and (u32.shr (local identity) (i32 15)) (u32 31)))))
+			(slice.store (local output) (i32.add.wrapping (local start) (i32 4))
+				(slice.load (local alphabet) (int.convert i32 (u32.and (u32.shr (local identity) (i32 10)) (u32 31)))))
+			(slice.store (local output) (i32.add.wrapping (local start) (i32 5))
+				(slice.load (local alphabet) (int.convert i32 (u32.and (u32.shr (local identity) (i32 5)) (u32 31)))))
+			(slice.store (local output) (i32.add.wrapping (local start) (i32 6))
+				(slice.load (local alphabet) (int.convert i32 (u32.and (local identity) (u32 31)))))
+			(return (bool true))))
+
+	(fn digest_base32hex_width
+		(:doc "Return the width in bytes of one unpadded 256-bit digest encoding.")
+		(:pragma (cfg (not bootstrap)))
+		(params)
+		(returns i32)
+		(body (return (i32 52))))
+
+	(fn digest_base32hex
+		(:doc "Encode eight big-endian words as 52 lowercase Base32hex digits.")
+		(:pragma (cfg (not bootstrap)))
+		(params (words (array u32 8)))
+		(returns (owned-array u8))
+		(body
+			(let-mut output (array.alloc u8 (call digest_base32hex_width)))
+			(let-mut pair (i32 0))
 			(while
-				(:doc "Consume the remaining thirty bits as six groups of five, most significant first.")
-				(i32.lt (local index) (local end))
+				(:doc "Read ten bits per digit pair, combining adjacent words when the bits straddle a boundary.")
+				(i32.lt (local pair) (i32 25))
 				(body
-					(let-mut digit (u32 0))
-					(let-mut bits (i32 5))
-					(while
-						(:doc "Shift in the high bit and advance the unconsumed part of the word.")
-						(i32.lt (i32 0) (local bits))
-						(body
-							(set (local digit) (u32.add.wrapping (local digit) (local digit)))
-							(if
-								(:doc "The unsigned upper half has a set high bit.")
-								(bool.not (u32.lt (local word) (u32 2147483648)))
-								(then (set (local digit) (u32.add.wrapping (local digit) (u32 1)))))
-							(set (local word) (u32.add.wrapping (local word) (local word)))
-							(set (local bits) (i32.sub.wrapping (local bits) (i32 1)))))
-					(slice.store (local output) (local index) (call base32hex_digit (local digit)))
-					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
-			(return (bool true)))))
+					(let bit (i32.mul.wrapping (local pair) (i32 10)))
+					(let word (i32.div (local bit) (i32 32)))
+					(let shift (i32.sub.wrapping (i32 22) (i32.rem (local bit) (i32 32))))
+					(let limb (array.load (local words) (local word)))
+					(let-mut window (u32 0))
+					(if
+						(:doc "A negative shift means that the low bits of the pair come from the next word.")
+						(i32.lt (local shift) (i32 0))
+						(then
+							(set (local window) (u32.or
+								(u32.shl (local limb) (i32.sub.wrapping (i32 0) (local shift)))
+								(u32.shr (array.load (local words) (i32.add.wrapping (local word) (i32 1)))
+									(i32.add.wrapping (i32 32) (local shift))))))
+						(else
+							(set (local window) (u32.shr (local limb) (local shift)))))
+					(let value (u32.and (local window) (u32 1023)))
+					(let index (i32.mul.wrapping (local pair) (i32 2)))
+					(slice.store (local output) (local index)
+						(slice.load (local alphabet) (int.convert i32 (u32.shr (local value) (i32 5)))))
+					(slice.store (local output) (i32.add.wrapping (local index) (i32 1))
+						(slice.load (local alphabet) (int.convert i32 (u32.and (local value) (u32 31)))))
+					(set (local pair) (i32.add.wrapping (local pair) (i32 1)))))
+			(let tail (u32.and (array.load (local words) (i32 7)) (u32 63)))
+			(slice.store (local output) (i32 50)
+				(slice.load (local alphabet) (int.convert i32 (u32.shr (local tail) (i32 1)))))
+			(slice.store (local output) (i32 51)
+				(slice.load (local alphabet) (int.convert i32 (u32.shl (u32.and (local tail) (u32 1)) (i32 4)))))
+			(return (move (local output))))))
