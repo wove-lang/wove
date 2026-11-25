@@ -1,0 +1,84 @@
+(module native_debug_source
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Give the private C unit its future source location before Clang compiles it.`)
+
+	(use wove-file "../files.wove" (only file_stamp read_source_file))
+	(use wove-file "../paths.wove" (only directory_width join_file_path))
+	(use wove-file "../publication.wove" (only stage_file))
+	(use wove-file "../../emit/text.wove" (only c_hex_byte))
+	(use wove-file "../../text/copy.wove" (only append_bytes))
+
+	(let line_prefix "#line 2 \"")
+	(let line_suffix "\"\n")
+
+	(fn debug_directory
+		(:doc `Place this build's sources and symbols together under the retained bin directory.`)
+		(params (target (shared-slice u8)) (retained (shared-slice u8)) (stage (shared-slice u8)) (mode u32))
+		(returns (owned-array u8))
+		(body
+			(let target_parent (call directory_width (borrow-shared (local target))))
+			(let-mut cache 2i32)
+			(if
+				(:doc `A bare target uses a retained path starting with ./.`)
+				(i32.lt 0i32 (local target_parent))
+				(then (set (local cache) (local target_parent))))
+			(if
+				(:doc `Only a debug build with a valid retained path needs a per-build destination.`)
+				(bool.or (bool.not (u32.eq (local mode) 1u32))
+					(bool.not (i32.lt (local cache) (slice.len (local retained)))))
+				(then
+					(let empty (array.alloc u8 0i32))
+					(return (move (local empty)))))
+			(let absolute (call join_file_path (borrow-shared (local stage))
+				(borrow-shared (slice.range (local retained) (local cache) (slice.len (local retained))))))
+			(let suffix (call directory_width (borrow-shared (local stage))))
+			(return (call join_file_path (borrow-shared (local absolute))
+				(borrow-shared (slice.range (local stage) (local suffix) (slice.len (local stage))))))))
+
+	(fn stage_debug_source
+		(:doc `Record a retained filename while keeping each physical source line number unchanged.`)
+		(:expect (tests "stage-2/cli/native/debug/cases.tsv") (issues "gh:wove-lang/wove:324"))
+		(params (path (shared-slice u8)) (retained (shared-slice u8)) (source (shared-slice u8))) (returns bool)
+		(body
+			(let path_width (slice.len (local retained)))
+			(let fixed (i32.add.wrapping (slice.len (local line_prefix)) (slice.len (local line_suffix))))
+			(let directive (u64.add.wrapping (int.convert u64 (local fixed))
+				(u64.shl (int.convert u64 (local path_width)) 2i32)))
+			(let width (u64.add.wrapping (local directive) (int.convert u64 (slice.len (local source)))))
+			(if
+				(:doc `The file writer needs a nonempty filename and a representable extent.`)
+				(bool.or (i32.eq (local path_width) 0i32) (u64.lt 2147483647u64 (local width)))
+				(then (return (bool false))))
+			(let-mut bytes (array.alloc u8 (int.convert i32 (local width))))
+			(let-mut at (call append_bytes (borrow-shared (local line_prefix)) (borrow-mut (local bytes)) 0i32))
+			(let-mut index 0i32)
+			(while
+				(:doc `Escape each filename byte independently, including quotes and newlines.`)
+				(i32.lt (local index) (local path_width))
+				(body
+					(slice.store (local bytes) (local at) 92u8)
+					(slice.store (local bytes) (i32.add.wrapping (local at) 1i32) 120u8)
+					(set (local at) (int.convert i32 (call c_hex_byte (slice.load (local retained) (local index))
+						(borrow-mut (local bytes)) (int.convert u32 (i32.add.wrapping (local at) 2i32)) (bool true))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(let start (call append_bytes (borrow-shared (local line_suffix)) (borrow-mut (local bytes)) (local at)))
+			(let end (call append_bytes (borrow-shared (local source)) (borrow-mut (local bytes)) (local start)))
+			(return (call stage_file (borrow-shared (local path)) (borrow-shared (local bytes))))))
+
+	(fn name_debug_unit
+		(:doc `Add a source location to the generated translation unit before Clang reads it.`)
+		(params (unit (shared-slice u8)) (retained (shared-slice u8))) (returns bool)
+		(body
+			(let stamp (call file_stamp (borrow-shared (local unit))))
+			(let size (struct.get (local stamp) length))
+			(if
+				(:doc `A missing private unit cannot be named for debugging.`)
+				(i32.lt (local size) 0i32)
+				(then (return (bool false))))
+			(let-mut emitted (array.alloc u8 (local size)))
+			(return (bool.and
+				(call read_source_file (borrow-shared (local unit)) (local stamp) (borrow-mut (local emitted)))
+				(call stage_debug_source (borrow-shared (local unit)) (borrow-shared (local retained))
+					(borrow-shared (local emitted)))))))
+)

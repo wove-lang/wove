@@ -1084,7 +1084,7 @@ build/input
 ```
 
 `cc` and `bin` take one explicit UTF-8 source path and an explicit output
-target with a basename. Both write
+target with a basename. The `cc` command and ordinary `bin` builds write
 `main.c` below `<target-parent>/.wovec-cache/<profile>/<target-name>/bin/`.
 To compile retained C manually when it uses runtime operations, use
 `-I runtime` and link `runtime/wove_runtime.c`. The driver reads `wovec.jsonc` from its
@@ -1106,9 +1106,15 @@ a private copy of the generated unit containing the packaged runtime.
 It uses `clang` from PATH or the executable named by `CLANG`. After Clang
 succeeds, it checks that the staged output is a regular executable before
 renaming it onto the target. On tool failure it reports the status and
-leaves any previous executable in place.
-The driver keeps optional Clang side outputs, such as a Darwin debug
-bundle, in a private per-build directory beside retained C when possible.
+leaves any previous executable in place. Ordinary builds retain optional
+Clang side outputs beside the retained C when possible.
+
+A debug `bin` build retains its exact Clang input, bundled runtime, and
+optional Clang side outputs in a per-build `.wovec-bin.*` directory under
+that same `bin/` cache directory. The debug line table points to the retained C and runtime sources. On
+Darwin, load `program.dSYM` from the same directory with LLDB's
+`target symbols add` command. A failed rebuild leaves the previous
+executable and its retained debug directory intact.
 
 Both commands check the requested target, retained C, and retained tree
 against the active inputs before publishing. The check follows existing
