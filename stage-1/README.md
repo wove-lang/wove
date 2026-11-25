@@ -105,11 +105,22 @@ slice bounds checks. The same place works with `slice.len` and
 operation.
 
 A `module`, `fn`, or module-level `let` declaration starts with its tag
-and bare name. Place its contiguous metadata prefix after the name and
-before ordinary fields, as in `(fn main (:doc "Return success.") (params) ...)`.
-The same naming syntax applies to functions in C bridges.
-Declaration groups carry that context through their members. Opaque
-metadata payloads can use the same form tags as ordinary data.
+and bare name. Modules and module-level bindings put a contiguous metadata
+prefix after the name. Functions collect metadata and tagged fields in any
+order after the name. Each Wove function requires one `params`, one `returns`,
+and one `body`, including explicit `(params)` for zero arguments.
+
+```lisp
+(fn main
+  (returns i32)
+  (:doc "Return success.")
+  (params)
+  (body (return 0i32)))
+```
+
+C bridge functions also start with a bare name and allow metadata anywhere
+among their signature fields. Declaration groups carry that context through
+their members. Opaque payloads can use the same form tags as ordinary data.
 
 A C bridge starts with `(bridge c-header "<header.h>"`. Place its metadata
 after the quoted header and before the first member.
@@ -120,8 +131,8 @@ binds `buffer` in the function body. In function-local `let` and `let-mut`
 without metadata, the binding name follows the tag. Metadata entries use
 colon-prefixed tags such as `(:doc "text")`, `(:expect ...)`, and
 `(:pragma (cfg bootstrap) (inline always))`.
-An entry before the fixed opening slots or after an ordinary field is a
-source error. The retired `with-meta`, `meta`, and `;;` spellings remain invalid. Quoted text can contain semicolons.
+An entry before a fixed opening slot is a source error. Outside a function
+declaration, an ordinary field ends the metadata prefix. The retired `with-meta`, `meta`, and `;;` spellings remain invalid. Quoted text can contain semicolons.
 
 An `:expect` entry can group test and issue links on the form it describes.
 

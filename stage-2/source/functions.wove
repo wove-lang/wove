@@ -1,0 +1,99 @@
+(module source_functions
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Collect direct function fields by tag while retaining their original source rows.")
+
+	(use wove-file "./scan.wove" (only is_metadata_form (type SourceNode)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct FunctionFields (fields (params i32) (result i32) (body i32) (target i32) (error u32) (site i32)))
+
+	(let params_tag "params")
+	(let returns_tag "returns")
+	(let body_tag "body")
+	(let target_tag "c-name")
+
+	(fn function_field_tag
+		(:doc "Identify the exact tag of an ordinary function field.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (field SourceNode))
+		(returns u32)
+		(body
+			(if (bool.not (u32.eq (record.get (local field) kind) 40u32))
+				(then (return 0u32)))
+			(let head (slice.load (local nodes) (record.get (local field) first_child)))
+			(let start (record.get (local head) start))
+			(let end (record.get (local head) end))
+			(if (call same_bytes (borrow-shared (local source)) (local start) (local end)
+				(borrow-shared (local params_tag)) 0i32 (slice.len (local params_tag)))
+				(then (return 1u32)))
+			(if (call same_bytes (borrow-shared (local source)) (local start) (local end)
+				(borrow-shared (local returns_tag)) 0i32 (slice.len (local returns_tag)))
+				(then (return 2u32)))
+			(if (call same_bytes (borrow-shared (local source)) (local start) (local end)
+				(borrow-shared (local body_tag)) 0i32 (slice.len (local body_tag)))
+				(then (return 3u32)))
+			(if (call same_bytes (borrow-shared (local source)) (local start) (local end)
+				(borrow-shared (local target_tag)) 0i32 (slice.len (local target_tag)))
+				(then (return 4u32)))
+			(return 0u32)))
+
+	(fn collect_function_fields
+		(:doc "Record the available slots and the first unexpected or repeated field.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (foreign bool))
+		(returns FunctionFields)
+		(body
+			(let-mut params -1i32)
+			(let-mut result -1i32)
+			(let-mut body -1i32)
+			(let-mut target -1i32)
+			(let-mut index (local first))
+			(while
+				(:doc "Visit original siblings, leaving metadata to the declaration's metadata reader.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let field (slice.load (local nodes) (local index)))
+					(if
+						(:doc "Only ordinary fields occupy a slot.")
+						(bool.not (call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local field)))
+						(then
+							(let tag (call function_field_tag (borrow-shared (local source)) (borrow-shared (local nodes)) (local field)))
+							(let-mut previous (local index))
+							(let-mut error 23u32)
+							(if
+								(:doc "Keep the body diagnostic for a repeated body or an extra field after a Wove signature.")
+								(bool.and (bool.not (local foreign)) (bool.or (u32.eq (local tag) 3u32)
+									(bool.and (u32.eq (local tag) 0u32)
+										(bool.and (i32.lt -1i32 (local params)) (i32.lt -1i32 (local result))))))
+								(then (set (local error) 24u32)))
+							(if
+								(:doc "The parameter slot is common to Wove definitions and C declarations.")
+								(u32.eq (local tag) 1u32)
+								(then
+									(set (local previous) (local params))
+									(set (local params) (local index))))
+							(if
+								(:doc "The result slot can appear before or after the parameters.")
+								(u32.eq (local tag) 2u32)
+								(then
+									(set (local previous) (local result))
+									(set (local result) (local index))))
+							(if
+								(:doc "Only Wove definitions have a body.")
+								(bool.and (u32.eq (local tag) 3u32) (bool.not (local foreign)))
+								(then
+									(set (local previous) (local body))
+									(set (local body) (local index))))
+							(if
+								(:doc "Only C declarations can name a separate native symbol.")
+								(bool.and (u32.eq (local tag) 4u32) (local foreign))
+								(then
+									(set (local previous) (local target))
+									(set (local target) (local index))))
+							(if
+								(:doc "An occupied slot or unknown field reports the current sibling's span.")
+								(i32.lt -1i32 (local previous))
+								(then (return (record.make FunctionFields (params -1i32) (result -1i32) (body -1i32)
+									(target -1i32) (error (local error)) (site (local index))))))))
+					(set (local index) (record.get (local field) next_sibling))))
+			(return (record.make FunctionFields (params (local params)) (result (local result))
+				(body (local body)) (target (local target)) (error 0u32) (site -1i32))))))

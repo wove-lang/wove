@@ -97,14 +97,25 @@ spans both parentheses and has its tag as its first child.
 
 After building the tree, call `check_source_metadata` with the same source
 view, successful result, and shared node slice. Form heads use
-`[A-Za-z_][A-Za-z0-9_.-]*`. A leading colon marks a metadata entry only
-when the form is in its parent's prefix. For a module, function, or module-level
-`let` declaration, the bare name directly follows the tag. The contiguous
-metadata prefix follows that name.
-Other forms use the prefix immediately after the tag. Name slots follow
-declaration ancestry through declaration groups and supported C bridges.
-An opaque payload can contain the same tags as ordinary data. Each entry
-keeps its order, parent link, spelling, and original byte span.
+`[A-Za-z_][A-Za-z0-9_.-]*`. A leading colon marks a metadata entry. For a
+module, function, or module-level `let` declaration, the bare name directly
+follows the tag. Function declarations allow metadata anywhere after the
+name, alongside their tagged fields. A Wove definition requires exactly
+one `params`, one `returns`, and one `body` in any order. Spell `(params)`
+when the function takes no arguments. Selection pragmas apply to the
+owning function wherever they appear among its fields.
+
+```lisp
+(fn main (returns i32) (params) (body (return 0i32))
+  (:doc "Return success."))
+```
+
+Modules and module-level bindings put a contiguous metadata prefix after
+the name. C bridges put theirs after the header. Other forms use the prefix
+immediately after the tag. Name slots follow declaration ancestry through
+declaration groups and supported C bridges. An opaque payload can contain
+the same tags as ordinary data. Each entry keeps its order, parent link,
+spelling, and original byte span.
 
 | Code | Failure | Primary span |
 | --- | --- | --- |
@@ -576,8 +587,15 @@ native argument contract. Parameter names must be unique within the signature. T
 importing file's function namespace. Its binding keeps the defining declaration
 and the raw header, native symbol, and signature spans in that file.
 
-A bodyless C bridge function can put a quoted native target before its
-parameters, as in `(fn absolute (c-name "abs") (params (value i32)) (returns i32))`.
+A bodyless C bridge function requires one `params` and one `returns` and
+can specify one quoted native target with `c-name`. It accepts these fields
+and metadata in any order after the Wove name.
+
+```lisp
+(fn absolute (returns i32) (:doc "Call C abs.")
+  (params (value i32)) (c-name "abs"))
+```
+
 The Wove selector uses the declared function name. Calls and C ABI checks use
 the target's C identifier. Without `c-name`, the two spellings are the same.
 
