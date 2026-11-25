@@ -10,6 +10,9 @@
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte)))
 	(use wove-file "../text/utf8.wove" (only utf8_invalid_offset valid_utf8_width))
 	(use wove-file "../text/quoted.wove" (only scan_double_quoted))
+	(use wove-file "../text/character.wove" (only scan_character_span decode_character))
+
+	(let character_token 4u32)
 
 	(struct Token (fields (kind u32) (start i32) (end i32) (error u32)))
 	(struct SourceDiagnostic (fields (error u32) (start i32) (end i32)))
@@ -42,13 +45,14 @@
 			(return (bool.or (u8.eq (local byte) 40u8) (u8.eq (local byte) 41u8)))))
 
 	(fn is_semicolon_or_quote
-		(:doc `Stop an atom before a semicolon, a double quote, or a backtick.`)
+		(:doc `Stop an atom before a semicolon or any literal delimiter.`)
 		(:pragma (inline always))
 		(params (byte u8))
 		(returns bool)
 		(body
 			(return (bool.or (u8.eq (local byte) 59u8)
-					(bool.or (u8.eq (local byte) 34u8) (u8.eq (local byte) 96u8))))))
+					(bool.or (u8.eq (local byte) 34u8)
+						(bool.or (u8.eq (local byte) 39u8) (u8.eq (local byte) 96u8)))))))
 
 	(fn skip_whitespace
 		(:doc `Resume at the supplied cursor and leave the first non-whitespace byte unconsumed.`)
@@ -151,6 +155,27 @@
 				(then (return (call lexical_error (u32.add.wrapping (local error) 1u32) (local start) (local end)))))
 			(return (struct.new Token (kind 2u32) (error 0u32) (start (local start)) (end (local end))))))
 
+	(fn scan_character
+		(:doc "Validate a single byte value and retain the complete character token spelling.")
+		(params (source (shared-array u8)) (start i32)) (returns Token)
+		(body
+			(let span (call scan_character_span (borrow-shared (local source)) (local start)))
+			(let end (struct.get (local span) end))
+			(if
+				(:doc "Missing closing quotes use the existing unterminated-literal diagnostic.")
+				(bool.not (struct.get (local span) closed))
+				(then (return (call lexical_error 2u32 (local start) (local end)))))
+			(if
+				(:doc "An invalid payload points to its original quoted token.")
+				(i32.lt (call decode_character (borrow-shared (local source)) (local start) (local end)) 0i32)
+				(then
+					(if
+						(:doc "Keep unsupported and malformed escapes in the existing error category.")
+						(call is_head_byte (borrow-shared (local source)) (local start) 1i32 92u8)
+						(then (return (call lexical_error 3u32 (local start) (local end)))))
+					(return (call lexical_error 25u32 (local start) (local end)))))
+			(return (struct.new Token (kind (local character_token)) (error 0u32) (start (local start)) (end (local end))))))
+
 	(fn scan_raw_string
 		(:doc `Find the closing delimiter of a raw string in an admitted byte view.`)
 		(:expect
@@ -186,7 +211,8 @@
 
 		Start at a view-relative byte cursor and advance by the resulting exclusive end.
 		Both string delimiters produce kind 2. Use the opening byte to tell the two
-		spellings apart and keep all literal bytes in the span.`)
+		spellings apart and keep all literal bytes in the span. Single-quoted character
+		tokens have their own kind.`)
 		(:expect
 			(tests
 				"stage-2/lexer_layouts.tsv" "stage-2/lexer_errors.tsv"
@@ -220,6 +246,10 @@
 				(:doc "The opening quote selects the string scanner before interpreting any content.")
 				(u8.eq (local byte) 34u8)
 				(then (return (call scan_quoted (borrow-shared (local source)) (local start)))))
+			(if
+				(:doc "A character can include delimiters when they are the quoted payload.")
+				(u8.eq (local byte) 39u8)
+				(then (return (call scan_character (borrow-shared (local source)) (local start)))))
 			(if
 				(:doc "The backtick scanner keeps all literal bytes in the token span.")
 				(u8.eq (local byte) 96u8)

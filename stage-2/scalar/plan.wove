@@ -15,7 +15,10 @@
 	(use wove-file "./matches.wove" (only plan_match_cases match_continues))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_conversion
 		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
-	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
+	(use wove-file "../text/character.wove" (only decode_character))
+	(use wove-file "./literals.wove" (only integer_magnitude_start hex_digits_start integer_digits_end integer_scalar
+		(value decimal_literal_format) (value hex_literal_format)))
+	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token) (value character_token)))
 	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../source/module.wove" (only form_parts skip_disabled_siblings validate_form_metadata (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -49,7 +52,7 @@
 			(value next_path) (value break_path) (value continue_path) (value break_statement)))
 	(use wove-file "./control.wove" (only enclosing_loop sequence_paths predicate_literal control_paths native_transfer_paths has_path repeats_loop))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar decimal_suffix_start scalar_operator word_shift_type is_i32_division is_fixed_initializer
+		(only entry_keyword entry_at entry_form read_statement scalar_type scalar_operator word_shift_type is_i32_division is_fixed_initializer
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
 	(struct
@@ -573,21 +576,26 @@
 				(first (local first)) (start (local start)) (end (local end)) (negative (local negative))
 				(borrowed_owner (bool false)) (mutable_place (bool false)) (projection -1i32) (asset_start 0i32) (asset_end 0i32)))))
 
-	(fn plan_decimal_value
-		(:doc `Record a bounded decimal value using only the original sign and digit span.`)
+	(fn plan_integer_value
+		(:doc `Record a bounded integer value using the checked radix, sign, and digit span.`)
 		(params (source (shared-array u8)) (node SourceNode) (end i32) (type u32)
 			(index i32) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
-			(let spelling (call decimal_scalar (borrow-shared (local source))
+			(let spelling (call integer_scalar (borrow-shared (local source))
 				(struct.get (local node) start) (local end) (local type)))
 			(let digits (struct.get (local spelling) digits))
 			(if
 				(:doc "An invalid spelling or magnitude points at the whole original atom.")
 				(i32.lt (local digits) 0i32)
 				(then (return (call entry_at (local node) -1i32 25u32))))
+			(let-mut format (local decimal_literal_format))
+			(if
+				(:doc "The emitter adds a C hexadecimal prefix to the normalized digits.")
+				(struct.get (local spelling) hexadecimal)
+				(then (set (local format) (local hex_literal_format))))
 			(array.store (local expressions) (local index)
-				(call expression_row 1u32 (local type) -1i32 -1i32
+				(call expression_row 1u32 (local type) (local format) -1i32
 					(local digits) (local end) (struct.get (local spelling) negative)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
@@ -607,14 +615,44 @@
 				(call expression_row (local float_literal) (local type) (local shape) -1i32 (local start) (local end) (bool false)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
-	(fn plan_suffixed_decimal
-		(:doc `Check the exact numeric type named after a decimal atom.`)
+	(fn plan_suffixed_integer
+		(:doc "Resolve the suffix against the exact builtin integer types before checking the magnitude.")
+		(params (source (shared-array u8)) (node SourceNode) (suffix i32) (index i32) (expected u32)
+			(expressions (mut-array ScalarExpression))) (returns EntryRead)
+		(body
+			(let end (struct.get (local node) end))
+			(let type (call builtin_type_keyword (borrow-shared (local source)) (local suffix) (i32.sub.wrapping (local end) (local suffix))))
+			(if
+				(:doc "The suffix must name a supported integer type.")
+				(bool.not (call is_builtin_integer (local type)))
+				(then (return (call entry_at (local node) -1i32 25u32))))
+			(if
+				(:doc "An enclosing operation can require a different exact type.")
+				(bool.not (call value_matches_type (local expected) (local type)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(return (call plan_integer_value (borrow-shared (local source)) (local node) (local suffix)
+				(local type) (local index) (borrow-mut (local expressions))))))
+
+	(fn plan_suffixed_number
+		(:doc `Check a hexadecimal, decimal, or floating atom against its explicit suffix.`)
 		(params (source (shared-array u8)) (node SourceNode) (index i32) (expected u32)
 			(expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(let end (struct.get (local node) end))
 			(let start (struct.get (local node) start))
+			(let hex_start (call hex_digits_start (borrow-shared (local source)) (local start) (local end)))
+			(if
+				(:doc "The hexadecimal prefix takes priority over a trailing byte sequence that resembles a float suffix.")
+				(i32.lt -1i32 (local hex_start))
+				(then
+					(let suffix (call integer_digits_end (borrow-shared (local source)) (local hex_start) (local end) 16i32))
+					(if
+						(:doc "Typed hexadecimal atoms need at least one digit after the base prefix.")
+						(i32.eq (local suffix) (local hex_start))
+						(then (return (call entry_at (local node) -1i32 25u32))))
+					(return (call plan_suffixed_integer (borrow-shared (local source)) (local node) (local suffix)
+						(local index) (local expected) (borrow-mut (local expressions))))))
 			(if
 				(:doc "Check a float suffix separately so fractions and exponents remain in the decimal spelling.")
 				(i32.lt 3i32 (i32.sub.wrapping (local end) (local start)))
@@ -631,22 +669,42 @@
 								(then (return (call entry_at (local node) -1i32 24u32))))
 							(return (call plan_floating_value (borrow-shared (local source)) (local node) (local suffix)
 								(local type) (local index) (borrow-mut (local expressions))))))))
-			(let suffix (call decimal_suffix_start (borrow-shared (local source)) (struct.get (local node) start) (local end)))
+			(let magnitude (call integer_magnitude_start (borrow-shared (local source)) (local start)))
+			(let suffix (call integer_digits_end (borrow-shared (local source)) (local magnitude) (local end) 10i32))
 			(if
-				(:doc "Other atoms do not supply a scalar expression.")
-				(i32.lt (local suffix) 0i32)
+				(:doc "Another bare token or an unsuffixed decimal does not supply a scalar expression.")
+				(bool.or (i32.eq (local suffix) (local magnitude)) (i32.eq (local suffix) (local end)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(let type (call builtin_type_keyword (borrow-shared (local source)) (local suffix) (i32.sub.wrapping (local end) (local suffix))))
+			(return (call plan_suffixed_integer (borrow-shared (local source)) (local node) (local suffix)
+				(local index) (local expected) (borrow-mut (local expressions))))))
+
+	(fn plan_character_value
+		(:doc "Lower the checked character to an i32 value or its explicit u8 conversion.")
+		(params (source (shared-array u8)) (node SourceNode) (type u32) (index i32)
+			(expressions (mut-array ScalarExpression))) (returns EntryRead)
+		(body
+			(let start (struct.get (local node) start))
+			(let end (struct.get (local node) end))
+			(let value (call decode_character (borrow-shared (local source)) (local start) (local end)))
 			(if
-				(:doc "The suffix must name a supported integer type.")
-				(bool.not (call is_builtin_integer (local type)))
+				(:doc "A character must represent exactly one byte.")
+				(i32.lt (local value) 0i32)
 				(then (return (call entry_at (local node) -1i32 25u32))))
+			(array.store (local expressions) (local index)
+				(call expression_row 1u32 (local type) (local value) -1i32 (local start) (local end) (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_character_atom
+		(:doc "Infer i32 for an unconverted character value and require any enclosing exact type to match.")
+		(params (source (shared-array u8)) (node SourceNode) (index i32) (expected u32)
+			(expressions (mut-array ScalarExpression))) (returns EntryRead)
+		(body
 			(if
-				(:doc "An enclosing operation can require a different exact type.")
-				(bool.not (call value_matches_type (local expected) (local type)))
+				(:doc "A byte context requires an explicit conversion, as with an i32 expression.")
+				(bool.not (call value_matches_type (local expected) 5u32))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(return (call plan_decimal_value (borrow-shared (local source)) (local node) (local suffix)
-				(local type) (local index) (borrow-mut (local expressions))))))
+			(return (call plan_character_value (borrow-shared (local source)) (local node) 5u32
+				(local index) (borrow-mut (local expressions))))))
 
 	(fn plan_literal
 		(:doc `Check one literal operand and record its normalized C spelling.`)
@@ -678,7 +736,13 @@
 						(call expression_row (local kind) (local type) -1i32 -1i32 0i32 0i32 (bool false)))
 					(return (call entry_at (local node) (local index) 0u32))))
 			(if
-				(:doc "The typed list's magnitude must be an unquoted decimal atom.")
+				(:doc "An i32 or explicit u8 literal form accepts one character token.")
+				(bool.and (u32.eq (struct.get (local value) kind) (local character_token))
+					(bool.or (u32.eq (local type) 5u32) (u32.eq (local type) 10u32)))
+				(then (return (call plan_character_value (borrow-shared (local source)) (local value) (local type)
+					(local index) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A numeric magnitude uses an unquoted atom.")
 				(bool.not (u32.eq (struct.get (local value) kind) 1u32))
 				(then (return (call entry_at (local value) -1i32 25u32))))
 			(if
@@ -686,7 +750,7 @@
 				(call is_builtin_float (local type))
 				(then (return (call plan_floating_value (borrow-shared (local source)) (local value) (struct.get (local value) end)
 					(local type) (local index) (borrow-mut (local expressions))))))
-			(return (call plan_decimal_value (borrow-shared (local source)) (local value) (struct.get (local value) end)
+			(return (call plan_integer_value (borrow-shared (local source)) (local value) (struct.get (local value) end)
 				(local type) (local index) (borrow-mut (local expressions))))))
 
 	(fn find_module_binding
@@ -751,9 +815,14 @@
 		(returns EntryRead)
 		(body
 			(if
-				(:doc "A suffixed decimal literal uses the exact type named by the suffix.")
+				(:doc "Plan a character token as its own unconverted value.")
+				(u32.eq (struct.get (local node) kind) (local character_token))
+				(then (return (call plan_character_atom (borrow-shared (local source)) (local node)
+					(local index) (local expected) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A suffixed numeric literal uses the exact type named by the suffix.")
 				(u32.eq (struct.get (local node) kind) 1u32)
-				(then (return (call plan_suffixed_decimal (borrow-shared (local source)) (local node)
+				(then (return (call plan_suffixed_number (borrow-shared (local source)) (local node)
 					(local index) (local expected) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
@@ -2903,9 +2972,14 @@
 					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 					(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
+				(:doc "Plan a character token as its own unconverted value.")
+				(u32.eq (struct.get (local node) kind) (local character_token))
+				(then (return (call plan_character_atom (borrow-shared (local source)) (local node)
+					(local index) (local expected) (borrow-mut (local expressions))))))
+			(if
 				(:doc "A typed atom retains its own value span when checked against a consumer.")
 				(u32.eq (struct.get (local node) kind) 1u32)
-				(then (return (call plan_suffixed_decimal (borrow-shared (local source)) (local node)
+				(then (return (call plan_suffixed_number (borrow-shared (local source)) (local node)
 					(local index) (local expected) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))

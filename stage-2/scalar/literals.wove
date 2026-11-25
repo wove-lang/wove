@@ -1,0 +1,184 @@
+(module scalar_literals
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Resolve the sign, radix, and significant digits of checked integer atoms.")
+
+	(use wove-file "../source/numeric_ops.wove" (only integer_byte_width))
+	(use wove-file "../text/decimal.wove" (only read_bounded_decimal_spelling))
+	(use wove-file "../text/hex.wove" (only hex_digit_value))
+
+	(struct IntegerSpelling (fields (digits i32) (negative bool) (hexadecimal bool)))
+
+	(let decimal_literal_format -1i32)
+	(let hex_literal_format -2i32)
+
+	(fn integer_magnitude_start
+		(:doc "Skip the optional leading minus in a nonempty integer span.")
+		(params (source (shared-array u8)) (start i32)) (returns i32)
+		(body
+			(if (u8.eq (array.load (local source) (local start)) 45u8) (then (return (i32.add.wrapping (local start) 1i32))))
+			(return (local start))))
+
+	(fn hex_digits_start
+		(:doc "Return the byte after a case-insensitive hexadecimal prefix, or -1 for another radix.")
+		(params (source (shared-array u8)) (start i32) (end i32)) (returns i32)
+		(body
+			(let magnitude (call integer_magnitude_start (borrow-shared (local source)) (local start)))
+			(if
+				(:doc "Read the prefix only when both bytes fit inside the atom.")
+				(bool.and (bool.not (i32.lt (i32.sub.wrapping (local end) (local magnitude)) 2i32))
+					(u8.eq (array.load (local source) (local magnitude)) 48u8))
+				(then
+					(let tag (array.load (local source) (i32.add.wrapping (local magnitude) 1i32)))
+					(if
+						(:doc "The archived lexer accepts lowercase and uppercase radix indicators.")
+						(bool.or (u8.eq (local tag) 120u8) (u8.eq (local tag) 88u8))
+						(then (return (i32.add.wrapping (local magnitude) 2i32))))))
+			(return -1i32)))
+
+	(fn integer_digits_end
+		(:doc "Find the first byte that does not belong to the selected radix.")
+		(params (source (shared-array u8)) (start i32) (end i32) (radix i32)) (returns i32)
+		(body
+			(let-mut cursor (local start))
+			(while
+				(:doc "The suffix starts at the first nondigit or at the end of an unsuffixed atom.")
+				(i32.lt (local cursor) (local end))
+				(body
+					(let digit (call hex_digit_value (array.load (local source) (local cursor))))
+					(if
+						(:doc "Decimal stops before letters, including valid hexadecimal digits.")
+						(bool.or (i32.lt (local digit) 0i32) (bool.not (i32.lt (local digit) (local radix))))
+						(then (return (local cursor))))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+			(return (local cursor))))
+
+	(let decimal_bounds `0
+127
+128
+255
+2147483647
+2147483648
+4294967295
+18446744073709551615
+`)
+	(let hexadecimal_bounds `0
+7f
+80
+ff
+7fffffff
+80000000
+ffffffff
+ffffffffffffffff
+`)
+
+	(fn integer_limit_slot
+		(:doc "Use the same limit order for zero, the byte bounds, the word bounds, and the full u64 bound in both radices.")
+		(params (type u32) (signed bool) (negative bool)) (returns i32)
+		(body
+			(let width (call integer_byte_width (local type)))
+			(if (i32.eq (local width) 8i32) (then (return 7i32)))
+			(let-mut slot 4i32)
+			(if (i32.eq (local width) 1i32) (then (set (local slot) 1i32)))
+			(if
+				(:doc "An unsigned range occupies the third slot of its width group.")
+				(bool.not (local signed))
+				(then (return (i32.add.wrapping (local slot) 2i32))))
+			(if
+				(:doc "A negative signed literal may use the next magnitude above the positive maximum.")
+				(local negative)
+				(then (return (i32.add.wrapping (local slot) 1i32))))
+			(return (local slot))))
+
+	(fn bound_start
+		(:doc "Find the selected bound in the short newline-delimited table.")
+		(params (bounds (shared-array u8)) (slot i32)) (returns i32)
+		(body
+			(let-mut cursor 0i32)
+			(let-mut remaining (local slot))
+			(while
+				(:doc "Each newline advances to the next bound of this radix.")
+				(i32.lt 0i32 (local remaining))
+				(body
+					(if
+						(:doc "The cursor following the selected newline begins the desired bound.")
+						(u8.eq (array.load (local bounds) (local cursor)) 10u8)
+						(then (set (local remaining) (i32.sub.wrapping (local remaining) 1i32))))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+			(return (local cursor))))
+
+	(fn bounded_integer_digits
+		(:doc `Select the exact bound and compare significant digits without accumulating a host integer.
+
+		Retain one digit for zero. A shorter magnitude is in range once every digit is valid.`)
+		(params (source (shared-array u8)) (start i32) (end i32) (radix i32)
+			(bounds (shared-array u8)) (slot i32)) (returns i32)
+		(body
+			(let bound (call bound_start (borrow-shared (local bounds)) (local slot)))
+			(let bound_end (call integer_digits_end (borrow-shared (local bounds)) (local bound) (array.len (local bounds)) (local radix)))
+			(if
+				(:doc "Decimal retains the existing normalized spelling check for the selected bound.")
+				(i32.eq (local radix) 10i32)
+				(then (return (call read_bounded_decimal_spelling (borrow-shared (local source)) (local start) (local end)
+					(borrow-shared (array.range (local bounds) (local bound) (local bound_end)))))))
+			(if (bool.not (i32.lt (local start) (local end))) (then (return -1i32)))
+			(let-mut first (local start))
+			(let last (i32.sub.wrapping (local end) 1i32))
+			(while
+				(:doc "Strip leading zeros while retaining the final digit.")
+				(bool.and (i32.lt (local first) (local last)) (u8.eq (array.load (local source) (local first)) 48u8))
+				(body (set (local first) (i32.add.wrapping (local first) 1i32))))
+			(let width (i32.sub.wrapping (local end) (local first)))
+			(let maximum (i32.sub.wrapping (local bound_end) (local bound)))
+			(if (i32.lt (local maximum) (local width)) (then (return -1i32)))
+			(let-mut below (i32.lt (local width) (local maximum)))
+			(let-mut cursor (local first))
+			(while
+				(:doc "Validate every digit. If widths match, compare until the magnitude is strictly below its bound.")
+				(i32.lt (local cursor) (local end))
+				(body
+					(let digit (call hex_digit_value (array.load (local source) (local cursor))))
+					(if
+						(:doc "Reject a letter outside the selected radix even if the magnitude has fewer digits.")
+						(bool.or (i32.lt (local digit) 0i32) (bool.not (i32.lt (local digit) (local radix))))
+						(then (return -1i32)))
+					(if
+						(:doc "Equal prefixes leave the next digit to resolve the comparison.")
+						(bool.not (local below))
+						(then
+							(let index (i32.add.wrapping (local bound) (i32.sub.wrapping (local cursor) (local first))))
+							(let limit (call hex_digit_value (array.load (local bounds) (local index))))
+							(if (i32.lt (local limit) (local digit)) (then (return -1i32)))
+							(set (local below) (i32.lt (local digit) (local limit)))))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+			(return (local first))))
+
+	(fn integer_scalar
+		(:doc "Validate either radix against the same exact-width integer bound.")
+		(params (source (shared-array u8)) (start i32) (end i32) (type u32)) (returns IntegerSpelling)
+		(body
+			(let invalid (struct.new IntegerSpelling (digits -1i32) (negative (bool false)) (hexadecimal (bool false))))
+			(let magnitude (call integer_magnitude_start (borrow-shared (local source)) (local start)))
+			(let negative (i32.lt (local start) (local magnitude)))
+			(let signed (bool.or (u32.eq (local type) 5u32) (u32.eq (local type) 61u32)))
+			(let hex_start (call hex_digits_start (borrow-shared (local source)) (local start) (local end)))
+			(let hexadecimal (i32.lt -1i32 (local hex_start)))
+			(let-mut slot (call integer_limit_slot (local type) (local signed) (local negative)))
+			(if
+				(:doc "Keep the seed's decimal negative-zero spelling and the archive's stricter hexadecimal sign rule.")
+				(bool.and (local negative) (bool.not (local signed)))
+				(then
+					(if (local hexadecimal) (then (return (local invalid))))
+					(set (local slot) 0i32)))
+			(let-mut digits -1i32)
+			(if
+				(:doc "The selected radix supplies the spelling of the same type's magnitude limit.")
+				(local hexadecimal)
+				(then (set (local digits) (call bounded_integer_digits (borrow-shared (local source))
+					(local hex_start) (local end) 16i32 (borrow-shared (local hexadecimal_bounds)) (local slot))))
+				(else (set (local digits) (call bounded_integer_digits (borrow-shared (local source))
+					(local magnitude) (local end) 10i32 (borrow-shared (local decimal_bounds)) (local slot)))))
+			(if (i32.lt (local digits) 0i32) (then (return (local invalid))))
+			(return (struct.new IntegerSpelling (digits (local digits)) (hexadecimal (local hexadecimal))
+				(negative (bool.and (local negative) (bool.not (u8.eq (array.load (local source) (local digits)) 48u8))))))))
+)

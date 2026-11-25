@@ -27,6 +27,8 @@ NATIVE_DRIVER := stage-2/driver
 SOURCE_SCAN_MODULE := stage-2/source/scan.wove
 UTF8_MODULE := stage-2/text/utf8.wove
 QUOTED_TEXT_MODULE := stage-2/text/quoted.wove
+HEX_TEXT_MODULE := stage-2/text/hex.wove
+CHARACTER_TEXT_MODULE := stage-2/text/character.wove
 BYTE_TEXT_MODULE := stage-2/text/bytes.wove
 BYTE_MATCH_MODULE := stage-2/text/match.wove
 VALUE_TEXT_MODULES := $(BYTE_TEXT_MODULE) stage-2/text/decimal.wove
@@ -41,8 +43,8 @@ C_HEADER_MODULE := stage-2/c/headers.wove
 C_STANDARD_MODULE := stage-2/c/standard.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
-C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/numeric_ops.wove source/float_ops.wove source/enum_forms.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/arrays.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_variadic.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
-	scalar/syntax.wove scalar/signatures.wove scalar/flow.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/matches.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
+C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/numeric_ops.wove source/float_ops.wove source/enum_forms.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/arrays.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_variadic.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
+	scalar/syntax.wove scalar/literals.wove scalar/signatures.wove scalar/flow.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/matches.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_BITS := stage-2/hashing/bits.wove
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove) $(HASHING_BITS)
 HASHING_FIXTURES := tests/stage-2/hashing
@@ -56,7 +58,7 @@ BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
 BLAKE2B_SOURCE := stage-2/hashing/blake2b.wove
 JSON_WRITER_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove \
 	$(UTF8_MODULE) $(BYTE_TEXT_MODULE) $(DECIMAL_WRITER)
-JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove $(QUOTED_TEXT_MODULE) $(UTF8_MODULE)
+JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(UTF8_MODULE)
 JSON_FRAME_MODULE := stage-2/json/frame.wove
 JSON_FIXTURES := tests/stage-2/json
 JSON_CASES := $(JSON_FIXTURES)/cases.tsv
@@ -116,7 +118,7 @@ GCC_FIXTURES := tests/stage-2/gcc
 SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
-BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
+BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 BOOTSTRAP_DRIVER_SOURCES := $(addprefix $(NATIVE_DRIVER)/,bootstrap/entry.wove bootstrap/graph.wove bootstrap/emit.wove bootstrap/files.wove graph_emit.wove graph_storage.wove assets.wove paths.wove bundled_paths.wove) \
 	stage-2/text/copy.wove
 BOOTSTRAP_RUNTIME := runtime/wove_bootstrap.c
@@ -168,7 +170,7 @@ test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-ha
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove stage-2/c-stdlib/*.wove $(HASHING_SOURCES) $(BLAKE2B_SOURCE) \
-		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
+		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) $(PROCESS_MODULES) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
@@ -207,6 +209,7 @@ test-stage-2-native: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/check.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/diagnostics.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/literals.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/standard.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/protection.tsv"
@@ -412,7 +415,7 @@ $(CONFIG_PROGRAM): $(CONFIG_FIXTURES)/project.probe.c $(CONFIG_PROGRAM).c $(STAG
 
 # Supply an argv arena and config bytes to the standalone command fixture.
 $(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOURCES) $(CONFIG_SOURCES) $(JOB_BUDGET_MODULE) \
-	$(JSON_READER_SOURCES) $(SOURCE_SCAN_MODULE) $(BYTE_MATCH_MODULE) $(SEED)
+	$(JSON_READER_SOURCES) $(SOURCE_SCAN_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
@@ -450,7 +453,7 @@ $(STAGE1)/module.select.c: $(MODULE_SELECT_SOURCES)
 $(STAGE1)/module.bindings.c: $(MODULE_BINDINGS_PROVIDER)
 $(STAGE1)/module.imports.c: $(MODULE_IMPORTS_PROVIDER)
 $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
-$(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
+$(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
 REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) $(BOOTSTRAP_DRIVER_SOURCES) $(BOOTSTRAP_RUNTIME) \
