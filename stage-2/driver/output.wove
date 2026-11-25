@@ -11,9 +11,36 @@
 	(let cwd_path ".")
 	(let cache_directory "/.wovec-cache/")
 	(let source_suffix "/bin/main.c")
+	(let parent_directory "..")
 	(let default_profile "default")
 	(let debug_profile "debug")
 	(let release_profile "release")
+
+	(fn valid_profile_component
+		(:doc "Check that a selected named profile fits in one retained directory component.")
+		(params (profile (shared-slice u8))) (returns bool)
+		(body
+			(let width (slice.len (local profile)))
+			(if
+				(:doc "The caller selects a fallback for empty names. Dot components cannot name profiles.")
+				(bool.or (i32.eq (local width) (i32 0))
+					(bool.or (call same_bytes (borrow-shared (local profile)) (i32 0) (local width)
+						(borrow-shared (local cwd_path)) (i32 0) (i32 1))
+						(call same_bytes (borrow-shared (local profile)) (i32 0) (local width)
+							(borrow-shared (local parent_directory)) (i32 0) (i32 2))))
+				(then (return (bool false))))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Reject directory separators and embedded C string terminators.")
+				(i32.lt (local index) (local width))
+				(body
+					(let byte (slice.load (local profile) (local index)))
+					(if
+						(:doc "A profile is copied as one C path component.")
+						(bool.or (u8.eq (local byte) (u8 47)) (u8.eq (local byte) (u8 0)))
+						(then (return (bool false))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (bool true))))
 
 	(fn make_retained_path
 		(:doc `Join the validated target components in the retained publication layout.`)
@@ -26,7 +53,7 @@
 						(int.convert u64 (i32.add.wrapping (i32 1)
 							(i32.add.wrapping (slice.len (local cache_directory)) (slice.len (local source_suffix)))))))))
 			(if
-				(:doc "Keep the inspection path representable by the native byte ABI.")
+				(:doc "Keep the destination path representable by the native byte ABI.")
 				(u64.lt (u64 2147483647) (local width))
 				(then
 					(let empty (array.alloc u8 (i32 0)))
@@ -42,7 +69,7 @@
 			(return (move (local path)))))
 
 	(fn retained_path_for_profile
-		(:doc `Apply the same mode fallback used when publishing retained C.`)
+		(:doc `Resolve the profile component of the retained destination.`)
 		(params (parent (shared-slice u8)) (name (shared-slice u8)) (profile (shared-slice u8)) (mode u32))
 		(returns (owned-array u8))
 		(body
@@ -51,8 +78,15 @@
 				(bool.and (i32.lt (i32 0) (slice.len (local profile)))
 					(bool.not (call same_bytes (borrow-shared (local profile)) (i32 0) (slice.len (local profile))
 						(borrow-shared (local default_profile)) (i32 0) (slice.len (local default_profile)))))
-				(then (return (call make_retained_path (borrow-shared (local parent)) (borrow-shared (local name))
-					(borrow-shared (local profile))))))
+				(then
+					(if
+						(:doc "An invalid profile leaves an empty destination for publication to diagnose.")
+						(bool.not (call valid_profile_component (borrow-shared (local profile))))
+						(then
+							(let empty (array.alloc u8 (i32 0)))
+							(return (move (local empty)))))
+					(return (call make_retained_path (borrow-shared (local parent)) (borrow-shared (local name))
+						(borrow-shared (local profile))))))
 			(if
 				(:doc "Debug and release are separate built-in cache trees.")
 				(u32.eq (local mode) (u32 1))
@@ -67,7 +101,7 @@
 				(borrow-shared (local default_profile))))))
 
 	(fn retained_c_path
-		(:doc `Compute the existing retained path so the graph can protect every loaded source from replacement.`)
+		(:doc `Compute one retained destination for collision checks and publication.`)
 		(params (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)) (returns (owned-array u8))
 		(body
 			(let-mut slash (i32.sub.wrapping (slice.len (local target)) (i32 1)))
@@ -87,12 +121,15 @@
 
 	(fn publish_input
 		(:doc "Publish the completed unit and attach any write failure to the output operand.")
-		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
-			(target_index i32) (output (shared-slice u8)))
+		(params (path (shared-slice u8)) (destination (shared-slice u8)) (target_index i32) (output (shared-slice u8)))
 		(returns i32)
 		(body
-			(let published (call wove_cli_publish (borrow-shared (local target)) (borrow-shared (local profile))
-				(local mode) (borrow-shared (local path)) (borrow-shared (local output)) (slice.len (local output))))
+			(if
+				(:doc "An invalid or unrepresentable retained path cannot be sent to the writer.")
+				(i32.eq (slice.len (local destination)) (i32 0))
+				(then (return (call report_argv (u32 65) (local target_index) (u32 5)))))
+			(let published (call wove_cli_publish (borrow-shared (local destination))
+				(borrow-shared (local path)) (borrow-shared (local output)) (slice.len (local output))))
 			(if
 				(:doc "Failure to publish names the original output argument.")
 				(i32.lt (local published) (i32 0))

@@ -98,7 +98,7 @@ int32_t wove_cli_read_project(uint8_t *bytes, int32_t length) {
 	return wove_cli_read_input(project_file, bytes, length);
 }
 
-// Accept exactly one directory component for a profile or target basename.
+// Accept a single named directory component.
 static bool component(const char *name) {
 	return name[0] != '\0' && strchr(name, '/') == NULL &&
 		strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
@@ -124,7 +124,7 @@ static bool ensure_directory(const char *path) {
 }
 
 // Create each missing directory in the retained path before writing its artifact.
-static bool ensure_directories(char *path) {
+static bool ensure_parent_directories(char *path) {
 	// A leading slash is the filesystem root, which already exists.
 	for (char *cursor = path + (path[0] == '/'); *cursor != '\0'; ++cursor) {
 		// Repeated separators name the same directory.
@@ -135,7 +135,7 @@ static bool ensure_directories(char *path) {
 			if (!ready) { return false; }
 		}
 	}
-	return ensure_directory(path);
+	return true;
 }
 
 // Protect the original source and project even when the retained name is an alias.
@@ -170,29 +170,14 @@ static bool write_unit(const char *path, const uint8_t *bytes, int32_t length) {
 	return published;
 }
 
-// Publish one C unit atomically in the archive's retained target directory.
-int32_t wove_cli_publish(const char *target, const char *profile, uint32_t mode, const char *input,
-		const uint8_t *bytes, int32_t length) {
-	const char *name = target_basename(target);
-	const char *parent = name == target ? "." : target;
-	const int prefix = name == target ? 1 : (int)(name - target - 1);
-	// Built-in modes use their archive directory. A named profile uses its own component.
-	if (profile[0] == '\0' || strcmp(profile, "default") == 0) {
-		profile = mode == 1 ? "debug" : mode == 2 ? "release" : "default";
-	}
-	if (!component(name) || !component(profile)) { return -1; }
-	const int size = snprintf(NULL, 0, "%.*s/.wovec-cache/%s/%s/bin", prefix, parent, profile, name);
-	if (size < 0) { return -1; }
-	char *path = malloc((size_t)size + sizeof "/main.c");
-	if (path == NULL) { return -1; }
-	snprintf(path, (size_t)size + 1, "%.*s/.wovec-cache/%s/%s/bin", prefix, parent, profile, name);
-	bool published = false;
-	// No source or project file may also be the retained output.
-	if (ensure_directories(path)) {
-		memcpy(path + size, "/main.c", sizeof "/main.c");
-		published = !is_same_file(path, input) && !is_same_file(path, project_file) && write_unit(path, bytes, length);
-	}
-	free(path);
+// Publish atomically at the supplied destination after protecting the source and project files.
+int32_t wove_cli_publish(const char *path, const char *input, const uint8_t *bytes, int32_t length) {
+	char *parents = strdup(path);
+	if (parents == NULL) { return -1; }
+	const bool ready = ensure_parent_directories(parents);
+	free(parents);
+	const bool published = ready && !is_same_file(path, input) && !is_same_file(path, project_file) &&
+		write_unit(path, bytes, length);
 	return published ? 0 : -1;
 }
 
