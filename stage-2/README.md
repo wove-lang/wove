@@ -465,7 +465,7 @@ after the loop.
 and updates it one raw byte at a time with `fnv1a_byte`. The declaration
 identity builder supplies the order and delimiters for its components.
 
-[Base32hex](hashing/base32hex.wove) exposes `base32hex31_width` and
+[Base32hex](hashing/base32hex.wove) exposes the fixed width `base32hex31_width` and
 `encode_base32hex31`. The encoder writes all seven digits at the requested
 offset and returns true. An out-of-range ID or output span returns false
 and preserves the destination.
