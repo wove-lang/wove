@@ -19,8 +19,11 @@
 	(struct
 		(:doc "A fixed-array row has a negative name, with element type in first and extent in count.")
 		ScalarRecord
-		(fields (name i32) (file i32) (identity u32) (first i32) (count i32) (declaration i32) (native i32)))
-	(struct ScalarMember (fields (ordinal i32) (type u32) (row i32)))
+		(fields (name i32) (file i32) (identity u32) (first i32) (count i32)
+			(declaration i32) (native i32) (source_base i32) (emit_row i32)))
+	(struct ScalarMember (fields (ordinal i32) (row i32)))
+	(struct LayoutVisit (fields (row i32) (field i32)))
+	(struct LayoutCheck (fields (file i32) (start i32) (end i32) (error u32)))
 
 	(fn is_record_type
 		(:doc `Recognize value types for registered aggregate layouts.
@@ -113,7 +116,8 @@
 			(slice.store (local records) (local next)
 				(record.make ScalarRecord (name (i32 -1)) (file (i32 -1))
 					(identity (int.convert u32 (local next))) (first (int.convert i32 (local element)))
-					(count (record.get (local shape) extent)) (declaration (i32 -1)) (native (i32 0))))
+					(count (record.get (local shape) extent)) (declaration (i32 -1)) (native (i32 0))
+					(source_base (i32 0)) (emit_row (i32 0))))
 			(return (i32.add.wrapping (local next) (i32 1)))))
 
 	(fn is_disabled_statement
@@ -573,46 +577,49 @@
 			(return (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) operands)))))
 
 	(fn member_value_type
-		(:doc `Resolve a Wove field's scalar or fixed-array value type.`)
+		(:doc `Resolve a Wove field in the type namespace of its defining record.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(records (shared-slice ScalarRecord)) (member SourceNode))
+			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding))
+			(layout ScalarRecord) (member SourceNode))
 		(returns u32)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
-			(let index (record.get (local parts) operands))
-			(let type (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local index)))
-			(if (u32.lt (u32 0) (local type)) (then (return (local type))))
-			(return (call fixed_array_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (slice.load (local nodes) (local index))))))
+			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings))
+				(record.get (local layout) file) (record.get (local layout) source_base) (record.get (local parts) operands)))
+			(if
+				(:doc "Wove fields hold Wove-defined value types. Foreign aliases and record views have their own contracts.")
+				(bool.or (call is_native_integer (local type))
+					(bool.and (call is_record_type (local type))
+						(call is_native_record (slice.load (local records) (call record_index (local type))))))
+				(then (return (u32 0))))
+			(return (local type))))
 
 	(fn find_member
-		(:doc `Resolve a member in the checked prefix of a record's field list.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
-			(first i32) (count i32) (name SourceNode))
+		(:doc `Find the original member row and its native ordinal by spelling.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (count i32) (name SourceNode))
 		(returns ScalarMember)
 		(body
 			(let-mut field (local first))
 			(let-mut ordinal (i32 0))
 			(while
-				(:doc "Use the original member order for native ordinals.")
+				(:doc "Search in declaration order without resolving field types.")
 				(i32.lt (local ordinal) (local count))
 				(body
 					(let item (slice.load (local nodes) (local field)))
 					(let head (slice.load (local nodes) (record.get (local item) first_child)))
 					(if
-						(:doc "Native naming does not affect member lookup.")
+						(:doc "The source spelling determines which ordinal the caller reads or writes.")
 						(call same_name (borrow-shared (local source)) (local head) (local name))
-						(then (return (record.make ScalarMember (ordinal (local ordinal))
-							(type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-								(borrow-shared (local records)) (local item))) (row (local field))))))
+						(then (return (record.make ScalarMember (ordinal (local ordinal)) (row (local field))))))
 					(set (local field) (record.get (local item) next_sibling))
 					(set (local ordinal) (i32.add.wrapping (local ordinal) (i32 1)))))
-			(return (record.make ScalarMember (ordinal (i32 -1)) (type (u32 0)) (row (i32 -1))))))
+			(return (record.make ScalarMember (ordinal (i32 -1)) (row (i32 -1))))))
 
 	(fn register_record
-		(:doc `Register one selected type after checking its scalar fields and stable identity.`)
+		(:doc `Register one selected type after checking field forms and stable identity.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32)
-			(file i32) (base i32) (module u32) (records (mut-slice ScalarRecord)) (index i32))
+			(file i32) (base i32) (source_base i32) (module u32) (records (mut-slice ScalarRecord)) (index i32))
 		(returns EntryRead)
 		(body
 			(let node (slice.load (local nodes) (local declaration)))
@@ -675,15 +682,9 @@
 						(:doc "Malformed member forms retain the offending span.")
 						(u32.lt (u32 0) (record.get (local checked) error))
 						(then (return (local checked))))
-					(let field_type (record.get (local checked) operand))
-					(if
-						(:doc "A Wove field contains a scalar or a previously discovered fixed layout.")
-						(u32.eq (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-							(borrow-shared (local records)) (local member)) (u32 0))
-						(then (return (call entry_at (slice.load (local nodes) (local field_type)) (i32 -1) (u32 23)))))
 					(let field_name (slice.load (local nodes) (record.get (local member) first_child)))
 					(let prior (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (local first) (local count) (local field_name)))
+						(local first) (local count) (local field_name)))
 					(if
 						(:doc "Each spelling occupies one native member position.")
 						(bool.not (i32.lt (record.get (local prior) ordinal) (i32 0)))
@@ -692,7 +693,8 @@
 					(set (local field) (record.get (local member) next_sibling))))
 			(slice.store (local records) (local index)
 				(record.make ScalarRecord (name (local name)) (file (local file)) (identity (local identity))
-					(first (local first)) (count (local count)) (declaration (i32.sub.wrapping (local declaration) (local base))) (native (i32 0))))
+					(first (local first)) (count (local count)) (declaration (i32.sub.wrapping (local declaration) (local base)))
+					(native (i32 0)) (source_base (local source_base)) (emit_row (i32 0))))
 			(return (call entry_at (local node) (i32.add.wrapping (local index) (i32 1)) (u32 0)))))
 
 	(fn register_module_records
@@ -701,7 +703,7 @@
 		A graph supplies the file's tree base and the next available record
 		row. Single-file checking starts both positions at zero.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(declarations (shared-slice SelectedDeclaration)) (count i32) (base i32)
+			(declarations (shared-slice SelectedDeclaration)) (count i32) (base i32) (source_base i32)
 			(file i32) (module u32) (records (mut-slice ScalarRecord)) (start i32))
 		(returns EntryRead)
 		(body
@@ -723,7 +725,7 @@
 						(u32.eq (local kind) (u32 48))
 						(then
 							(let checked (call register_record (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local form) (local file) (local base) (local module) (borrow-mut (local records)) (local next)))
+								(local form) (local file) (local base) (local source_base) (local module) (borrow-mut (local records)) (local next)))
 							(if
 								(:doc "Preserve the original invalid type or field span.")
 								(u32.lt (u32 0) (record.get (local checked) error))
@@ -731,4 +733,133 @@
 							(set (local next) (record.get (local checked) operand))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (record.make EntryRead (operand (local next)) (start (i32 0)) (end (i32 0))
-				(error (u32 0)) (related (i32 -1)))))))
+				(error (u32 0)) (related (i32 -1))))))
+
+	(fn layout_error
+		(:doc `Point a layout error at the exact field's type in its original file.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(layout ScalarRecord) (member SourceNode) (error u32))
+		(returns LayoutCheck)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+			(let spelling (slice.load (local nodes) (record.get (local parts) operands)))
+			(let base (record.get (local layout) source_base))
+			(return (record.make LayoutCheck (file (record.get (local layout) file))
+				(start (i32.sub.wrapping (record.get (local spelling) start) (local base)))
+				(end (i32.sub.wrapping (record.get (local spelling) end) (local base))) (error (local error))))))
+
+	(fn enter_layout
+		(:doc `Mark a layout active and push its first Wove field for dependency checking.`)
+		(params (row i32) (layout ScalarRecord) (depth i32)
+			(marks (mut-slice u8)) (stack (mut-slice LayoutVisit)))
+		(returns void)
+		(body
+			(let-mut field (i32 -1))
+			(if
+				(:doc "Only named Wove records can depend on another Wove value layout.")
+				(bool.and (bool.not (call is_fixed_array (local layout))) (i32.eq (record.get (local layout) native) (i32 0)))
+				(then (set (local field) (record.get (local layout) first))))
+			(slice.store (local marks) (local row) (u8 1))
+			(slice.store (local stack) (local depth) (record.make LayoutVisit (row (local row)) (field (local field))))))
+
+	(fn publish_layout
+		(:doc `Record which defining layout is emitted at this position while retaining all type identities.`)
+		(params (records (mut-slice ScalarRecord)) (position i32) (row i32))
+		(returns void)
+		(body
+			(let entry (slice.load (local records) (local position)))
+			(slice.store (local records) (local position)
+				(record.make ScalarRecord (name (record.get (local entry) name)) (file (record.get (local entry) file))
+					(identity (record.get (local entry) identity)) (first (record.get (local entry) first)) (count (record.get (local entry) count))
+					(declaration (record.get (local entry) declaration)) (native (record.get (local entry) native))
+					(source_base (record.get (local entry) source_base)) (emit_row (local row))))))
+
+	(fn walk_record_layouts
+		(:doc `Validate fields and order each complete value layout after its dependencies.
+
+		Traverse roots in table order. An explicit stack keeps source depth
+		out of the host stack. A field leading to an active layout closes a
+		by-value cycle and supplies the diagnostic span.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(bindings (shared-slice GraphBinding)) (records (mut-slice ScalarRecord)) (count i32)
+			(marks (mut-slice u8)) (stack (mut-slice LayoutVisit)))
+		(returns LayoutCheck)
+		(body
+			(let ok (record.make LayoutCheck (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0))))
+			(let-mut root (i32 0))
+			(let-mut written (i32 0))
+			(while
+				(:doc "Visit each root once, preserving source order among independent layouts.")
+				(i32.lt (local root) (local count))
+				(body
+					(let-mut depth (i32 -1))
+					(if
+						(:doc "A completed dependency already has an emission position.")
+						(u8.eq (slice.load (local marks) (local root)) (u8 0))
+						(then
+							(set (local depth) (i32 0))
+							(call enter_layout (local root) (slice.load (local records) (local root)) (local depth)
+								(borrow-mut (local marks)) (borrow-mut (local stack)))))
+					(while
+						(:doc "Finish a layout once every field's defining layout has been emitted.")
+						(i32.lt (i32 -1) (local depth))
+						(body
+							(let visit (slice.load (local stack) (local depth)))
+							(let row (record.get (local visit) row))
+							(let field (record.get (local visit) field))
+							(if
+								(:doc "Postorder publishes the original row after its children.")
+								(i32.lt (local field) (i32 0))
+								(then
+									(call publish_layout (borrow-mut (local records)) (local written) (local row))
+									(slice.store (local marks) (local row) (u8 2))
+									(set (local written) (i32.add.wrapping (local written) (i32 1)))
+									(set (local depth) (i32.sub.wrapping (local depth) (i32 1))))
+								(else
+									(let member (slice.load (local nodes) (local field)))
+									(let layout (slice.load (local records) (local row)))
+									(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+										(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
+									(if
+										(:doc "Reject a field that has no visible Wove value type.")
+										(u32.eq (local type) (u32 0))
+										(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+											(local layout) (local member) (u32 23)))))
+									(slice.store (local stack) (local depth)
+										(record.make LayoutVisit (row (local row)) (field (record.get (local member) next_sibling))))
+									(if
+										(:doc "Only a by-value aggregate field needs a separate layout.")
+										(call is_record_type (local type))
+										(then
+											(let child (call record_index (local type)))
+											(let mark (slice.load (local marks) (local child)))
+											(if
+												(:doc "A visiting child closes a cycle through inline storage.")
+												(u8.eq (local mark) (u8 1))
+												(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+													(local layout) (local member) (u32 23)))))
+											(if
+												(:doc "Revisit this layout after ordering the unvisited child.")
+												(u8.eq (local mark) (u8 0))
+												(then
+													(set (local depth) (i32.add.wrapping (local depth) (i32 1)))
+													(call enter_layout (local child) (slice.load (local records) (local child)) (local depth)
+														(borrow-mut (local marks)) (borrow-mut (local stack)))))))))))
+					(set (local root) (i32.add.wrapping (local root) (i32 1)))))
+			(return (local ok))))
+
+	(fn order_record_layouts
+		(:doc `Allocate one traversal slot and mark per complete registered layout.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(bindings (shared-slice GraphBinding)) (records (mut-slice ScalarRecord)) (count i32))
+		(returns LayoutCheck)
+		(body
+			(if
+				(:doc "Scalar-only modules have no layout work or scratch allocation.")
+				(i32.eq (local count) (i32 0))
+				(then (return (record.make LayoutCheck (file (i32 -1)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
+			(let-mut marks (array.alloc u8 (local count)))
+			(let-mut stack (array.alloc LayoutVisit (local count)))
+			(return (call walk_record_layouts (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (borrow-mut (local records)) (local count)
+				(borrow-mut (local marks)) (borrow-mut (local stack)))))))

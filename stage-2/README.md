@@ -232,11 +232,21 @@ the field spelling and type, including the platform-specific
 timestamp members in the bundled Stat views.
 
 A module-local `(struct Token (fields (kind u32) (start i32)))` defines
-a named, copyable record. Fields can use `bool`, `i8`, `u8`, `i32`, `u32`, or `u64`.
+a named, copyable record. Fields can hold scalar values, fixed arrays, or
+other Wove records. Named field types resolve in the defining module,
+including forward declarations and explicitly imported types. Inline
+record layouts must be acyclic.
 `(record.make Token (kind (u32 40)) (start (i32 2)))` evaluates each
 initializer exactly once in the order written. Supply every field once
 with its declared type. A local stores the result by value, and
-`(record.get (local tok) start)` reads a field with its exact type.
+`(record.get (local tok) start)` reads a field with its exact type. Chain
+`record.get` forms to reach nested fields.
+
+Use `(set (record.get (local tok) start) (i32 8))` to assign a field of a
+`let-mut` local. The same form accepts a nested field path and writes
+through to the original local. The right-hand value must have the
+field's exact type. Copies made by binding, calls, or returns retain
+their own fields.
 
 Functions can take and return locally declared or explicitly imported records.
 Calls pass these values by copy, and a caller retains its original local.

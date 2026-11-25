@@ -41,6 +41,7 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 | `(local name)` | Read a local, parameter, or visible immutable module binding. |
 | `(call name args...)` | Call a visible function. Arguments evaluate left to right. |
 | `(set (local name) value)` | Replace a mutable local with a value of its exact type. |
+| `(set (record.get place field) value)` | Stage 2. Replace an exact field through a mutable Wove record local, including along a nested field path. |
 | `(record.make Type (field value) ...)` | Construct a record from typed field values in written order. |
 | `(record.get value field)` | Read a field with its declared type. |
 | `(array.alloc T count)` | Allocate an owned, zeroed buffer of `u8` or a supported copyable record type. `count` is `i32`. |
