@@ -76,6 +76,10 @@ def main():
 	with TemporaryDirectory(prefix="wove-discovery-") as directory:
 		root = Path(directory).resolve()
 		entry = write_graph(root, bundled)
+		entries = set(root.rglob("*"))
+		checked = subprocess.run([native, "cc", "--check", entry], cwd=root, capture_output=True, check=True, timeout=30)
+		assert not checked.stdout and not checked.stderr, checked
+		assert set(root.rglob("*")) == entries
 		seed = subprocess.run([bootstrap, entry], cwd=root, capture_output=True, check=True, timeout=30)
 		subprocess.run([native, "bin", entry, "-o", "discovery"], cwd=root, check=True, timeout=30)
 		assert seed.stdout == (root / ".wovec-cache/default/discovery/bin/main.c").read_bytes()

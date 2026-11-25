@@ -1130,6 +1130,7 @@ executable reads host arguments, resolves command and project settings, and
 reads source files through explicit checked-in POSIX C-header imports.
 
 ```sh
+build/wovec cc --check input.wove
 build/wovec cc input.wove -o build/input
 build/wovec bin input.wove -o build/input
 build/input
@@ -1141,8 +1142,11 @@ probes used by both native commands and for the final Clang invocation in
 The driver applies the resolved standard after forwarded options at both
 the Clang driver and frontend levels.
 
-`cc` and `bin` take one explicit UTF-8 source path and an explicit output
-target with a basename. The `cc` command and ordinary `bin` builds write
+`cc` and `bin` take one explicit UTF-8 source path. Builds require an
+explicit output target with a basename. `cc --check` checks the selected
+entry, imports, embeds, and C availability without creating output.
+It exits successfully for a valid entry and ignores any supplied `-o`.
+The `cc` command and ordinary `bin` builds write
 `main.c` below `<target-parent>/.wovec-cache/<profile>/<target-name>/bin/`.
 To compile retained C manually when it uses runtime operations, use
 `-I runtime` and link `runtime/wove_runtime.c`. The driver reads `wovec.jsonc` from its
