@@ -25,6 +25,14 @@ def prepare_tool(root, clang, options, target):
 		binary.chmod(0o700)
 	env = {**os.environ, "CLANG": str(probe), "WOVE_CLANG_LOG": str(root / "clang.jsonl"),
 		"WOVE_REAL_CLANG": json.dumps(clang)}
+	# Exercise the default Clang lookup with a miss before the fixture executable.
+	if options.get("search"):
+		env.pop("CLANG", None)
+		first = root / "empty-path"
+		first.mkdir()
+		env["PATH"] = os.pathsep.join((str(first), str(probe.parent), os.environ.get("PATH", os.defpath)))
+		real_clang = Path(shutil.which(clang[0])).resolve()
+		env["WOVE_REAL_CLANG"] = json.dumps([str(real_clang), *clang[1:]])
 	env.pop("WOVE_CLANG_STATUS", None)
 	env.pop("WOVE_CLANG_LINK_TARGET", None)
 	# Keep fixture-controlled AST outcomes local to this invocation.

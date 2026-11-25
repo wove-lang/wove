@@ -4,11 +4,12 @@
 	(:doc "Stage one C translation unit and capture a bounded Clang AST dump.")
 
 	(use wove-file "../c/probe.wove" (only capture_probe_to_stderr probe_options_complete))
+	(use wove-file "../io/capture/descriptors.wove" (only move_above_stdio))
 	(use wove-file "../io/temporary.wove" (only create_temporary_directory))
-	(use wove-file "../io/write.wove" (only write_new_file))
+	(use wove-file "../io/write.wove" (only write_new_file open_new_output))
 	(use wove-file "../text/copy.wove" (only append_bytes))
 	(use wove-file "./trace.wove" (only read_trace relay_trace_diagnostics))
-	(use c-header "<unistd.h>" (only unlink rmdir))
+	(use c-header "<unistd.h>" (only close unlink rmdir))
 
 	(struct ClangRun (fields (error u32) (status i32) (length i32)))
 
@@ -28,10 +29,10 @@
 	(fn invoke_clang
 		(:doc "Forward complete frontend arguments before the mandatory AST dump flags.")
 		(params (program (shared-slice u8)) (options (shared-slice u8)) (path (shared-slice u8))
-			(diagnostics (shared-slice u8)) (output (mut-slice u8)))
+			(diagnostics i32) (output (mut-slice u8)))
 		(returns ClangRun)
 		(body
-			(let traced (i32.lt 0i32 (slice.len (local diagnostics))))
+			(let traced (i32.lt -1i32 (local diagnostics)))
 			(let-mut flags (slice.len (local ast_flags)))
 			(if
 				(:doc "Native probes send expanded dependency outputs to sinks and report includes.")
@@ -57,7 +58,7 @@
 			(let path_end (call append_bytes (borrow-shared (local path)) (borrow-mut (local arguments)) (local flag_end)))
 			(slice.store (local arguments) (local path_end) 0u8)
 			(let capture (call capture_probe_to_stderr (borrow-shared (local program)) (borrow-shared (local arguments))
-				(borrow-shared (local diagnostics)) (borrow-mut (local output))))
+				(local diagnostics) (borrow-mut (local output))))
 			(return (call clang_run_at (record.get (local capture) error)
 				(record.get (local capture) status) (record.get (local capture) length)))))
 
@@ -70,10 +71,8 @@
 			(if
 				(:doc "Standalone queries inherit diagnostics and keep their original probe arguments.")
 				(i32.eq (slice.len (local trace)) 0i32)
-				(then
-					(let empty (array.alloc u8 0i32))
-					(return (call invoke_clang (borrow-shared (local program)) (borrow-shared (local options))
-						(borrow-shared (local path)) (borrow-shared (local empty)) (borrow-mut (local output))))))
+				(then (return (call invoke_clang (borrow-shared (local program)) (borrow-shared (local options))
+					(borrow-shared (local path)) -1i32 (borrow-mut (local output))))))
 			(let size (slice.len (local path)))
 			(let suffix (slice.len (local trace_suffix)))
 			(if
@@ -83,9 +82,26 @@
 			(let-mut diagnostics (array.alloc u8 (i32.add.wrapping (local size) (local suffix))))
 			(let next (call append_bytes (borrow-shared (local path)) (borrow-mut (local diagnostics)) 0i32))
 			(let end (call append_bytes (borrow-shared (local trace_suffix)) (borrow-mut (local diagnostics)) (local next)))
+			(let created (call open_new_output (borrow-shared (local diagnostics))))
+			(if
+				(:doc "A failed exclusive open leaves the existing path alone.")
+				(i32.lt (local created) 0i32)
+				(then (return (call clang_run_at 3u32 -1i32 0i32))))
+			(let descriptor (call move_above_stdio (local created)))
+			(if
+				(:doc "The private descriptor may occupy a closed standard stream in the parent.")
+				(i32.lt (local descriptor) 0i32)
+				(then
+					(let removed (call unlink (borrow-shared (local diagnostics))))
+					(return (call clang_run_at 3u32 -1i32 0i32))))
 			(let run (call invoke_clang (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local path)) (borrow-shared (local diagnostics)) (borrow-mut (local output))))
+				(borrow-shared (local path)) (local descriptor) (borrow-mut (local output))))
+			(let closed (call close (local descriptor)))
 			(let-mut error (record.get (local run) error))
+			(if
+				(:doc "The parent finishes writing before reopening the trace for reading.")
+				(bool.and (u32.eq (local error) 0u32) (bool.not (i32.eq (local closed) 0i32)))
+				(then (set (local error) 3u32)))
 			(if
 				(:doc "Successful and failed frontends both produce private trace data that can be read.")
 				(bool.or (u32.eq (local error) 0u32) (u32.eq (local error) 4u32))
