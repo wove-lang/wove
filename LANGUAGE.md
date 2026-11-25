@@ -5,9 +5,10 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Wove builtin quick reference
 
-Spellings are case-sensitive. Integer literals carry their type, as in `(i32 -3)`
-and `(u32 42)`. Both stages support `i8`, `u8`, `i32`, `u32`, and `bool`.
-Stage 2 also supports `u64`. Boolean literals are `(bool true)` and `(bool false)`.
+Spellings are case-sensitive. Decimal integer atoms carry their type, as in
+`-3i32` and `42u32`. The typed lists `(i32 -3)` and `(u32 42)` are
+equivalent. Both stages support `i8`, `u8`, `i32`, and `u32`. Stage 2 also
+supports `u64`. Boolean literals are `(bool true)` and `(bool false)`.
 
 ## Integers and booleans
 
