@@ -842,16 +842,24 @@ Every call site keeps the original file and declaration identities
 of both endpoints. Diagnostic spans use the file where the failure
 originated.
 
-`make stage-2` translates [the compiler root](wovec.wove) with the Python seed
-and links `build/stage-1/wovec` with Clang and the shared runtime. The root
-imports `admit_source` and `scan_token` from [the scanner](source/scan.wove).
-Its parameterless bootstrap entry admits an empty view and expects an EOF
-token.
+`make` builds `build/wovec` from [the compiler root](wovec.wove). The Python
+seed emits the bootstrap entry for `build/stage-1/wovec`. That compiler
+opens the checked-in entry and follows its active imports and embeds to
+build `build/stage-2/wovec`. The second compiler runs its native `bin`
+command on the same entry to build the final compiler. Each generation
+compiles and links one C translation unit with Clang.
+
+The native generations read the same copy of the source tree and runtime
+under `BUILD_DIR/self-host-source`. Its local `build/version.txt` supplies
+the exact same bytes to both compilers, including with a custom
+`BUILD_DIR` or version override. `make self-host` compares their retained
+C with C re-emitted by the final compiler and builds and runs a smoke
+program using that compiler.
 
 The seed translates a separate [Wove fixture root](../tests/stage-2/source_scan.wove)
-for the [C source probe](../tests/stage-2/source_scan.probe.c). The probe also
-supplies graph emission when building the native compiler. Run `make test-stage-2`
-to run the bootstrap entry and compare scanner streams with the Stage 1 lexer. The
+for the [C source probe](../tests/stage-2/source_scan.probe.c). Run
+`make test-stage-2` to exercise the bootstrap entry and compare scanner
+streams with the Stage 1 lexer. The
 [layout fixtures](../tests/stage-2/lexer_layouts.tsv) supply indentation, line
 endings, and parent view bytes. The parity check compares token kinds and raw
 spellings. `make test` includes these checks.
@@ -1041,14 +1049,14 @@ printing the version.
 
 ## Native source graph compilation
 
-Run `make stage-2` to build `build/stage-2/wovec`. The seed-built Stage 2
-emitter compiles the native entry and its Wove dependencies. The linked
+Run `make` to build `build/wovec` or `make stage-2` to stop at
+`build/stage-2/wovec`. The linked
 executable reads host arguments, resolves command and project settings, and
 reads source files through explicit checked-in POSIX C-header imports.
 
 ```sh
-build/stage-2/wovec cc input.wove -o build/input
-build/stage-2/wovec bin input.wove -o build/input
+build/wovec cc input.wove -o build/input
+build/wovec bin input.wove -o build/input
 build/input
 ```
 

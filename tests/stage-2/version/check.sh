@@ -10,7 +10,6 @@ compiler=$3
 version=$4
 manifest=$5
 seed=$6
-probe=$7
 generator=tools/build-info.sh
 work=$(mktemp -d "$build/version-check.XXXXXX")
 trap 'rm -rf -- "$work"' 0
@@ -44,7 +43,7 @@ check_compiler() {
 
 # Build the real compiler under a separate build directory, reusing the checked seed.
 build_compiler() {
-	"$make" -s stage-2 "BUILD_DIR=$work/native" "STAGE1=$seed" "SOURCE_SCAN=$probe" "WOVEC_BUILD_VERSION=$1"
+	"$make" -s stage-2 "BUILD_DIR=$work/native" "STAGE1=$seed" "WOVEC_BUILD_VERSION=$1"
 }
 
 # Change only the version and exercise the real Make targets under equal timestamps.
