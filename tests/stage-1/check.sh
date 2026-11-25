@@ -13,13 +13,33 @@ fixtures=$(dirname "$manifest")
 check_status() {
 	expected=$1
 	program=$2
+	shift 2
 	status=0
-	"$program" || status=$?
+	"$program" "$@" || status=$?
 	# Report fixture failures with both statuses.
 	if [ "$status" != "$expected" ]; then
 		printf '%s returned %s, expected %s\n' "$program" "$status" "$expected" >&2
 		exit 1
 	fi
+}
+
+# Read one argument after each fixed TSV marker. A bare marker represents an empty argument.
+check_argv_status() {
+	expected=$1
+	program=$2
+	case_file=$3
+	tab=$(printf '\t')
+	set --
+	# Keep the values opaque to the shell and exclude the fixture's copyright comments.
+	while IFS= read -r row || [ -n "$row" ]; do
+		case "$row" in
+			""|\#*) continue ;;
+			arg) set -- "$@" "" ;;
+			arg"$tab"*) set -- "$@" "${row#arg"$tab"}" ;;
+			*) printf 'invalid argument row in %s\n' "$case_file" >&2; exit 1 ;;
+		esac
+	done < "$case_file"
+	check_status "$expected" "$program" "$@"
 }
 
 # A source rejection must give the expected line and emit no C.
@@ -90,6 +110,10 @@ while read -r mode source expected origin extra <&3 || [ -n "${mode:-}" ]; do
 		# Compare the fixture exit status with the ordinary runtime.
 		run)
 			check_status "$expected" "$program"
+			;;
+		# The fourth column names the fixture supplying the exact user argv.
+		run-argv)
+			check_argv_status "$expected" "$program" "$fixtures/$origin"
 			;;
 		# Repeat the fixture with the allocation probe linked in.
 		tracked)
