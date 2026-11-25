@@ -16,6 +16,12 @@ STAGE2 := $(BUILD_DIR)/stage-2
 BOOTSTRAP_COMPILER := $(STAGE1)/wovec
 COMPILER_ROOT := stage-2/wovec.wove
 NATIVE_COMPILER := $(STAGE2)/wovec
+FINAL_COMPILER := $(BUILD_DIR)/wovec
+SELF_HOST_SOURCE := $(BUILD_DIR)/self-host-source
+SELF_HOST_ENTRY := $(SELF_HOST_SOURCE)/$(COMPILER_ROOT)
+SELF_HOST_VERIFIED := $(STAGE2)/wovec-self-hosted
+SELF_HOST_SMOKE := $(BUILD_DIR)/self-host-smoke
+SELF_HOST_INPUTS := tools/stage-compiler-inputs.sh
 NATIVE_DRIVER := stage-2/driver
 SOURCE_SCAN_MODULE := stage-2/source/scan.wove
 UTF8_MODULE := stage-2/text/utf8.wove
@@ -123,24 +129,32 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
 
-.PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
+.PHONY: all stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
 .PHONY: test-stage-2-gcc test-stage-2-gcc-live test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version force-build-info
 .PHONY: test-stage-2-inventory
 .DELETE_ON_ERROR:
 .SECONDARY:
 
-all: stage-1
+all: $(FINAL_COMPILER)
 
-stage-1: $(STAGE1)/ownership.transfer
+stage-1: $(BOOTSTRAP_COMPILER)
 
-stage-2: $(BOOTSTRAP_COMPILER) $(SOURCE_SCAN) $(NATIVE_COMPILER)
+stage-2: $(NATIVE_COMPILER)
+
+# Compare all native emissions from the same graph and exercise the final executable.
+self-host: $(FINAL_COMPILER) $(STAGE2)/wovec.c $(SELF_HOST_SOURCE)/.ready
+	"$(FINAL_COMPILER)" cc "$(SELF_HOST_ENTRY)" -o "$(SELF_HOST_VERIFIED)"
+	cmp "$(STAGE2)/wovec.c" "$(BUILD_DIR)/.wovec-cache/default/wovec/bin/main.c"
+	cmp "$(STAGE2)/wovec.c" "$(STAGE2)/.wovec-cache/default/wovec-self-hosted/bin/main.c"
+	CLANG="$(CLANG)" "$(FINAL_COMPILER)" bin "$(NATIVE_CLI_FIXTURES)/input.wove" -o "$(SELF_HOST_SMOKE)"
+	@status=0; "$(SELF_HOST_SMOKE)" || status=$$?; test "$$status" -eq 42
 
 # Preserve quoting in compiler settings until the runner splits them into arguments.
 test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version test-stage-2-inventory
+test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version test-stage-2-inventory
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -188,7 +202,7 @@ test-stage-2-native: $(NATIVE_COMPILER)
 # Check generated metadata and version invalidation in an isolated build.
 test-stage-2-version: $(NATIVE_COMPILER) $(BUILD_VERSION)
 	+sh "$(VERSION_FIXTURES)/check.sh" "$(MAKE)" "$(abspath $(BUILD_DIR))" "$(NATIVE_COMPILER)" "$(BUILD_VERSION)" \
-		"$(VERSION_FIXTURES)/cases.tsv" "$(abspath $(STAGE1))" "$(abspath $(SOURCE_SCAN))"
+		"$(VERSION_FIXTURES)/cases.tsv" "$(abspath $(STAGE1))"
 
 # Exercise the project loader with the checked-in config and standalone cases.
 test-stage-2-config: $(CONFIG_PROGRAM)
@@ -293,13 +307,25 @@ define build_versioned
 	fi
 endef
 
-# Ask the seed-built Stage 2 graph emitter to compile the root with its embedded assets.
-$(STAGE2)/wovec.c: $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py $(BUILD_VERSION) force-build-info
-	$(call build_versioned,mkdir -p "$(@D)"; $(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" "$(COMPILER_ROOT)" $(NATIVE_WOVE_SOURCES) --asset $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS))
+# Keep the relative version and runtime embeds inside the selected build directory.
+$(SELF_HOST_SOURCE)/.ready: $(SELF_HOST_INPUTS) $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) $(BUILD_VERSION) force-build-info
+	$(call build_versioned,sh "$(SELF_HOST_INPUTS)" "$(@D)" "$(BUILD_VERSION)")
 
-# Link the emitted native compiler with the shared runtime.
-$(NATIVE_COMPILER): $(STAGE2)/wovec.c $(STAGE1)/runtime.o $(BUILD_VERSION) force-build-info
-	$(call build_versioned,$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime $(filter-out $(BUILD_VERSION) force-build-info,$^) -o "$@")
+# Give the seed-built Wove compiler one entry. It opens the selected imports and assets.
+$(STAGE2)/wovec.c: $(BOOTSTRAP_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_VERSION) force-build-info
+	$(call build_versioned,mkdir -p "$(@D)"; c_output="$@.tmp.$$$$"; \
+		trap 'rm -f "$$c_output"' 0; "$(BOOTSTRAP_COMPILER)" "$(SELF_HOST_ENTRY)" > "$$c_output"; mv "$$c_output" "$@")
+
+# Build the second compiler and the shared runtime in one C translation unit.
+$(NATIVE_COMPILER): $(STAGE2)/wovec.c $(RUNTIME) $(RUNTIME_HEADER) $(BUILD_VERSION) force-build-info
+	$(call build_versioned,stage=$$(mktemp -d "$(@D)/.wovec.XXXXXX"); trap 'rm -rf -- "$$stage"' 0; \
+		$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime \
+			-include "$(RUNTIME)" "$<" -o "$$stage/wovec"; mv "$$stage/wovec" "$@")
+
+# Forward each quoted Make flag as one native CLI option for the final compiler.
+$(FINAL_COMPILER): $(NATIVE_COMPILER) $(SELF_HOST_SOURCE)/.ready wovec.jsonc $(BUILD_VERSION) force-build-info
+	$(call build_versioned,set -- $(CFLAGS); count=$$#; for flag do set -- "$$@" --cflag "$$flag"; done; shift "$$count"; \
+		CLANG="$(CLANG)" "$(NATIVE_COMPILER)" bin "$(SELF_HOST_ENTRY)" -o "$@" "$$@")
 
 # Build utility-only Wove programs with the ordinary Python seed and runtime.
 $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o
