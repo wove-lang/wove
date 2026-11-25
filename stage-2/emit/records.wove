@@ -7,16 +7,24 @@
 	Type names keep the defining declaration identity across source layouts.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "../scalar/records.wove" (only record_index member_type is_record_type is_native_integer native_integer_index is_record_slice is_writable_slice is_array_owner
-		is_native_record native_field_type is_record_reference is_mutable_record_reference record_reference_target (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only record_index member_value_type is_record_type is_native_integer native_integer_index is_record_slice is_writable_slice is_array_owner
+		is_fixed_array is_native_record native_field_type is_record_reference is_mutable_record_reference record_reference_target (type ScalarRecord)))
 	(use wove-file "./owners.wove" (only write_bridge_result_type write_native_type))
-	(use wove-file "./runtime.wove" (only open_array_layout_query))
-	(use wove-file "./text.wove" (only c_byte c_span c_type_text write_c_name record_name_role member_name_role))
+	(use wove-file "./runtime.wove" (only open_array_layout_query write_c_number))
+	(use wove-file "./text.wove" (only c_byte c_span c_type_text write_c_name record_name_role member_name_role fixed_array_name_role))
 
 	(let c_const "const ")
 	(let c_member_check_open "_Static_assert(_Generic(((")
 	(let c_member_check_access "*)0)->")
 	(let c_member_check_close ":1,default:0),\"Wove C field type\");\n")
+	(let c_array_open "typedef struct{")
+	(let c_array_items " wvrt_items[")
+	(let c_array_close "];}")
+	(let c_alignas "_Alignas(")
+	(let c_alignas_end ") ")
+	(let c_pointer_alignas_end "*) ")
+	(let c_pointer_items "*wvrt_items;}")
+	(let c_layout_end ";\n")
 
 	(fn write_record_text
 		(:doc `Append a complete fixed C fragment from immutable byte storage.`)
@@ -32,6 +40,12 @@
 			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
+			(if
+				(:doc "Each structural array has one generated name in the translation unit.")
+				(call is_fixed_array (local record))
+				(then (return (call write_c_name (borrow-mut (local output)) (local offset) (local writing)
+					(local name_prefix) (call fixed_array_name_role) (record.get (local record) identity)
+					(borrow-shared (local source)) (i32 0) (i32 0)))))
 			(let name (slice.load (local nodes) (record.get (local record) name)))
 			(return (call write_c_name (borrow-mut (local output)) (local offset) (local writing)
 				(local name_prefix) (call record_name_role) (record.get (local record) identity) (borrow-shared (local source))
@@ -114,11 +128,13 @@
 				(local name_prefix) (call member_name_role) (int.convert u32 (local ordinal)) (borrow-shared (local source)) (i32 0) (i32 0)))))
 
 	(fn write_member_declaration
-		(:doc `Write one scalar member declaration in a native layout.`)
-		(params (source (shared-slice u8)) (type u32) (ordinal i32) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(:doc `Write one scalar or inline array member declaration in a Wove layout.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(type u32) (ordinal i32) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
-			(let type_end (call c_type_text (borrow-mut (local output)) (local offset) (local type) (local writing)))
+			(let type_end (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
 			(let space (call c_byte (borrow-mut (local output)) (local type_end) (u8 32) (local writing)))
 			(let name_end (call write_member_name (borrow-shared (local source)) (local ordinal)
 				(borrow-mut (local output)) (local space) (local name_prefix) (local writing)))
@@ -126,7 +142,7 @@
 
 	(fn write_record_layout
 		(:doc `Write a complete record typedef with fields in declaration order.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (record ScalarRecord)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord)) (record ScalarRecord)
 			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -153,14 +169,17 @@
 				(:doc "Give an empty Wove record a single byte so its native struct is valid C11.")
 				(i32.eq (local count) (i32 0))
 				(then (set (local cursor) (call write_member_declaration (borrow-shared (local source))
+					(borrow-shared (local nodes)) (borrow-shared (local records))
 					(u32 10) (i32 0) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(while
 				(:doc "Assign each declared member the same ordinal used at its accesses.")
 				(i32.lt (local ordinal) (local count))
 				(body
 					(let node (slice.load (local nodes) (local field)))
-					(let type (call member_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local node)))
 					(set (local cursor) (call write_member_declaration (borrow-shared (local source))
+						(borrow-shared (local nodes)) (borrow-shared (local records))
 						(local type) (local ordinal) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(set (local field) (record.get (local node) next_sibling))
 					(set (local ordinal) (i32.add.wrapping (local ordinal) (i32 1)))))
@@ -247,6 +266,65 @@
 					(set (local field) (record.get (local node) next_sibling))))
 			(return (local cursor))))
 
+	(fn write_fixed_array_layout
+		(:doc `Write the archive's inline array wrapper or its aligned zero-extent placeholder.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (layout ScalarRecord)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let extent (record.get (local layout) count))
+			(let element (int.convert u32 (record.get (local layout) first)))
+			(let-mut cursor (call write_record_text (borrow-shared (local c_array_open))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(if
+				(:doc "Keep empty arrays aligned without declaring a zero-length C array.")
+				(i32.eq (local extent) (i32 0))
+				(then
+					(set (local cursor) (call write_record_text (borrow-shared (local c_alignas)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor) (local element) (local writing)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_alignas_end)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_alignas)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor) (local element) (local writing)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_pointer_alignas_end)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor) (local element) (local writing)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_pointer_items)) (borrow-mut (local output)) (local cursor) (local writing))))
+				(else
+					(let-mut digits (array.alloc u8 (i32 11)))
+					(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor) (local element) (local writing)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_array_items)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call write_c_number (borrow-mut (local output)) (local cursor) (local extent) (borrow-mut (local digits)) (local writing)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_array_close)) (borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 32) (local writing)))
+			(set (local cursor) (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local layout) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(return (call write_record_text (borrow-shared (local c_layout_end))
+				(borrow-mut (local output)) (local cursor) (local writing)))))
+
+	(fn write_value_layout
+		(:doc `Emit Wove value layouts and native ABI assertions in registration order.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(layout ScalarRecord) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "A fixed array defines its inline element storage before any enclosing record.")
+				(call is_fixed_array (local layout))
+				(then (return (call write_fixed_array_layout (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local layout) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(if
+				(:doc "Named Wove records define their complete layout here.")
+				(i32.eq (record.get (local layout) native) (i32 0))
+				(then (return (call write_record_layout (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (local layout) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(if
+				(:doc "A native record verifies its exposed members against the C type.")
+				(call is_native_record (local layout))
+				(then (return (call write_native_field_checks (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (local layout) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(return (call write_integer_check (borrow-shared (local source))
+				(slice.load (local nodes) (record.get (local layout) native))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
 	(fn write_record_layouts
 		(:doc `Emit the checked prefix of populated record declarations before function code.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
@@ -261,20 +339,7 @@
 				(body
 					(let record (slice.load (local records) (local index)))
 					(if (i32.eq (record.get (local record) name) (i32 0)) (then (return (local cursor))))
-					(if
-						(:doc "Only Wove-defined records need generated layouts. Native types receive compatibility checks.")
-						(i32.eq (record.get (local record) native) (i32 0))
-						(then (set (local cursor) (call write_record_layout (borrow-shared (local source)) (borrow-shared (local nodes))
-							(local record) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
-						(else
-							(if
-								(:doc "A native view verifies exposed members. An integer alias verifies integral promotion.")
-								(call is_native_record (local record))
-								(then (set (local cursor) (call write_native_field_checks (borrow-shared (local source))
-									(borrow-shared (local nodes)) (borrow-shared (local records)) (local record)
-									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
-								(else (set (local cursor) (call write_integer_check (borrow-shared (local source))
-									(slice.load (local nodes) (record.get (local record) native))
-									(borrow-mut (local output)) (local cursor) (local writing)))))))
+					(set (local cursor) (call write_value_layout (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local record) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (local cursor)))))

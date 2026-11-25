@@ -243,6 +243,20 @@ An argument or return must match the defining record identity, so two
 types with the same fields remain distinct. Record layout declarations
 can follow the signatures that refer to them.
 
+`(array element extent)` describes a fixed array of an exact builtin
+scalar type and a nonnegative decimal `i32` extent. Both are part of
+the type. Use `(array.make (array u8 2) (u8 17) (u8 25))` for a typed
+list and `(array.repeat (array u8 128) (u8 0))` to fill a fixed block.
+Lists evaluate their elements left to right. Repetition evaluates its
+initializer once, including at extent zero.
+
+A fixed array keeps its elements inline and can be a record field, a
+function parameter, or a return value. Binding, passing, and returning
+an array or a record containing one copy the value. `(array.load value index)`
+reads an element and `(array.store (local data) index value)` writes to
+a `let-mut` local. Both take an exact `i32` index and trap at the access
+span if the index is outside the declared extent.
+
 `(bool true)` and `(bool false)` are scalar literals.
 `i32.eq` and `i32.lt` compare signed operands. `u8.eq`, `u8.lt`,
 `u32.eq`, and `u32.lt` compare unsigned operands. Each comparison

@@ -17,6 +17,76 @@
 	(struct StatementRead (fields (kind u32) (binding i32) (value i32) (start i32) (end i32) (error u32)))
 	(struct ScalarOperator (fields (operand u32) (result u32) (symbol u8) (arity i32) (short_circuit bool)))
 	(struct DecimalSpelling (fields (digits i32) (negative bool)))
+	(struct FixedArrayShape (fields (element u32) (extent i32)))
+
+	(let array_type_head "array")
+	(let array_make_head "array.make")
+	(let array_repeat_head "array.repeat")
+	(let array_load_head "array.load")
+	(let array_store_head "array.store")
+
+	(fn keyword_matches
+		(:doc `Compare a checked atom to an immutable keyword spelling.`)
+		(params (source (shared-slice u8)) (start i32) (end i32) (keyword (shared-slice u8)))
+		(returns bool)
+		(body
+			(return (call same_bytes (borrow-shared (local source)) (local start) (local end)
+				(borrow-shared (local keyword)) (i32 0) (slice.len (local keyword))))))
+
+	(fn fixed_array_keyword
+		(:doc `Recognize the fixed-array type and operation heads at their full widths.`)
+		(params (source (shared-slice u8)) (start i32) (end i32))
+		(returns u32)
+		(body
+			(if
+				(:doc "Check the keyword width before advancing to the prefix end.")
+				(i32.lt (i32.sub.wrapping (local end) (local start)) (i32 5))
+				(then (return (u32 0))))
+			(let prefix_end (i32.add.wrapping (local start) (i32 5)))
+			(if
+				(:doc "Other keywords need no comparison against the array forms.")
+				(bool.not (call keyword_matches (borrow-shared (local source)) (local start) (local prefix_end)
+					(borrow-shared (local array_type_head))))
+				(then (return (u32 0))))
+			(if (i32.eq (local end) (local prefix_end)) (then (return (u32 70))))
+			(if
+				(:doc "A typed list initializes one element per operand.")
+				(call keyword_matches (borrow-shared (local source)) (local start) (local end) (borrow-shared (local array_make_head)))
+				(then (return (u32 71))))
+			(if
+				(:doc "A repeat initializer supplies one value for the declared extent.")
+				(call keyword_matches (borrow-shared (local source)) (local start) (local end) (borrow-shared (local array_repeat_head)))
+				(then (return (u32 72))))
+			(if
+				(:doc "A load reads a checked element by value.")
+				(call keyword_matches (borrow-shared (local source)) (local start) (local end) (borrow-shared (local array_load_head)))
+				(then (return (u32 73))))
+			(if
+				(:doc "A store writes an element in a writable local.")
+				(call keyword_matches (borrow-shared (local source)) (local start) (local end) (borrow-shared (local array_store_head)))
+				(then (return (u32 74))))
+			(return (u32 0))))
+
+	(fn is_fixed_array_type_head
+		(:doc `Check whether a source atom introduces a structural array layout.`)
+		(params (source (shared-slice u8)) (node SourceNode))
+		(returns bool)
+		(body
+			(return (bool.and (u32.eq (record.get (local node) kind) (u32 1))
+				(call keyword_matches (borrow-shared (local source)) (record.get (local node) start)
+					(record.get (local node) end) (borrow-shared (local array_type_head)))))))
+
+	(fn is_fixed_initializer
+		(:doc `Identify either typed fixed-array initializer.`)
+		(params (kind u32))
+		(returns bool)
+		(body (return (bool.or (u32.eq (local kind) (u32 71)) (u32.eq (local kind) (u32 72))))))
+
+	(fn is_fixed_access
+		(:doc `Identify a checked fixed-array index operation.`)
+		(params (kind u32))
+		(returns bool)
+		(body (return (bool.or (u32.eq (local kind) (u32 73)) (u32.eq (local kind) (u32 74))))))
 
 	(fn is_scalar_name
 		(:doc `Check that the source operand names an unquoted Wove identifier.`)
@@ -451,6 +521,7 @@
 		48, 49, 50, and 52. Void uses 59, embed uses 60, and i8 uses 61.
 		Typed integer equality uses 65. Return 66 through 69 for u32.and,
 		u32.or, u32.shl, and u32.shr.
+		Fixed-array types, lists, repeats, loads, and stores use 70 through 74.
 		Other nodes and absent indices return 0.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (index i32))
 		(returns u32)
@@ -701,6 +772,11 @@
 				(:doc "Recognize complete record keywords before testing wrapping arithmetic.")
 				(u32.lt (u32 0) (local record))
 				(then (return (local record))))
+			(let array (call fixed_array_keyword (borrow-shared (local source)) (local start) (record.get (local node) end)))
+			(if
+				(:doc "Distinguish fixed arrays from heap-backed allocation.")
+				(u32.lt (u32 0) (local array))
+				(then (return (local array))))
 			(return (call wrapping_keyword (borrow-shared (local source)) (local start) (local width)))))
 
 	(fn entry_at
@@ -752,7 +828,8 @@
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
 			(if
 				(:doc "The expression planner checks the operands of a standalone call or store.")
-				(bool.or (u32.eq (local tag) (u32 9)) (u32.eq (local tag) (u32 40)))
+				(bool.or (u32.eq (local tag) (u32 9))
+					(bool.or (u32.eq (local tag) (u32 40)) (u32.eq (local tag) (u32 74))))
 				(then (return (record.make StatementRead (kind (local tag)) (binding (i32 -1)) (value (local index))
 					(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))))))
 			(let returning (u32.eq (local tag) (u32 7)))
@@ -817,6 +894,43 @@
 					(bool.and (u32.lt (u32 9) (local tag)) (u32.lt (local tag) (u32 13))))
 				(then (return (local tag))))
 			(return (u32 0))))
+
+	(fn read_fixed_array_shape
+		(:doc `Read a fixed array of an exact scalar element and a nonnegative i32 extent.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns FixedArrayShape)
+		(body
+			(let invalid (record.make FixedArrayShape (element (u32 0)) (extent (i32 -1))))
+			(if
+				(:doc "Only a complete fixed type form can contribute a shape.")
+				(bool.not (u32.eq (record.get (local node) kind) (u32 40)))
+				(then (return (local invalid))))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (u32 70) (u32 23)))
+			(let element_node (record.get (local form) operand))
+			(if
+				(:doc "The type starts with one supported scalar element.")
+				(bool.or (u32.lt (u32 0) (record.get (local form) error)) (i32.lt (local element_node) (i32 0)))
+				(then (return (local invalid))))
+			(let element (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element_node)))
+			(let size (record.get (slice.load (local nodes) (local element_node)) next_sibling))
+			(if
+				(:doc "An extent must follow the scalar element.")
+				(bool.or (u32.eq (local element) (u32 0)) (i32.lt (local size) (i32 0)))
+				(then (return (local invalid))))
+			(let extent (slice.load (local nodes) (local size)))
+			(if
+				(:doc "The last operand is a bare decimal integer.")
+				(bool.or (bool.not (u32.eq (record.get (local extent) kind) (u32 1)))
+					(bool.not (i32.lt (record.get (local extent) next_sibling) (i32 0))))
+				(then (return (local invalid))))
+			(let parsed (call read_decimal_digits (borrow-shared (local source))
+				(record.get (local extent) start) (record.get (local extent) end) (u32 214748364) (u32 7)))
+			(if
+				(:doc "Reject a sign, nondigit, or extent outside i32.")
+				(i32.lt (record.get (local parsed) digits) (i32 0))
+				(then (return (local invalid))))
+			(return (record.make FixedArrayShape (element (local element))
+				(extent (int.convert i32 (record.get (local parsed) magnitude)))))))
 
 	(fn decimal_scalar
 		(:doc `Validate a decimal scalar and locate its C-safe significant digits.

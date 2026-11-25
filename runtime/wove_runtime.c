@@ -312,6 +312,16 @@ size_t wvrt_slice_offset_at_span(int32_t wvrtlength, int32_t wvrtindex,
 	return (size_t)wvrtindex;
 }
 
+// Check a fixed-array index against its compile-time extent before access.
+size_t wvrt_array_index_at_span(int32_t wvrtlength, int32_t wvrtindex,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// The original fixed-array access supplies the diagnostic span.
+	if (!wvrt_slice_index_valid(wvrtlength, wvrtindex)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "array index out of bounds");
+	}
+	return (size_t)wvrtindex;
+}
+
 // Read a byte from the original storage through a checked Stage 2 view.
 uint8_t wvrt_slice_load_u8_at_span(wvrt_slice wvrtview, int32_t wvrtindex,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {

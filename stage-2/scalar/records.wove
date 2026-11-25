@@ -7,19 +7,23 @@
 	Resolve fields by original spelling and use declaration order for
 	their native ordinals. The record table is a zero-initialized prefix.`)
 
-	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/scan.wove" (only is_disabled_form is_metadata_form (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts validate_form_metadata (type SelectedDeclaration)))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../source/types.wove" (only is_reserved_type_name))
 	(use wove-file "../emit/names.wove" (only record_identity))
 	(use wove-file "./syntax.wove"
-		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type (type EntryRead)))
+		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type read_fixed_array_shape is_fixed_array_type_head
+			(type EntryRead) (type FixedArrayShape)))
 
-	(struct ScalarRecord (fields (name i32) (file i32) (identity u32) (first i32) (count i32) (declaration i32) (native i32)))
+	(struct
+		(:doc "A fixed-array row has a negative name, with element type in first and extent in count.")
+		ScalarRecord
+		(fields (name i32) (file i32) (identity u32) (first i32) (count i32) (declaration i32) (native i32)))
 	(struct ScalarMember (fields (ordinal i32) (type u32) (row i32)))
 
 	(fn is_record_type
-		(:doc `Recognize value types for registered records.
+		(:doc `Recognize value types for registered aggregate layouts.
 
 		Even an empty record definition uses five tree rows.
 		A definition also uses more than eight source bytes. The signed
@@ -35,6 +39,114 @@
 		(params (row i32))
 		(returns u32)
 		(body (return (u32.add.wrapping (int.convert u32 (local row)) (u32 64)))))
+
+	(fn is_fixed_array
+		(:doc `Distinguish an anonymous fixed array from a named record in the layout table.`)
+		(params (layout ScalarRecord))
+		(returns bool)
+		(body (return (i32.lt (record.get (local layout) name) (i32 0)))))
+
+	(fn find_fixed_array_type
+		(:doc `Find the one structural type for the exact scalar element and extent.`)
+		(params (records (shared-slice ScalarRecord)) (shape FixedArrayShape))
+		(returns u32)
+		(body
+			(let element (record.get (local shape) element))
+			(if (u32.eq (local element) (u32 0)) (then (return (u32 0))))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Only populated fixed layouts can match a structural type.")
+				(i32.lt (local index) (slice.len (local records)))
+				(body
+					(let layout (slice.load (local records) (local index)))
+					(if (i32.eq (record.get (local layout) name) (i32 0)) (then (return (u32 0))))
+					(if
+						(:doc "Both shape components must agree, including a zero extent.")
+						(bool.and (call is_fixed_array (local layout))
+							(bool.and (i32.eq (record.get (local layout) first) (int.convert i32 (local element)))
+								(i32.eq (record.get (local layout) count) (record.get (local shape) extent))))
+						(then (return (call record_type (local index)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (u32 0))))
+
+	(fn fixed_array_type
+		(:doc `Resolve a fixed array spelling against the structural layout table.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(records (shared-slice ScalarRecord)) (node SourceNode))
+		(returns u32)
+		(body
+			(return (call find_fixed_array_type (borrow-shared (local records))
+				(call read_fixed_array_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))))))
+
+	(fn next_layout_node
+		(:doc `Advance through one declaration without following its outer siblings.`)
+		(params (nodes (shared-slice SourceNode)) (index i32) (declaration i32) (descend bool))
+		(returns i32)
+		(body
+			(let first (record.get (slice.load (local nodes) (local index)) first_child))
+			(if
+				(:doc "An ordinary nonempty form exposes its first child.")
+				(bool.and (local descend) (i32.lt (i32 -1) (local first)))
+				(then (return (local first))))
+			(let-mut cursor (local index))
+			(while
+				(:doc "Find the next sibling or finish when the walk returns to its declaration.")
+				(bool.not (i32.eq (local cursor) (local declaration)))
+				(body
+					(let node (slice.load (local nodes) (local cursor)))
+					(let next (record.get (local node) next_sibling))
+					(if (i32.lt (i32 -1) (local next)) (then (return (local next))))
+					(set (local cursor) (record.get (local node) parent))))
+			(return (i32 -1))))
+
+	(fn intern_fixed_array
+		(:doc `Append one new valid shape and return the next free layout row.`)
+		(params (shape FixedArrayShape) (records (mut-slice ScalarRecord)) (next i32))
+		(returns i32)
+		(body
+			(let element (record.get (local shape) element))
+			(if
+				(:doc "An invalid shape or an existing type needs no layout row.")
+				(bool.or (u32.eq (local element) (u32 0))
+					(u32.lt (u32 0) (call find_fixed_array_type (borrow-shared (local records)) (local shape))))
+				(then (return (local next))))
+			(slice.store (local records) (local next)
+				(record.make ScalarRecord (name (i32 -1)) (file (i32 -1))
+					(identity (int.convert u32 (local next))) (first (int.convert i32 (local element)))
+					(count (record.get (local shape) extent)) (declaration (i32 -1)) (native (i32 0))))
+			(return (i32.add.wrapping (local next) (i32 1)))))
+
+	(fn register_fixed_arrays
+		(:doc `Intern array shapes in one selected declaration before its types are checked.
+
+		Layout discovery skips disabled and metadata subtrees. Malformed
+		types remain for the signature, field, or expression checker to report.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32)
+			(records (mut-slice ScalarRecord)) (start i32))
+		(returns i32)
+		(body
+			(let-mut index (record.get (slice.load (local nodes) (local declaration)) first_child))
+			(let-mut next (local start))
+			(while
+				(:doc "Visit only descendants of the selected declaration.")
+				(i32.lt (i32 -1) (local index))
+				(body
+					(let node (slice.load (local nodes) (local index)))
+					(let head (record.get (local node) first_child))
+					(let ordinary (bool.and
+						(bool.and (u32.eq (record.get (local node) kind) (u32 40)) (i32.lt (i32 -1) (local head)))
+						(bool.not (bool.or
+							(call is_disabled_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))
+							(call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))))))
+					(if
+						(:doc "Only the fixed-array type head supplies an element and extent.")
+						(bool.and (local ordinary)
+							(call is_fixed_array_type_head (borrow-shared (local source)) (slice.load (local nodes) (local head))))
+						(then
+							(let shape (call read_fixed_array_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+							(set (local next) (call intern_fixed_array (local shape) (borrow-mut (local records)) (local next)))))
+					(set (local index) (call next_layout_node (borrow-shared (local nodes)) (local index) (local declaration) (local ordinary)))))
+			(return (local next))))
 
 	(fn record_index
 		(:doc `Recover the checked defining row from a named record type.`)
@@ -307,7 +419,7 @@
 					(if (i32.eq (local declared) (i32 0)) (then (return (i32 -1))))
 					(if
 						(:doc "Match the defining row in a graph or the original spelling in a single file.")
-						(bool.and (i32.eq (local owner) (record.get (local record) file))
+						(bool.and (bool.and (i32.lt (i32 0) (local declared)) (i32.eq (local owner) (record.get (local record) file)))
 							(bool.or
 								(bool.and (local has_declaration)
 									(i32.eq (local declaration) (record.get (local record) declaration)))
@@ -331,7 +443,12 @@
 				(then (return (local scalar))))
 			(let name (slice.load (local nodes) (local index)))
 			(if
-				(:doc "A compound type or a quoted name cannot name a local record.")
+				(:doc "A supported compound value type resolves through the structural layout table.")
+				(u32.eq (record.get (local name) kind) (u32 40))
+				(then (return (call fixed_array_type (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (local name)))))
+			(if
+				(:doc "A quoted name cannot name a local record.")
 				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
 				(then (return (u32 0))))
 			(let found (call find_record (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -426,9 +543,23 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 			(return (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) operands)))))
 
+	(fn member_value_type
+		(:doc `Resolve a Wove field's scalar or fixed-array value type.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(records (shared-slice ScalarRecord)) (member SourceNode))
+		(returns u32)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+			(let index (record.get (local parts) operands))
+			(let type (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local index)))
+			(if (u32.lt (u32 0) (local type)) (then (return (local type))))
+			(return (call fixed_array_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (slice.load (local nodes) (local index))))))
+
 	(fn find_member
 		(:doc `Resolve a member in the checked prefix of a record's field list.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (count i32) (name SourceNode))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(first i32) (count i32) (name SourceNode))
 		(returns ScalarMember)
 		(body
 			(let-mut field (local first))
@@ -443,7 +574,8 @@
 						(:doc "Native naming does not affect member lookup.")
 						(call same_name (borrow-shared (local source)) (local head) (local name))
 						(then (return (record.make ScalarMember (ordinal (local ordinal))
-							(type (call member_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local item))) (row (local field))))))
+							(type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (local item))) (row (local field))))))
 					(set (local field) (record.get (local item) next_sibling))
 					(set (local ordinal) (i32.add.wrapping (local ordinal) (i32 1)))))
 			(return (record.make ScalarMember (ordinal (i32 -1)) (type (u32 0)) (row (i32 -1))))))
@@ -484,7 +616,8 @@
 					(let prior (slice.load (local records) (local previous)))
 					(if
 						(:doc "Distinguish a repeated name in this file from a stable identity collision.")
-						(u32.eq (local identity) (record.get (local prior) identity))
+						(bool.and (bool.not (call is_fixed_array (local prior)))
+							(u32.eq (local identity) (record.get (local prior) identity)))
 						(then
 							(let earlier (slice.load (local nodes) (record.get (local prior) name)))
 							(if
@@ -515,12 +648,13 @@
 						(then (return (local checked))))
 					(let field_type (record.get (local checked) operand))
 					(if
-						(:doc "Copyable fields use one of the four exact scalar types.")
-						(u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local field_type)) (u32 0))
+						(:doc "A Wove field contains a scalar or a previously discovered fixed layout.")
+						(u32.eq (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+							(borrow-shared (local records)) (local member)) (u32 0))
 						(then (return (call entry_at (slice.load (local nodes) (local field_type)) (i32 -1) (u32 23)))))
 					(let field_name (slice.load (local nodes) (record.get (local member) first_child)))
 					(let prior (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local first) (local count) (local field_name)))
+						(borrow-shared (local records)) (local first) (local count) (local field_name)))
 					(if
 						(:doc "Each spelling occupies one native member position.")
 						(bool.not (i32.lt (record.get (local prior) ordinal) (i32 0)))
@@ -549,9 +683,15 @@
 				(i32.lt (local index) (local count))
 				(body
 					(let form (i32.add.wrapping (local base) (record.get (slice.load (local declarations) (local index)) node)))
+					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
+					(if
+						(:doc "Checked function and struct declarations can mention anonymous fixed layouts.")
+						(bool.or (u32.eq (local kind) (u32 1)) (u32.eq (local kind) (u32 48)))
+						(then (set (local next) (call register_fixed_arrays (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local form) (borrow-mut (local records)) (local next)))))
 					(if
 						(:doc "Only struct declarations populate the type namespace.")
-						(u32.eq (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)) (u32 48))
+						(u32.eq (local kind) (u32 48))
 						(then
 							(let checked (call register_record (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local form) (local file) (local base) (local module) (borrow-mut (local records)) (local next)))
