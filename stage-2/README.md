@@ -576,9 +576,10 @@ of a C variadic function. The named parameter follows at least one fixed
 parameter. Every Wove argument is required, including the named tail and
 all parameters that follow it. The tail keeps its declared Wove types
 through checking and capture. The emitter verifies the fixed prefix
-and result against the header's variadic prototype and lets Clang apply
-the target C ABI's default argument promotions at the call. This
-includes `open` and `openat` with the native `Mode` alias. Repeated
+and result against the header's variadic prototype. Fixed C byte views
+accept compatible void or character pointers with their access mode.
+Clang applies the target C ABI's default argument promotions at the call.
+This includes `open` and `openat` with the native `Mode` alias. Repeated
 boundaries must agree. A named boundary and `c_macro` cannot share a
 declaration.
 

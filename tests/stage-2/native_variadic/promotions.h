@@ -21,4 +21,24 @@ static inline int32_t test_promotions(int32_t fixed, ...) {
 		wide == UINT32_MAX && text[0] == '*' && text[1] == '\0' ? 42 : 1;
 }
 
+// Read a typed shared byte pointer and the promoted integer from the tail.
+static inline int32_t read_first(const uint8_t *bytes, int32_t count, ...) {
+	va_list args;
+	va_start(args, count);
+	int expected = va_arg(args, int);
+	va_end(args);
+	return count == 1 && bytes[0] == expected ? 42 : 1;
+}
+
+// Copy through mixed byte pointer types with independent access qualifiers.
+static inline int32_t copy_first(const volatile signed char *bytes, char *target, int32_t count, ...) {
+	va_list args;
+	va_start(args, count);
+	int expected = va_arg(args, int);
+	va_end(args);
+	if (count != 1 || bytes[0] != expected) { return 1; }
+	target[0] = (char)bytes[0];
+	return 42;
+}
+
 #endif
