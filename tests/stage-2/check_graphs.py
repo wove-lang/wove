@@ -46,15 +46,21 @@ def read_cases(manifest):
 			assets.append((path, b"" if contents == "-" else bytes.fromhex(contents)))
 		elif kind == "native" and label is not None:
 			status, *flags = fields
-			native = flags, [(int(status), [], b"")]
+			native = flags, [(int(status), [], None, b"", b"")]
 		# Runtime traps use the same native recipe with exact stderr.
 		elif kind == "native-trap" and label is not None:
 			diagnostic, *flags = fields
-			native = flags, [(1, [], json.loads(diagnostic).encode("utf-8"))]
-		# Additional vectors reuse the compiled artifact and preserve empty arguments.
+			native = flags, [(1, [], None, b"", json.loads(diagnostic).encode("utf-8"))]
+		# Additional vectors may supply a display name independent of the executable.
 		elif kind == "native-argv" and native is not None:
-			status, argv = fields
-			native[1].append((int(status), json.loads(argv), b""))
+			status, argv, *display = fields
+			argv0, = display or ["null"]
+			native[1].append((int(status), json.loads(argv), json.loads(argv0), b"", b""))
+		# A program that reports results can attach expected streams to any invocation.
+		elif kind == "native-output" and native is not None:
+			stdout, stderr = (json.loads(field).encode("utf-8") for field in fields)
+			status, argv, argv0, _, _ = native[1][-1]
+			native[1][-1] = (status, argv, argv0, stdout, stderr)
 		# A native behavior case may assert just the probe’s leading rows.
 		elif kind in {"expect", "expect-prefix"} and label is not None:
 			prefix = prefix or kind == "expect-prefix"
@@ -82,9 +88,10 @@ def check_native(probe, label, emitted, fixture_flags, executions):
 		command = [*compiler, "-std=c11", *flags, "-I", "runtime", *fixture_flags, str(generated), runtime, "-o", str(program)]
 		subprocess.run(command, check=True, timeout=30)
 		# Reuse the compiled fixture for every supplied argument vector.
-		for expected, argv, diagnostic in executions:
-			result = subprocess.run([program, *argv], capture_output=True, timeout=30)
-			assert (result.returncode, result.stdout, result.stderr) == (expected, b"", diagnostic), (label, result)
+		for expected, argv, argv0, stdout, stderr in executions:
+			result = subprocess.run([program if argv0 is None else argv0, *argv],
+				executable=program, capture_output=True, timeout=30)
+			assert (result.returncode, result.stdout, result.stderr) == (expected, stdout, stderr), (label, result)
 
 
 # Materialize supplied assets for emission and move them before native verification.
