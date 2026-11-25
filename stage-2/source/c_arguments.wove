@@ -8,13 +8,13 @@
 
 	(use wove-file "./scan.wove" (only (type SourceNode)))
 	(use wove-file "./module.wove" (only form_parts source_keyword (type FormParts)))
-	(use wove-file "./types.wove" (only source_builtin_type is_builtin_integer))
+	(use wove-file "./types.wove" (only source_builtin_type))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "../c/arguments.wove"
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode))
 
-	(struct CArgument (fields (mode u8) (size i32) (count i32)))
+	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool)))
 	(struct CArguments (fields (strings i32) (bytes i32) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
 	(struct CFormal (fields (position i32) (type_node i32) (start i32) (end i32)))
 
@@ -108,21 +108,23 @@
 		(body (return (record.make CFormal (position (local position)) (type_node (local type_node))
 			(start (record.get (local site) start)) (end (record.get (local site) end))))))
 
-	(fn accepts_c_formal
-		(:doc `Check a signature-validated type against its contract role.
+	(fn mark_c_integer_argument
+		(:doc `Mark a resolved integer formal before reading argument adaptations.`)
+		(params (contracts (mut-slice CArgument)) (index i32))
+		(returns void)
+		(body
+			(slice.store (local contracts) (local index)
+				(record.make CArgument (mode (call c_value_mode)) (size (i32 0)) (count (i32 0)) (integer (bool true))))))
 
-		Only a native integer alias can be a bare name outside the built-ins
-		at this point. Owned resources require a compound shared-ref type.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (type SourceNode) (mode u8))
+	(fn accepts_c_formal
+		(:doc `Check a resolved formal against the requested native argument role.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (type SourceNode) (mode u8) (formal CArgument))
 		(returns bool)
 		(body
 			(if
-				(:doc "Extent operands need one of the supported integer types.")
+				(:doc "Both extent operands must have resolved to integer types.")
 				(call is_c_value_mode (local mode))
-				(then
-					(let scalar (call source_builtin_type (borrow-shared (local source)) (local type)))
-					(return (bool.or (call is_builtin_integer (local scalar))
-						(bool.and (u32.eq (local scalar) (u32 0)) (u32.eq (record.get (local type) kind) (u32 1)))))))
+				(then (return (record.get (local formal) integer))))
 			(let view (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
 			(return (bool.or (u32.eq (local view) (u32 34))
 				(bool.and (call is_c_bytes_mode (local mode)) (u32.eq (local view) (u32 38)))))))
@@ -157,7 +159,8 @@
 
 	(fn find_c_formal
 		(:doc `Check the named formal's type for the requested argument adaptation.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (name SourceNode) (mode u8))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (name SourceNode) (mode u8)
+			(contracts (shared-slice CArgument)))
 		(returns CFormal)
 		(body
 			(let formal (call find_named_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local first) (local name)))
@@ -169,7 +172,8 @@
 					(let type (slice.load (local nodes) (local type_node)))
 					(if
 						(:doc "An incompatible formal points to its declared type.")
-						(bool.not (call accepts_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (local mode)))
+						(bool.not (call accepts_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (local mode)
+							(slice.load (local contracts) (record.get (local formal) position))))
 						(then (return (call c_formal (i32 -1) (i32 -1) (local type)))))))
 			(return (local formal))))
 
@@ -193,7 +197,7 @@
 						(then (return (call checked_c_arguments (i32 0) (i32 0) (bool false) (i32 0)))))
 					(return (call c_argument_error (record.get (local formal) start) (record.get (local formal) end)))))
 			(slice.store (local contracts) (local index)
-				(record.make CArgument (mode (local mode)) (size (local size)) (count (local count))))
+				(record.make CArgument (mode (local mode)) (size (local size)) (count (local count)) (integer (record.get (local prior) integer))))
 			(if
 				(:doc "Each bounded pointer contributes one extent check.")
 				(call is_c_bytes_mode (local mode))
@@ -219,7 +223,7 @@
 					(bool.not (i32.lt (record.get (slice.load (local nodes) (local third)) next_sibling) (i32 0))))
 				(then (return (call c_argument_error_at (local directive)))))
 			(let view (call find_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local first) (local data) (call c_bytes_mode)))
+				(local first) (local data) (call c_bytes_mode) (borrow-shared (local contracts))))
 			(if
 				(:doc "Preserve the byte view's lookup or type diagnostic.")
 				(i32.lt (record.get (local view) position) (i32 0))
@@ -231,7 +235,7 @@
 				(bool.not (i32.lt (local third) (i32 0)))
 				(then
 					(let found (call find_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local first) (slice.load (local nodes) (local second)) (call c_value_mode)))
+						(local first) (slice.load (local nodes) (local second)) (call c_value_mode) (borrow-shared (local contracts))))
 					(if
 						(:doc "Report an invalid size at its name or formal type.")
 						(i32.lt (record.get (local found) position) (i32 0))
@@ -239,7 +243,7 @@
 					(set (local size) (record.get (local found) position))
 					(set (local count_node) (local third))))
 			(let count (call find_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local first) (slice.load (local nodes) (local count_node)) (call c_value_mode)))
+				(local first) (slice.load (local nodes) (local count_node)) (call c_value_mode) (borrow-shared (local contracts))))
 			(if
 				(:doc "Report an invalid count at its name or formal type.")
 				(i32.lt (record.get (local count) position) (i32 0))
@@ -261,7 +265,7 @@
 				(body
 					(let name (slice.load (local nodes) (local index)))
 					(let formal (call find_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local first) (local name) (local mode)))
+						(local first) (local name) (local mode) (borrow-shared (local contracts))))
 					(if
 						(:doc "Preserve the first invalid string formal at its own span.")
 						(i32.lt (record.get (local formal) position) (i32 0))
@@ -355,7 +359,9 @@
 				(local first) (local begin) (local mode) (borrow-mut (local contracts))))))
 
 	(fn read_c_arguments
-		(:doc `Read bridge metadata into one zeroed contract slot per checked formal.
+		(:doc `Read bridge metadata into one contract slot per checked formal.
+
+		The caller marks slots for resolved integer formals before applying pragmas.
 
 		Every accepted byte view needs an explicit native lowering contract.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function FormParts)
