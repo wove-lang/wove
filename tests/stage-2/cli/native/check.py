@@ -29,6 +29,7 @@ def prepare_binary(root, clang, options, target):
 	# The fixture controls whether the probe delegates or writes a failed partial stage.
 	if "tool_status" in options:
 		env["WOVE_CLANG_STATUS"] = str(options["tool_status"])
+		env["WOVE_CLANG_OUTPUT"] = options.get("tool_output", "partial")
 	return env, previous
 
 
@@ -52,7 +53,7 @@ def check_binary(root, options, target, retained, value, diagnostic, result, pat
 	binary = root / target
 	# A failed build must preserve both the previously published bytes and its result.
 	if diagnostic != "-":
-		assert binary.read_bytes() == previous
+		assert not binary.is_symlink() and binary.read_bytes() == previous
 		assert json.loads(result.stderr) == json.loads(diagnostic), result.stderr
 	else:
 		assert not result.stderr, result.stderr

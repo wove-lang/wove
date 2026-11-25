@@ -1059,9 +1059,10 @@ graph emits as one retained C translation unit.
 
 `bin` launches Clang once with the selected profile's native options and
 a private copy of the generated unit containing the packaged runtime.
-It uses `clang` from PATH or the executable named by `CLANG`. On success
-it renames the staged executable onto the output target. On tool failure
-it reports the status and leaves any previous executable in place.
+It uses `clang` from PATH or the executable named by `CLANG`. After Clang
+succeeds, it checks that the staged output is a regular executable before
+renaming it onto the target. On tool failure it reports the status and
+leaves any previous executable in place.
 The driver keeps optional Clang side outputs, such as a Darwin debug
 bundle, in a private per-build directory beside retained C when possible.
 
