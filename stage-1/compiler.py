@@ -88,6 +88,19 @@ class BufferType:
 Type = str | Record | BufferType
 
 
+_BYTE_VIEW = BufferType(SHARED, U8)
+_BYTE_OUTPUT = BufferType(MUT, U8)
+# Only the private bootstrap host ABI bypasses ordinary Wove name lookup.
+BOOTSTRAP_CALLS: dict[str, tuple[tuple[Type, ...], Type]] = {
+	"bootstrap_canonical_path": ((_BYTE_VIEW, _BYTE_OUTPUT), I32),
+	"bootstrap_file": ((_BYTE_VIEW, _BYTE_OUTPUT), I32),
+	"bootstrap_same_file": ((_BYTE_VIEW, _BYTE_VIEW), BOOL),
+	"bootstrap_write": ((_BYTE_VIEW, BOOL), BOOL),
+	"bootstrap_os": ((), U8),
+	"bootstrap_arch": ((), U8),
+}
+
+
 @dataclass(frozen=True)
 class Value:
 	kind: Type
@@ -496,24 +509,40 @@ class FunctionEmitter:
 		if not node.operands:
 			raise SourceError(node.line)
 		name, *args = node.operands
-		callee = self.functions.get(identifier(name))
-		# Resolve the signature before pairing arguments with parameters.
-		if callee is None or callee.is_entry or len(args) != len(callee.params):
+		symbol = identifier(name)
+		callee = self.functions.get(symbol)
+		# The fixed host calls apply only when ordinary Wove lookup has no binding.
+		if callee is None:
+			bootstrap = BOOTSTRAP_CALLS.get(symbol)
+			# Keep arbitrary C functions outside the seed's bootstrap surface.
+			if bootstrap is None:
+				raise SourceError(node.line)
+			parameters, return_type = bootstrap
+			c_name = f"wvrt_{symbol}"
+		else:
+			# Neither representation of the root entry is a callable Wove helper.
+			if callee.is_entry:
+				raise SourceError(node.line)
+			parameters = tuple(kind for _, kind in callee.params)
+			return_type = callee.result
+			c_name = callee.c_name
+		# Resolve the exact signature before evaluating any argument.
+		if len(args) != len(parameters):
 			raise SourceError(node.line)
 		checkpoint = len(self.loans)
 		values = []
 		# Each argument may acquire a loan that constrains later arguments.
-		for argument, (_, kind) in zip(args, callee.params):
+		for argument, kind in zip(args, parameters):
 			value = self.borrow(argument, kind) if isinstance(kind, BufferType) else self.typed(argument, kind)
 			values.append(value.c)
-		expression = f"{callee.c_name}({', '.join(values)})"
+		expression = f"{c_name}({', '.join(values)})"
 		# A void call is a statement and supplies no C value to a consumer.
-		if callee.result == VOID:
+		if return_type == VOID:
 			self.emit_line(f"{expression};")
 			result = Value(VOID, "")
 		# Value-returning calls capture their result before the next operation.
 		else:
-			result = self.temporary(callee.result, expression)
+			result = self.temporary(return_type, expression)
 		del self.loans[checkpoint:]
 		return result
 

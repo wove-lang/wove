@@ -1,0 +1,317 @@
+(module bootstrap_disk_graph
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Load the selected compiler-entry graph with the seed's bounded POSIX file ABI.
+
+	The shared resolver selects every edge. This module supplies file bytes,
+	identities, and edge rows, then sends the graph to the shared emitter.`)
+
+	(use wove-file "./files.wove" (only measure_file read_file_range))
+	(use wove-file "./emit.wove" (only emit_bootstrap_graph report_bootstrap))
+	(use wove-file "../paths.wove" (only write_file_path))
+	(use wove-file "../bundled_paths.wove" (only
+		(value stdlib_path) (value stdio_path) (value unistd_path) (value spawn_path)
+		(value fcntl_path) (value errno_path) (value sys_stat_path) (value sys_wait_path)))
+	(use wove-file "../../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../../source/graph.wove" (only resolve_disk_graph (type GraphModule) (type GraphUse)
+		(type GraphSelector) (type GraphBinding) (type GraphResult) (type DiskEdge)))
+	(use wove-file "../../source/target.wove" (only (type SelectionContext)))
+	(use wove-file "../../source/scan.wove" (only (type Token)))
+	(use wove-file "../../source/strings.wove" (only decode_string))
+	(use wove-file "../../text/copy.wove" (only append_bytes))
+
+	(struct DiskProgress (fields (bytes i32) (files i32) (edges i32) (error u32)))
+
+	(fn load_file
+		(:doc `Register one disk snapshot under its canonical or bundled virtual path.`)
+		(params (physical (shared-slice u8)) (logical (shared-slice u8)) (start i32) (index i32) (bundled bool)
+			(arena (mut-slice u8)) (files (mut-slice SuppliedFile))) (returns i32)
+		(body
+			(if
+				(:doc `A short arena or table requests a larger workspace before writing anything.`)
+				(bool.or (i32.eq (local start) -2i32) (bool.not (i32.lt (local index) (slice.len (local files)))))
+				(then (return -2i32)))
+			(if (i32.lt (local start) 0i32) (then (return -1i32)))
+			(let width (slice.len (local logical)))
+			(let size (call measure_file (borrow-shared (local physical))))
+			(if (i32.lt (local size) 0i32) (then (return -1i32)))
+			(let room (i32.sub.wrapping (slice.len (local arena)) (local start)))
+			(if
+				(:doc `Subtract each component before computing the end offsets.`)
+				(bool.or (i32.lt (local room) (local width))
+					(i32.lt (i32.sub.wrapping (local room) (local width)) (local size)))
+				(then (return -2i32)))
+			(let source (i32.add.wrapping (local start) (local width)))
+			(let end (i32.add.wrapping (local source) (local size)))
+			(if
+				(:doc `Failed or changed files are never exposed as initialized rows.`)
+				(bool.not (call read_file_range (borrow-shared (local physical)) (local source) (local end)
+					(borrow-mut (local arena))))
+				(then (return -1i32)))
+			(let copied (call append_bytes (borrow-shared (local logical)) (borrow-mut (local arena)) (local start)))
+			(slice.store (local files) (local index)
+				(record.make SuppliedFile (identity (local index)) (path_start (local start)) (path_end (local copied))
+					(source_start (local source)) (source_end (local end)) (bundled (local bundled))))
+			(return (local end))))
+
+	(fn load_bundle_file
+		(:doc `Read a checked-in C provider beside the compiler entry and retain its virtual identity.`)
+		(params (entry (shared-slice u8)) (logical (shared-slice u8)) (start i32) (index i32)
+			(arena (mut-slice u8)) (files (mut-slice SuppliedFile))) (returns i32)
+		(body
+			(if (i32.lt (local start) 0i32) (then (return (local start))))
+			(let-mut empty (array.alloc u8 0i32))
+			(let width (call write_file_path (borrow-shared (local entry))
+				(borrow-shared (slice.range (local logical) 1i32 (slice.len (local logical)))) (borrow-mut (local empty))))
+			(if (i32.lt (local width) 0i32) (then (return -1i32)))
+			(let-mut path (array.alloc u8 (local width)))
+			(let sized (call write_file_path (borrow-shared (local entry))
+				(borrow-shared (slice.range (local logical) 1i32 (slice.len (local logical)))) (borrow-mut (local path))))
+			(return (call load_file (borrow-shared (slice.range (local path) 0i32 (local sized))) (borrow-shared (local logical)) (local start)
+				(local index) (bool true) (borrow-mut (local arena)) (borrow-mut (local files))))))
+
+	(fn initial_files
+		(:doc `Keep the source row and bundled header identities in the same order as the native compiler.`)
+		(params (entry (shared-slice u8)) (arena (mut-slice u8)) (files (mut-slice SuppliedFile))) (returns i32)
+		(body
+			(let root (call load_file (borrow-shared (local entry)) (borrow-shared (local entry)) 0i32 0i32
+				(bool false) (borrow-mut (local arena)) (borrow-mut (local files))))
+			(let stdlib (call load_bundle_file (borrow-shared (local entry)) (borrow-shared (local stdlib_path)) (local root) 1i32
+				(borrow-mut (local arena)) (borrow-mut (local files))))
+			(let stdio (call load_bundle_file (borrow-shared (local entry)) (borrow-shared (local stdio_path)) (local stdlib) 2i32
+				(borrow-mut (local arena)) (borrow-mut (local files))))
+			(let unistd (call load_bundle_file (borrow-shared (local entry)) (borrow-shared (local unistd_path)) (local stdio) 3i32
+				(borrow-mut (local arena)) (borrow-mut (local files))))
+			(let spawn (call load_bundle_file (borrow-shared (local entry)) (borrow-shared (local spawn_path)) (local unistd) 4i32
+				(borrow-mut (local arena)) (borrow-mut (local files))))
+			(let fcntl (call load_bundle_file (borrow-shared (local entry)) (borrow-shared (local fcntl_path)) (local spawn) 5i32
+				(borrow-mut (local arena)) (borrow-mut (local files))))
+			(let errno (call load_bundle_file (borrow-shared (local entry)) (borrow-shared (local errno_path)) (local fcntl) 6i32
+				(borrow-mut (local arena)) (borrow-mut (local files))))
+			(let stat (call load_bundle_file (borrow-shared (local entry)) (borrow-shared (local sys_stat_path)) (local errno) 7i32
+				(borrow-mut (local arena)) (borrow-mut (local files))))
+			(return (call load_bundle_file (borrow-shared (local entry)) (borrow-shared (local sys_wait_path)) (local stat) 8i32
+				(borrow-mut (local arena)) (borrow-mut (local files))))))
+
+	(fn copy_files
+		(:doc `Provide only initialized file descriptors to the resolver.`)
+		(params (source (shared-slice SuppliedFile)) (files (mut-slice SuppliedFile))) (returns void)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc `The destination covers exactly the known file count.`)
+				(i32.lt (local index) (slice.len (local files)))
+				(body
+					(slice.store (local files) (local index) (slice.load (local source) (local index)))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))))
+
+	(fn copy_edges
+		(:doc `Provide only initialized disk edges to the resolver.`)
+		(params (source (shared-slice DiskEdge)) (edges (mut-slice DiskEdge))) (returns void)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc `The destination covers exactly the known edge count.`)
+				(i32.lt (local index) (slice.len (local edges)))
+				(body
+					(slice.store (local edges) (local index) (slice.load (local source) (local index)))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))))
+
+	(fn find_file
+		(:doc `Reuse the first stored identity for hard links and symbolic aliases.`)
+		(params (path (shared-slice u8)) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (count i32))
+		(returns i32)
+		(body
+			(let-mut row 0i32)
+			(while
+				(:doc `Bundled rows name virtual providers and never shadow disk files.`)
+				(i32.lt (local row) (local count))
+				(body
+					(let file (slice.load (local files) (local row)))
+					(if
+						(:doc `The fixed host operation compares the complete native device and inode.`)
+						(bool.and (bool.not (record.get (local file) bundled))
+							(call bootstrap_same_file (borrow-shared (local path))
+								(borrow-shared (slice.range (local arena) (record.get (local file) path_start)
+									(record.get (local file) path_end)))))
+						(then (return (local row))))
+					(set (local row) (i32.add.wrapping (local row) 1i32))))
+			(return -1i32)))
+
+	(fn progress
+		(:doc `Keep the initialized prefixes and first failure together.`)
+		(params (bytes i32) (files i32) (edges i32) (error u32)) (returns DiskProgress)
+		(body (return (record.make DiskProgress (bytes (local bytes)) (files (local files))
+			(edges (local edges)) (error (local error))))))
+
+	(fn commit_edge
+		(:doc `Bind one selected use to a canonical file, loading its bytes only for a new identity.`)
+		(params (canonical (shared-slice u8)) (request GraphResult) (used DiskProgress) (arena (mut-slice u8))
+			(files (mut-slice SuppliedFile)) (edges (mut-slice DiskEdge))) (returns DiskProgress)
+		(body
+			(let-mut count (record.get (local used) files))
+			(let-mut end (record.get (local used) bytes))
+			(let edge (record.get (local used) edges))
+			(let-mut target (call find_file (borrow-shared (local canonical)) (borrow-shared (local arena))
+				(borrow-shared (local files)) (local count)))
+			(if
+				(:doc `A new defining file is published only when its full snapshot fits.`)
+				(i32.lt (local target) 0i32)
+				(then
+					(set (local target) (local count))
+					(set (local end) (call load_file (borrow-shared (local canonical)) (borrow-shared (local canonical))
+						(local end) (local target) (bool false) (borrow-mut (local arena)) (borrow-mut (local files))))
+					(if (i32.eq (local end) -2i32) (then (return (call progress 0i32 0i32 0i32 16u32))))
+					(if (i32.lt (local end) 0i32) (then (return (call progress 0i32 0i32 0i32 27u32))))
+					(set (local count) (i32.add.wrapping (local count) 1i32))))
+			(slice.store (local edges) (local edge)
+				(record.make DiskEdge (file (record.get (local request) file)) (start (record.get (local request) start))
+					(target (local target))))
+			(return (call progress (local end) (local count) (i32.add.wrapping (local edge) 1i32) 0u32))))
+
+	(fn load_edge
+		(:doc `Decode and resolve the one file path requested by the shared graph walker.`)
+		(params (request GraphResult) (used DiskProgress) (arena (mut-slice u8))
+			(files (mut-slice SuppliedFile)) (edges (mut-slice DiskEdge))) (returns DiskProgress)
+		(body
+			(if
+				(:doc `Reserve an edge slot before opening the selected provider.`)
+				(i32.eq (record.get (local used) edges) (slice.len (local edges)))
+				(then (return (call progress 0i32 0i32 0i32 16u32))))
+			(let importer (slice.load (local files) (record.get (local request) file)))
+			(let start (record.get (local request) path_start))
+			(let finish (record.get (local request) path_end))
+			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local finish) (local start))))
+			(let path (call decode_edge_path (borrow-shared (local arena)) (local importer) (local start) (local finish)
+				(borrow-mut (local decoded))))
+			(if (i32.lt (local path) 0i32) (then (return (call progress 0i32 0i32 0i32 27u32))))
+			(let-mut empty (array.alloc u8 0i32))
+			(let size (call edge_path (borrow-shared (local arena)) (local importer)
+				(borrow-shared (slice.range (local decoded) 0i32 (local path))) (borrow-mut (local empty))))
+			(if (i32.lt (local size) 0i32) (then (return (call progress 0i32 0i32 0i32 27u32))))
+			(let-mut joined (array.alloc u8 (local size)))
+			(let written (call edge_path (borrow-shared (local arena)) (local importer)
+				(borrow-shared (slice.range (local decoded) 0i32 (local path))) (borrow-mut (local joined))))
+			(let width (call bootstrap_canonical_path (borrow-shared (slice.range (local joined) 0i32 (local written))) (borrow-mut (local empty))))
+			(if (i32.lt (local width) 1i32) (then (return (call progress 0i32 0i32 0i32 27u32))))
+			(let-mut canonical (array.alloc u8 (local width)))
+			(let resolved (call bootstrap_canonical_path (borrow-shared (slice.range (local joined) 0i32 (local written))) (borrow-mut (local canonical))))
+			(if
+				(:doc `Reject a change between measuring and copying the canonical spelling.`)
+				(bool.not (i32.eq (local resolved) (local width)))
+				(then (return (call progress 0i32 0i32 0i32 27u32))))
+			(return (call commit_edge (borrow-shared (local canonical)) (local request) (local used)
+				(borrow-mut (local arena)) (borrow-mut (local files)) (borrow-mut (local edges))))))
+
+	(fn decode_edge_path
+		(:doc `Decode the use token in the importing file's own byte view.`)
+		(params (arena (shared-slice u8)) (importer SuppliedFile) (start i32) (end i32)
+			(output (mut-slice u8))) (returns i32)
+		(body
+			(let result (call decode_string
+				(borrow-shared (slice.range (local arena) (record.get (local importer) source_start)
+					(record.get (local importer) source_end)))
+				(record.make Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32)) (borrow-mut (local output))))
+			(if (u32.lt 0u32 (record.get (local result) error)) (then (return -1i32)))
+			(return (record.get (local result) written))))
+
+	(fn edge_path
+		(:doc `Use the importing path's directory before performing POSIX canonical lookup.`)
+		(params (arena (shared-slice u8)) (importer SuppliedFile) (request (shared-slice u8))
+			(output (mut-slice u8))) (returns i32)
+		(body (return (call write_file_path
+			(borrow-shared (slice.range (local arena) (record.get (local importer) path_start) (record.get (local importer) path_end)))
+			(borrow-shared (local request)) (borrow-mut (local output))))))
+
+	(fn resolve_edges
+		(:doc `Use the shared native-selection walker on the current immutable byte prefix.`)
+		(params (arena (shared-slice u8)) (length i32) (files (shared-slice SuppliedFile))
+			(edges (shared-slice DiskEdge)) (modules (mut-slice GraphModule)) (bindings (mut-slice GraphBinding))
+			(uses (mut-slice GraphUse)) (selectors (mut-slice GraphSelector))) (returns GraphResult)
+		(body (return (call resolve_disk_graph (borrow-shared (slice.range (local arena) 0i32 (local length)))
+			(borrow-shared (local files)) 0i32
+			(record.make SelectionContext (mode 0u32) (os (call bootstrap_os)) (arch (call bootstrap_arch)) (deployment -1i32))
+			(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
+			(borrow-mut (local selectors)) (borrow-shared (local edges))))))
+
+	(fn walk_disk
+		(:doc `Add one active edge per successful resolver request and emit only a complete graph.`)
+		(params (arena (mut-slice u8)) (files (mut-slice SuppliedFile)) (edges (mut-slice DiskEdge))
+			(initial i32) (capacity i32)) (returns i32)
+		(body
+			(let-mut used_bytes (local initial))
+			(let-mut used_files 9i32)
+			(let-mut used_edges 0i32)
+			(while
+				(:doc `Each iteration either publishes an edge, detects an error, or emits the resolved source.`)
+				(bool true)
+				(body
+					(let-mut input (array.alloc SuppliedFile (local used_files)))
+					(call copy_files (borrow-shared (local files)) (borrow-mut (local input)))
+					(let-mut targets (array.alloc DiskEdge (local used_edges)))
+					(call copy_edges (borrow-shared (local edges)) (borrow-mut (local targets)))
+					(let-mut modules (array.alloc GraphModule (local used_files)))
+					(let-mut bindings (array.alloc GraphBinding (local capacity)))
+					(let-mut uses (array.alloc GraphUse (local capacity)))
+					(let-mut selectors (array.alloc GraphSelector (local capacity)))
+					(let result (call resolve_edges (borrow-shared (local arena)) (local used_bytes)
+						(borrow-shared (local input)) (borrow-shared (local targets)) (borrow-mut (local modules))
+						(borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))))
+					(let error (record.get (local result) error))
+					(if
+						(:doc `The same emitter consumes the same published file and binding identities as native cc.`)
+						(u32.eq (local error) 0u32)
+						(then (return (call emit_bootstrap_graph (borrow-shared (local arena)) (local used_bytes)
+							(borrow-shared (local input)) (borrow-shared (local modules)) (borrow-shared (local bindings)) (local result)))))
+					(if (u32.eq (local error) 16u32) (then (return 2i32)))
+					(if
+						(:doc `A non-request failure is complete and retains its original source span.`)
+						(i32.lt (record.get (local result) path_start) 0i32)
+						(then (return (call report_bootstrap (borrow-shared (local arena)) (borrow-shared (local input))
+							(record.get (local result) file) (local error) (record.get (local result) start) (record.get (local result) end)))))
+					(let next (call load_edge (local result)
+						(call progress (local used_bytes) (local used_files) (local used_edges) 0u32)
+						(borrow-mut (local arena)) (borrow-mut (local files)) (borrow-mut (local edges))))
+					(let loaded (record.get (local next) error))
+					(if (u32.eq (local loaded) 16u32) (then (return 2i32)))
+					(if
+						(:doc `A file open failure refers to the use that originally requested the provider.`)
+						(u32.lt 0u32 (local loaded))
+						(then (return (call report_bootstrap (borrow-shared (local arena)) (borrow-shared (local input))
+							(record.get (local result) file) (local loaded) (record.get (local result) start) (record.get (local result) end)))))
+					(set (local used_bytes) (record.get (local next) bytes))
+					(set (local used_files) (record.get (local next) files))
+					(set (local used_edges) (record.get (local next) edges))))
+			(return 1i32)))
+
+	(fn compile_bootstrap_graph
+		(:doc `Drive bounded workspace growth from an explicit canonical compiler source entry.`)
+		(params (entry (shared-slice u8))) (returns i32)
+		(body
+			(let-mut bytes 1048576i32)
+			(let-mut file_count 128i32)
+			(let-mut edge_count 1024i32)
+			(let-mut scratch 8192i32)
+			(while
+				(:doc `The private compiler starts small for the real source tree and only grows on capacity errors.`)
+				(bool true)
+				(body
+					(let-mut arena (array.alloc u8 (local bytes)))
+					(let-mut files (array.alloc SuppliedFile (local file_count)))
+					(let-mut edges (array.alloc DiskEdge (local edge_count)))
+					(let initial (call initial_files (borrow-shared (local entry)) (borrow-mut (local arena)) (borrow-mut (local files))))
+					(let-mut status 2i32)
+					(if (i32.eq (local initial) -1i32) (then (return 1i32)))
+					(if
+						(:doc `Graph traversal starts only after the entry and bundled providers are readable.`)
+						(i32.lt -1i32 (local initial))
+						(then (set (local status) (call walk_disk (borrow-mut (local arena)) (borrow-mut (local files))
+							(borrow-mut (local edges)) (local initial) (local scratch)))))
+					(if (bool.not (i32.eq (local status) 2i32)) (then (return (local status))))
+					(if (i32.lt 1073741823i32 (local bytes)) (then (return 1i32)))
+					(set (local bytes) (i32.add.wrapping (local bytes) (local bytes)))
+					(set (local file_count) (i32.add.wrapping (local file_count) (local file_count)))
+					(set (local edge_count) (i32.add.wrapping (local edge_count) (local edge_count)))
+					(set (local scratch) (i32.add.wrapping (local scratch) (local scratch)))))
+			(return 1i32)))
+)
