@@ -16,6 +16,7 @@
 	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "./types.wove" (only source_builtin_type))
 	(use wove-file "./c_owners.wove" (only is_native_name check_c_type))
+	(use wove-file "./c_records.wove" (only is_c_record read_c_record))
 	(use wove-file "./c_arguments.wove" (only c_byte_slice_type read_c_arguments (type CArgument)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
@@ -255,6 +256,24 @@
 				(then (return (call c_member_error (local start) (local end) (u32 23)))))
 			(return (local resource))))
 
+	(fn read_c_named_field_type
+		(:doc `Resolve a native record field that names another view or a scalar alias in this bridge.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (context SelectionContext))
+		(returns CMemberRead)
+		(body
+			(if
+				(:doc "A field's representation is a bare scalar or record type name.")
+				(bool.not (u32.eq (record.get (local node) kind) (u32 1)))
+				(then (return (call c_member_error (record.get (local node) start) (record.get (local node) end) (u32 23)))))
+			(let type (call read_c_named_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local bridge) (local context)))
+			(if
+				(:doc "A record value cannot implicitly copy or destroy an embedded pointer owner.")
+				(bool.and (u32.eq (record.get (local type) error) (u32 0))
+					(i32.lt (i32 -1) (record.get (local type) drop_start)))
+				(then (return (call c_member_error (record.get (local node) start) (record.get (local node) end) (u32 23)))))
+			(return (local type))))
+
 	(fn read_c_result_type
 		(:doc `Use the built-in scalar code or resolve the named native result type.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (context SelectionContext))
@@ -264,8 +283,16 @@
 				(:doc "Scalar results need no resource declaration.")
 				(call is_c_scalar (borrow-shared (local source)) (local node))
 				(then (return (call c_member_error (i32 0) (i32 0) (u32 0)))))
-			(return (call read_c_named_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local node) (local bridge) (local context)))))
+			(let type (call read_c_named_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local bridge) (local context)))
+			(if
+				(:doc "Bridge record storage is supplied by reference in this ABI slice.")
+				(bool.and (u32.eq (record.get (local type) error) (u32 0))
+					(call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local nodes) (record.get (local type) declaration))))
+				(then (return (call c_member_error (record.get (local node) start) (record.get (local node) end) (u32 23)))))
+			(return (local type))))
+
 
 	(fn is_shared_ref_head
 		(:doc `Match the full shared-ref spelling at a parameter type's head.`)
@@ -287,17 +314,40 @@
 							(u8 45) (u8 114) (u8 101))
 							(call is_head_byte (borrow-shared (local source)) (local start) (i32 9) (u8 102)))))))))
 
-	(fn read_c_handle_parameter
-		(:doc `Read one shared reference to an active pointer resource in this C bridge.`)
+
+	(fn c_reference_mode
+		(:doc `Classify a bridge reference as shared (1), mutable (2), or absent (0).`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (head i32))
+		(returns u32)
+		(body
+			(if (i32.lt (local head) (i32 0)) (then (return (u32 0))))
+			(if
+				(:doc "Use the shared mode before checking the distinct mutable spelling.")
+				(call is_shared_ref_head (borrow-shared (local source)) (borrow-shared (local nodes)) (local head))
+				(then (return (u32 1))))
+			(let node (slice.load (local nodes) (local head)))
+			(let start (record.get (local node) start))
+			(if
+				(:doc "Match the complete mut-ref tag.")
+				(bool.and (i32.eq (i32.sub.wrapping (record.get (local node) end) (local start)) (i32 7))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 109) (u8 117) (u8 116))
+						(bool.and (call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3))
+							(u8 45) (u8 114) (u8 101))
+							(call is_head_byte (borrow-shared (local source)) (local start) (i32 6) (u8 102)))))
+				(then (return (u32 2))))
+			(return (u32 0))))
+
+	(fn read_c_reference_parameter
+		(:doc `Read a record reference or shared handle in its defining C bridge.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (context SelectionContext))
 		(returns CMemberRead)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-			(let head (record.get (local parts) head))
+			(let mode (call c_reference_mode (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
 			(let target (record.get (local parts) operands))
 			(if
-				(:doc "A shared handle parameter needs the shared-ref tag and exactly one type operand.")
-				(bool.or (bool.not (call is_shared_ref_head (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))
+				(:doc "A reference parameter needs a known access mode and exactly one type operand.")
+				(bool.or (u32.eq (local mode) (u32 0))
 					(bool.or (i32.lt (local target) (i32 0))
 						(bool.not (i32.lt (record.get (slice.load (local nodes) (local target)) next_sibling) (i32 0)))))
 				(then (return (call c_member_error (record.get (local node) start) (record.get (local node) end) (u32 23)))))
@@ -309,16 +359,22 @@
 					(record.get (local choice) error)))))
 			(let name (slice.load (local nodes) (local target)))
 			(if
-				(:doc "The referenced resource must be a bare name.")
+				(:doc "The referenced native type must be a bare name.")
 				(bool.not (u32.eq (record.get (local name) kind) (u32 1)))
 				(then (return (call c_member_error (record.get (local name) start) (record.get (local name) end) (u32 23)))))
 			(let checked (call read_c_named_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local name) (local bridge) (local context)))
+			(if (u32.lt (u32 0) (record.get (local checked) error)) (then (return (local checked))))
 			(if
-				(:doc "A copyable alias cannot be borrowed as a pointer owner.")
-				(bool.and (u32.eq (record.get (local checked) error) (u32 0)) (i32.lt (record.get (local checked) drop_start) (i32 0)))
-				(then (return (call c_member_error (record.get (local name) start) (record.get (local name) end) (u32 23)))))
-			(return (local checked))))
+				(:doc "Both access modes can reference the complete native record.")
+				(call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
+					(slice.load (local nodes) (record.get (local checked) declaration)))
+				(then (return (local checked))))
+			(if
+				(:doc "Pointer owners support shared loans that pass their existing pointer value.")
+				(bool.and (i32.lt (i32 -1) (record.get (local checked) drop_start)) (u32.eq (local mode) (u32 1)))
+				(then (return (local checked))))
+			(return (call c_member_error (record.get (local name) start) (record.get (local name) end) (u32 23)))))
 
 	(fn read_c_integer_parameter
 		(:doc `Resolve a native value parameter in the defining bridge without borrowing it.`)
@@ -328,14 +384,16 @@
 			(let checked (call read_c_named_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local bridge) (local context)))
 			(if
-				(:doc "Owned resources still require an explicit shared-ref parameter.")
+				(:doc "Native value parameters in this slice must be integer aliases.")
 				(bool.and (u32.eq (record.get (local checked) error) (u32 0))
-					(bool.not (i32.lt (record.get (local checked) drop_start) (i32 0))))
+					(bool.or (i32.lt (i32 -1) (record.get (local checked) drop_start))
+						(call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
+							(slice.load (local nodes) (record.get (local checked) declaration)))))
 				(then (return (call c_member_error (record.get (local node) start) (record.get (local node) end) (u32 23)))))
 			(return (local checked))))
 
 	(fn read_c_native_parameter
-		(:doc `Choose the named integer or shared handle check from the written parameter form.`)
+		(:doc `Choose the native value or reference check from the written parameter form.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (context SelectionContext))
 		(returns CMemberRead)
 		(body
@@ -344,7 +402,7 @@
 				(u32.eq (record.get (local node) kind) (u32 1))
 				(then (return (call read_c_integer_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local bridge) (local context)))))
-			(return (call read_c_handle_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
+			(return (call read_c_reference_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local bridge) (local context)))))
 
 	(fn read_c_function
@@ -467,6 +525,14 @@
 				(drop_start (record.get (local resource) drop_start)) (drop_end (record.get (local resource) drop_end))
 				(type_start (record.get (local resource) type_start)) (type_end (record.get (local resource) type_end))))))
 
+	(fn matches_c_member_tag
+		(:doc `Use the type selection tag for both aliases and record members.`)
+		(params (member u32) (requested u32))
+		(returns bool)
+		(body
+			(return (bool.or (u32.eq (local member) (local requested))
+				(bool.and (u32.eq (local member) (u32 7)) (u32.eq (local requested) (u32 6)))))))
+
 	(fn find_c_member
 		(:doc `Find an active member in the requested namespace under the defining bridge.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (bridge_row i32) (tag u32)
@@ -491,10 +557,11 @@
 						(u32.eq (local tag) (u32 6))
 						(then (set (local name) (record.get (local form) operands))))
 					(if
-						(:doc "Only members with the requested tag participate in the lookup.")
-						(bool.and (bool.not (i32.lt (local head) (i32 0)))
-							(bool.and (bool.not (i32.lt (local name) (i32 0)))
-								(u32.eq (call import_keyword (borrow-shared (local source)) (slice.load (local nodes) (local head))) (local tag))))
+						(:doc "Native aliases and record views share the C bridge's type namespace.")
+						(bool.and (i32.lt (i32 -1) (local name))
+							(bool.and (i32.lt (i32 -1) (local head))
+								(call matches_c_member_tag
+									(call import_keyword (borrow-shared (local source)) (slice.load (local nodes) (local head))) (local tag))))
 						(then
 							(let named (slice.load (local nodes) (local name)))
 							(let from (record.get (local named) start))
@@ -527,7 +594,7 @@
 			(return (record.make CMemberLookup (declaration (local found)) (start (i32 0)) (end (i32 0)) (error (u32 0))))))
 
 	(fn find_c_type
-		(:doc `Resolve a selected integer alias or pointer owner with its original native annotation.`)
+		(:doc `Resolve a selected native alias, pointer owner, or record with its original representation.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (bridge i32)
 			(spelling (shared-slice u8)) (start i32) (end i32) (context SelectionContext))
 		(returns CMemberRead)
@@ -541,6 +608,23 @@
 				(then (return (call c_member_error (record.get (local found) start) (record.get (local found) end)
 					(record.get (local found) error)))))
 			(let node (slice.load (local nodes) (local declaration)))
+			(if
+				(:doc "Record views contribute a C value type without a destructor.")
+				(call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))
+				(then
+					(let checked_record (call read_c_record (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(if
+						(:doc "A malformed record is diagnosed in the defining bridge.")
+						(u32.lt (u32 0) (record.get (local checked_record) error))
+						(then (return (call c_member_error (record.get (local checked_record) start)
+							(record.get (local checked_record) end) (record.get (local checked_record) error)))))
+					(let representation (slice.load (local nodes) (record.get (local checked_record) native)))
+					(return (record.make CMemberRead (declaration (local declaration))
+						(native_start (record.get (local representation) start)) (native_end (record.get (local representation) end))
+						(signature_start (record.get (local node) start)) (signature_end (record.get (local node) end))
+						(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))
+						(native_type (local declaration)) (drop_start (i32 -1)) (drop_end (i32 -1))
+						(type_start (record.get (local representation) start)) (type_end (record.get (local representation) end))))))
 			(let checked (call check_c_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(if
 				(:doc "The contract's invalid annotation lives in the defining source.")

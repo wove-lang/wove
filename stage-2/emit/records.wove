@@ -7,10 +7,24 @@
 	Type names keep the defining declaration identity across source layouts.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "../scalar/records.wove" (only record_index member_type is_record_type is_native_integer native_integer_index is_record_slice is_writable_slice is_array_owner (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only record_index member_type is_record_type is_native_integer native_integer_index is_record_slice is_writable_slice is_array_owner
+		is_native_record native_field_type is_record_reference is_mutable_record_reference record_reference_target (type ScalarRecord)))
 	(use wove-file "./owners.wove" (only write_bridge_result_type write_native_type))
 	(use wove-file "./runtime.wove" (only open_array_layout_query))
-	(use wove-file "./text.wove" (only c_byte c_type_text write_c_name record_name_role member_name_role))
+	(use wove-file "./text.wove" (only c_byte c_span c_type_text write_c_name record_name_role member_name_role))
+
+	(let c_const "const ")
+	(let c_member_check_open "_Static_assert(_Generic(((")
+	(let c_member_check_access "*)0)->")
+	(let c_member_check_close ":1,default:0),\"Wove C field type\");\n")
+
+	(fn write_record_text
+		(:doc `Append a complete fixed C fragment from immutable byte storage.`)
+		(params (text (shared-slice u8)) (output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(return (call c_span (borrow-shared (local text)) (i32 0) (slice.len (local text))
+				(borrow-mut (local output)) (local offset) (local writing)))))
 
 	(fn write_record_name
 		(:doc `Write the stable C typedef name of a checked record.`)
@@ -35,14 +49,34 @@
 				(then
 					(let row (slice.load (local records) (call native_integer_index (local type))))
 					(return (call write_native_type (borrow-shared (local source))
-						(slice.load (local nodes) (record.get (local row) first))
+						(slice.load (local nodes) (record.get (local row) native))
 						(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
-				(:doc "Record types resolve to the canonical typedef, regardless of the local binding.")
+				(:doc "Native record references point at the header's type with the requested const qualification.")
+				(call is_record_reference (local type))
+				(then
+					(let row (slice.load (local records) (call record_index (call record_reference_target (local type)))))
+					(let-mut cursor (local offset))
+					(if
+						(:doc "Use const for a shared reference to the complete object.")
+						(bool.not (call is_mutable_record_reference (local type)))
+						(then (set (local cursor) (call write_record_text (borrow-shared (local c_const)) (borrow-mut (local output)) (local cursor) (local writing)))))
+					(set (local cursor) (call write_native_type (borrow-shared (local source))
+						(slice.load (local nodes) (record.get (local row) native)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 42) (local writing)))))
+			(if
+				(:doc "Native values use their full C types. Wove-defined records use generated typedefs.")
 				(call is_record_type (local type))
-				(then (return (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes))
-					(slice.load (local records) (call record_index (local type)))
-					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+				(then
+					(let row (slice.load (local records) (call record_index (local type))))
+					(if
+						(:doc "Using the header type preserves its alignment, padding, and private members.")
+						(call is_native_record (local row))
+						(then (return (call write_native_type (borrow-shared (local source))
+							(slice.load (local nodes) (record.get (local row) native))
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(return (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local row) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Record slices use the descriptor ABI for their access mode.")
 				(call is_record_slice (local type))
@@ -183,6 +217,36 @@
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))))
 
+	(fn write_native_field_checks
+		(:doc `Use C11 type selection to verify the header member names and compatible types without evaluating an access.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(layout ScalarRecord) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let repr (slice.load (local nodes) (record.get (local layout) native)))
+			(let-mut field (record.get (local layout) first))
+			(let-mut cursor (local offset))
+			(while
+				(:doc "Each exposed member is checked against the representation chosen by the header.")
+				(i32.lt (i32 -1) (local field))
+				(body
+					(let node (slice.load (local nodes) (local field)))
+					(let name (slice.load (local nodes) (record.get (local node) first_child)))
+					(let type (call native_field_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local layout) (local field)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_member_check_open)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call write_native_type (borrow-shared (local source)) (local repr)
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_member_check_access)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_span (borrow-shared (local source)) (record.get (local name) start)
+						(record.get (local name) end) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
+					(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call write_record_text (borrow-shared (local c_member_check_close)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local field) (record.get (local node) next_sibling))))
+			(return (local cursor))))
+
 	(fn write_record_layouts
 		(:doc `Emit the checked prefix of populated record declarations before function code.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
@@ -198,12 +262,19 @@
 					(let record (slice.load (local records) (local index)))
 					(if (i32.eq (record.get (local record) name) (i32 0)) (then (return (local cursor))))
 					(if
-						(:doc "Native aliases already have a declaration in the selected C header.")
-						(i32.lt (i32 -1) (record.get (local record) count))
+						(:doc "Only Wove-defined records need generated layouts. Native types receive compatibility checks.")
+						(i32.eq (record.get (local record) native) (i32 0))
 						(then (set (local cursor) (call write_record_layout (borrow-shared (local source)) (borrow-shared (local nodes))
 							(local record) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
-						(else (set (local cursor) (call write_integer_check (borrow-shared (local source))
-							(slice.load (local nodes) (record.get (local record) first))
-							(borrow-mut (local output)) (local cursor) (local writing)))))
+						(else
+							(if
+								(:doc "A native view verifies exposed members. An integer alias verifies integral promotion.")
+								(call is_native_record (local record))
+								(then (set (local cursor) (call write_native_field_checks (borrow-shared (local source))
+									(borrow-shared (local nodes)) (borrow-shared (local records)) (local record)
+									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
+								(else (set (local cursor) (call write_integer_check (borrow-shared (local source))
+									(slice.load (local nodes) (record.get (local record) native))
+									(borrow-mut (local output)) (local cursor) (local writing)))))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (local cursor)))))

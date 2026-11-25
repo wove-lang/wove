@@ -1,0 +1,145 @@
+(module source_c_records
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Read the declarations of an explicit C record view.
+
+	The selected C header supplies the complete object layout. This reader
+	retains the native spelling and checked source field links.`)
+
+	(use wove-file "./scan.wove" (only (type SourceNode)))
+	(use wove-file "./module.wove" (only form_parts validate_form_metadata))
+	(use wove-file "./imports.wove" (only import_keyword))
+	(use wove-file "./c_owners.wove" (only is_native_name read_c_type_form check_c_type_spelling))
+	(use wove-file "../text/match.wove" (only is_three_bytes))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct CRecordRead (fields (name i32) (native i32) (first i32) (count i32) (start i32) (end i32) (error u32)))
+
+	(fn c_record_at
+		(:doc `Tie a record view check to the original form or failing operand.`)
+		(params (node SourceNode) (name i32) (native i32) (first i32) (count i32) (error u32))
+		(returns CRecordRead)
+		(body
+			(return (record.make CRecordRead (name (local name)) (native (local native)) (first (local first))
+				(count (local count)) (start (record.get (local node) start)) (end (record.get (local node) end)) (error (local error))))))
+
+	(fn is_c_record
+		(:doc `Distinguish a native struct member from a native alias when its definition is already known.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns bool)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (record.get (local parts) head))
+			(return (bool.and (i32.lt (i32 -1) (local head))
+				(u32.eq (call import_keyword (borrow-shared (local source)) (slice.load (local nodes) (local head))) (u32 7))))))
+
+	(fn is_fields_head
+		(:doc `Match the fields tag of a record's view list.`)
+		(params (source (shared-slice u8)) (node SourceNode))
+		(returns bool)
+		(body
+			(let start (record.get (local node) start))
+			(return (bool.and (i32.eq (i32.sub.wrapping (record.get (local node) end) (local start)) (i32 6))
+				(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 102) (u8 105) (u8 101))
+					(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) (i32 3))
+						(u8 108) (u8 100) (u8 115)))))))
+
+	(fn read_c_fields
+		(:doc `Check the native member spelling, single type operand, and uniqueness of each field in source order.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (list SourceNode) (name i32) (native i32))
+		(returns CRecordRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local list)))
+			(let head (record.get (local parts) head))
+			(if
+				(:doc "A view exposes its members in a single fields form.")
+				(bool.or (i32.lt (local head) (i32 0))
+					(bool.not (call is_fields_head (borrow-shared (local source)) (slice.load (local nodes) (local head)))))
+				(then (return (call c_record_at (local list) (i32 -1) (i32 -1) (i32 -1) (i32 0) (u32 23)))))
+			(let selection (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local list) (local parts)))
+			(if
+				(:doc "The complete view is selectable. The field list must preserve the directive's error span.")
+				(u32.lt (u32 0) (record.get (local selection) error))
+				(then (return (record.make CRecordRead (name (i32 -1)) (native (i32 -1)) (first (i32 -1))
+					(count (i32 0)) (start (record.get (local selection) start)) (end (record.get (local selection) end))
+					(error (record.get (local selection) error))))))
+			(let first (record.get (local parts) operands))
+			(let-mut field (local first))
+			(let-mut count (i32 0))
+			(while
+				(:doc "Each field maps directly to one named member of the native object.")
+				(i32.lt (i32 -1) (local field))
+				(body
+					(let node (slice.load (local nodes) (local field)))
+					(let member (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let spelling (record.get (local member) head))
+					(let type (record.get (local member) operands))
+					(if
+						(:doc "Fields need one bare type, preserving the view's original span on shape errors.")
+						(bool.or (bool.or (i32.lt (local spelling) (i32 0)) (i32.lt (local type) (i32 0)))
+							(i32.lt (i32 -1) (record.get (slice.load (local nodes) (local type)) next_sibling)))
+						(then (return (call c_record_at (local node) (i32 -1) (i32 -1) (i32 -1) (i32 0) (u32 23)))))
+					(let field_name (slice.load (local nodes) (local spelling)))
+					(if
+						(:doc "C member access uses the written name verbatim.")
+						(bool.not (call is_native_name (borrow-shared (local source)) (local field_name)))
+						(then (return (call c_record_at (local field_name) (i32 -1) (i32 -1) (i32 -1) (i32 0) (u32 23)))))
+					(let choice (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (local member)))
+					(if
+						(:doc "Selection belongs to the complete record view.")
+						(u32.lt (u32 0) (record.get (local choice) error))
+						(then (return (record.make CRecordRead (name (i32 -1)) (native (i32 -1)) (first (i32 -1))
+							(count (i32 0)) (start (record.get (local choice) start)) (end (record.get (local choice) end))
+							(error (record.get (local choice) error))))))
+					(let-mut earlier (local first))
+					(while
+						(:doc "A native view may expose a given field name only once.")
+						(bool.not (i32.eq (local earlier) (local field)))
+						(body
+							(let previous (slice.load (local nodes) (local earlier)))
+							(let previous_name (slice.load (local nodes) (record.get (local previous) first_child)))
+							(if
+								(:doc "Report the later spelling when a native field is repeated.")
+								(call same_bytes (borrow-shared (local source))
+									(record.get (local previous_name) start) (record.get (local previous_name) end)
+									(borrow-shared (local source)) (record.get (local field_name) start) (record.get (local field_name) end))
+								(then (return (call c_record_at (local field_name) (i32 -1) (i32 -1) (i32 -1) (i32 0) (u32 33)))))
+							(set (local earlier) (record.get (local previous) next_sibling))))
+					(set (local field) (record.get (local node) next_sibling))
+					(set (local count) (i32.add.wrapping (local count) (i32 1)))))
+			(return (call c_record_at (local list) (local name) (local native) (local first) (local count) (u32 0)))))
+
+	(fn read_c_record
+		(:doc `Validate the view's name and C type spelling and retain the original field list.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns CRecordRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let name (record.get (local parts) operands))
+			(if
+				(:doc "A view needs a name in the bridge type namespace.")
+				(i32.lt (local name) (i32 0))
+				(then (return (call c_record_at (local node) (i32 -1) (i32 -1) (i32 -1) (i32 0) (u32 23)))))
+			(let type (record.get (slice.load (local nodes) (local name)) next_sibling))
+			(if
+				(:doc "Report a missing native representation at the complete declaration.")
+				(i32.lt (local type) (i32 0))
+				(then (return (call c_record_at (local node) (i32 -1) (i32 -1) (i32 -1) (i32 0) (u32 23)))))
+			(let representation (slice.load (local nodes) (local type)))
+			(let native (call check_c_type_spelling (borrow-shared (local source)) (borrow-shared (local nodes))
+				(call read_c_type_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local representation))))
+			(if
+				(:doc "C type diagnostics identify the literal or form that supplied it.")
+				(u32.lt (u32 0) (record.get (local native) error))
+				(then (return (record.make CRecordRead (name (i32 -1)) (native (i32 -1)) (first (i32 -1)) (count (i32 0))
+					(start (record.get (local native) start)) (end (record.get (local native) end)) (error (record.get (local native) error))))))
+			(let fields (record.get (local representation) next_sibling))
+			(if
+				(:doc "A record view requires its fields form after the representation.")
+				(bool.or (i32.lt (local fields) (i32 0))
+					(i32.lt (i32 -1) (record.get (slice.load (local nodes) (local fields)) next_sibling)))
+				(then (return (call c_record_at (local node) (i32 -1) (i32 -1) (i32 -1) (i32 0) (u32 23)))))
+			(return (call read_c_fields (borrow-shared (local source)) (borrow-shared (local nodes))
+				(slice.load (local nodes) (local fields)) (local name) (record.get (local native) native))))))

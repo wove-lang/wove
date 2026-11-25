@@ -8,7 +8,7 @@
 
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "./scan.wove" (only (type SourceNode) (type Token)))
-	(use wove-file "./module.wove" (only form_parts source_keyword (type FormParts)))
+	(use wove-file "./module.wove" (only form_parts source_keyword validate_form_metadata (type FormParts)))
 	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte is_c_identifier))
 
@@ -180,22 +180,27 @@
 					(set (local metadata) (record.get (local entry) next_sibling))))
 			(return (call owner_read (i32 -1) (local drop) (local site) (u32 0)))))
 
-	(fn read_c_type_literal
-		(:doc `Read the single c-type string of a named native type declaration.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name SourceNode))
+	(fn read_c_type_form
+		(:doc `Read a c-type form and its single quoted representation.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (form SourceNode))
 		(returns COwnerRead)
 		(body
-			(let index (record.get (local name) next_sibling))
-			(if (i32.lt (local index) (i32 0)) (then (return (call owner_read (i32 -1) (i32 -1) (local name) (u32 23)))))
-			(let form (slice.load (local nodes) (local index)))
-			(let literal (record.get (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)) operands))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
+			(let literal (record.get (local parts) operands))
 			(if
 				(:doc "A native type needs one c-type form and a string operand.")
 				(bool.or (i32.lt (local literal) (i32 0))
-					(bool.or (bool.not (i32.lt (record.get (local form) next_sibling) (i32 0)))
-						(bool.not (u32.eq (call owner_form_keyword (borrow-shared (local source))
-							(borrow-shared (local nodes)) (local form)) (u32 2)))))
+					(bool.not (u32.eq (call owner_form_keyword (borrow-shared (local source))
+						(borrow-shared (local nodes)) (local form)) (u32 2))))
 				(then (return (call owner_read (i32 -1) (i32 -1) (local form) (u32 23)))))
+			(let choice (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local form) (local parts)))
+			(if
+				(:doc "Selection belongs to the enclosing declaration. Keep the directive's own span.")
+				(u32.lt (u32 0) (record.get (local choice) error))
+				(then (return (record.make COwnerRead (native (i32 -1)) (drop (i32 -1))
+					(start (record.get (local choice) start)) (end (record.get (local choice) end))
+					(error (record.get (local choice) error))))))
 			(let value (slice.load (local nodes) (local literal)))
 			(if
 				(:doc "Keep a bad native type operand at its originating span.")
@@ -203,6 +208,20 @@
 					(bool.not (i32.lt (record.get (local value) next_sibling) (i32 0))))
 				(then (return (call owner_read (i32 -1) (i32 -1) (local value) (u32 23)))))
 			(return (call owner_read (local literal) (i32 -1) (local value) (u32 0)))))
+
+	(fn read_c_type_literal
+		(:doc `Require the c-type form to be the last operand of a native alias.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name SourceNode))
+		(returns COwnerRead)
+		(body
+			(let index (record.get (local name) next_sibling))
+			(if (i32.lt (local index) (i32 0)) (then (return (call owner_read (i32 -1) (i32 -1) (local name) (u32 23)))))
+			(let form (slice.load (local nodes) (local index)))
+			(if
+				(:doc "An alias declaration ends after its representation.")
+				(i32.lt (i32 -1) (record.get (local form) next_sibling))
+				(then (return (call owner_read (i32 -1) (i32 -1) (local form) (u32 23)))))
+			(return (call read_c_type_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))))
 
 	(fn read_c_type
 		(:doc `Read a native type literal and any explicit destructor using their original tree rows.`)
@@ -235,8 +254,8 @@
 				(then (return (call owner_read (i32 -1) (i32 -1) (local node) (u32 23)))))
 			(return (local read))))
 
-	(fn is_c_integer_spelling
-		(:doc `Accept portable native type words. The selected C header supplies the declared integer typedef.`)
+	(fn is_c_type_words
+		(:doc `Accept C type words separated by horizontal whitespace.`)
 		(params (text (shared-slice u8)))
 		(returns bool)
 		(body
@@ -263,12 +282,11 @@
 					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
 			(return (local word))))
 
-	(fn check_c_type
-		(:doc `Check the decoded C representation using the type's declared ownership contract.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+	(fn check_c_type_spelling
+		(:doc `Check the spelling of a value or pointer representation before emitting it.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (read COwnerRead))
 		(returns COwnerRead)
 		(body
-			(let read (call read_c_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(if (u32.lt (u32 0) (record.get (local read) error)) (then (return (local read))))
 			(let literal (slice.load (local nodes) (record.get (local read) native)))
 			(let start (record.get (local literal) start))
@@ -284,12 +302,20 @@
 			(let length (record.get (local value) written))
 			(let-mut valid (bool false))
 			(if
-				(:doc "The destructor contract selects pointer syntax. Copyable aliases use integer type words.")
+				(:doc "The destructor contract selects pointer syntax. Value types use plain type words.")
 				(i32.lt (record.get (local read) drop) (i32 0))
-				(then (set (local valid) (call is_c_integer_spelling (borrow-shared (slice.range (local decoded) (i32 0) (local length))))))
+				(then (set (local valid) (call is_c_type_words (borrow-shared (slice.range (local decoded) (i32 0) (local length))))))
 				(else (set (local valid) (call is_c_pointer_spelling (borrow-shared (slice.range (local decoded) (i32 0) (local length)))))))
 			(if
 				(:doc "Keep a bad representation at the original quoted operand.")
 				(bool.not (local valid))
 				(then (return (call owner_read (i32 -1) (i32 -1) (local literal) (u32 23)))))
-			(return (local read)))))
+			(return (local read))))
+
+	(fn check_c_type
+		(:doc `Read a native alias and check its C representation against the ownership contract.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns COwnerRead)
+		(body
+			(return (call check_c_type_spelling (borrow-shared (local source)) (borrow-shared (local nodes))
+				(call read_c_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))))

@@ -13,7 +13,7 @@
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_byte))
 	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../source/callers.wove" (only inspect_graph_name))
-	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only is_native_record (type ScalarRecord)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/tests.wove" (only discover_graph_tests (type DiscoveredTest)))
 	(use wove-file "../scalar/plan.wove"
@@ -71,10 +71,12 @@
 							(call reserve_native_prefix (borrow-shared (local text)) (local word) (local index)
 								(borrow-mut (local occupied)))
 							(set (local word) (local next))))
-					(set (local index) (local next))))))
+					(set (local index) (local next))))
+			(call reserve_native_prefix (borrow-shared (local text)) (local word) (local length)
+				(borrow-mut (local occupied)))))
 
 	(fn reserve_type_prefixes
-		(:doc `Reserve every identifier in the decoded native pointer type.
+		(:doc `Reserve every identifier in the decoded native type spelling.
 
 		A C typedef shares the identifier namespace with ordinary locals
 		and functions. A native type spelling can also be a header macro.`)
@@ -89,11 +91,11 @@
 				(record.get (local value) written))) (borrow-mut (local occupied)))))
 
 	(fn native_prefix_capacity
-		(:doc `Bound reserved prefixes by selected symbols, signatures, and native type spellings.
+		(:doc `Bound reserved prefixes by selected symbols and the native types and fields they need.
 
 		Every slot also requires a spelling in the arena, so no occupied
 		slot can reach signed i32 capacity.`)
-		(params (bindings (shared-slice GraphBinding)))
+		(params (bindings (shared-slice GraphBinding)) (records (shared-slice ScalarRecord)))
 		(returns i32)
 		(body
 			(let-mut count (i32 0))
@@ -118,10 +120,32 @@
 								(then (return (i32 2147483647))))
 							(set (local count) (i32.add.wrapping (local count) (int.convert i32 (local width))))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(set (local index) (i32 0))
+			(while
+				(:doc "Include the representation and members of native types used only by a signature or field.")
+				(i32.lt (local index) (slice.len (local records)))
+				(body
+					(let row (slice.load (local records) (local index)))
+					(if (i32.eq (record.get (local row) name) (i32 0)) (then (return (local count))))
+					(if
+						(:doc "A C value type can contribute one user-chosen type word and every exposed field name.")
+						(i32.lt (i32 0) (record.get (local row) native))
+						(then
+							(let-mut width (i32 1))
+							(if
+								(:doc "Record views also reserve the spellings of their exposed fields.")
+								(i32.lt (i32 0) (record.get (local row) count))
+								(then (set (local width) (i32.add.wrapping (local width) (record.get (local row) count)))))
+							(if
+								(:doc "Keep the prefix table length within signed slice bounds.")
+								(i32.lt (i32.sub.wrapping (i32 2147483647) (local count)) (local width))
+								(then (return (i32 2147483647))))
+							(set (local count) (i32.add.wrapping (local count) (local width)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (local count))))
 
-	(fn reserve_integer_types
-		(:doc `Protect each selected native integer spelling, including aliases discovered only in parameter signatures.`)
+	(fn reserve_native_types
+		(:doc `Protect native type spellings, including dependencies of selected signatures and records.`)
 		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord)) (occupied (mut-slice u8)))
 		(returns void)
 		(body
@@ -133,12 +157,26 @@
 					(let row (slice.load (local records) (local index)))
 					(if (i32.eq (record.get (local row) name) (i32 0)) (then (return)))
 					(if
-						(:doc "A native alias remembers its original type literal.")
-						(i32.lt (record.get (local row) count) (i32 0))
+						(:doc "Native values keep their original C type literal.")
+						(i32.lt (i32 0) (record.get (local row) native))
 						(then
-							(let literal (slice.load (local nodes) (record.get (local row) first)))
+							(let literal (slice.load (local nodes) (record.get (local row) native)))
 							(call reserve_type_prefixes (borrow-shared (local arena))
-								(record.get (local literal) start) (record.get (local literal) end) (borrow-mut (local occupied)))))
+								(record.get (local literal) start) (record.get (local literal) end) (borrow-mut (local occupied)))
+							(if
+								(:doc "A header field spelling can expand as a macro. Keep generated names out of its prefix.")
+								(call is_native_record (local row))
+								(then
+									(let-mut field (record.get (local row) first))
+									(while
+										(:doc "Reserve the checked spelling of each member of the view.")
+										(i32.lt (i32 -1) (local field))
+										(body
+											(let node (slice.load (local nodes) (local field)))
+											(let name (slice.load (local nodes) (record.get (local node) first_child)))
+											(call reserve_native_prefix (borrow-shared (local arena)) (record.get (local name) start)
+												(record.get (local name) end) (borrow-mut (local occupied)))
+											(set (local field) (record.get (local node) next_sibling))))))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
 
 	(fn choose_name_prefix
@@ -182,7 +220,7 @@
 										(i32.add.wrapping (local base) (record.get (local binding) type_end))
 										(borrow-mut (local occupied)))))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
-			(call reserve_integer_types (borrow-shared (local arena)) (borrow-shared (local nodes))
+			(call reserve_native_types (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-mut (local occupied)))
 			(let-mut slot (i32 0))
 			(while
@@ -218,7 +256,7 @@
 				(u32.lt (u32 0) (record.get (local headers) error))
 				(then (return (call graph_output (i32 0) (i32 -1) (record.get (local headers) file)
 					(record.get (local headers) start) (record.get (local headers) end) (record.get (local headers) error)))))
-			(let-mut occupied (array.alloc u8 (call native_prefix_capacity (borrow-shared (local bindings)))))
+			(let-mut occupied (array.alloc u8 (call native_prefix_capacity (borrow-shared (local bindings)) (borrow-shared (local records)))))
 			(let name_prefix (call choose_name_prefix (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (borrow-shared (local nodes)) (borrow-shared (local records)) (borrow-mut (local occupied))))
 			(let count (record.get (local headers) count))
@@ -275,8 +313,8 @@
 		selects C emission, otherwise inspect the given name through the path
 		row's local bindings. Both destinations remain untouched on failure.`)
 		(:expect
-			(tests "stage-2/scalar_graphs.tsv" "stage-2/test_execution.tsv" "stage-2/native_alias/cases.tsv")
-			(issues "gh:wove-lang/wove:71" "gh:wove-lang/wove:129" "gh:wove-lang/wove:140" "gh:wove-lang/wove:142" "gh:wove-lang/wove:144" "gh:wove-lang/wove:146" "gh:wove-lang/wove:154" "gh:wove-lang/wove:186" "gh:wove-lang/wove:194"))
+			(tests "stage-2/scalar_graphs.tsv" "stage-2/test_execution.tsv" "stage-2/native_alias/cases.tsv" "stage-2/native_records/cases.tsv")
+			(issues "gh:wove-lang/wove:71" "gh:wove-lang/wove:129" "gh:wove-lang/wove:140" "gh:wove-lang/wove:142" "gh:wove-lang/wove:144" "gh:wove-lang/wove:146" "gh:wove-lang/wove:154" "gh:wove-lang/wove:186" "gh:wove-lang/wove:194" "gh:wove-lang/wove:223"))
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
 			(bindings (shared-slice GraphBinding)) (resolved GraphResult) (root i32) (query_path i32) (name (shared-slice u8))
 			(assets (shared-slice SuppliedFile)) (output (mut-slice u8)) (callers (mut-slice CallSite)))
@@ -312,7 +350,7 @@
 				(borrow-mut (local output)) (borrow-mut (local callers))))))
 
 	(fn bind_emission_assets
-		(:doc "Bind external asset rows or the byte ranges already loaded for the entry.")
+		(:doc `Bind external asset rows or the byte ranges already loaded for the entry.`)
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
 			(assets (shared-slice SuppliedFile)) (requests (shared-slice EmbedAsset)) (asset_mode u32)
 			(expressions (mut-slice ScalarExpression)))
