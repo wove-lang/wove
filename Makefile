@@ -202,7 +202,8 @@ test-stage-2-gcc-live: $(AST_PROBE) $(CLANG_TEMPLATE)
 test-stage-2-blake2b: $(BLAKE2B_PROBE)
 	sh "$(BLAKE2B_FIXTURES)/check.sh" "$(BLAKE2B_PROBE)" "$(BLAKE2B_FIXTURES)/cases.tsv"
 
-test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
+test: stage-1 test-stage-2 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
+	"$(STAGE1)/runtime.cstr_cleanup"
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 	sh "$(OWNERSHIP_TESTS)/check_includes.sh" "$(STAGE1)/imports.c_headers.c" "$(OWNERSHIP_TESTS)/imports/c_headers/includes.txt"
@@ -386,6 +387,10 @@ $(STAGE1)/runtime.tracked.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -Dmalloc=tracked_malloc -Dcalloc=tracked_calloc \
 		-Dfree=tracked_free -c "$<" -o "$@"
+
+# Simulate an allocator that clobbers errno when native call scratch is released.
+$(STAGE1)/runtime.cstr_cleanup: tests/support/cstr_cleanup.c $(STAGE1)/runtime.tracked.o $(RUNTIME_HEADER)
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime $(filter-out %.h,$^) -o "$@"
 
 $(STAGE1)/%.tracked.o: $(STAGE1)/%.c $(RUNTIME_HEADER)
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -Dmain=wove_test_main -c "$<" -o "$@"
