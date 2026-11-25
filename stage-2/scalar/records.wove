@@ -10,7 +10,7 @@
 	(use wove-file "../source/scan.wove" (only is_disabled_form is_metadata_form (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts validate_form_metadata (type SelectedDeclaration)))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
-	(use wove-file "../source/types.wove" (only is_reserved_type_name))
+	(use wove-file "../source/types.wove" (only is_reserved_type_name reference_mode))
 	(use wove-file "../emit/names.wove" (only record_identity))
 	(use wove-file "./syntax.wove"
 		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type read_fixed_array_shape is_fixed_array_type_head
@@ -302,29 +302,29 @@
 			(bool.and (bool.not (u32.lt (local type) (u32 1610612736))) (u32.lt (local type) (u32 1879048192)))))))
 
 	(fn is_mutable_record_reference
-		(:doc `Test the native mutable reference range above the writable record slices.`)
+		(:doc `Identify the encoding for an exclusive reference to a record.`)
 		(:pragma (inline always))
 		(params (type u32))
 		(returns bool)
 		(body (return (bool.and (bool.not (u32.lt (local type) (u32 1879048192))) (u32.lt (local type) (u32 2147483648))))))
 
 	(fn is_record_reference
-		(:doc `Distinguish native record pointers from by-value records and slice descriptors.`)
+		(:doc `Distinguish call-scoped record references from by-value records and slice descriptors.`)
 		(:pragma (inline always))
 		(params (type u32))
 		(returns bool)
 		(body (return (bool.or (call is_mutable_record_reference (local type))
 			(bool.and (bool.not (u32.lt (local type) (u32 1342177280))) (u32.lt (local type) (u32 1610612736)))))))
 
-	(fn native_record_borrow_kind
-		(:doc `Identify a checked call argument that takes the address of a native record.`)
+	(fn record_borrow_kind
+		(:doc `Identify a checked argument that borrows the original record storage.`)
 		(:pragma (inline always))
 		(params)
 		(returns u32)
 		(body (return (u32 63))))
 
 	(fn record_reference_type
-		(:doc `Encode a call-scoped reference to a native layout using the free slice type intervals.`)
+		(:doc `Encode a call-scoped reference to its exact defining record layout.`)
 		(params (type u32) (mutable bool))
 		(returns u32)
 		(body
@@ -332,7 +332,7 @@
 			(return (u32.add.wrapping (local type) (u32 1342177280)))))
 
 	(fn record_reference_target
-		(:doc `Recover the defining record type from either native reference mode.`)
+		(:doc `Recover the defining record type from either reference mode.`)
 		(params (type u32))
 		(returns u32)
 		(body
@@ -341,6 +341,17 @@
 				(call is_mutable_record_reference (local type))
 				(then (return (u32.sub.wrapping (local type) (u32 1879048192)))))
 			(return (u32.sub.wrapping (local type) (u32 1342177280)))))
+
+	(fn record_receiver_type
+		(:doc `Resolve the layout of a field receiver whether read by value or through a reference.`)
+		(params (type u32))
+		(returns u32)
+		(body
+			(if
+				(:doc "A reference keeps access mode separate from the defining layout.")
+				(call is_record_reference (local type))
+				(then (return (call record_reference_target (local type)))))
+			(return (local type))))
 
 	(fn typed_slice_type
 		(:doc `Encode a typed slice from its exact element and access mode.`)
@@ -495,10 +506,33 @@
 				(then (return (call native_integer_type (local found)))))
 			(return (call record_type (local found)))))
 
-	(fn read_parameter_type
-		(:doc `Read a copyable value or slice parameter type, retaining any type operand diagnostic.`)
+	(fn read_wove_reference
+		(:doc `Read a call-scoped reference to a named, ordinary Wove record.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)) (file i32) (source_base i32) (index i32))
+			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding))
+			(file i32) (source_base i32) (node SourceNode) (element i32) (mode u32))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A reference needs exactly one defining type operand.")
+				(bool.or (i32.lt (local element) (i32 0))
+					(bool.not (i32.lt (record.get (slice.load (local nodes) (local element)) next_sibling) (i32 0))))
+				(then (return (call entry_at (local node) (i32 -1) (u32 23)))))
+			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local element)))
+			(if
+				(:doc "Ordinary references target a named Wove record rather than a scalar, fixed layout, or C type.")
+				(bool.not (bool.and (call is_record_type (local type))
+					(bool.and (bool.not (call is_fixed_array (slice.load (local records) (call record_index (local type)))))
+						(bool.not (call is_native_record (slice.load (local records) (call record_index (local type))))))))
+				(then (return (call entry_at (slice.load (local nodes) (local element)) (i32 -1) (u32 23)))))
+			(return (call entry_at (local node)
+				(int.convert i32 (call record_reference_type (local type) (u32.eq (local mode) (u32 2)))) (u32 0)))))
+
+	(fn read_parameter_type
+		(:doc `Read a value, slice, or Wove record reference, retaining the original type diagnostic.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)) (file i32) (source_base i32) (index i32) (wove bool))
 		(returns EntryRead)
 		(body
 			(let node (slice.load (local nodes) (local index)))
@@ -509,6 +543,21 @@
 				(u32.lt (u32 0) (local value))
 				(then (return (call entry_at (local node) (int.convert i32 (local value)) (u32 0)))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let mode (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+			(if
+				(:doc "Wove function parameters resolve named reference targets in their own file.")
+				(bool.and (local wove) (u32.lt (u32 0) (local mode)))
+				(then
+					(let selection (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (local parts)))
+					(if
+						(:doc "Keep invalid selection metadata on the original type form.")
+						(u32.lt (u32 0) (record.get (local selection) error))
+						(then (return (record.make EntryRead (operand (i32 -1)) (start (record.get (local selection) start))
+							(end (record.get (local selection) end)) (error (record.get (local selection) error)) (related (i32 -1))))))
+					(return (call read_wove_reference (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base)
+						(local node) (record.get (local parts) operands) (local mode)))))
 			(let type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
 				(record.get (local parts) head)))
 			(if

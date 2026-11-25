@@ -10,10 +10,10 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../scalar/records.wove" (only record_index member_value_type is_record_type is_native_integer native_integer_index is_typed_slice is_writable_slice is_array_owner
 		is_fixed_array is_native_record native_field_type is_record_reference is_mutable_record_reference record_reference_target (type ScalarRecord)))
-	(use wove-file "../scalar/plan.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/plan.wove" (only (type ScalarExpression) (type ScalarParameter)))
 	(use wove-file "./owners.wove" (only write_bridge_result_type write_native_type))
 	(use wove-file "./runtime.wove" (only open_array_layout_query write_c_number))
-	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_type_text write_c_name record_name_role member_name_role fixed_array_name_role write_local_name))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_type_text write_c_name record_name_role parameter_name_role member_name_role fixed_array_name_role write_local_name))
 
 	(let c_const "const ")
 	(let c_member_check_open "_Static_assert(_Generic(((")
@@ -60,7 +60,7 @@
 						(slice.load (local nodes) (record.get (local row) native))
 						(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
-				(:doc "Native record references point at the header's type with the requested const qualification.")
+				(:doc "Record references are pointers to the exact type with the requested const qualification.")
 				(call is_record_reference (local type))
 				(then
 					(let row (slice.load (local records) (call record_index (call record_reference_target (local type)))))
@@ -69,8 +69,14 @@
 						(:doc "Use const for a shared reference to the complete object.")
 						(bool.not (call is_mutable_record_reference (local type)))
 						(then (set (local cursor) (call c_literal_text (borrow-shared (local c_const)) (borrow-mut (local output)) (local cursor) (local writing)))))
-					(set (local cursor) (call write_native_type (borrow-shared (local source))
-						(slice.load (local nodes) (record.get (local row) native)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(if
+						(:doc "Use the defining C type for bridge records and the generated typedef for ordinary Wove records.")
+						(call is_native_record (local row))
+						(then (set (local cursor) (call write_native_type (borrow-shared (local source))
+							(slice.load (local nodes) (record.get (local row) native))
+							(borrow-mut (local output)) (local cursor) (local writing))))
+						(else (set (local cursor) (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local row) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 					(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 42) (local writing)))))
 			(if
 				(:doc "Native values use their full C types. Wove-defined records use generated typedefs.")
@@ -121,9 +127,49 @@
 			(return (call write_c_name (borrow-mut (local output)) (local offset) (local writing)
 				(local name_prefix) (call member_name_role) (int.convert u32 (local ordinal)) (borrow-shared (local source)) (i32 0) (i32 0)))))
 
+	(fn write_parameter_name
+		(:doc `Write the parameter name in its C function scope.
+
+		Its ordinal is local to the signature and keeps distinct parameters
+		separate even when their readable suffixes sanitize identically.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (param ScalarParameter)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let name (slice.load (local nodes) (record.get (local param) name)))
+			(return (call write_c_name (borrow-mut (local output)) (local offset) (local writing) (local name_prefix) (call parameter_name_role)
+				(int.convert u32 (record.get (local param) position)) (borrow-shared (local source))
+				(record.get (local name) start) (record.get (local name) end)))))
+
+	(fn write_member_separator
+		(:doc `Select C member access for a record value or pointer to its original storage.`)
+		(params (output (mut-slice u8)) (offset u32) (reference bool) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "A record reference uses the pointer member operator.")
+				(local reference)
+				(then
+					(let dash (call c_byte (borrow-mut (local output)) (local offset) (u8 45) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local dash) (u8 62) (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local offset) (u8 46) (local writing)))))
+
+	(fn captures_record_argument
+		(:doc `Capture fixed arrays and mutable record locals before evaluating later call arguments.`)
+		(params (row ScalarExpression) (next i32) (records (shared-slice ScalarRecord)))
+		(returns bool)
+		(body
+			(let type (record.get (local row) type))
+			(return (bool.and (i32.lt (i32 -1) (local next))
+				(bool.and (u32.eq (record.get (local row) kind) (u32 6))
+					(bool.and (call is_record_type (local type))
+						(bool.or (record.get (local row) mutable_place)
+							(call is_fixed_array (slice.load (local records) (call record_index (local type)))))))))))
+
 	(fn write_field_place
-		(:doc `Write a record lvalue from its original local followed by checked member ordinals.`)
+		(:doc `Write a record lvalue against its original local or referenced storage.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
+			(parameters (shared-slice ScalarParameter))
 			(place i32) (tree_base i32) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -134,15 +180,27 @@
 				(body
 					(set (local root) (record.get (slice.load (local expressions) (local root)) first))))
 			(let value (slice.load (local expressions) (local root)))
-			(let-mut cursor (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
-				(record.get (local value) target) (local tree_base) (borrow-mut (local output))
-				(local offset) (local name_prefix) (local writing)))
+			(let-mut reference (call is_record_reference (record.get (local value) type)))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "A checked reference destination starts at the pointer parameter.")
+				(local reference)
+				(then
+					(set (local cursor) (call write_parameter_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local parameters) (record.get (local value) target)) (borrow-mut (local output))
+						(local cursor) (local name_prefix) (local writing))))
+				(else
+					(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(record.get (local value) target) (local tree_base) (borrow-mut (local output))
+						(local cursor) (local name_prefix) (local writing)))))
 			(while
 				(:doc "Append each enclosing field along the checked path from the binding.")
 				(bool.not (i32.eq (local root) (local place)))
 				(body
 					(set (local root) (record.get (slice.load (local nodes) (local root)) parent))
-					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 46) (local writing)))
+					(set (local cursor) (call write_member_separator (borrow-mut (local output)) (local cursor)
+						(local reference) (local writing)))
+					(set (local reference) (bool false))
 					(set (local cursor) (call write_member_name (borrow-shared (local source))
 						(record.get (slice.load (local expressions) (local root)) target)
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
