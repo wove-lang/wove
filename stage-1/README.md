@@ -45,9 +45,9 @@ operations return `bool`.
 
 Declare a named record with `(struct Token (fields (kind u32) (start i32)
 (end i32)))`. Its fields can have type `bool`, `i8`, `u8`, `i32`, or `u32`.
-A `record.make` names the record type and supplies each field once, using its
+A `struct.new` names the record type and supplies each field once, using its
 declared type. Initializer expressions run in the order written. Use
-`(record.get (local token) start)` to read a field as its declared scalar type.
+`(struct.get (local token) start)` to read a field as its declared scalar type.
 Bindings, arguments, and returns copy records by value and preserve the
 record's defining declaration as its type.
 

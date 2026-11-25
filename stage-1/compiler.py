@@ -658,11 +658,11 @@ class FunctionEmitter:
 			return self.temporary(I32, f"(int32_t){value.c}")
 
 		# A record construction produces a new value of its declared type.
-		if expr.tag == "record.make":
+		if expr.tag == "struct.new":
 			return self.make_record(expr)
 
 		# A member access produces a copy of the declared scalar field.
-		if expr.tag == "record.get":
+		if expr.tag == "struct.get":
 			return self.record_field(expr)
 
 		# An ordinary value use copies a scalar or record binding.
