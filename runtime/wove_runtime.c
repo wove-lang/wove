@@ -433,3 +433,18 @@ int32_t wvrt_i32_add_wrapping(int32_t wvrtleft, int32_t wvrtright) {
 int32_t wvrt_i32_sub_wrapping(int32_t wvrtleft, int32_t wvrtright) {
 	return wvrt_i32_from_wrapped_bits(wvrt_u32_sub_wrapping((uint32_t)wvrtleft, (uint32_t)wvrtright));
 }
+
+// Compute a signed quotient or remainder only after checking the Wove range.
+int32_t wvrt_i32_divide_at_span(int32_t wvrtleft, int32_t wvrtright, bool wvrtremainder,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// A zero divisor is invalid for both operations.
+	if (wvrtright == 0) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "division by zero");
+	}
+	// Handle the signed minimum without invoking either C operator on this pair.
+	if (wvrtleft == INT32_MIN && wvrtright == -1) {
+		if (wvrtremainder) { return 0; }
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer arithmetic overflow");
+	}
+	return wvrtremainder ? wvrtleft % wvrtright : wvrtleft / wvrtright;
+}

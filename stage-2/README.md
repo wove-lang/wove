@@ -263,10 +263,17 @@ span if the index is outside the declared extent.
 requires operands of its named scalar type and returns `bool`.
 `(int.eq Type left right)` also compares two integers of the exact
 named type, including native aliases such as `Device` and `Inode`.
-`i32.add.wrapping` and `i32.sub.wrapping` take `i32` operands and
+`i32.add.wrapping`, `i32.sub.wrapping`, and `i32.mul.wrapping` take `i32` operands and
 return their signed 32-bit result modulo 2^32. Each binary operand is
 evaluated once, left to right. Emitted C widens the arithmetic,
 reduces it to 32 bits as unsigned, and produces an in-range signed result.
+
+`(i32.div dividend divisor)` truncates the quotient toward zero.
+`(i32.rem dividend divisor)` returns the signed remainder. Both take
+two exact `i32` operands, evaluated once from left to right, and return
+`i32`. A zero divisor traps at the original operation span. Dividing
+`INT32_MIN` by `-1` also traps for overflow. The corresponding
+remainder is zero.
 
 `u32.add.wrapping` and `u32.sub.wrapping` take exact `u32` operands
 and yield `u32` results modulo 2^32. Each operand runs once, left to
