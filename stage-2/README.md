@@ -297,6 +297,14 @@ reports an invalid length or allocation failure at the allocation's
 original file identity and byte span. A shared call borrow keeps the
 owner's original storage. A mutable call borrow requires `let-mut`.
 
+Use `(slice.store (local output) index value)` to fill a local byte array
+bound with `let-mut` before returning it by move. The store holds an
+exclusive view of the live owner while evaluating the index and value,
+then checks the index and writes the byte. A call in either operand
+can borrow a different buffer. The index and value have the same exact
+`i32` and `u8` types and bounds diagnostics as a store through a slice
+parameter.
+
 For a copyable record, `(array.alloc Token count)` owns `count` zeroed
 records. The runtime allocates with `sizeof` and `_Alignof` of the
 defining C type. A whole-array call borrow uses a slice of the same

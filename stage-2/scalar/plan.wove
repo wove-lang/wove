@@ -399,7 +399,8 @@
 		Expectation 1 infers an integer. A local initializer (42) can
 		also copy a record, allocate, or move an owner. A field receiver
 		(53) can be any registered record. A length or load receiver (55)
-		can use any readable slice. A store receiver (56) must be writable.
+		can use any readable slice. A store receiver (56) needs a writable
+		slice or a local byte owner checked for mutable access.
 		An owner operand (57) can supply a transfer or a handle borrow. Zero marks unvisited rows.`)
 		(params (expected u32) (actual u32))
 		(returns bool)
@@ -724,10 +725,15 @@
 						(:doc "Native pointer owners need a checked borrow or transfer before they can be read.")
 						(bool.and (call is_native_owner (local actual)) (bool.not (u32.eq (local expected) (u32 57))))
 						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+					(let byte_store (bool.and (u32.eq (local expected) (u32 56)) (u32.eq (local actual) (u32 41))))
 					(if
-						(:doc "Only an explicit matching call loan can borrow an owner's backing storage.")
+						(:doc "A direct byte store checks its owner like a mutable byte reborrow.")
+						(local byte_store)
+						(then (set (local type) (u32 38))))
+					(if
+						(:doc "Project a local owner's storage for a call loan or a direct byte store.")
 						(bool.and (call is_array_owner (local actual))
-							(bool.or (local reborrow) (call is_record_slice (local expected))))
+							(bool.or (local byte_store) (bool.or (local reborrow) (call is_record_slice (local expected)))))
 						(then
 							(let-mut element (u32 10))
 							(if
@@ -1073,10 +1079,11 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn has_conflicting_loan
-		(:doc `Find a conflicting loan in earlier arguments of the enclosing calls.
+		(:doc `Find a conflicting loan in earlier operands of an enclosing operation.
 
-		A previously evaluated borrow is live until its call returns.
-		Loans made by nested calls in completed arguments have already ended.`)
+		Call arguments hold their loans until the call returns. A direct
+		owner store holds its receiver loan through the index and value.
+		Loans made by nested calls in completed operands have already ended.`)
 		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
 			(index i32) (statement i32) (target i32) (owner bool) (exclusive bool))
 		(returns bool)
@@ -1087,14 +1094,15 @@
 				(bool.not (i32.eq (local child) (local statement)))
 				(body
 					(let parent (record.get (slice.load (local nodes) (local child)) parent))
-					(let call_row (slice.load (local expressions) (local parent)))
+					(let operation (slice.load (local expressions) (local parent)))
+					(let operation_kind (record.get (local operation) kind))
 					(if
-						(:doc "Each earlier argument can still hold a loan of its original source.")
-						(u32.eq (record.get (local call_row) kind) (u32 3))
+						(:doc "A call argument or direct store receiver can still hold a loan of its source.")
+						(bool.or (u32.eq (local operation_kind) (u32 3)) (u32.eq (local operation_kind) (u32 40)))
 						(then
-							(let-mut earlier (record.get (local call_row) first))
+							(let-mut earlier (record.get (local operation) first))
 							(while
-								(:doc "Earlier argument rows are already checked in source evaluation order.")
+								(:doc "Earlier operands are already checked in source evaluation order.")
 								(bool.not (i32.eq (local earlier) (local child)))
 								(body
 									(let loan (slice.load (local expressions) (local earlier)))
@@ -1203,11 +1211,18 @@
 						(call is_record_slice (local actual))
 						(then (set (local type) (call record_slice_type (call record_slice_element (local actual)) (bool false)))))))
 			(if
-				(:doc "A store needs the original writable descriptor and its element type.")
+				(:doc "A store uses the writable descriptor of a slice or projects one from its byte owner.")
 				(u32.eq (local expected) (u32 56))
-				(then (set (local type) (local actual))))
+				(then
+					(set (local type) (local actual))
+					(if
+						(:doc "The checked owner supplies an exclusive byte view for this store.")
+						(local owner)
+						(then
+							(set (local kind) (u32 39))
+							(set (local type) (u32 38))))))
 			(if
-				(:doc "An earlier argument can hold a loan of this owner or mutable parameter.")
+				(:doc "An earlier operand can hold a loan of this owner or mutable parameter.")
 				(bool.and (bool.or (local owner) (call is_writable_slice (local actual)))
 					(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
 						(local index) (local statement) (local target) (local owner) (call is_writable_slice (local type))))
