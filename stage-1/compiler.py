@@ -30,8 +30,8 @@ SCALAR_LIMITS = {
 }
 SCALAR_TYPES = (*SCALAR_LIMITS, BOOL)
 OWNED = "owned-array"
-SHARED = "shared-slice"
-MUT = "mut-slice"
+SHARED = "shared-array"
+MUT = "mut-array"
 C_TYPE = {
 	I8: "int8_t",
 	I32: "int32_t",
@@ -433,25 +433,29 @@ class FunctionEmitter:
 			if parent is binding and (exclusive or loan == MUT):
 				raise SourceError(line)
 
-	# Resolve a slice and check its permission to access the parent storage.
-	def slice(self, node: Node, line: int, writable: bool = False) -> tuple[Value, str | Record]:
+	# Resolve the array place, check its permission, and return its descriptor field prefix.
+	def array_access(self, node: Node, line: int, writable: bool = False) -> tuple[str, str | Record]:
 		binding = self.local(node, line)
 		value = binding.value
 		kind = value.kind
-		# Slice operations need a view, and stores require its mutable type.
-		if not isinstance(kind, BufferType) or kind.access == OWNED or (writable and kind.access != MUT):
+		# Only array owners and views carry an element descriptor.
+		if not isinstance(kind, BufferType):
+			raise SourceError(line)
+		owned = kind.access == OWNED
+		# Writes require the owner's mutable binding or an exclusive parameter.
+		if writable and not (binding.writable if owned else kind.access == MUT):
 			raise SourceError(line)
 		self.check_access(binding, writable, line)
-		return value, kind.element
+		return value.c + ("->" if owned else "."), kind.element
 
 	# Index a native record only after the runtime verifies the signed element index.
 	def record_element(
-		self, view: Value, element: str | Record, index: Value, line: int, *, writable: bool = False
+		self, fields: str, element: str | Record, index: Value, line: int, *, writable: bool = False
 	) -> str:
 		native = c_type(element)
 		pointer = native if writable else f"const {native}"
-		offset = f"wvrt_slice_offset({view.c}.wvrt_length, {index.c}, {self.site(line)})"
-		return f"(({pointer} *){view.c}.wvrt_items)[{offset}]"
+		offset = f"wvrt_slice_offset({fields}wvrt_length, {index.c}, {self.site(line)})"
+		return f"(({pointer} *){fields}wvrt_items)[{offset}]"
 
 	# Supply the source line to runtime checks emitted for this operation.
 	def site(self, line: int) -> str:
@@ -465,10 +469,10 @@ class FunctionEmitter:
 		target = checked_form(target_node)
 		source = target
 		range_bounds = None
-		# A range projects the named source for a shared call argument.
-		if target.tag == "slice.range":
-			# Range projection uses the runtime's shared byte-slice path.
-			if exclusive or kind.element != U8:
+		# A range projects the named source for a byte-array call argument.
+		if target.tag == "array.range":
+			# Range projection uses the runtime byte stride.
+			if kind.element != U8:
 				raise SourceError(node.line)
 			source, start, end = form(target, arity=3).operands
 			range_bounds = (start, end)
@@ -490,8 +494,9 @@ class FunctionEmitter:
 		if range_bounds is not None:
 			start = self.typed(range_bounds[0], I32)
 			end = self.typed(range_bounds[1], I32)
+			helper = "wvrt_mut_slice_range_u8" if exclusive else "wvrt_slice_range_u8"
 			expression = (
-				f"wvrt_slice_range_u8({fields}wvrt_items, {fields}wvrt_length, "
+				f"{helper}({fields}wvrt_items, {fields}wvrt_length, "
 				f"{start.c}, {end.c}, {self.site(target.line)})"
 			)
 		# A whole-place borrow keeps the original pointer and extent.
@@ -705,22 +710,22 @@ class FunctionEmitter:
 			self.emit_line(f"{binding.value.c} = NULL;")
 			return result
 
-		# Read the length from the non-owning slice descriptor.
-		if expr.tag == "slice.len":
+		# Read the element count of the live owner or received view.
+		if expr.tag == "array.len":
 			target, = form(expr, arity=1).operands
-			view, _ = self.slice(target, node.line)
-			return self.temporary(I32, f"{view.c}.wvrt_length")
+			fields, _ = self.array_access(target, node.line)
+			return self.temporary(I32, f"{fields}wvrt_length")
 
 		# Copy an element through either descriptor after checking its index.
-		if expr.tag == "slice.load":
+		if expr.tag == "array.load":
 			target, subscript = form(expr, arity=2).operands
-			view, element = self.slice(target, node.line)
+			fields, element = self.array_access(target, node.line)
 			index = self.typed(subscript, I32)
 			# A typed record access copies the entire element.
 			if element != U8:
-				return self.temporary(element, self.record_element(view, element, index, node.line))
+				return self.temporary(element, self.record_element(fields, element, index, node.line))
 			return self.temporary(
-				U8, f"wvrt_slice_load_u8({view.c}.wvrt_items, {view.c}.wvrt_length, "
+				U8, f"wvrt_slice_load_u8({fields}wvrt_items, {fields}wvrt_length, "
 				f"{index.c}, {self.site(node.line)})"
 			)
 
@@ -881,20 +886,20 @@ class FunctionEmitter:
 			return False
 
 		# Store directly into the mutable view's backing storage.
-		if statement.tag == "slice.store":
+		if statement.tag == "array.store":
 			target, subscript, operand = form(statement, arity=3).operands
-			view, element = self.slice(target, node.line, writable=True)
+			fields, element = self.array_access(target, node.line, writable=True)
 			index = self.typed(subscript, I32)
 			value = self.typed(operand, element)
 			# Keep the byte path for existing callers and use native assignment for records.
 			if element == U8:
 				self.emit_line(
-					f"wvrt_slice_store_u8({view.c}.wvrt_items, {view.c}.wvrt_length, "
+					f"wvrt_slice_store_u8({fields}wvrt_items, {fields}wvrt_length, "
 					f"{index.c}, {value.c}, {self.site(node.line)});"
 				)
 			# The checked element index selects one writable record slot.
 			else:
-				slot = self.record_element(view, element, index, node.line, writable=True)
+				slot = self.record_element(fields, element, index, node.line, writable=True)
 				self.emit_line(f"{slot} = {value.c};")
 			return True
 

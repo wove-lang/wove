@@ -4,7 +4,7 @@
 	(:doc `Check call loans by binding identity and statically checked field path.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "./records.wove" (only place_borrow_kind is_mutable_place_reference))
+	(use wove-file "./records.wove" (only place_borrow_kind is_mutable_place_reference is_writable_slice))
 	(use wove-file "./flow.wove" (only (value fixed_shared_loan) (value fixed_mut_loan)))
 	(use wove-file "./owners.wove" (only native_handle_borrow_kind is_native_storage_write_loan))
 
@@ -30,19 +30,19 @@
 
 	(fn field_place_root
 		(:doc `Follow checked field projections toward the original binding or value expression.`)
-		(params (expressions (shared-slice ScalarExpression)) (place i32))
+		(params (expressions (shared-array ScalarExpression)) (place i32))
 		(returns i32)
 		(body
 			(let-mut root (local place))
 			(while
 				(:doc "Each checked field points at its immediate receiver.")
-				(u32.eq (struct.get (slice.load (local expressions) (local root)) kind) 52u32)
-				(body (set (local root) (struct.get (slice.load (local expressions) (local root)) first))))
+				(u32.eq (struct.get (array.load (local expressions) (local root)) kind) 52u32)
+				(body (set (local root) (struct.get (array.load (local expressions) (local root)) first))))
 			(return (local root))))
 
 	(fn paths_overlap
 		(:doc `Compare paths from the same binding. A path overlaps itself and all enclosing places.`)
-		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
 			(left i32) (right i32))
 		(returns bool)
 		(body
@@ -50,18 +50,18 @@
 				(:doc "A whole binding covers every field below it.")
 				(bool.or (i32.lt (local left) 0i32) (i32.lt (local right) 0i32))
 				(then (return (bool true))))
-			(let-mut a (struct.get (slice.load (local expressions) (local left)) projection))
-			(let-mut b (struct.get (slice.load (local expressions) (local right)) projection))
+			(let-mut a (struct.get (array.load (local expressions) (local left)) projection))
+			(let-mut b (struct.get (array.load (local expressions) (local right)) projection))
 			(while
 				(:doc "Walk out from each root through the matched field ordinals.")
 				(bool.not (bool.or (i32.eq (local a) (local left)) (i32.eq (local b) (local right))))
 				(body
-					(set (local a) (struct.get (slice.load (local nodes) (local a)) parent))
-					(set (local b) (struct.get (slice.load (local nodes) (local b)) parent))
+					(set (local a) (struct.get (array.load (local nodes) (local a)) parent))
+					(set (local b) (struct.get (array.load (local nodes) (local b)) parent))
 					(if
 						(:doc "Different fields of the same enclosing record have independent storage.")
-						(bool.not (i32.eq (struct.get (slice.load (local expressions) (local a)) target)
-							(struct.get (slice.load (local expressions) (local b)) target)))
+						(bool.not (i32.eq (struct.get (array.load (local expressions) (local a)) target)
+							(struct.get (array.load (local expressions) (local b)) target)))
 						(then (return (bool false))))))
 			(return (bool true))))
 
@@ -76,16 +76,16 @@
 
 	(fn projected_store_conflicts
 		(:doc `A projected indexed store holds its field through the index and value expressions.`)
-		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
 			(receiver i32) (target i32) (local_binding bool) (place i32))
 		(returns bool)
 		(body
-			(let root (struct.get (slice.load (local expressions) (local receiver)) projection))
+			(let root (struct.get (array.load (local expressions) (local receiver)) projection))
 			(if
 				(:doc "A whole fixed local uses the existing direct fixed-array store rules.")
 				(i32.lt (local root) 0i32)
 				(then (return (bool false))))
-			(let binding (slice.load (local expressions) (local root)))
+			(let binding (array.load (local expressions) (local root)))
 			(return (bool.and
 				(call same_binding (local target) (local local_binding) (struct.get (local binding) target)
 					(u32.eq (struct.get (local binding) kind) 6u32))
@@ -102,15 +102,19 @@
 				(:doc "Place loans retain their access mode in the checked reference type.")
 				(u32.eq (local kind) (call place_borrow_kind))
 				(then (return (bool.or (local exclusive) (call is_mutable_place_reference (struct.get (local loan) type))))))
+			(if
+				(:doc "A range retains the access mode of its call loan.")
+				(u32.eq (local kind) 45u32)
+				(then (return (bool.or (local exclusive) (call is_writable_slice (struct.get (local loan) type))))))
 			(return (bool.or
 				(bool.or (u32.eq (local kind) 39u32) (u32.eq (local kind) (local fixed_mut_loan)))
 				(bool.and (local exclusive)
 					(bool.or (u32.eq (local kind) (local fixed_shared_loan))
-						(bool.or (u32.eq (local kind) 35u32) (u32.eq (local kind) 45u32))))))))
+						(u32.eq (local kind) 35u32)))))))
 
 	(fn native_loan_conflicts
 		(:doc `Check when another native loan or transfer can use the same local resource.`)
-		(params (expressions (shared-slice ScalarExpression)) (loan ScalarExpression) (target i32) (exclusive bool))
+		(params (expressions (shared-array ScalarExpression)) (loan ScalarExpression) (target i32) (exclusive bool))
 		(returns bool)
 		(body
 			(let kind (struct.get (local loan) kind))
@@ -120,7 +124,7 @@
 				(bool.not (bool.or (local writable)
 					(bool.and (local exclusive) (u32.eq (local kind) (call native_handle_borrow_kind)))))
 				(then (return (bool false))))
-			(let pointer (slice.load (local expressions) (struct.get (local loan) first)))
+			(let pointer (array.load (local expressions) (struct.get (local loan) first)))
 			(return (bool.and (u32.eq (struct.get (local pointer) kind) 6u32)
 				(i32.eq (struct.get (local pointer) target) (local target))))))
 
@@ -130,7 +134,7 @@
 		Call arguments hold their loans until the call returns. An owner
 		or projected array store holds its receiver through the index and value.
 		Loans made by nested calls in completed operands have already ended.`)
-		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
 			(index i32) (statement i32) (target i32) (local_binding bool) (place i32) (exclusive bool))
 		(returns bool)
 		(body
@@ -139,8 +143,8 @@
 				(:doc "Walk from the current operand up to its statement.")
 				(bool.not (i32.eq (local child) (local statement)))
 				(body
-					(let parent (struct.get (slice.load (local nodes) (local child)) parent))
-					(let operation (slice.load (local expressions) (local parent)))
+					(let parent (struct.get (array.load (local nodes) (local child)) parent))
+					(let operation (array.load (local expressions) (local parent)))
 					(let operation_kind (struct.get (local operation) kind))
 					(let first (struct.get (local operation) first))
 					(if
@@ -159,7 +163,7 @@
 								(:doc "Earlier operands are already checked in source evaluation order.")
 								(bool.not (i32.eq (local earlier) (local child)))
 								(body
-									(let loan (slice.load (local expressions) (local earlier)))
+									(let loan (array.load (local expressions) (local earlier)))
 									(if
 										(:doc "Native storage loans are tied to their original local owner.")
 										(bool.and (local local_binding)
@@ -173,6 +177,6 @@
 												(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
 													(local place) (struct.get (local loan) projection))))
 										(then (return (bool true))))
-									(set (local earlier) (struct.get (slice.load (local nodes) (local earlier)) next_sibling))))))
+									(set (local earlier) (struct.get (array.load (local nodes) (local earlier)) next_sibling))))))
 					(set (local child) (local parent))))
 			(return (bool false)))))

@@ -84,7 +84,7 @@ admission errors retain codes 1–5. Structural checks use the following codes.
 | 10 | Extra input after the root | The first extra significant token |
 
 `build_source_tree` takes the same admitted source view, its successful
-`FormCheck`, and a writable `(mut-slice SourceNode)`. It checks capacity
+`FormCheck`, and a writable `(mut-array SourceNode)`. It checks capacity
 before writing. On success it fills exactly the counted rows in source
 order and returns the original check. Short storage returns code 11
 with the real root's span.
@@ -209,7 +209,7 @@ Functions use `(local lowest_digit)` to read the scalar after declaring
 or selecting the binding. A local or parameter with the same name takes
 precedence. A quoted string is a shared `u8` view over its decoded
 bytes. Generated C puts a referenced nonempty byte table in a single read-only array
-with no added terminator. The ordinary `slice.len`, `slice.load`, and
+with no added terminator. The ordinary `array.len`, `array.load`, and
 `borrow-shared` forms work with the static view.
 
 A helper with `(returns void)` can use `(return)` or finish at the end
@@ -217,8 +217,8 @@ of its body. Invoke it with a standalone `(call ...)` statement. The
 call checks its arguments, and either exit releases the helper's live
 local owners.
 
-An executable's `main` takes a `(shared-slice u8)` and a
-`(shared-slice ArgSpan)` and returns `i32`. The span record has `start` and
+An executable's `main` takes a `(shared-array u8)` and a
+`(shared-array ArgSpan)` and returns `i32`. The span record has `start` and
 `end` fields of type `i32` in that order. A type alias retains the defining
 record identity for calls to the [typed argv parser](cli/argv.wove).
 Ordinary zero-argument functions use `(params)`.
@@ -305,17 +305,17 @@ Disjoint sibling fields remain accessible. Both array operations take
 an exact `i32` index and trap at the access span when it is out of bounds.
 
 A fixed integer array local can lend all its elements to a function whose
-formal is a `shared-slice` or `mut-slice` of the same element type. Supported
+formal is a `shared-array` or `mut-array` of the same element type. Supported
 element types are `i8`, `u8`, `i32`, `u32`, and `u64`.
 For example, `(borrow-shared (local words))` supplies a matching
-`(shared-slice u64)` formal. A mutable loan uses
+`(shared-array u64)` formal. A mutable loan uses
 `(borrow-mut (local words))` and requires a `let-mut` local. The
 descriptor carries the original backing storage and declared extent,
 including zero. Loans last through the call and follow the same
 exclusivity rules as other slice arguments.
 
-In the callee, `slice.len` counts elements and `slice.load` returns
-the declared element type. `slice.store` takes an exact value of that type
+In the callee, `array.len` counts elements and `array.load` returns
+the declared element type. `array.store` takes an exact value of that type
 and writes into the original fixed array through a mutable slice.
 A checked load or store reports an invalid `i32` index at the original
 operation span.
@@ -366,38 +366,39 @@ span of the conversion, including from a source subrange or an imported
 file. C emitted for conversions includes `wove_runtime.h` and links
 with the shared Wove C runtime.
 
-Helpers can take `(shared-slice u8)` parameters using the runtime's
+Helpers can take `(shared-array u8)` parameters using the runtime's
 `wvrt_slice` ABI. Pass a named view to another helper with
-`(borrow-shared (local data))`. `(slice.len (local data))` returns its
-signed `i32` length. `(slice.load (local data) index)` takes an exact
+`(borrow-shared (local data))`. `(array.len (local data))` returns its
+signed `i32` length. `(array.load (local data) index)` takes an exact
 `i32` index and returns a `u8`. A negative index or an index at or beyond
 the length traps before reading the slice, with the original file ID and
 half-open byte span of the load. C emitted for a shared view includes
 `wove_runtime.h`. Link the shared runtime when the code uses a checked load.
 
-A `(shared-slice Token)` parameter can refer to a named, copyable scalar
+A `(shared-array Token)` parameter can refer to a named, copyable scalar
 record. Its C descriptor is also a `wvrt_slice`. Pass a whole view to
 another function with `(borrow-shared (local data))` and the same defining
-element type. `slice.len` counts records and `slice.load` checks its
+element type. `array.len` counts records and `array.load` checks its
 `i32` index before copying the selected record by value. A C caller
 supplies the original array of the emitted record type and its element
 count and size.
 
-Helpers can also take `(mut-slice u8)` parameters using `wvrt_mut_slice`.
+Helpers can also take `(mut-array u8)` parameters using `wvrt_mut_slice`.
 Pass one to a writable parameter with `(borrow-mut (local data))`, or
 to a shared parameter with `(borrow-shared (local data))`. An explicit
 reborrow lasts through the call. A later argument cannot use the same
 parameter while it is exclusively borrowed, and a shared loan prevents
 an exclusive one until the call returns. Both view types support
-`slice.len` and `slice.load`.
+`array.len` and `array.load`.
 
-`(slice.store (local data) index value)` is a statement. It requires a
-mutable byte view, an exact `i32` index, and an exact `u8` value. It
+`(array.store (local data) index value)` is a statement. For a byte
+receiver, it requires a mutable owner or exclusive view, an exact `i32`
+index, and an exact `u8` value. It
 evaluates its operands in order and checks bounds before writing the
 byte in the caller's storage. An out-of-bounds store reports the same
 file identity and half-open span format as a checked load.
 
-A `(mut-slice Token)` carries the same defining record type as its
+A `(mut-array Token)` carries the same defining record type as its
 shared counterpart and uses the `wvrt_mut_slice` C descriptor.
 Use `(borrow-mut (local data))` to pass writable access to a helper.
 A shared reborrow keeps the same record element and gives read access.
@@ -410,7 +411,7 @@ reports an invalid length or allocation failure at the allocation's
 original file identity and byte span. A shared call borrow keeps the
 owner's original storage. A mutable call borrow requires `let-mut`.
 
-Use `(slice.store (local output) index value)` to fill a local byte array
+Use `(array.store (local output) index value)` to fill a local byte array
 bound with `let-mut` before returning it by move. The store holds an
 exclusive view of the live owner while evaluating the index and value,
 then checks the index and writes the byte. A call in either operand
@@ -425,9 +426,13 @@ defining record and the allocation's original storage. A `let-mut`
 binding permits exclusive access. The usual scope exits and moves apply
 to record owners.
 
-A shared call argument can use
-`(borrow-shared (slice.range (local source) start end))` with a named byte
-owner or shared byte slice. The source view and its exact `i32` endpoints
+`array.len` also reads the length of a live owner or the extent of a fixed
+array. It evaluates a computed fixed array receiver before returning its
+extent.
+
+A byte-range argument uses `(borrow-shared (array.range (local source) start end))`
+or the same projection with `borrow-mut`. An exclusive range requires a
+writable owner or mutable view. The source view and its exact `i32` endpoints
 are evaluated once, left to right. The runtime checks
 `0 <= start <= end <= source.len` before entering the callee. The view
 uses the original storage, with length `end - start` and index zero at
@@ -457,10 +462,10 @@ move it through its normal owner lifetime. A zero-length result follows
 the same ownership rules.
 
 `(array.alloc (owned-array u8) count)` allocates a vector with initially
-unfilled row slots. Use `(slice.store (local rows) index (move (local row)))`
+unfilled row slots. Use `(array.store (local rows) index (move (local row)))`
 or a call returning a fresh byte owner to fill or replace a slot. A
 replacement releases the previous row. A loan such as
-`(borrow-shared (slice.load (local rows) index))` borrows the stored byte
+`(borrow-shared (array.load (local rows) index))` borrows the stored byte
 slice for the call and reports an unfilled slot at the indexed access.
 The vector owns its filled rows and can be returned through
 `(returns (owned-array (owned-array u8)))`.
@@ -717,7 +722,7 @@ type. A mutable slice passes a writable pointer, so writes by C reach
 the caller's original storage. A zero count can lend an empty view.
 Built-in elements can use a fixed integer array. Native integer aliases
 can use an owner from `(array.alloc ElementType count)`. For example,
-`<unistd.h>` declares `pipe` with `(mut-slice i32)` and
+`<unistd.h>` declares `pipe` with `(mut-array i32)` and
 `(:pragma (c_array descriptors 2))`.
 
 A bridge can declare an integer alias such as `(type Size (c-type "size_t"))`.

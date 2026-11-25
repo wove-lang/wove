@@ -50,7 +50,7 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 | `(owner.is-null (local file))` | Stage 2. Test whether a native owner holds a missing handle. |
 | `(embed "./payload.bin")` | Stage 2. Initialize a fresh owned byte buffer from a file relative to the defining module. |
 
-A quoted string in an immutable module binding is a shared `u8` slice.
+A quoted string in an immutable module binding is a `(shared-array u8)` view.
 Its length counts the decoded bytes.
 
 In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
@@ -60,15 +60,20 @@ Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a cal
 
 | Form | Meaning |
 | --- | --- |
-| `(slice.len view)` | Count elements as `i32`. |
-| `(slice.load view index)` | Read one element by value. |
-| `(slice.store view index value)` | Write through a mutable view. Stage 2 also accepts a mutable local byte owner. |
-| `(borrow-shared (local data))` | Lend read access to a call. |
-| `(borrow-mut (local data))` | Lend exclusive write access to a call from writable storage. |
-| `(borrow-shared (slice.range (local data) start end))` | Lend a half-open range of a named byte owner or shared byte slice to a call. |
+| `(owned-array T)` | Own the backing allocation. |
+| `(shared-array T)` | Borrow read access to an array view. |
+| `(mut-array T)` | Borrow exclusive write access to an array view. |
+| `(array.len data)` | Count the elements in a live owner, fixed array, or received view as `i32`. |
+| `(array.load data index)` | Read an element by value from a readable receiver. |
+| `(array.store data index value)` | Write an exact element value through a mutable view or into writable array storage. |
+| `(borrow-shared (local data))` | Lend read access to the whole array for a call. |
+| `(borrow-mut (local data))` | Lend exclusive write access to the whole array for a call. |
+| `(borrow-shared (array.range (local data) start end))` | Lend a half-open byte range of a named owner or view. |
+| `(borrow-mut (array.range (local data) start end))` | Lend a half-open byte range from a mutable owner or exclusive view. |
 
-Slice and array indexes and range endpoints are exact `i32` values.
-Bounds violations trap. A call loan lasts through later arguments and the call.
+Indexes and range endpoints are exact `i32` values. Received views count
+and index elements relative to their own bounds. Bounds violations trap.
+A call loan lasts through later arguments and the call.
 
 Stage 2 fixed arrays keep their elements inline and copy by value. Use
 `(array T extent)` for the type, with a builtin scalar `T` and a nonnegative

@@ -20,7 +20,7 @@ provider. Native fixtures select members from `stdio.wove` and the Linux and mac
   inside `params`.
 - `(c-type "native spelling")` preserves the header type on an alias, record,
   or enum. `shared-ref` and `mut-ref` borrow native scalar, record, or
-  resource storage. `shared-slice` and `mut-slice` represent borrowed spans.
+  resource storage. `shared-array` and `mut-array` represent borrowed spans.
   An `optional` result containing an `owned-array` preserves null and
   successful ownership separately. `fn-type` records a callback signature.
 - Native `const`, `let`, and `let-mut` distinguish header constants,
