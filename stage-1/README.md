@@ -111,12 +111,18 @@ order after the name. Each Wove function requires one `params`, one `returns`,
 and one `body`, including explicit `(params)` for zero arguments.
 
 ```lisp
-(fn main
+(fn succeed
   (returns i32)
   (:doc "Return success.")
   (params)
   (body (return 0i32)))
 ```
+
+Application `main` takes a `(shared-slice u8)` and a shared slice of a
+record with exactly `(start i32)` and `(end i32)` in that order, and returns
+`i32`. The seed emits the same `int main(int argc, char **argv)` wrapper
+as Stage 2. It excludes the executable name and supplies two empty views
+when the process has zero user arguments.
 
 C bridge functions also start with a bare name and allow metadata anywhere
 among their signature fields. Declaration groups carry that context through

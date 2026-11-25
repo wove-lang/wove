@@ -13,7 +13,7 @@ static void *backing;
 static size_t descriptor_allocations;
 static size_t backing_allocations;
 
-int wove_test_main(void);
+int wove_test_main(int argc, char **argv);
 
 // Fail the probe on unexpected allocator activity.
 static _Noreturn void fail(const char *message) {
@@ -60,8 +60,8 @@ void tracked_free(void *pointer) {
 }
 
 // Check every expected descriptor and backing block was released before returning the Wove result.
-int main(void) {
-	int status = wove_test_main();
+int main(int argc, char **argv) {
+	int status = wove_test_main(argc, argv);
 	// An exit status alone cannot establish that both original blocks were released.
 	if (descriptor_allocations != WOVE_TRACK_ARRAYS || backing_allocations != WOVE_TRACK_ARRAYS ||
 			descriptor != NULL || backing != NULL) {

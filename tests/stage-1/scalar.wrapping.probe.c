@@ -21,8 +21,8 @@ static _Noreturn void fail(const char *operation) {
 }
 
 // Check full-width results when both operands enter through parameters.
-int main(void) {
-	if (wove_fixture_main() != 18) { fail("signed cursor distance"); }
+int main(int argc, char **argv) {
+	if (wove_fixture_main(argc, argv) != 18) { fail("signed cursor distance"); }
 	if (advance(INT32_MAX, 1) != INT32_MIN) { fail("i32 maximum plus one"); }
 	if (advance(INT32_MIN, -1) != INT32_MAX) { fail("i32 minimum plus negative one"); }
 	if (distance(INT32_MIN, 1) != INT32_MAX) { fail("i32 minimum minus one"); }

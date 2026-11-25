@@ -6,7 +6,7 @@
 
 #undef main
 
-int wove_emitted_main(void);
+int wove_emitted_main(int argc, char **argv);
 int32_t wgf074tbcmadd(int32_t, int32_t);
 int32_t wgf077r2npsubtract(int32_t, int32_t);
 _Bool wgf0los7kuless(int32_t, int32_t);
@@ -16,9 +16,9 @@ _Bool wgf1ks5s1gtruth(void);
 _Bool wgf0t9n2jrfalsity(void);
 
 // Report the cursor result, dynamic wrap boundaries, and the boolean helpers' values.
-int main(void) {
+int main(int argc, char **argv) {
 	return printf("%d %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %d %d %d %d %d %d %d\n",
-		wove_emitted_main(),
+		wove_emitted_main(argc, argv),
 		wgf074tbcmadd(INT32_MAX, 1), wgf074tbcmadd(INT32_MIN, -1),
 		wgf077r2npsubtract(INT32_MIN, 1), wgf077r2npsubtract(INT32_MAX, -1),
 		wgf0los7kuless(-1, 0), wgf0los7kuless(0, -1),

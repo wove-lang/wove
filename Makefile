@@ -159,7 +159,6 @@ test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
 test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version test-stage-2-inventory
-	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \

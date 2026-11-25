@@ -7,7 +7,7 @@
 #include <string.h>
 
 #undef main
-int wove_emitted_main(void);
+int wove_emitted_main(int argc, char **argv);
 uint8_t wgf1s4otf2forward_write(wvrt_mut_slice view, int32_t index);
 
 // Observe the same writable storage before and after a Wove reborrow.
@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
 		return 2;
 	}
 	uint8_t written = wgf1s4otf2forward_write(full, 1);
-	printf("%d %u %u %u %u\n", wove_emitted_main(), (unsigned)written,
+	printf("%d %u %u %u %u\n", wove_emitted_main(argc, argv), (unsigned)written,
 		(unsigned)data[0], (unsigned)data[1], (unsigned)data[2]);
 	return 0;
 }

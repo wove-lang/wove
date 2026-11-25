@@ -18,7 +18,7 @@ _Static_assert(_Generic(&alphabet, const wvrt_slice *: 1, default: 0), "read-onl
 _Static_assert(_Generic(&signed_byte, int8_t (*)(int8_t): 1, default: 0), "signed byte signature");
 
 // Check the generated view and its indexed reads against the exact alphabet.
-int main(void) {
+int main(int argc, char **argv) {
 	const char expected[] = "0123456789abcdef";
 	if (alphabet.wvrt_items != alphabet_bytes) { return 18; }
 	if (memcmp(alphabet_bytes, expected, sizeof alphabet_bytes) != 0) { return 19; }
@@ -26,5 +26,5 @@ int main(void) {
 	for (int32_t index = 0; index < alphabet.wvrt_length; ++index) {
 		if (digit(index) != (uint8_t)expected[index]) { return 20; }
 	}
-	return wove_fixture_main();
+	return wove_fixture_main(argc, argv);
 }

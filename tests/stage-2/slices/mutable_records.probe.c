@@ -15,7 +15,7 @@ typedef struct {
 } wgr0r80f1mToken;
 
 #undef main
-int wove_emitted_main(void);
+int wove_emitted_main(int argc, char **argv);
 wgr0r80f1mToken wgf0at5uakreplace_token(wvrt_mut_slice view, int32_t index, wgr0r80f1mToken value);
 
 // Print every field of a copy or backing record without truncating its scalar values.
@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
 	}
 
 	const wgr0r80f1mToken observed = wgf0at5uakreplace_token(full, 1, replacement);
-	printf("%d", wove_emitted_main());
+	printf("%d", wove_emitted_main(argc, argv));
 	print_token(observed);
 	print_token(data[0]);
 	print_token(data[1]);

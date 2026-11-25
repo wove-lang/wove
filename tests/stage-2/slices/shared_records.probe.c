@@ -15,7 +15,7 @@ typedef struct {
 } wgr1d5abitToken;
 
 #undef main
-int wove_emitted_main(void);
+int wove_emitted_main(int argc, char **argv);
 wgr1d5abitToken wgf1vpl7koforward_token(wvrt_slice view, int32_t index);
 int32_t wgf0qod78mtoken_count(wvrt_slice view);
 
@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
 	data[0] = second;
 	const wgr1d5abitToken updated = wgf1vpl7koforward_token(full, 0);
 	printf("%d %" PRId32 " %" PRId32 " %" PRIu32 " %" PRId32 " %d %u %" PRIu32 " %" PRId32 " %d %u %" PRIu32 "\n",
-		wove_emitted_main(), wgf0qod78mtoken_count(full), wgf0qod78mtoken_count(empty),
+		wove_emitted_main(argc, argv), wgf0qod78mtoken_count(full), wgf0qod78mtoken_count(empty),
 		first.wgm0000000, first.wgm0000001, first.wgm0000002, (unsigned)first.wgm0000003,
 		second.wgm0000000, second.wgm0000001, second.wgm0000002, (unsigned)second.wgm0000003, updated.wgm0000000);
 	return 0;

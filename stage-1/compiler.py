@@ -127,10 +127,10 @@ class Function:
 	body: Form
 	host_span: Record | None = None
 
-	# Both entry signatures are reserved for the C host.
+	# The host adapter owns the application entry.
 	@property
 	def is_entry(self) -> bool:
-		return self.c_name == "main" or self.host_span is not None
+		return self.host_span is not None
 
 
 @dataclass(frozen=True)
@@ -336,12 +336,12 @@ def read_function(
 	if result != VOID and not copyable(result):
 		raise SourceError(result_node.line)
 	entry = entry_module and name == "main"
-	# Both bootstrapping entry signatures return a native i32 exit status.
+	# The application entry implements the shared host argument ABI.
 	if entry and result != I32:
 		raise SourceError(node.line)
-	host_span = read_host_span(params, node.line) if entry and params else None
+	host_span = read_host_span(params, node.line) if entry else None
 
-	c_name = "main" if entry and host_span is None else f"wv_seed_fn_{index}"
+	c_name = f"wv_seed_fn_{index}"
 	return Function(c_name, tuple(params.items()), result, checked_form(body_node, "body"), host_span)
 
 
@@ -366,7 +366,7 @@ def signature(function: Function) -> str:
 		f"{c_type(kind)} wv_value_{index}"
 		for index, (_, kind) in enumerate(function.params)
 	)
-	result = "int" if function.c_name == "main" else f"static {c_type(function.result)}"
+	result = f"static {c_type(function.result)}"
 	return f"{result} {function.c_name}({params or 'void'})"
 
 
@@ -927,6 +927,9 @@ class FunctionEmitter:
 	def emit(self, retained: tuple[str, ...] = ()) -> list[str]:
 		body = self.function.body
 		self.lines.append(signature(self.function) + " {")
+		# Every named parameter may be unused in the Wove body.
+		for index in range(len(self.function.params)):
+			self.emit_line(f"(void)wv_value_{index};")
 		# Keep loaded provider functions and module bindings private while marking them used.
 		for name in retained:
 			self.emit_line(f"(void){name};")

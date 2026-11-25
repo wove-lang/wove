@@ -8,7 +8,7 @@
 #include <string.h>
 
 #undef main
-int wove_emitted_main(void);
+int wove_emitted_main(int argc, char **argv);
 uint8_t wgf1tb8104forward_read(wvrt_slice view, int32_t index);
 int32_t wgf1tlecdcforward_length(wvrt_slice view);
 _Bool wgf0oorrvmhas_last_byte(wvrt_slice view, uint8_t value);
@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
 		if (strcmp(argv[1], "empty") == 0) { (void)wgf1tb8104forward_read(empty, 0); }
 		return 2;
 	}
-	printf("%d %u %" PRId32 " %" PRId32 " %d %d\n", wove_emitted_main(),
+	printf("%d %u %" PRId32 " %" PRId32 " %d %d\n", wove_emitted_main(argc, argv),
 		(unsigned)wgf1tb8104forward_read(full, 2),
 		wgf1tlecdcforward_length(full), wgf1tlecdcforward_length(empty),
 		wgf0oorrvmhas_last_byte(full, UINT8_MAX), wgf0oorrvmhas_last_byte(empty, UINT8_MAX));
