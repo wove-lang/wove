@@ -225,6 +225,27 @@ grows. `array.load` reads the original table at a checked `i32` index
 and copies only the selected element. Stage 1 keeps its integer and
 quoted-byte module initializer subset.
 
+A fieldless enum declares one or more variants. Every value keeps its nominal
+enum type through locals, assignments, parameters, and returns. A type alias
+selected from another module keeps the defining enum and its variant names.
+
+```lisp
+(enum Status (variants (Ok) (IoError) (Invalid)))
+
+(let status (enum.new Status Ok))
+(match (local status)
+    (case Ok (return 0i32))
+    (case IoError (return 1i32))
+    (case Invalid (return 3i32)))
+```
+
+The match evaluates its subject once. Every variant of its exact type must
+appear once, and the selected case runs in its own local scope. A continuing
+case exits the match after cleaning up its locals. A return exits the
+function and releases its active owners. When every case returns, the
+match satisfies the enclosing return requirement. Missing coverage reports
+code 78 at the match. Unknown or duplicate variants point at the case name.
+
 A helper with `(returns void)` can use `(return)` or finish at the end
 of its body. Invoke it with a standalone `(call ...)` statement. The
 call checks its arguments, and either exit releases the helper's live

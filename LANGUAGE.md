@@ -65,6 +65,14 @@ named Wove record. `array.load` can read the table directly.
 In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
 
+## Fieldless enums
+
+Stage 2 uses `(enum Status (variants (Ok) (IoError) (Invalid)))` to
+declare a nominal, copyable type. `(enum.new Status Ok)` constructs one
+variant of that type. `(match value (case Ok statements...) ...)` is a
+statement that evaluates its subject once, requires one case for every
+variant, and runs only the selected case in its own scope.
+
 ## Arrays, slices, and borrows
 
 | Form | Meaning |

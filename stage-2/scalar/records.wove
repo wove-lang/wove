@@ -7,6 +7,7 @@
 	Resolve fields by original spelling and use declaration order for
 	their native ordinals. The record table is a zero-initialized prefix.`)
 
+	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value variants_list) (value match_case)))
 	(use wove-file "../source/integer_ops.wove" (only read_integer_operation integer_byte_width is_integer_byte_encoder))
 	(use wove-file "../source/c_scope.wove" (only declaring_c_bridge project_bridge))
 	(use wove-file "../source/scan.wove" (only is_disabled_form is_metadata_form (type SourceNode)))
@@ -20,7 +21,11 @@
 			(type EntryRead) (type FixedArrayShape)))
 
 	(struct
-		(:doc "A fixed-array row has a negative name, with element type in first and extent in count.")
+		(:doc `One registered value layout or native type.
+
+		A fixed array has a negative name, element type in first, and
+		extent in count. An enum has native -1 and keeps its first
+		variant and count in the same positions as a record's fields.`)
 		ScalarRecord
 		(fields (name i32) (file i32) (identity u32) (first i32) (count i32)
 			(declaration i32) (native i32) (source_base i32) (emit_row i32)))
@@ -29,7 +34,7 @@
 	(struct LayoutCheck (fields (file i32) (start i32) (end i32) (error u32)))
 
 	(fn is_record_type
-		(:doc `Recognize value types for registered aggregate layouts.
+		(:doc `Recognize value types represented by registered layouts.
 
 		Even an empty record definition uses five tree rows.
 		A definition also uses more than eight source bytes. The signed
@@ -51,6 +56,12 @@
 		(params (layout ScalarRecord))
 		(returns bool)
 		(body (return (i32.lt (struct.get (local layout) name) 0i32))))
+
+	(fn is_enum_layout
+		(:doc `Recognize a nominal fieldless enum in the shared type table.`)
+		(params (layout ScalarRecord))
+		(returns bool)
+		(body (return (i32.eq (struct.get (local layout) native) -1i32))))
 
 	(fn find_fixed_array_type
 		(:doc `Find the one structural type for the exact scalar element and extent.`)
@@ -135,7 +146,8 @@
 			(let parent (array.load (local nodes) (struct.get (local node) parent)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parent) first_child)))
 			(return (bool.or (u32.eq (local tag) 6u32)
-				(bool.or (u32.eq (local tag) 23u32) (u32.eq (local tag) 24u32))))))
+				(bool.or (u32.eq (local tag) (local match_case))
+					(bool.or (u32.eq (local tag) 23u32) (u32.eq (local tag) 24u32)))))))
 
 	(fn register_fixed_arrays
 		(:doc `Intern array shapes in one selected declaration before its types are checked.
@@ -633,10 +645,14 @@
 			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local element)))
 			(if
-				(:doc "Ordinary references target a named Wove record rather than a scalar, fixed layout, or C type.")
-				(bool.not (bool.and (call is_record_type (local type))
-					(bool.and (bool.not (call is_fixed_array (array.load (local records) (call record_index (local type)))))
-						(bool.not (call is_native_record (array.load (local records) (call record_index (local type))))))))
+				(:doc "A place reference needs a registered value layout.")
+				(bool.not (call is_record_type (local type)))
+				(then (return (call entry_at (array.load (local nodes) (local element)) -1i32 23u32))))
+			(let layout (array.load (local records) (call record_index (local type))))
+			(if
+				(:doc "Record references have fields. Arrays, enums, and C records have separate shapes.")
+				(bool.or (call is_fixed_array (local layout))
+					(bool.or (call is_native_record (local layout)) (call is_enum_layout (local layout))))
 				(then (return (call entry_at (array.load (local nodes) (local element)) -1i32 23u32))))
 			(return (call entry_at (local node)
 				(int.convert i32 (call place_reference_type (local type) (u32.eq (local mode) 2u32))) 0u32))))
@@ -783,9 +799,45 @@
 					(set (local ordinal) (i32.add.wrapping (local ordinal) 1i32))))
 			(return (struct.new ScalarMember (ordinal -1i32) (row -1i32)))))
 
-	(fn register_record
-		(:doc `Register one selected type after checking field forms and stable identity.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32)
+	(fn read_unit_variant
+		(:doc `Accept only a named form without payload operands.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
+		(returns EntryRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (struct.get (local parts) head))
+			(if
+				(:doc "The first significant child names a unit variant.")
+				(bool.or (i32.lt (local head) 0i32)
+					(bool.not (call is_scalar_name (borrow-shared (local source)) (array.load (local nodes) (local head)))))
+				(then (return (call entry_at (local node) -1i32 22u32))))
+			(let metadata (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local parts)))
+			(if
+				(:doc "Variant metadata cannot selectively remove a member of a closed enum.")
+				(u32.lt 0u32 (struct.get (local metadata) error))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local metadata) start))
+					(end (struct.get (local metadata) end)) (error (struct.get (local metadata) error)) (related -1i32)))))
+			(let payload (struct.get (local parts) operands))
+			(if
+				(:doc "Report the first unsupported payload operand directly.")
+				(i32.lt -1i32 (local payload))
+				(then (return (call entry_at (array.load (local nodes) (local payload)) -1i32 22u32))))
+			(return (call entry_at (local node) (local head) 0u32))))
+
+	(fn read_type_member
+		(:doc `Check a field type or a unit variant according to the enclosing declaration.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (enumeration bool))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A unit variant has only its name, while a struct field needs a type.")
+				(local enumeration)
+				(then (return (call read_unit_variant (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
+			(return (call read_member_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
+
+	(fn register_nominal_type
+		(:doc `Register one selected record or enum after checking its member forms and stable identity.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32) (enumeration bool)
 			(file i32) (base i32) (source_base i32) (module u32) (records (mut-array ScalarRecord)) (index i32))
 		(returns EntryRead)
 		(body
@@ -793,13 +845,13 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let name (struct.get (local parts) operands))
 			(if
-				(:doc "A struct requires a name before its field list.")
+				(:doc "A named type requires a name before its member list.")
 				(i32.lt (local name) 0i32)
 				(then (return (call entry_at (local node) -1i32 22u32))))
 			(let spelling (array.load (local nodes) (local name)))
 			(let fields (struct.get (local spelling) next_sibling))
 			(if
-				(:doc "There is exactly one fields operand after the record name.")
+				(:doc "There is exactly one fields or variants form after the type name.")
 				(bool.or (i32.lt (local fields) 0i32)
 					(bool.not (i32.lt (struct.get (array.load (local nodes) (local fields)) next_sibling) 0i32)))
 				(then (return (call entry_at (local node) -1i32 22u32))))
@@ -830,13 +882,25 @@
 								(then (return (call entry_at (local spelling) -1i32 33u32))))
 							(return (call entry_at (local spelling) -1i32 32u32))))
 					(set (local previous) (i32.add.wrapping (local previous) 1i32))))
+			(let-mut list_kind 49u32)
+			(let-mut native 0i32)
+			(if
+				(:doc "An enum uses a variants list and its own layout marker.")
+				(local enumeration)
+				(then
+					(set (local list_kind) (local variants_list))
+					(set (local native) -1i32)))
 			(let list (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
-				(array.load (local nodes) (local fields)) 49u32 22u32))
+				(array.load (local nodes) (local fields)) (local list_kind) 22u32))
 			(if
 				(:doc "Keep an invalid field list's own span.")
 				(u32.lt 0u32 (struct.get (local list) error))
 				(then (return (local list))))
 			(let first (struct.get (local list) operand))
+			(if
+				(:doc "An enum needs a first variant for its zero ordinal.")
+				(bool.and (local enumeration) (i32.lt (local first) 0i32))
+				(then (return (call entry_at (array.load (local nodes) (local fields)) -1i32 22u32))))
 			(let-mut field (local first))
 			(let-mut count 0i32)
 			(while
@@ -844,7 +908,8 @@
 				(bool.not (i32.lt (local field) 0i32))
 				(body
 					(let member (array.load (local nodes) (local field)))
-					(let checked (call read_member_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+					(let checked (call read_type_member (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local member) (local enumeration)))
 					(if
 						(:doc "Malformed member forms retain the offending span.")
 						(u32.lt 0u32 (struct.get (local checked) error))
@@ -861,7 +926,7 @@
 			(array.store (local records) (local index)
 				(struct.new ScalarRecord (name (local name)) (file (local file)) (identity (local identity))
 					(first (local first)) (count (local count)) (declaration (i32.sub.wrapping (local declaration) (local base)))
-					(native 0i32) (source_base (local source_base)) (emit_row 0i32)))
+					(native (local native)) (source_base (local source_base)) (emit_row 0i32)))
 			(return (call entry_at (local node) (i32.add.wrapping (local index) 1i32) 0u32))))
 
 	(fn register_module_records
@@ -888,11 +953,12 @@
 						(then (set (local next) (call register_fixed_arrays (borrow-shared (local source)) (borrow-shared (local nodes))
 							(local form) (borrow-mut (local records)) (local next)))))
 					(if
-						(:doc "Only struct declarations populate the type namespace.")
-						(u32.eq (local kind) 48u32)
+						(:doc "Structs and enums populate the shared nominal type namespace.")
+						(bool.or (u32.eq (local kind) 48u32) (u32.eq (local kind) (local enum_declaration)))
 						(then
-							(let checked (call register_record (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local form) (local file) (local base) (local source_base) (local module) (borrow-mut (local records)) (local next)))
+							(let checked (call register_nominal_type (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local form) (u32.eq (local kind) (local enum_declaration)) (local file) (local base)
+								(local source_base) (local module) (borrow-mut (local records)) (local next)))
 							(if
 								(:doc "Preserve the original invalid type or field span.")
 								(u32.lt 0u32 (struct.get (local checked) error))
@@ -928,11 +994,12 @@
 			(let element (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local operand)))
 			(if
-				(:doc "Native aliases, C records, and anonymous aggregate elements are outside the table contract.")
+				(:doc "Tables use builtin scalars or ordinary named Wove records.")
 				(bool.not (bool.or (call is_builtin_integer (local element))
 					(bool.or (u32.eq (local element) 12u32)
 						(bool.and (call is_record_type (local element))
-							(bool.not (call is_native_record (array.load (local records) (call record_index (local element)))))))))
+							(bool.not (bool.or (call is_native_record (array.load (local records) (call record_index (local element))))
+								(call is_enum_layout (array.load (local records) (call record_index (local element))))))))))
 				(then (return 0u32)))
 			(let shape (struct.new FixedArrayShape (element (local element)) (extent (local extent))))
 			(let existing (call find_fixed_array_type (borrow-shared (local records)) (local shape)))

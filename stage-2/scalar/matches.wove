@@ -1,0 +1,80 @@
+(module scalar_matches
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve exhaustive statement cases against one checked enum's variant table.`)
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only skip_disabled_siblings))
+	(use wove-file "../source/enum_forms.wove" (only (value match_case) (value non_exhaustive_match)))
+	(use wove-file "./syntax.wove" (only entry_at entry_form is_scalar_name (type EntryRead)))
+	(use wove-file "./records.wove" (only find_member (type ScalarRecord)))
+	(use wove-file "./flow.wove" (only block_statement (type ScalarStatement)))
+
+	(fn plan_match_cases
+		(:doc `Check case names and coverage before entering any of the independent arm scopes.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(first i32) (layout ScalarRecord) (statements (mut-array ScalarStatement)))
+		(returns EntryRead)
+		(body
+			(let count (struct.get (local layout) count))
+			(let-mut seen (array.alloc u8 (local count)))
+			(let-mut covered 0i32)
+			(let-mut arm (local first))
+			(while
+				(:doc "Resolve each case against the subject's exact enum, even when variants share spellings across types.")
+				(i32.lt -1i32 (local arm))
+				(body
+					(let block (array.load (local nodes) (local arm)))
+					(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local block) (local match_case) 24u32))
+					(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
+					(let index (struct.get (local form) operand))
+					(if
+						(:doc "A case needs its bare variant even when its body is empty.")
+						(i32.lt (local index) 0i32)
+						(then (return (call entry_at (local block) -1i32 24u32))))
+					(let name (array.load (local nodes) (local index)))
+					(if
+						(:doc "A case variant uses the declaration's bare spelling.")
+						(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+						(then (return (call entry_at (local name) -1i32 24u32))))
+					(let variant (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (local layout) first) (local count) (local name)))
+					(let ordinal (struct.get (local variant) ordinal))
+					(if
+						(:doc "An unavailable variant retains the original lookup span.")
+						(i32.lt (local ordinal) 0i32)
+						(then (return (call entry_at (local name) -1i32 34u32))))
+					(if
+						(:doc "A second case for one variant is a duplicate even if the bodies differ.")
+						(u8.eq (array.load (local seen) (local ordinal)) 1u8)
+						(then (return (call entry_at (local name) -1i32 33u32))))
+					(array.store (local seen) (local ordinal) 1u8)
+					(set (local covered) (i32.add.wrapping (local covered) 1i32))
+					(let body_start (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (local name) next_sibling)))
+					(array.store (local statements) (local arm)
+						(call block_statement (local body_start) (local ordinal) -1i32 (bool true)))
+					(set (local arm) (struct.get (local block) next_sibling))))
+			(if
+				(:doc "Missing variants have no case span. Report the incomplete match form.")
+				(bool.not (i32.eq (local covered) (local count)))
+				(then (return (call entry_at (local node) -1i32 (local non_exhaustive_match)))))
+			(return (call entry_at (local node) (local first) 0u32))))
+
+	(fn match_continues
+		(:doc `An exhaustive match reaches its successor exactly when at least one arm does.`)
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement)) (first i32))
+		(returns bool)
+		(body
+			(let-mut arm (local first))
+			(while
+				(:doc "All arm rows have been completed when the final case exits.")
+				(i32.lt -1i32 (local arm))
+				(body
+					(if
+						(:doc "One continuing arm suffices, irrespective of the other return paths.")
+						(struct.get (array.load (local statements) (local arm)) falls_through)
+						(then (return (bool true))))
+					(set (local arm) (struct.get (array.load (local nodes) (local arm)) next_sibling))))
+			(return (bool false)))))
