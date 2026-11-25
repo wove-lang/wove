@@ -21,6 +21,7 @@ SOURCE_SCAN_MODULE := stage-2/source/scan.wove
 UTF8_MODULE := stage-2/text/utf8.wove
 QUOTED_TEXT_MODULE := stage-2/text/quoted.wove
 BYTE_TEXT_MODULE := stage-2/text/bytes.wove
+BYTE_MATCH_MODULE := stage-2/text/match.wove
 VALUE_TEXT_MODULES := $(BYTE_TEXT_MODULE) stage-2/text/decimal.wove
 DECIMAL_WRITER := stage-2/text/decimal_write.wove
 SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
@@ -66,7 +67,7 @@ COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
 NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove version.wove)
-NATIVE_WOVE_SOURCES = $(sort $(SOURCE_SCAN_MODULE) $(SOURCE_MODULE_READER) $(SOURCE_STRINGS_MODULE) \
+NATIVE_WOVE_SOURCES = $(sort $(SOURCE_SCAN_MODULE) $(BYTE_MATCH_MODULE) $(SOURCE_MODULE_READER) $(SOURCE_STRINGS_MODULE) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
 	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES))
@@ -119,7 +120,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) stage-2/hashing/base16.wove $(BLAKE2B_SOURCES) \
-		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
+		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(PROCESS_MODULE) \
 		tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
@@ -186,7 +187,7 @@ test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 
 # Translate the compiler root and regenerate C when any source module changes.
-$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
+$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) \
 	$(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(C_EMITTER_SOURCES) $(HASHING_SOURCES) $(SEED)
 	mkdir -p "$(@D)"
@@ -281,7 +282,7 @@ $(CONFIG_PROGRAM): $(CONFIG_FIXTURES)/project.probe.c $(CONFIG_PROGRAM).c $(STAG
 
 # Supply an argv arena and config bytes to the standalone command fixture.
 $(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOURCES) $(CONFIG_SOURCES) \
-	$(JSON_READER_SOURCES) $(SOURCE_SCAN_MODULE) $(SEED)
+	$(JSON_READER_SOURCES) $(SOURCE_SCAN_MODULE) $(BYTE_MATCH_MODULE) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
@@ -312,7 +313,7 @@ $(STAGE1)/imports.host_declarations.c: $(OWNERSHIP_TESTS)/imports/nested/shared.
 $(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
 $(STAGE1)/module.select.c: $(MODULE_SELECT_SOURCES)
 $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
-$(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_TEXT_MODULE)
+$(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
 REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
