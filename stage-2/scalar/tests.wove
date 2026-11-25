@@ -10,11 +10,10 @@
 
 	(use wove-file "../source/scan.wove" (only check_source_form build_source_tree (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts read_module (type SelectedDeclaration)))
-	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding) (type GraphResult)))
+	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphResult)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
-	(use wove-file "./records.wove" (only (type ScalarRecord)))
 	(use wove-file "./syntax.wove" (only entry_keyword))
-	(use wove-file "./plan.wove" (only read_signature (type FunctionScope)))
+	(use wove-file "./signatures.wove" (only read_test_signature))
 
 	(struct DiscoveredTest (fields (file i32) (declaration i32) (name_start i32) (name_end i32) (start i32) (end i32)))
 	(struct TestDiscovery (fields (count i32) (file i32) (start i32) (end i32) (error u32)))
@@ -30,13 +29,13 @@
 
 	(fn ordered_test_files
 		(:doc `Invert the reached modules' discovery order to visit each canonical file once.`)
-		(params (modules (shared-slice GraphModule)) (order (mut-slice TestFileOrder)))
+		(params (modules (shared-slice GraphModule)) (file_count i32) (order (mut-slice TestFileOrder)))
 		(returns void)
 		(body
 			(let-mut file (i32 0))
 			(while
-				(:doc "Only reached canonical rows own a discovery index.")
-				(i32.lt (local file) (slice.len (local modules)))
+				(:doc "Resolution initializes one module slot per supplied file.")
+				(i32.lt (local file) (local file_count))
 				(body
 					(let module (slice.load (local modules) (local file)))
 					(let index (record.get (local module) order))
@@ -48,8 +47,7 @@
 
 	(fn collect_file_tests
 		(:doc `Validate direct test declarations in one reached source view and append their original spans.`)
-		(params (source (shared-slice u8)) (file i32) (mode u32) (first i32) (output (mut-slice DiscoveredTest))
-			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)))
+		(params (source (shared-slice u8)) (file i32) (mode u32) (first i32) (output (mut-slice DiscoveredTest)))
 		(returns TestDiscovery)
 		(body
 			(let checked (call check_source_form (borrow-shared (local source))))
@@ -65,18 +63,15 @@
 				(then (return (call discovery_result (local first) (local file) (record.get (local module) start)
 					(record.get (local module) end) (record.get (local module) error)))))
 			(return (call collect_selected_tests (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local selected)) (record.get (local module) count) (local file) (local mode)
-				(local first) (borrow-mut (local output)) (borrow-shared (local records)) (borrow-shared (local bindings))))))
+				(borrow-shared (local selected)) (record.get (local module) count) (local file)
+				(local first) (borrow-mut (local output))))))
 
 	(fn collect_selected_tests
 		(:doc `Read exact test signatures from the same selected declaration rows used by other compiler passes.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (selected (shared-slice SelectedDeclaration))
-			(count i32) (file i32) (mode u32) (first i32) (output (mut-slice DiscoveredTest))
-			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)))
+			(count i32) (file i32) (first i32) (output (mut-slice DiscoveredTest)))
 		(returns TestDiscovery)
 		(body
-			(let scope (record.make FunctionScope (file (local file)) (tree_base (i32 0)) (tree_limit (slice.len (local nodes)))
-				(source_base (i32 0)) (module_id (u32 0)) (entry_module (bool false)) (mode (local mode))))
 			(let-mut next (local first))
 			(let-mut index (i32 0))
 			(while
@@ -96,9 +91,8 @@
 								(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
 									(record.get (local parts) head)) (u32 1))
 								(then
-									(let signature (call read_signature (borrow-shared (local source)) (borrow-shared (local nodes))
-										(local node) (record.get (local parts) operands) (bool false) (bool true)
-										(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope)))
+									(let signature (call read_test_signature (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local node) (record.get (local parts) operands)))
 									(if
 										(:doc "Point at the exact parameter list or result type from the signature reader.")
 										(u32.lt (u32 0) (record.get (local signature) error))
@@ -119,7 +113,9 @@
 			(return (call discovery_result (local next) (i32 -1) (i32 0) (i32 0) (u32 0)))))
 
 	(fn discover_graph_tests
-		(:doc `Collect tests from a successfully resolved graph without requiring a program entry or checking bodies.`)
+		(:doc `Collect tests from a successfully resolved graph without requiring a program entry or checking bodies.
+
+		Only the module slots corresponding to supplied files participate in the inventory.`)
 		(:expect (tests "stage-2/test_discovery.tsv") (issues "gh:wove-lang/wove:181"))
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
 			(graph GraphResult) (output (mut-slice DiscoveredTest)))
@@ -132,18 +128,15 @@
 				(then (return (call discovery_result (i32 0) (i32 -1) (i32 0) (i32 0) (u32 0)))))
 			(let count (record.get (local graph) modules))
 			(let-mut order (array.alloc TestFileOrder (local count)))
-			(call ordered_test_files (borrow-shared (local modules)) (borrow-mut (local order)))
-			(let records (array.alloc ScalarRecord (i32 0)))
-			(let bindings (array.alloc GraphBinding (i32 0)))
+			(call ordered_test_files (borrow-shared (local modules)) (slice.len (local files)) (borrow-mut (local order)))
 			(return (call discover_ordered_tests (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local modules)) (borrow-shared (local order)) (local mode)
-				(borrow-mut (local output)) (borrow-shared (local records)) (borrow-shared (local bindings))))))
+				(borrow-mut (local output))))))
 
 	(fn discover_ordered_tests
 		(:doc `Visit canonical files in graph discovery order, skipping modules excluded by selection.`)
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
-			(order (shared-slice TestFileOrder)) (mode u32) (output (mut-slice DiscoveredTest))
-			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)))
+			(order (shared-slice TestFileOrder)) (mode u32) (output (mut-slice DiscoveredTest)))
 		(returns TestDiscovery)
 		(body
 			(let-mut index (i32 0))
@@ -161,7 +154,7 @@
 							(let result (call collect_file_tests
 								(borrow-shared (slice.range (local arena) (record.get (local input) source_start)
 									(record.get (local input) source_end))) (local file) (local mode) (local count)
-								(borrow-mut (local output)) (borrow-shared (local records)) (borrow-shared (local bindings))))
+								(borrow-mut (local output))))
 							(if (u32.lt (u32 0) (record.get (local result) error)) (then (return (local result))))
 							(set (local count) (record.get (local result) count))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))

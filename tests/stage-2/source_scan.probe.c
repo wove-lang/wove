@@ -27,9 +27,9 @@
 #define read_module wv_seed_fn_85
 #define emit_module wv_seed_fn_115
 #define resolve_graph wv_seed_fn_132
-#define inspect_callers wv_seed_fn_390
-#define run_scalar_graph wv_seed_fn_415
-#define discover_graph_tests wv_seed_fn_430
+#define inspect_callers wv_seed_fn_394
+#define run_scalar_graph wv_seed_fn_419
+#define discover_graph_tests wv_seed_fn_434
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -40,18 +40,18 @@ typedef wv_seed_record_11 FormParts;
 typedef wv_seed_record_12 SelectedDeclaration;
 typedef wv_seed_record_13 ModuleRead;
 typedef wv_seed_record_15 EmitResult;
-typedef wv_seed_record_50 EmbedAsset;
+typedef wv_seed_record_51 EmbedAsset;
 typedef wv_seed_record_16 GraphModule;
 typedef wv_seed_record_17 GraphBinding;
 typedef wv_seed_record_18 GraphUse;
 typedef wv_seed_record_19 GraphSelector;
 typedef wv_seed_record_20 GraphResult;
-typedef wv_seed_record_43 CallSite;
+typedef wv_seed_record_42 CallSite;
 typedef wv_seed_record_23 SuppliedFile;
-typedef wv_seed_record_53 CallerInspection;
-typedef wv_seed_record_57 GraphOutput;
-typedef wv_seed_record_61 DiscoveredTest;
-typedef wv_seed_record_62 TestDiscovery;
+typedef wv_seed_record_54 CallerInspection;
+typedef wv_seed_record_58 GraphOutput;
+typedef wv_seed_record_62 DiscoveredTest;
+typedef wv_seed_record_63 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
@@ -975,7 +975,7 @@ static int finish_tests(wvrt_slice arena, wvrt_slice supplied, wvrt_slice module
 	return status;
 }
 
-// Resolve a supplied graph before exposing its bindings, compiled C, or caller metadata.
+// Resolve a supplied graph before exposing bindings, compiled C, callers, or tests.
 static int graph_mode(int argc, char **argv, uint32_t mode) {
 	const bool emit = strcmp(argv[1], "--emit-graph") == 0;
 	const bool inspect = strcmp(argv[1], "--graph-callers") == 0;
@@ -1019,12 +1019,14 @@ static int graph_mode(int argc, char **argv, uint32_t mode) {
 	}
 	const wvrt_slice arena = {bytes, length, sizeof(uint8_t)};
 	const wvrt_slice supplied = {files, count, sizeof(SuppliedFile)};
-	wvrt_array *modules = wvrt_array_new(count, sizeof(GraphModule), _Alignof(GraphModule), site);
+	// Test discovery accepts spare module storage beyond the supplied file table.
+	const int32_t module_capacity = count + (tests ? 1 : 0);
+	wvrt_array *modules = wvrt_array_new(module_capacity, sizeof(GraphModule), _Alignof(GraphModule), site);
 	wvrt_array *bindings = wvrt_array_new(capacity, sizeof(GraphBinding), _Alignof(GraphBinding), site);
 	wvrt_array *uses = wvrt_array_new(capacity, sizeof(GraphUse), _Alignof(GraphUse), site);
 	wvrt_array *selectors = wvrt_array_new(capacity, sizeof(GraphSelector), _Alignof(GraphSelector), site);
 	const GraphResult result = resolve_graph(arena, supplied, entry, mode,
-		(wvrt_mut_slice){modules->wvrt_items, count, sizeof(GraphModule)},
+		(wvrt_mut_slice){modules->wvrt_items, module_capacity, sizeof(GraphModule)},
 		(wvrt_mut_slice){bindings->wvrt_items, capacity, sizeof(GraphBinding)},
 		(wvrt_mut_slice){uses->wvrt_items, capacity, sizeof(GraphUse)},
 		(wvrt_mut_slice){selectors->wvrt_items, capacity, sizeof(GraphSelector)});
@@ -1033,7 +1035,8 @@ static int graph_mode(int argc, char **argv, uint32_t mode) {
 	if (result.wv_field_5 != 0) {
 		write_graph_error(arena, files, result.wv_field_5, result.wv_field_2, result.wv_field_3, result.wv_field_4, -1, -1);
 	} else if (tests) {
-		status = finish_tests(arena, supplied, (wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)}, result, output);
+		status = finish_tests(arena, supplied,
+			(wvrt_slice){modules->wvrt_items, module_capacity, sizeof(GraphModule)}, result, output);
 	} else if (emit || inspect) {
 		status = finish_graph(arena, supplied, (wvrt_slice){asset_storage->wvrt_items, asset_count, sizeof(SuppliedFile)},
 			(wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},

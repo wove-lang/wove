@@ -24,6 +24,7 @@
 			find_member read_member_operand is_record_slice record_slice_type record_slice_element is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element (type ScalarRecord)))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
+	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
 	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind))
 	(use wove-file "./flow.wove" (only block_statement moved_owner after_block (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
@@ -55,7 +56,6 @@
 		ScalarExpression
 		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool) (borrowed_owner bool)
 			(asset_start i32) (asset_end i32)))
-	(struct ScalarSignature (fields (params i32) (result u32) (first_statement i32) (start i32) (end i32) (error u32) (body i32)))
 
 	(struct
 		(:doc `A direct call links the two defining files and declaration rows.
@@ -70,102 +70,35 @@
 	(struct BodyPlan
 		(fields (count i32) (file i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
 
-	(fn signature_error
-		(:doc `Carry an original source diagnostic through the signature reader.`)
-		(params (error EntryRead))
-		(returns ScalarSignature)
-		(body
-			(return (record.make ScalarSignature (params (i32 -1)) (result (u32 0)) (first_statement (i32 -1)) (body (i32 -1))
-				(start (record.get (local error) start)) (end (record.get (local error) end))
-				(error (record.get (local error) error))))))
-
 	(fn read_signature
-		(:doc `Check the signature and body shape of one named function.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
-			(params i32) (entry bool) (test bool) (records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)) (scope FunctionScope))
+		(:doc `Resolve a named function's result before completing its signature and body shape.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (params i32)
+			(entry bool) (records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)) (scope FunctionScope))
 		(returns ScalarSignature)
 		(body
+			(let bootstrap_entry (bool.and (local entry) (u32.eq (record.get (local scope) mode) (u32 1))))
+			(let head (call read_signature_head (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local params) (local bootstrap_entry)))
+			(let-mut result (u32 0))
 			(if
-				(:doc "The first form after the name declares the parameter list.")
-				(i32.lt (local params) (i32 0))
-				(then (return (call signature_error (call entry_at (local node) (i32 -1) (u32 23))))))
-			(let params_node (slice.load (local nodes) (local params)))
-			(let parameters (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local params_node) (u32 3) (u32 23)))
-			(if
-				(:doc "Preserve the original params diagnostic.")
-				(u32.lt (u32 0) (record.get (local parameters) error))
-				(then (return (call signature_error (local parameters)))))
-			(let first (record.get (local parameters) operand))
-			(if
-				(:doc "Discovered tests and bootstrap entry points take no parameters.")
-				(bool.and (bool.or (local test) (bool.and (local entry) (u32.eq (record.get (local scope) mode) (u32 1))))
-					(bool.not (i32.lt (local first) (i32 0))))
-				(then (return (call signature_error (call entry_at (local params_node) (i32 -1) (u32 23))))))
-			(let result_node (record.get (local params_node) next_sibling))
-			(if
-				(:doc "Every function declares its exact result type.")
-				(i32.lt (local result_node) (i32 0))
-				(then (return (call signature_error (call entry_at (local node) (i32 -1) (u32 23))))))
-			(let returns (slice.load (local nodes) (local result_node)))
-			(let signature (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local returns) (u32 4) (u32 23)))
-			(if
-				(:doc "Keep the return form's diagnostic before inspecting its operands.")
-				(u32.lt (u32 0) (record.get (local signature) error))
-				(then (return (call signature_error (local signature)))))
-			(let type_node (record.get (local signature) operand))
-			(if
-				(:doc "The returns form takes exactly one type.")
-				(bool.or (i32.lt (local type_node) (i32 0))
-					(bool.not (i32.lt (record.get (slice.load (local nodes) (local type_node)) next_sibling) (i32 0))))
-				(then (return (call signature_error (call entry_at (local returns) (i32 -1) (u32 23))))))
-			(let void (call void_type))
-			(let-mut result (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
-			(if
-				(:doc "Point at the written result type if a test does not return void.")
-				(bool.and (local test) (bool.not (u32.eq (local result) (local void))))
-				(then (return (call signature_error
-					(call entry_at (slice.load (local nodes) (local type_node)) (i32 -1) (u32 23))))))
-			(if
-				(:doc "Other results must have a copyable value type.")
-				(bool.not (u32.eq (local result) (local void)))
-				(then (set (local result) (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
-					(borrow-shared (local records)) (borrow-shared (local bindings))
-					(record.get (local scope) file) (record.get (local scope) source_base) (local type_node)))))
-			(if
-				(:doc "Helpers can return a copyable value or void. Main returns i32.")
-				(bool.or (u32.eq (local result) (u32 0))
-					(bool.and (local entry) (bool.not (u32.eq (local result) (u32 5)))))
-				(then (return (call signature_error
-					(call entry_at (slice.load (local nodes) (local type_node)) (i32 -1) (u32 23))))))
-			(let body (record.get (local returns) next_sibling))
-			(if
-				(:doc "One body follows the signature.")
-				(i32.lt (local body) (i32 0))
-				(then (return (call signature_error (call entry_at (local node) (i32 -1) (u32 24))))))
-			(let body_node (slice.load (local nodes) (local body)))
-			(let extra (record.get (local body_node) next_sibling))
-			(if
-				(:doc "Keep the first extra operand's span.")
-				(bool.not (i32.lt (local extra) (i32 0)))
-				(then (return (call signature_error
-					(call entry_at (slice.load (local nodes) (local extra)) (i32 -1) (u32 24))))))
-			(let statements (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local body_node) (u32 6) (u32 24)))
-			(if
-				(:doc "Forward an unsupported body form unchanged.")
-				(u32.lt (u32 0) (record.get (local statements) error))
-				(then (return (call signature_error (local statements)))))
-			(let first_statement (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
-				(record.get (local statements) operand)))
-			(if
-				(:doc "An empty body can only complete a void helper.")
-				(bool.and (i32.lt (local first_statement) (i32 0)) (bool.not (u32.eq (local result) (local void))))
-				(then (return (call signature_error (call entry_at (local body_node) (i32 -1) (u32 24))))))
-			(return (record.make ScalarSignature (params (local first)) (result (local result))
-				(first_statement (local first_statement)) (body (local body))
-				(start (record.get (local node) start)) (end (record.get (local node) end)) (error (u32 0))))))
+				(:doc "Only a checked head contains a result type operand to resolve.")
+				(u32.eq (record.get (local head) error) (u32 0))
+				(then
+					(let type_node (record.get (local head) type_node))
+					(set (local result) (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local type_node)))
+					(if
+						(:doc "Helper results can be void or any in-scope copyable type.")
+						(bool.not (u32.eq (local result) (call void_type)))
+						(then (set (local result) (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+							(borrow-shared (local records)) (borrow-shared (local bindings))
+							(record.get (local scope) file) (record.get (local scope) source_base) (local type_node)))))
+					(if
+						(:doc "The C entry requires i32 in every compilation mode.")
+						(bool.and (local entry) (bool.not (u32.eq (local result) (u32 5))))
+						(then (set (local result) (u32 0))))))
+			(return (call complete_signature (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local head) (local result)))))
 
 	(fn find_parameter
 		(:doc `Look up a parameter within the owning function's contiguous parameter interval.`)
@@ -327,7 +260,7 @@
 			(let entry (bool.and (record.get (local scope) entry_module)
 				(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)) (u32 2))))
 			(let signature (call read_signature (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local node) (record.get (local parts) operands) (local entry) (bool false)
+				(local node) (record.get (local parts) operands) (local entry)
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope)))
 			(if
 				(:doc "A malformed signature keeps its originating span.")

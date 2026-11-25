@@ -34,7 +34,7 @@ C_HEADER_MODULE := stage-2/c/headers.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
 C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove emit/embeds.wove hashing/base16.wove emit/c.wove emit/runtime.wove emit/c_arguments.wove emit/c_bytes.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
-	scalar/syntax.wove scalar/flow.wove scalar/host_entry.wove scalar/plan.wove scalar/graph.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
+	scalar/syntax.wove scalar/signatures.wove scalar/flow.wove scalar/host_entry.wove scalar/plan.wove scalar/graph.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_DIGITS := stage-2/hashing/digits.wove
 HASHING_BITS := stage-2/hashing/bits.wove
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_DIGITS) $(HASHING_BITS)

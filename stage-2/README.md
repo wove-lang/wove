@@ -625,7 +625,8 @@ header gives the count, followed by rows of the form
 `test FILE DECLARATION START END NAME PATH`. The declaration index and half-open
 byte span refer to the defining source file. A wrong signature reports the
 original parameter list or result type. Ordinary native and bootstrap modes
-exclude test-only forms and imports.
+exclude test-only forms and imports. The Stage 1 seed also treats `test`
+as false when evaluating `cfg` predicates.
 
 ## Compile-time file embeds
 

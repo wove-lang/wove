@@ -775,16 +775,17 @@ class FunctionEmitter:
 		return self.lines
 
 
-# Stage 1 always selects the bootstrap implementation.
+# Stage 1 selects bootstrap with test mode disabled.
 def cfg_matches(node: Node) -> bool:
 	negated = isinstance(node, Form)
-	# The only compound predicate in the seed is (not bootstrap).
+	# The seed only supports negating a single named predicate.
 	if negated:
 		node, = form(node, "not", 1).operands
+	predicate = identifier(node)
 	# An unsupported predicate cannot silently select a different declaration.
-	if identifier(node) != "bootstrap":
+	if predicate not in ("bootstrap", "test"):
 		raise SourceError(node.line)
-	return not negated
+	return (predicate == "bootstrap") != negated
 
 
 # Apply the seed's known selection pragmas to an eligible form.
