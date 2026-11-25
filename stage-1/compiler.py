@@ -19,6 +19,8 @@ U8 = "u8"
 U32 = "u32"
 BOOL = "bool"
 VOID = "void"
+RUNTIME_INCLUDE = '"wove_runtime.h"'
+HEADER_PATH = re.compile(r"[A-Za-z0-9_./-]+")
 SCALAR_LIMITS = {
 	I8: (-128, 127),
 	I32: (-(2**31), 2**31 - 1),
@@ -886,27 +888,30 @@ def checked_form(node: Node, tag: str | None = None, arity: int | None = None) -
 	return value
 
 
+# Classify a use by its bare provider while leaving every other operand opaque.
+def use_provider(node: Form) -> str | None:
+	# An absent, quoted, or malformed provider goes through ordinary use diagnostics.
+	if node.operands:
+		provider = node.operands[0]
+		# Keep an arbitrary well-formed foreign provider available to the skip rule.
+		if isinstance(provider, Atom) and not provider.quoted and IDENTIFIER.fullmatch(provider.text):
+			return provider.text
+	return None
+
+
 # Flatten active groups in source order before declaring any names.
 def selected_declarations(nodes: tuple[Node, ...], *, skip_host: bool = False) -> Iterator[Form]:
 	# Exclude declarations before opening imported files or validating bodies.
 	for node in nodes:
 		declaration = form(node)
-		# Bootstrap discards host declarations before interpreting any pragmas.
+		# Bootstrap discards skipped host providers before interpreting their pragmas.
 		if skip_host:
 			# A bridge and every member belong to later compilation stages.
 			if declaration.tag == "bridge":
 				continue
-			# Classify a use by its provider tag without checking its payload.
-			if declaration.tag == "use" and declaration.operands:
-				provider = declaration.operands[0]
-				# Malformed provider tags still go through ordinary use diagnostics.
-				if (
-					isinstance(provider, Atom)
-					and not provider.quoted
-					and provider.text != "wove-file"
-					and IDENTIFIER.fullmatch(provider.text)
-				):
-					continue
+			# Wove edges and C-header includes both participate in bootstrap selection.
+			if declaration.tag == "use" and use_provider(declaration) not in (None, "wove-file", "c-header"):
+				continue
 		# An inactive declaration or group contributes no definitions.
 		if not metadata_enabled(declaration, selectable=True):
 			continue
@@ -1007,6 +1012,55 @@ def read_use(node: Form) -> tuple[str, Form]:
 	return source.text, checked_form(only, "only")
 
 
+# Derive the deduplication key and emitted operand from an active C-header use.
+def read_header_include(node: Form, directory: Path) -> tuple[str, str]:
+	# A C-header provider needs at least its header operand.
+	if len(node.operands) < 2:
+		raise SourceError(node.line)
+	operand = node.operands[1]
+	# The outer Wove quotes protect the C search delimiters and path.
+	if not isinstance(operand, Atom) or not operand.quoted:
+		raise SourceError(operand.line)
+	spelling = operand.text
+	opener = spelling[:1]
+	# Validate the complete literal before emitting an include directive.
+	if opener in ('<', '"'):
+		closer = ">" if opener == "<" else '"'
+		# Only a matched delimiter pair can enclose a nonempty path.
+		if not spelling.endswith(closer):
+			raise SourceError(operand.line)
+		spelling = spelling[1:-1]
+	# Match the native include operand's path alphabet.
+	if not HEADER_PATH.fullmatch(spelling):
+		raise SourceError(operand.line)
+	# Angle brackets keep system search with the original checked path.
+	if opener == "<":
+		include = f"<{spelling}>"
+		return include, include
+
+	candidate = directory / spelling
+	key = str(candidate)
+	anchored = spelling.startswith(("./", "../", "/"))
+	# Local files use their resolved containing directory for comparison.
+	try:
+		# Keep the header basename so file aliases can retain their include context.
+		if candidate.is_file():
+			anchored = True
+			key = os.path.join(os.path.realpath(candidate.parent, strict=True), candidate.name)
+	# If the path cannot be inspected, keep the original lookup for Clang.
+	except OSError:
+		pass
+	# Anchor local paths without collapsing parent traversal across symlinks.
+	if anchored:
+		spelling = str(candidate)
+	else:
+		key = spelling
+	# The containing directory can contain spaces but must fit a C header-name token.
+	if any(byte in spelling for byte in '"\r\n\0'):
+		raise SourceError(operand.line)
+	return f'"{key}"', f'"{spelling}"'
+
+
 # Bind provider declarations directly so aliases retain the defining identity.
 def bind_use(only: Form, provider: Module, importer: Module) -> None:
 	# Each item selects a definition in its provider, including an immutable value.
@@ -1066,12 +1120,12 @@ def file_identity(path: Path) -> tuple[int, int]:
 	return status.st_dev, status.st_ino
 
 
-# Visit the active source graph in declaration order and keep the first defining path.
-def load_modules(root: Module) -> list[Module]:
-	# A single file only needs signature preparation.
+# Visit the active source graph and collect includes at their first use.
+def load_modules(root: Module) -> tuple[list[Module], list[str]]:
+	# A file with no uses only needs signature preparation.
 	if not root.uses:
 		prepare_functions(root, entry=True)
-		return [root]
+		return [root], [RUNTIME_INCLUDE]
 	path = Path(root.filename).resolve()
 	# The root text can also be supplied in memory under a prospective filename.
 	try:
@@ -1079,6 +1133,7 @@ def load_modules(root: Module) -> list[Module]:
 	except FileNotFoundError:
 		root_identity = path
 	modules = {root_identity: root}
+	headers = {RUNTIME_INCLUDE: RUNTIME_INCLUDE}
 	active = {root_identity}
 	stack = [(root_identity, path, iter(root.uses), None)]
 	record_index = len(root.records)
@@ -1102,8 +1157,13 @@ def load_modules(root: Module) -> list[Module]:
 				with source_file(parent.filename):
 					bind_use(only, importer, parent)
 			continue
-		# An active edge or an invalid selection is diagnosed in this importer.
+		# An include, edge, or invalid selection is diagnosed in this importer.
 		with source_file(importer.filename):
+			# An explicit C header contributes no Wove names or dependency edges.
+			if use_provider(use) == "c-header":
+				key, include = read_header_include(use, path.parent)
+				headers.setdefault(key, include)
+				continue
 			requested, only = read_use(use)
 			# Resolve from the file containing the use and collapse path aliases.
 			try:
@@ -1128,13 +1188,13 @@ def load_modules(root: Module) -> list[Module]:
 			value_index += len(provider.values)
 			active.add(target_identity)
 			stack.append((target_identity, target, iter(provider.uses), (importer, only)))
-	return list(modules.values())
+	return list(modules.values()), list(headers.values())
 
 
 # Emit a complete C translation unit after the source graph succeeds.
 def compile_source(source: str, filename: str) -> str:
 	root = read_module(source, filename, 0, 0, 0, entry=True)
-	modules = load_modules(root)
+	modules, headers = load_modules(root)
 	functions = [function for module in modules for function in module.functions.values()]
 	values = [value for module in modules for value in module.values.values()]
 	retained = (
@@ -1142,7 +1202,8 @@ def compile_source(source: str, filename: str) -> str:
 		*(value.binding.value.c for value in values),
 	)
 
-	lines = ['#include "wove_runtime.h"', ""]
+	lines = [f"#include {operand}" for operand in headers]
+	lines.append("")
 	# Define every native type before functions use it by value.
 	for module in modules:
 		# Each record is emitted only for its defining file.
