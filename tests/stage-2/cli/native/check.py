@@ -15,7 +15,7 @@ from tempfile import TemporaryDirectory
 
 
 # Provide an executable wrapper and preserve a previous binary's bytes for failed builds.
-def prepare_binary(root, clang, options, target):
+def prepare_tool(root, clang, options, target):
 	probe = root / options["probe"]
 	probe.chmod(0o700)
 	binary = root / target
@@ -25,8 +25,23 @@ def prepare_binary(root, clang, options, target):
 		binary.chmod(0o700)
 	env = {**os.environ, "CLANG": str(probe), "WOVE_CLANG_LOG": str(root / "clang.jsonl"),
 		"WOVE_REAL_CLANG": json.dumps(clang)}
+	# Exercise the default Clang lookup with a miss before the fixture executable.
+	if options.get("search"):
+		env.pop("CLANG", None)
+		first = root / "empty-path"
+		first.mkdir()
+		env["PATH"] = os.pathsep.join((str(first), str(probe.parent), os.environ.get("PATH", os.defpath)))
+		real_clang = Path(shutil.which(clang[0])).resolve()
+		env["WOVE_REAL_CLANG"] = json.dumps([str(real_clang), *clang[1:]])
 	env.pop("WOVE_CLANG_STATUS", None)
 	env.pop("WOVE_CLANG_LINK_TARGET", None)
+	# Keep fixture-controlled AST outcomes local to this invocation.
+	for key in ("ast_status", "ast_output"):
+		name = "WOVE_CLANG_" + key.upper()
+		env.pop(name, None)
+		# Forward supplied outputs verbatim, including an empty capture.
+		if key in options:
+			env[name] = str(options[key])
 	# The fixture controls whether the probe delegates or writes a failed partial stage.
 	if "tool_status" in options:
 		env["WOVE_CLANG_STATUS"] = str(options["tool_status"])
@@ -36,20 +51,31 @@ def prepare_binary(root, clang, options, target):
 	return env, previous
 
 
-# Check the retained unit, single tool launch, executable publication, and diagnostic.
-def check_binary(root, options, target, retained, value, diagnostic, result, patterns, previous):
+# Check header queries and the optional compiler launch in their original order.
+def check_tool_calls(root, options):
+	log = root / "clang.jsonl"
+	calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+	expected = list(options.get("queries", []))
+	# Binary cases also verify their final build invocation and platform link flags.
+	if "arguments" in options:
+		expected.append(options.get(sys.platform, options["arguments"]))
+	assert len(calls) == len(expected), calls
+	# Fixture expressions account for the private paths chosen by the driver.
+	for arguments, patterns in zip(calls, expected, strict=True):
+		assert len(arguments) == len(patterns), arguments
+		# Compare every argument without pinning the temporary directory names.
+		for actual, pattern in zip(arguments, patterns, strict=True):
+			assert re.fullmatch(pattern, actual), (actual, pattern)
+
+
+# Check the retained unit, executable publication, and diagnostic.
+def check_binary(root, target, retained, value, diagnostic, result, patterns, previous):
 	artifacts = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.c") if path.is_file())
 	assert artifacts == [retained], artifacts
 	generated = (root / retained).read_text()
 	# Apply the same retained-C pattern checks used by cc fixtures.
 	for pattern, count in patterns.items():
 		assert len(re.findall(pattern, generated)) == count, pattern
-	calls = [json.loads(line) for line in (root / "clang.jsonl").read_text().splitlines()]
-	expected = options.get(sys.platform, options["arguments"])
-	assert len(calls) == 1 and len(calls[0]) == len(expected), calls
-	# Fixture expressions account for the private paths chosen by the driver.
-	for actual, pattern in zip(calls[0], expected, strict=True):
-		assert re.fullmatch(pattern, actual), (actual, pattern)
 	# Toolchain flags can request side outputs, which belong with retained C.
 	for stage in root.rglob(".wovec-bin.*"):
 		assert stage.parent == (root / retained).parent and not (stage / "program").exists(), stage
@@ -69,7 +95,7 @@ def check_case(compiler, clang, runtime, fixtures, row):
 	label, inputs, argv, status, target, retained, value, diagnostic, *options = row
 	patterns = json.loads(options[0]) if options else {}
 	flags = json.loads(options[1]) if len(options) > 1 else []
-	binary = json.loads(options[2]) if len(options) > 2 else None
+	tool = json.loads(options[2]) if len(options) > 2 else None
 	with TemporaryDirectory(prefix="native-cli-", dir=compiler.parent) as workspace:
 		root = Path(workspace)
 		entries = json.loads(inputs)
@@ -98,12 +124,17 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		stages = {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()}
 		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
 			for argument in json.loads(argv)]
-		env, previous = prepare_binary(root, clang, binary, target) if binary else (None, None)
+		preserved = {root / path: (root / path).read_bytes() for path in (tool or {}).get("unchanged", [])}
+		env, previous = prepare_tool(root, clang, tool, target) if tool else (None, None)
 		result = subprocess.run([compiler, *arguments], cwd=root, env=env, capture_output=True, timeout=30)
 		assert (result.returncode, result.stdout) == (int(status), b""), (label, result)
+		assert all(path.read_bytes() == original for path, original in preserved.items()), label
+		# Check optional probes before inspecting published artifacts.
+		if tool:
+			check_tool_calls(root, tool)
 		# Binary fixtures run the executable published by the compiler itself.
-		if binary:
-			check_binary(root, binary, target, retained, value, diagnostic, result, patterns, previous)
+		if tool and "arguments" in tool:
+			check_binary(root, target, retained, value, diagnostic, result, patterns, previous)
 			return
 		# cc retains C beside its requested target without creating the target itself.
 		assert not (root / target).exists(), (label, target)
@@ -116,8 +147,8 @@ def check_case(compiler, clang, runtime, fixtures, row):
 			for pattern, count in patterns.items():
 				assert len(re.findall(pattern, generated)) == count, (label, pattern)
 			program = root / "result"
-			subprocess.run([*clang, *flags, "-I", "runtime", str(root / retained), runtime, "-o", str(program)],
-				check=True, timeout=30)
+			subprocess.run([*clang, *flags, "-I", Path("runtime").resolve(), str(root / retained), runtime, "-o", str(program)],
+				cwd=root, check=True, timeout=30)
 			built = subprocess.run([program], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
 			assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), (label, built)
 		else:
@@ -131,7 +162,7 @@ def main():
 	compiler, manifest = (Path(value).resolve() for value in sys.argv[1:])
 	clang = [*shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang")), "-std=c11",
 		*shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))]
-	runtime = os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")
+	runtime = Path(os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")).resolve()
 	# Relocate the executable so its cases exercise an installed compiler outside the checkout.
 	with TemporaryDirectory(prefix="native-wovec-") as install:
 		installed = Path(install) / compiler.name

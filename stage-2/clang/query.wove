@@ -12,21 +12,25 @@
 	See c/probe.wove for the shared result and failure codes.`)
 
 	(use wove-file "../c/probe.wove"
-		(only (type (as QuerySite ProbeSite)) (type HeaderQuery) render_header_source index_capture query_failed probe_run_at))
+		(only (type (as QuerySite ProbeSite)) (type HeaderQuery) render_header_source render_frontend_header_source index_capture query_failed probe_run_at))
 	(use wove-file "./run.wove" (only (type ClangRun) clang_run_at run_clang_probe))
 	(use wove-file "./index.wove" (only (type ClangIndex) (type ClangDeclaration)))
 	(use wove-file "./values.wove" (only (type ProbeWord)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../text/copy.wove" (only append_bytes))
 
 	(struct QuerySite (fields (file i32) (start i32) (end i32)))
 	(struct ClangQuery
 		(fields (site QuerySite) (run ClangRun) (index ClangIndex) (fact ProbeWord) (error u32) (present bool)))
 
+	(let defaults "-pthread\u0000-std=c11\u0000")
+
 	(fn query_rendered
 		(:doc "Invoke Clang only with a complete rendered source and index the successful capture.")
-		(params (program (shared-slice u8)) (options (shared-slice u8)) (source (shared-slice u8))
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (directory (shared-slice u8))
+			(source (shared-slice u8))
 			(site ProbeSite) (output (mut-slice u8)) (nodes (mut-slice JsonNode))
-			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
+			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)) (trace (mut-slice u8)))
 		(returns HeaderQuery)
 		(body
 			(if
@@ -34,7 +38,7 @@
 				(i32.eq (slice.len (local source)) 0i32)
 				(then (return (call query_failed (local site) (call probe_run_at 1u32 -1i32 0i32)))))
 			(let capture (call run_clang_probe (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local source)) (borrow-mut (local output))))
+				(borrow-shared (local directory)) (borrow-shared (local source)) (borrow-mut (local output)) (borrow-mut (local trace))))
 			(let run (call probe_run_at (record.get (local capture) error)
 				(record.get (local capture) status) (record.get (local capture) length)))
 			(if
@@ -44,22 +48,65 @@
 			(return (call index_capture (borrow-shared (local output)) (local site) (local run)
 				(borrow-mut (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names))))))
 
+	(fn query_header_source
+		(:doc "Translate the shared probe transport and index into the Clang query result.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (directory (shared-slice u8))
+			(source (shared-slice u8)) (site QuerySite) (output (mut-slice u8)) (nodes (mut-slice JsonNode))
+			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)) (trace (mut-slice u8)))
+		(returns ClangQuery)
+		(body
+			(let origin (record.make ProbeSite (file (record.get (local site) file))
+				(start (record.get (local site) start)) (end (record.get (local site) end))))
+			(let result (call query_rendered (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local directory)) (borrow-shared (local source)) (local origin) (borrow-mut (local output)) (borrow-mut (local nodes))
+				(borrow-mut (local entries)) (borrow-mut (local names)) (borrow-mut (local trace))))
+			(return (call clang_query_result (local site) (local result)))))
+
+	(fn clang_query_result
+		(:doc "Present the shared result and native child status through the Clang API.")
+		(params (site QuerySite) (result HeaderQuery)) (returns ClangQuery)
+		(body
+			(let run (record.get (local result) run))
+			(return (record.make ClangQuery (site (local site))
+				(run (call clang_run_at (record.get (local run) error) (record.get (local run) status) (record.get (local run) length)))
+				(index (record.get (local result) index)) (fact (record.get (local result) fact))
+				(error (record.get (local result) error)) (present (record.get (local result) present))))))
+
 	(fn query_clang_header
-		(:doc "Render the embedded template, invoke Clang, and index a complete successful capture.")
+		(:doc "Render and index the standalone header probe with its established defaults.")
 		(:expect (tests "stage-2/clang/live.tsv") (issues "gh:wove-lang/wove:196"))
 		(params (program (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8)) (extra (shared-slice u8))
 			(site QuerySite) (output (mut-slice u8)) (nodes (mut-slice JsonNode))
 			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
 		(returns ClangQuery)
 		(body
+			(let width (slice.len (local defaults)))
+			(let size (slice.len (local options)))
+			(if
+				(:doc "Check the size before joining caller options with the standalone defaults.")
+				(i32.lt (i32.sub.wrapping 2147483647i32 (local width)) (local size))
+				(then
+					(let origin (record.make ProbeSite (file (record.get (local site) file))
+						(start (record.get (local site) start)) (end (record.get (local site) end))))
+					(return (call clang_query_result (local site) (call query_failed (local origin) (call probe_run_at 2u32 -1i32 0i32))))))
+			(let-mut packed (array.alloc u8 (i32.add.wrapping (local width) (local size))))
+			(let next (call append_bytes (borrow-shared (local defaults)) (borrow-mut (local packed)) 0i32))
+			(let end (call append_bytes (borrow-shared (local options)) (borrow-mut (local packed)) (local next)))
 			(let source (call render_header_source (borrow-shared (local header)) (borrow-shared (local extra))))
-			(let origin (record.make ProbeSite (file (record.get (local site) file))
-				(start (record.get (local site) start)) (end (record.get (local site) end))))
-			(let result (call query_rendered (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local source)) (local origin) (borrow-mut (local output)) (borrow-mut (local nodes))
-				(borrow-mut (local entries)) (borrow-mut (local names))))
-			(let run (record.get (local result) run))
-			(return (record.make ClangQuery (site (local site))
-				(run (call clang_run_at (record.get (local run) error) (record.get (local run) status) (record.get (local run) length)))
-				(index (record.get (local result) index)) (fact (record.get (local result) fact))
-				(error (record.get (local result) error)) (present (record.get (local result) present)))))))
+			(let empty (array.alloc u8 0i32))
+			(let-mut trace (array.alloc u8 0i32))
+			(return (call query_header_source (borrow-shared (local program)) (borrow-shared (slice.range (local packed) 0i32 (local end)))
+				(borrow-shared (local empty)) (borrow-shared (local source)) (local site)
+				(borrow-mut (local output)) (borrow-mut (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names)) (borrow-mut (local trace))))))
+
+	(fn query_clang_frontend
+		(:doc "Query a header with the build's frontend arguments, macros, and quote-include directory.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (directory (shared-slice u8))
+			(prefix (shared-slice u8)) (header (shared-slice u8)) (site QuerySite) (output (mut-slice u8)) (nodes (mut-slice JsonNode))
+			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)) (trace (mut-slice u8)))
+		(returns ClangQuery)
+		(body
+			(let source (call render_frontend_header_source (borrow-shared (local prefix)) (borrow-shared (local header))))
+			(return (call query_header_source (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local directory)) (borrow-shared (local source)) (local site)
+				(borrow-mut (local output)) (borrow-mut (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names)) (borrow-mut (local trace)))))))

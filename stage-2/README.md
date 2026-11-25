@@ -599,6 +599,29 @@ and metadata in any order after the Wove name.
 The Wove selector uses the declared function name. Calls and C ABI checks use
 the target's C identifier. Without `c-name`, the two spellings are the same.
 
+Attach `(:pragma (c_optional))` to a bodyless bridge function to check its
+availability when native `cc` or `bin` resolves a selection. Clang must find
+a `FunctionDecl` whose name exactly matches the C target. Other bridge members
+stay usable regardless of an unselected optional declaration. The compiler
+reports a selected missing function at its original Wove selector, including
+when the selector gives it a local alias.
+
+The probe uses resolved C flags, definitions, and the selected C dialect.
+For a quoted project header, retained-only `cc` also searches the directory
+of the Wove bridge. A binary build probes from its private build directory
+with the same frontend arguments and staged runtime headers used for
+compilation. The probe uses preceding C includes in emission order and
+checks for declarations introduced by the selected header. Dependency and compilation database output options apply to the final
+build. Availability errors use the importing source span.
+
+| Code | Meaning |
+| --- | --- |
+| 71 | Optional C function unavailable |
+| 72 | C header probe tool failed |
+| 73 | C header probe output malformed |
+| 74 | C header probe workspace exhausted |
+| 75 | C header probe setup failed |
+
 The native `query_clang_header` API in `clang/query.wove` accepts a Clang
 executable, NUL-terminated target and include arguments, the header spelling,
 and the originating import span. It renders the embedded C probe, captures

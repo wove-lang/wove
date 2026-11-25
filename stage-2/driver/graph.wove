@@ -3,6 +3,7 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc "Resolve native graphs with the bundled providers and emit one retained C unit.")
 
+	(use wove-file "./availability.wove" (only check_optional_c_functions (type Availability)))
 	(use wove-file "./assets.wove" (only copy_source_prefix load_graph_assets))
 	(use wove-file "./bundled.wove" (only load_bundled_providers bundled_file_count bundled_input_width write_bundled_sources))
 	(use wove-file "./diagnostics.wove" (only report_source
@@ -11,6 +12,7 @@
 	(use wove-file "./files.wove" (only canonical_path))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "./platform.wove" (only native_selection))
+	(use wove-file "./paths.wove" (only directory_width))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile) normalize_path))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)
 		(type GraphUse) (type GraphSelector) (type GraphResult) resolve_graph_for_target))
@@ -51,6 +53,12 @@
 			(return (bool false))))
 
 	(let current_directory ".")
+	(let unavailable_c_function "optional C function is unavailable")
+	(let header_tool_failed "Clang header probe failed")
+	(let header_output_invalid "Clang header probe output is invalid")
+	(let header_workspace_exceeded "Clang header probe exceeded workspace")
+	(let header_setup_failed "could not prepare Clang header probe")
+
 
 	(fn report_provider_source
 		(:doc `Display paths under the current directory relative to it when the entry was relative.`)
@@ -204,14 +212,61 @@
 				(borrow-shared (local extended)) (borrow-shared (local files)) (borrow-shared (local modules))
 				(borrow-shared (local bindings)) (local resolved) (borrow-mut (local requests))))))
 
+	(fn report_availability
+		(:doc "Describe the failed probe or absent symbol at the original importing selection.")
+		(params (path (shared-slice u8)) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (result Availability))
+		(returns i32)
+		(body
+			(let error (record.get (local result) error))
+			(if
+				(:doc "Forward the distinct availability result at the selected import.")
+				(u32.eq (local error) 71u32)
+				(then (return (call report_availability_at (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (local result) (borrow-shared (local unavailable_c_function))))))
+			(if
+				(:doc "Forward the distinct availability result at the selected import.")
+				(u32.eq (local error) 72u32)
+				(then (return (call report_availability_at (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (local result) (borrow-shared (local header_tool_failed))))))
+			(if
+				(:doc "Forward the distinct availability result at the selected import.")
+				(u32.eq (local error) 73u32)
+				(then (return (call report_availability_at (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (local result) (borrow-shared (local header_output_invalid))))))
+			(if
+				(:doc "Forward the distinct availability result at the selected import.")
+				(u32.eq (local error) 74u32)
+				(then (return (call report_availability_at (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (local result) (borrow-shared (local header_workspace_exceeded))))))
+			(return (call report_availability_at (borrow-shared (local path)) (borrow-shared (local arena))
+				(borrow-shared (local files)) (local result) (borrow-shared (local header_setup_failed))))))
+
+	(fn report_availability_at
+		(:doc "Report a live availability result in the same location format as graph diagnostics.")
+		(params (path (shared-slice u8)) (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
+			(result Availability) (message (shared-slice u8)))
+		(returns i32)
+		(body (return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files))
+			(record.get (local result) file) (record.get (local result) error)
+			(record.get (local result) start) (record.get (local result) end) (borrow-shared (local message))))))
+
 	(fn compile_resolved_graph
 		(:doc `Pass the exact checked binding prefix and source rows to the graph emitter.`)
 		(params (path (shared-slice u8)) (canonical (shared-slice u8))
-			(destination (shared-slice u8)) (staged (shared-slice u8)) (target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
+			(destination (shared-slice u8)) (staged (shared-slice u8)) (probe_options (shared-slice u8)) (target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
 			(scratch (shared-slice GraphBinding)) (resolved GraphResult) (rows i32) (length i32)) (returns i32)
 		(body
 			(let-mut bindings (array.alloc GraphBinding (record.get (local resolved) bindings)))
 			(call copy_graph_bindings (borrow-shared (local scratch)) (borrow-mut (local bindings)))
+			(let available (call check_optional_c_functions (borrow-shared (local arena))
+				(borrow-shared (local files)) (borrow-shared (local bindings)) (borrow-shared (local canonical))
+				(borrow-shared (local probe_options))
+				(borrow-shared (slice.range (local staged) 0i32 (call directory_width (borrow-shared (local staged)))))))
+			(if
+				(:doc "Reject unavailable optional bindings before emitting a C reference.")
+				(u32.lt 0u32 (record.get (local available) error))
+				(then (return (call report_availability (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (local available)))))
 			(let-mut requests (array.alloc EmbedAsset (local rows)))
 			(return (call compile_graph_assets (borrow-shared (local path)) (borrow-shared (local canonical))
 				(borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
@@ -222,7 +277,7 @@
 	(fn resolve_c_input
 		(:doc "Bind the entry's selections against the three registered sources.")
 		(params (path (shared-slice u8)) (canonical (shared-slice u8))
-			(destination (shared-slice u8)) (staged (shared-slice u8)) (target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (rows i32))
+			(destination (shared-slice u8)) (staged (shared-slice u8)) (probe_options (shared-slice u8)) (target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (rows i32))
 		(returns i32)
 		(body
 			(let-mut modules (array.alloc GraphModule (slice.len (local files))))
@@ -238,14 +293,14 @@
 					(borrow-shared (local files)) (record.get (local resolved) file) (record.get (local resolved) error)
 					(record.get (local resolved) start) (record.get (local resolved) end)))))
 			(return (call compile_resolved_graph (borrow-shared (local path)) (borrow-shared (local canonical))
-				(borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index) (borrow-shared (local arena))
+				(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options)) (local target_index) (borrow-shared (local arena))
 				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local scratch))
 				(local resolved) (local rows) (slice.len (local arena))))))
 
 	(fn prepare_bundled_input
 		(:doc "Allocate the source and path arena before registering the embedded modules.")
 		(params (path (shared-slice u8)) (canonical (shared-slice u8))
-			(destination (shared-slice u8)) (staged (shared-slice u8)) (target_index i32) (source (shared-slice u8)) (rows i32) (virtual (shared-slice u8)))
+			(destination (shared-slice u8)) (staged (shared-slice u8)) (probe_options (shared-slice u8)) (target_index i32) (source (shared-slice u8)) (rows i32) (virtual (shared-slice u8)))
 		(returns i32)
 		(body
 			(let providers (call load_bundled_providers))
@@ -260,14 +315,14 @@
 			(let written (call write_bundled_sources (borrow-shared (local virtual)) (borrow-shared (local source))
 				(borrow-shared (local providers)) (borrow-mut (local arena)) (borrow-mut (local files))))
 			(return (call resolve_c_input (borrow-shared (local path)) (borrow-shared (local canonical))
-				(borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
+				(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options)) (local target_index)
 				(borrow-shared (slice.range (local arena) 0i32 (local written))) (borrow-shared (local files)) (local rows)))))
 
 	(fn compile_bundled_input
 		(:doc "Open the source graph with the checked-in C provider bytes embedded in this compiler.")
 		(:expect (tests "stage-2/cli/native/cases.tsv") (issues "gh:wove-lang/wove:221"))
 		(params (path (shared-slice u8)) (canonical (shared-slice u8))
-			(destination (shared-slice u8)) (staged (shared-slice u8)) (target_index i32) (source (shared-slice u8)) (rows i32))
+			(destination (shared-slice u8)) (staged (shared-slice u8)) (probe_options (shared-slice u8)) (target_index i32) (source (shared-slice u8)) (rows i32))
 		(returns i32)
 		(body
 			(let width (slice.len (local path)))
@@ -282,6 +337,6 @@
 				(i32.lt (local end) 1i32)
 				(then (return (call report_source (borrow-shared (local path)) 27u32 0i32 0i32 (borrow-shared (local invalid_source))))))
 			(return (call prepare_bundled_input (borrow-shared (local path)) (borrow-shared (local canonical))
-				(borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index) (borrow-shared (local source))
+				(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options)) (local target_index) (borrow-shared (local source))
 				(local rows) (borrow-shared (slice.range (local virtual) 0i32 (local end)))))))
 )
