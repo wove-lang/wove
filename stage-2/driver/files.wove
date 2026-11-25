@@ -1,0 +1,180 @@
+(module native_cli_files
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Snapshot regular source files through the checked-in native POSIX bindings.
+
+	Canonical paths supply an importer's directory. Device and inode
+	identify the opened file independently of its spelling. Recheck the
+	identity and extent before reading and reject changed lengths.`)
+
+	(use c-header "<stdlib.h>" (only realpath))
+	(use c-header "<sys/stat.h>" (only stat fstat S_ISREG (type Stat) (type Device)))
+	(use c-header "<fcntl.h>" (only open O_RDONLY O_NONBLOCK O_CLOEXEC (type Mode)))
+	(use c-header "<unistd.h>" (only read close (type Size)))
+	(use c-header "<errno.h>" (only EINTR errno))
+	(use wove-file "../source/scan.wove" (only admit_source))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+
+	(struct FileStamp (fields (device u64) (inode u64) (length i32)))
+
+	(fn empty_path
+		(:doc `A canonical absolute path is never empty. Use an empty owner for failure.`)
+		(params) (returns (owned-array u8))
+		(body
+			(let empty (array.alloc u8 (i32 0)))
+			(return (move (local empty)))))
+
+	(fn canonical_path
+		(:doc `Return owned canonical path bytes or an empty owner on lookup failure.`)
+		(params (path (shared-slice u8))) (returns (owned-array u8))
+		(body
+			(if (i32.eq (slice.len (local path)) (i32 0)) (then (return (call empty_path))))
+			(let-mut cursor (i32 0))
+			(while
+				(:doc "Prevent an embedded NUL from changing which path reaches libc.")
+				(i32.lt (local cursor) (slice.len (local path)))
+				(body
+					(if (u8.eq (slice.load (local path) (local cursor)) (u8 0)) (then (return (call empty_path))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(let resolved (call realpath (borrow-shared (local path)) null))
+			(if (owner.is-null (local resolved)) (then (return (call empty_path))))
+			(let result (move (optional.unwrap (local resolved))))
+			(if
+				(:doc "A canonical source must have a UTF-8 path for the graph and JSON diagnostics.")
+				(i32.lt (i32 -1) (call admit_source (borrow-shared (local result))))
+				(then (return (call empty_path))))
+			(return (move (local result)))))
+
+	(fn invalid_file_stamp
+		(:doc `Use a negative byte extent to mark an unavailable regular source.`)
+		(params) (returns FileStamp)
+		(body (return (record.make FileStamp (device (u64 0)) (inode (u64 0)) (length (i32 -1))))))
+
+	(fn device_key
+		(:doc `Linux device numbers retain all bits as unsigned native values.`)
+		(:pragma (cfg (os "linux")))
+		(params (value Device)) (returns u64)
+		(body (return (int.convert u64 (local value)))))
+
+	(fn device_key
+		(:doc `Map every signed Darwin device number injectively into the unsigned key range.`)
+		(:pragma (cfg (os "macos")))
+		(params (value Device)) (returns u64)
+		(body
+			(let signed (int.convert i32 (local value)))
+			(if
+				(:doc "Bias the signed device range without trapping on a negative native value.")
+				(i32.lt (local signed) (i32 0))
+				(then (return (int.convert u64 (i32.sub.wrapping (local signed) (i32 -2147483648))))))
+			(return (u64.add.wrapping (u64 2147483648) (int.convert u64 (local signed))))))
+
+	(fn checked_stamp
+		(:doc `Accept regular files whose nonnegative POSIX size fits the source arena.`)
+		(params (info Stat)) (returns FileStamp)
+		(body
+			(if
+				(:doc "Directory and device contents cannot enter the source graph.")
+				(bool.not (call S_ISREG (record.get (local info) st_mode)))
+				(then (return (call invalid_file_stamp))))
+			(let size (int.convert u64 (record.get (local info) st_size)))
+			(if
+				(:doc "Keep room for the checked source tree's sentinel row.")
+				(u64.lt (u64 2147483646) (local size))
+				(then (return (call invalid_file_stamp))))
+			(return (record.make FileStamp (device (call device_key (record.get (local info) st_dev)))
+				(inode (int.convert u64 (record.get (local info) st_ino))) (length (int.convert i32 (local size)))))))
+
+	(fn file_stamp
+		(:doc `Identify a regular path before deciding whether its bytes need to be opened.`)
+		(params (path (shared-slice u8))) (returns FileStamp)
+		(body
+			(let-mut info (record.make Stat))
+			(if
+				(:doc "An unavailable path has no cache key.")
+				(bool.not (i32.eq (call stat (borrow-shared (local path)) (borrow-mut (local info))) (i32 0)))
+				(then (return (call invalid_file_stamp))))
+			(return (call checked_stamp (local info)))))
+
+	(fn descriptor_stamp
+		(:doc `Read the identity and size of the exact descriptor acquiring a source snapshot.`)
+		(params (descriptor i32)) (returns FileStamp)
+		(body
+			(let-mut info (record.make Stat))
+			(if
+				(:doc "A failed descriptor query cannot validate source bytes.")
+				(bool.not (i32.eq (call fstat (local descriptor) (borrow-mut (local info))) (i32 0)))
+				(then (return (call invalid_file_stamp))))
+			(return (call checked_stamp (local info)))))
+
+	(fn same_file_stamp
+		(:doc `Compare valid device and inode keys without relying on path spelling.`)
+		(params (left FileStamp) (right FileStamp)) (returns bool)
+		(body (return (bool.and
+			(bool.and (i32.lt (i32 -1) (record.get (local left) length)) (i32.lt (i32 -1) (record.get (local right) length)))
+			(bool.and (u64.eq (record.get (local left) device) (record.get (local right) device))
+				(u64.eq (record.get (local left) inode) (record.get (local right) inode)))))))
+
+	(fn read_chunk
+		(:doc `Retry a POSIX read interrupted before any bytes were returned.`)
+		(params (descriptor i32) (chunk (mut-slice u8)) (count i32)) (returns i32)
+		(body
+			(while
+				(:doc "Capture errno immediately when read returns a failure.")
+				(bool true)
+				(body
+					(let amount (int.convert i32 (call read (local descriptor) (borrow-mut (local chunk))
+						(int.convert Size (local count)))))
+					(if
+						(:doc "Return a short read, EOF, or any permanent error to the exact-length loop.")
+						(bool.or (i32.lt (i32 -1) (local amount)) (bool.not (i32.eq (local errno) (local EINTR))))
+						(then (return (local amount))))))
+			(return (i32 -1))))
+
+	(fn read_open_source
+		(:doc `Read exactly the measured extent and verify that there is no trailing byte.`)
+		(params (descriptor i32) (output (mut-slice u8))) (returns bool)
+		(body
+			(let-mut chunk (array.alloc u8 (i32 32768)))
+			(let-mut offset (i32 0))
+			(while
+				(:doc "Advance by the number of bytes actually supplied by each bounded read.")
+				(i32.lt (local offset) (slice.len (local output)))
+				(body
+					(let-mut count (i32.sub.wrapping (slice.len (local output)) (local offset)))
+					(if
+						(:doc "Keep the temporary independent of the source size.")
+						(i32.lt (i32 32768) (local count))
+						(then (set (local count) (i32 32768))))
+					(let amount (call read_chunk (local descriptor) (borrow-mut (local chunk)) (local count)))
+					(if
+						(:doc "A permanent failure or early EOF invalidates the measured snapshot.")
+						(i32.lt (local amount) (i32 1))
+						(then (return (bool false))))
+					(set (local offset) (call append_bytes (borrow-shared (slice.range (local chunk) (i32 0) (local amount)))
+						(borrow-mut (local output)) (local offset)))))
+			(return (i32.eq (call read_chunk (local descriptor) (borrow-mut (local chunk)) (i32 1)) (i32 0)))))
+
+	(fn verify_open_source
+		(:doc `Verify that opening a path yielded the same regular file and measured length.`)
+		(params (descriptor i32) (expected FileStamp) (output (mut-slice u8))) (returns bool)
+		(body
+			(let opened (call descriptor_stamp (local descriptor)))
+			(if
+				(:doc "Reject a replaced file or changed size before copying any bytes.")
+				(bool.not (bool.and (call same_file_stamp (local expected) (local opened))
+					(i32.eq (record.get (local opened) length) (slice.len (local output)))))
+				(then (return (bool false))))
+			(return (call read_open_source (local descriptor) (borrow-mut (local output))))))
+
+	(fn read_source_file
+		(:doc `Open a nonblocking close-on-exec descriptor and close it once after the snapshot attempt.`)
+		(params (path (shared-slice u8)) (expected FileStamp) (output (mut-slice u8))) (returns bool)
+		(body
+			(let flags (int.convert i32 (u32.or (int.convert u32 (local O_RDONLY))
+				(u32.or (int.convert u32 (local O_NONBLOCK)) (int.convert u32 (local O_CLOEXEC))))))
+			(let descriptor (call open (borrow-shared (local path)) (local flags) (int.convert Mode (i32 0))))
+			(if (i32.lt (local descriptor) (i32 0)) (then (return (bool false))))
+			(let complete (call verify_open_source (local descriptor) (local expected) (borrow-mut (local output))))
+			(let closed (call close (local descriptor)))
+			(return (bool.and (local complete) (i32.eq (local closed) (i32 0))))))
+)

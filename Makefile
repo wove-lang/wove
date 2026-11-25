@@ -70,11 +70,12 @@ CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove projec
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove graph.wove output.wove)
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove graph.wove output.wove platform.wove files.wove disk.wove disk_files.wove)
 BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove)
+DRIVER_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove sys_stat.wove fcntl.wove unistd.wove errno.wove)
 NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
-	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES))
+	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) stage-2/text/copy.wove $(DRIVER_C_PROVIDERS))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
 PROCESS_MODULE := stage-2/io/process.wove
 PROCESS_FIXTURES := tests/stage-2/process
@@ -247,7 +248,7 @@ $(STAGE2)/wovec.c: $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(BUNDLED_C_PROVIDERS
 
 # Link only the emitted native compiler, its host file bridges, and the runtime.
 $(NATIVE_COMPILER): $(STAGE2)/wovec.c $(NATIVE_DRIVER)/host.c $(STAGE1)/runtime.o $(NATIVE_DRIVER)/host.h $(BUILD_VERSION) force-build-info
-	$(call build_versioned,$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(NATIVE_DRIVER)" $(filter-out %.h $(BUILD_VERSION) force-build-info,$^) -o "$@")
+	$(call build_versioned,$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -I runtime -I "$(NATIVE_DRIVER)" $(filter-out %.h $(BUILD_VERSION) force-build-info,$^) -o "$@")
 
 # Build utility-only Wove programs with the ordinary Python seed and runtime.
 $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o

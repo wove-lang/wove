@@ -35,7 +35,9 @@
 	(struct GraphSelector
 		(fields (original_start i32) (original_end i32) (local_start i32) (local_end i32) (local_bare bool) (error u32) (namespace u32) (local_node i32)))
 	(struct GraphResult
-		(fields (modules i32) (bindings i32) (file i32) (start i32) (end i32) (error u32) (mode u32) (os u8) (arch u8) (deployment i32)))
+		(fields (modules i32) (bindings i32) (file i32) (start i32) (end i32) (error u32) (mode u32) (os u8) (arch u8) (deployment i32)
+			(path_start i32) (path_end i32)))
+	(struct DiskEdge (fields (file i32) (start i32) (target i32)))
 	(struct FileRead
 		(fields (bindings i32) (uses i32) (selectors i32) (active bool) (start i32) (end i32) (error u32)))
 	(struct GraphRead (fields (next i32) (start i32) (end i32) (error u32) (file i32)))
@@ -65,7 +67,7 @@
 			(return (record.make GraphResult (modules (local modules)) (bindings (local bindings))
 				(file (local file)) (start (local start)) (end (local end)) (error (local error)) (mode (record.get (local context) mode))
 				(os (record.get (local context) os)) (arch (record.get (local context) arch))
-				(deployment (record.get (local context) deployment))))))
+				(deployment (record.get (local context) deployment)) (path_start (i32 -1)) (path_end (i32 -1))))))
 
 	(fn graph_selection
 		(:doc `Recover the exact selection context retained by the resolver for its consumers.`)
@@ -362,6 +364,55 @@
 						(record.get (local edge) end) (local code)))))
 			(return (call graph_read (local target) (i32 0) (i32 0) (u32 0)))))
 
+	(fn resolve_disk_edge
+		(:doc `Use the disk loader's target for this exact source use. An absent row requests a load.`)
+		(params (file i32) (edge GraphUse) (edges (shared-slice DiskEdge)))
+		(returns GraphRead)
+		(body
+			(let error (record.get (local edge) error))
+			(if
+				(:doc "A malformed use must never request a file.")
+				(u32.lt (u32 0) (local error))
+				(then (return (call graph_read (i32 -1) (record.get (local edge) start)
+					(record.get (local edge) end) (local error)))))
+			(let-mut index (i32 0))
+			(while
+				(:doc "Bind by the importing file and use span, independently of lexical path spelling.")
+				(i32.lt (local index) (slice.len (local edges)))
+				(body
+					(let target (slice.load (local edges) (local index)))
+					(if
+						(:doc "A published disk edge supplies the row of a canonical provider.")
+						(bool.and (i32.eq (record.get (local target) file) (local file))
+							(i32.eq (record.get (local target) start) (record.get (local edge) start)))
+						(then (return (call graph_read (record.get (local target) target) (i32 0) (i32 0) (u32 0)))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (call graph_read (i32 -1) (record.get (local edge) start) (record.get (local edge) end) (u32 27)))))
+
+	(fn resolve_graph_edge
+		(:doc `Resolve one selected edge using its virtual path or a cached host target.`)
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (source (shared-slice u8))
+			(file i32) (path i32) (edge GraphUse) (disk bool) (edges (shared-slice DiskEdge)))
+		(returns GraphRead)
+		(body
+			(if
+				(:doc "Disk targets are keyed by the original use within the importing file.")
+				(local disk)
+				(then (return (call resolve_disk_edge (local file) (local edge) (borrow-shared (local edges))))))
+			(return (call resolve_edge (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local source)) (local path) (local edge)))))
+
+	(fn disk_request
+		(:doc `Keep the unresolved use's full span and the literal range to decode before touching disk.`)
+		(params (context SelectionContext) (modules i32) (bindings i32) (file i32) (edge GraphUse))
+		(returns GraphResult)
+		(body
+			(return (record.make GraphResult (modules (local modules)) (bindings (local bindings))
+				(mode (record.get (local context) mode)) (os (record.get (local context) os)) (arch (record.get (local context) arch))
+				(deployment (record.get (local context) deployment))
+				(file (local file)) (start (record.get (local edge) start)) (end (record.get (local edge) end)) (error (u32 27))
+				(path_start (record.get (local edge) path_start)) (path_end (record.get (local edge) path_end))))))
+
 	(fn publish_binding
 		(:doc `Reserve a file-local alias after either provider has resolved its defining declaration.`)
 		(params (source (shared-slice u8)) (selector GraphSelector) (importer i32) (target GraphBinding)
@@ -581,6 +632,40 @@
 			(borrow-mut (local uses)) (borrow-mut (local selectors))))))
 
 	(fn resolve_graph_for_target
+		(:doc `Resolve a virtual graph using the lexical paths supplied by its caller.`)
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (entry i32) (context SelectionContext)
+			(modules (mut-slice GraphModule)) (bindings (mut-slice GraphBinding))
+			(uses (mut-slice GraphUse)) (selectors (mut-slice GraphSelector)))
+		(returns GraphResult)
+		(body
+			(let edges (array.alloc DiskEdge (i32 0)))
+			(return (call walk_graph (borrow-shared (local arena)) (borrow-shared (local files)) (local entry) (local context)
+				(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
+				(borrow-mut (local selectors)) (bool false) (bool false) (borrow-shared (local edges))))))
+
+	(fn resolve_disk_graph
+		(:doc `Resolve a disk snapshot or return the first selected use with no cached target.
+
+		Each edge records its canonical importing file, original use start,
+		and a supplied target row. A nonnegative path_start marks a request
+		and the diagnostic span covers the complete importing use.`)
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (entry i32) (context SelectionContext)
+			(modules (mut-slice GraphModule)) (bindings (mut-slice GraphBinding))
+			(uses (mut-slice GraphUse)) (selectors (mut-slice GraphSelector)) (edges (shared-slice DiskEdge)))
+		(returns GraphResult)
+		(body
+			(let loaded (call walk_graph (borrow-shared (local arena)) (borrow-shared (local files)) (local entry) (local context)
+				(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
+				(borrow-mut (local selectors)) (bool true) (bool true) (borrow-shared (local edges))))
+			(if
+				(:doc "Return the next active file request or the first source failure during discovery.")
+				(u32.lt (u32 0) (record.get (local loaded) error))
+				(then (return (local loaded))))
+			(return (call walk_graph (borrow-shared (local arena)) (borrow-shared (local files)) (local entry) (local context)
+				(borrow-mut (local modules)) (borrow-mut (local bindings)) (borrow-mut (local uses))
+				(borrow-mut (local selectors)) (bool true) (bool false) (borrow-shared (local edges))))))
+
+	(fn walk_graph
 		(:doc `Resolve the reachable graph and publish file-local function bindings.
 
 		Entry is a supplied path row. The module table has room for every supplied
@@ -598,7 +683,7 @@
 			(issues "gh:wove-lang/wove:68" "gh:wove-lang/wove:138" "gh:wove-lang/wove:146" "gh:wove-lang/wove:190"))
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (entry i32) (context SelectionContext)
 			(modules (mut-slice GraphModule)) (bindings (mut-slice GraphBinding))
-			(uses (mut-slice GraphUse)) (selectors (mut-slice GraphSelector)))
+			(uses (mut-slice GraphUse)) (selectors (mut-slice GraphSelector)) (disk bool) (loading bool) (edges (shared-slice DiskEdge)))
 		(returns GraphResult)
 		(body
 			(let length (slice.len (local files)))
@@ -688,29 +773,39 @@
 								(:doc "A C header uses a declared key and does not traverse a Wove-file edge.")
 								(u32.eq (record.get (local edge) provider) (u32 8))
 								(then
-									(let bound (call bind_c_header_edge (borrow-shared (local arena)) (borrow-shared (local files))
-										(borrow-shared (slice.range (local arena) (local source_start) (local source_end)))
-										(local current) (local edge) (borrow-shared (local selectors))
-										(borrow-mut (local bindings)) (local binding_count) (local context)))
-									(set (local binding_count) (record.get (local bound) next))
-									(let error (record.get (local bound) error))
 									(if
-										(:doc "Use the provider file for a defining error and the importer for a selection error.")
-										(u32.lt (u32 0) (local error))
+										(:doc "A header declaration can live in a file reached by a later Wove edge.")
+										(bool.not (local loading))
 										(then
-											(let-mut file (record.get (local bound) file))
+											(let bound (call bind_c_header_edge (borrow-shared (local arena)) (borrow-shared (local files))
+												(borrow-shared (slice.range (local arena) (local source_start) (local source_end)))
+												(local current) (local edge) (borrow-shared (local selectors))
+												(borrow-mut (local bindings)) (local binding_count) (local context)))
+											(set (local binding_count) (record.get (local bound) next))
+											(let error (record.get (local bound) error))
 											(if
-												(:doc "A selection error has no separate defining file.")
-												(i32.lt (local file) (i32 0))
-												(then (set (local file) (local current))))
-											(return (call graph_result (local context) (local module_count) (local binding_count) (local file)
-												(record.get (local bound) start) (record.get (local bound) end) (local error)))))
+												(:doc "Use the provider file for a defining error and the importer for a selection error.")
+												(u32.lt (u32 0) (local error))
+												(then
+													(let-mut file (record.get (local bound) file))
+													(if
+														(:doc "A selection error has no separate defining file.")
+														(i32.lt (local file) (i32 0))
+														(then (set (local file) (local current))))
+													(return (call graph_result (local context) (local module_count) (local binding_count) (local file)
+														(record.get (local bound) start) (record.get (local bound) end) (local error)))))))
 									(call update_frame (borrow-mut (local modules)) (local current) (local frame) (u32 1)
 										(i32.add.wrapping (local next) (i32 1))))
 								(else
-									(let resolved (call resolve_edge (borrow-shared (local arena)) (borrow-shared (local files))
+									(let resolved (call resolve_graph_edge (borrow-shared (local arena)) (borrow-shared (local files))
 										(borrow-shared (slice.range (local arena) (local source_start) (local source_end)))
-										(record.get (local frame) path) (local edge)))
+										(local current) (record.get (local frame) path) (local edge) (local disk) (borrow-shared (local edges))))
+									(if
+										(:doc "Suspend before opening the next active disk edge. Malformed uses have no request span.")
+										(bool.and (bool.and (local disk) (u32.eq (record.get (local resolved) error) (u32 27)))
+											(i32.lt (i32 -1) (record.get (local edge) path_start)))
+										(then (return (call disk_request (local context) (local module_count) (local binding_count)
+											(local current) (local edge)))))
 									(let error (record.get (local resolved) error))
 									(if
 										(:doc "Path errors belong to the importing file.")

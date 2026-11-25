@@ -1,0 +1,189 @@
+(module native_cli_disk_files
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve one requested disk edge and publish its provider only after the source is read.
+
+	Keep a canonical path for relative lookup and compare device and inode
+	to reuse an immutable snapshot reached through any other spelling.`)
+
+	(use wove-file "./files.wove" (only canonical_path file_stamp read_source_file same_file_stamp (type FileStamp)))
+	(use wove-file "../source/paths.wove" (only directory_end (type SuppliedFile)))
+	(use wove-file "../source/scan.wove" (only (type Token)))
+	(use wove-file "../source/strings.wove" (only decode_string (type DecodeResult)))
+	(use wove-file "../source/graph.wove" (only (type GraphResult) (type DiskEdge)))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+
+	(struct DiskFile (fields (source SuppliedFile) (stamp FileStamp)))
+	(struct DiskSpace (fields (bytes i32) (files i32) (edges i32)))
+	(struct DiskRead (fields (space DiskSpace) (start i32) (end i32) (error u32) (grow bool)))
+
+	(fn disk_space
+		(:doc `Keep the initialized byte and table prefixes together.`)
+		(params (bytes i32) (files i32) (edges i32)) (returns DiskSpace)
+		(body (return (record.make DiskSpace (bytes (local bytes)) (files (local files)) (edges (local edges))))))
+
+	(fn disk_read
+		(:doc `Return an updated or requested capacity with the originating edge span.`)
+		(params (space DiskSpace) (start i32) (end i32) (error u32) (grow bool)) (returns DiskRead)
+		(body (return (record.make DiskRead (space (local space)) (start (local start)) (end (local end))
+			(error (local error)) (grow (local grow))))))
+
+	(fn disk_edge_error
+		(:doc `Report an unavailable or unrepresentable target at its full importing use.`)
+		(params (used DiskSpace) (request GraphResult) (code u32)) (returns DiskRead)
+		(body (return (call disk_read (local used) (record.get (local request) start) (record.get (local request) end)
+			(local code) (bool false)))))
+
+	(fn find_disk_file
+		(:doc `Look up a native identity among completed snapshots.`)
+		(params (files (shared-slice DiskFile)) (count i32) (stamp FileStamp)) (returns i32)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Bundled rows have invalid stamps and cannot shadow a disk file.")
+				(i32.lt (local index) (local count))
+				(body
+					(let known (record.get (slice.load (local files) (local index)) stamp))
+					(if (call same_file_stamp (local known) (local stamp)) (then (return (local index))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (i32 -1))))
+
+	(fn store_disk_edge
+		(:doc `Associate this exact active use with the provider's canonical row.`)
+		(params (edges (mut-slice DiskEdge)) (index i32) (request GraphResult) (provider i32)) (returns void)
+		(body
+			(slice.store (local edges) (local index)
+				(record.make DiskEdge (file (record.get (local request) file)) (start (record.get (local request) start))
+					(target (local provider))))))
+
+	(fn empty_view
+		(:doc `An empty path owner represents a failed canonical lookup.`)
+		(params (bytes (shared-slice u8))) (returns bool)
+		(body (return (i32.eq (slice.len (local bytes)) (i32 0)))))
+
+	(fn join_disk_path
+		(:doc `Join a literal against the canonical importer's directory before letting libc follow symlinks and dot components.`)
+		(params (arena (shared-slice u8)) (importer SuppliedFile) (literal (shared-slice u8))) (returns (owned-array u8))
+		(body
+			(let-mut prefix (i32 0))
+			(if
+				(:doc "An absolute request starts at its own root.")
+				(bool.and (i32.lt (i32 0) (slice.len (local literal)))
+					(bool.not (u8.eq (slice.load (local literal) (i32 0)) (u8 47))))
+				(then (set (local prefix) (i32.sub.wrapping (call directory_end (borrow-shared (local arena)) (local importer))
+					(record.get (local importer) path_start)))))
+			(let-mut size (i32 0))
+			(if
+				(:doc "An empty or overflowing request cannot name a source file.")
+				(bool.and (i32.lt (i32 0) (slice.len (local literal)))
+					(bool.not (i32.lt (i32.sub.wrapping (i32 2147483647) (local prefix)) (slice.len (local literal)))))
+				(then (set (local size) (i32.add.wrapping (local prefix) (slice.len (local literal))))))
+			(let-mut path (array.alloc u8 (local size)))
+			(if
+				(:doc "Only a complete request goes to libc. Keep its spelling through filesystem lookup.")
+				(i32.lt (i32 0) (local size))
+				(then
+					(let begin (record.get (local importer) path_start))
+					(let copied (call append_bytes
+						(borrow-shared (slice.range (local arena) (local begin) (i32.add.wrapping (local begin) (local prefix))))
+						(borrow-mut (local path)) (i32 0)))
+					(let end (call append_bytes (borrow-shared (local literal)) (borrow-mut (local path)) (local copied)))))
+			(return (move (local path)))))
+
+	(fn load_new_disk_file
+		(:doc `Make the complete immutable source and path visible to the next resolver pass.`)
+		(params (canonical (shared-slice u8)) (stamp FileStamp) (used DiskSpace) (request GraphResult)
+			(arena (mut-slice u8)) (files (mut-slice DiskFile)) (edges (mut-slice DiskEdge))) (returns DiskRead)
+		(body
+			(let length (record.get (local stamp) length))
+			(let start (record.get (local used) bytes))
+			(let index (record.get (local used) files))
+			(let edge (record.get (local used) edges))
+			(let width (slice.len (local canonical)))
+			(if
+				(:doc "Check aggregate widths before allocating or opening the source.")
+				(bool.or (i32.lt (i32.sub.wrapping (i32 2147483647) (local start)) (local width))
+					(i32.lt (i32.sub.wrapping (i32 2147483647) (i32.add.wrapping (local start) (local width))) (local length)))
+				(then (return (call disk_edge_error (local used) (local request) (u32 16)))))
+			(let path_end (i32.add.wrapping (local start) (local width)))
+			(let finish (i32.add.wrapping (local path_end) (local length)))
+			(let required (call disk_space (local finish) (i32.add.wrapping (local index) (i32 1))
+				(i32.add.wrapping (local edge) (i32 1))))
+			(if
+				(:doc "Grow storage before loading so retries never read the same new source twice.")
+				(bool.or (i32.lt (slice.len (local arena)) (local finish)) (bool.not (i32.lt (local index) (slice.len (local files)))))
+				(then (return (call disk_read (local required) (i32 0) (i32 0) (u32 0) (bool true)))))
+			(let-mut source (array.alloc u8 (local length)))
+			(if
+				(:doc "A changed or unreadable file cannot publish a partial graph row.")
+				(bool.not (call read_source_file (borrow-shared (local canonical)) (local stamp) (borrow-mut (local source))))
+				(then (return (call disk_edge_error (local used) (local request) (u32 27)))))
+			(let copy_path (call append_bytes (borrow-shared (local canonical)) (borrow-mut (local arena)) (local start)))
+			(let copied (call append_bytes (borrow-shared (local source)) (borrow-mut (local arena)) (local copy_path)))
+			(slice.store (local files) (local index)
+				(record.make DiskFile (source (record.make SuppliedFile (identity (local index))
+					(path_start (local start)) (path_end (local copy_path)) (source_start (local copy_path)) (source_end (local copied))))
+					(stamp (local stamp))))
+			(call store_disk_edge (borrow-mut (local edges)) (local edge) (local request) (local index))
+			(return (call disk_read (local required) (i32 0) (i32 0) (u32 0) (bool false)))))
+
+	(fn decode_use_path
+		(:doc `Decode the original quoted token in its importing source view.`)
+		(params (arena (shared-slice u8)) (importer SuppliedFile) (start i32) (end i32) (output (mut-slice u8)))
+		(returns DecodeResult)
+		(body
+			(return (call decode_string
+				(borrow-shared (slice.range (local arena) (record.get (local importer) source_start) (record.get (local importer) source_end)))
+				(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
+				(borrow-mut (local output))))))
+
+	(fn load_disk_edge
+		(:doc `Decode the selected use, canonicalize it, and load a new identity only when needed.`)
+		(params (used DiskSpace) (request GraphResult) (arena (mut-slice u8)) (files (mut-slice DiskFile))
+			(edges (mut-slice DiskEdge))) (returns DiskRead)
+		(body
+			(let edge (record.get (local used) edges))
+			(let count (record.get (local used) files))
+			(if
+				(:doc "The edge and file tables must retain signed indices.")
+				(bool.or (i32.eq (local edge) (i32 2147483647)) (i32.eq (local count) (i32 2147483647)))
+				(then (return (call disk_edge_error (local used) (local request) (u32 16)))))
+			(if
+				(:doc "Reserve the edge row before opening any provider.")
+				(i32.eq (local edge) (slice.len (local edges)))
+				(then (return (call disk_read (call disk_space (record.get (local used) bytes) (local count)
+					(i32.add.wrapping (local edge) (i32 1))) (i32 0) (i32 0) (u32 0) (bool true)))))
+			(let importer (record.get (slice.load (local files) (record.get (local request) file)) source))
+			(let start (record.get (local request) path_start))
+			(let end (record.get (local request) path_end))
+			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let value (call decode_use_path (borrow-shared (local arena)) (local importer) (local start) (local end)
+				(borrow-mut (local decoded))))
+			(if
+				(:doc "Report an invalid escape at the literal before calling libc.")
+				(u32.lt (u32 0) (record.get (local value) error))
+				(then (return (call disk_read (local used) (record.get (local value) start) (record.get (local value) end)
+					(record.get (local value) error) (bool false)))))
+			(let joined (call join_disk_path (borrow-shared (local arena)) (local importer)
+				(borrow-shared (slice.range (local decoded) (i32 0) (record.get (local value) written)))))
+			(let canonical (call canonical_path (borrow-shared (local joined))))
+			(if
+				(:doc "A missing path points to the source use that requested it.")
+				(call empty_view (borrow-shared (local canonical)))
+				(then (return (call disk_edge_error (local used) (local request) (u32 27)))))
+			(let stamp (call file_stamp (borrow-shared (local canonical))))
+			(if
+				(:doc "Only a regular file of representable length can be a source input.")
+				(i32.lt (record.get (local stamp) length) (i32 0))
+				(then (return (call disk_edge_error (local used) (local request) (u32 27)))))
+			(let known (call find_disk_file (borrow-shared (local files)) (local count) (local stamp)))
+			(if
+				(:doc "Alias paths publish an edge to the cached file without reopening its contents.")
+				(i32.lt (i32 -1) (local known))
+				(then
+					(call store_disk_edge (borrow-mut (local edges)) (local edge) (local request) (local known))
+					(return (call disk_read (call disk_space (record.get (local used) bytes) (local count)
+						(i32.add.wrapping (local edge) (i32 1))) (i32 0) (i32 0) (u32 0) (bool false)))))
+			(return (call load_new_disk_file (borrow-shared (local canonical)) (local stamp) (local used) (local request)
+				(borrow-mut (local arena)) (borrow-mut (local files)) (borrow-mut (local edges))))))
+)
