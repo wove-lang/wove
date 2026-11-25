@@ -22,13 +22,15 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 | Division and remainder | | `i32.div`, `i32.rem` |
 | Equality | `u8.eq`, `i32.eq`, `u32.eq` | `u64.eq`, `(int.eq Type left right)` |
 | Less than | `u8.lt`, `i32.lt`, `u32.lt` | `u64.lt` |
-| AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | `u64.and`, `u64.or`, `u64.xor`, `u64.not` |
-| Left and logical right shift | `u32.shl`, `u32.shr` | `u64.shl`, `u64.shr` |
+| AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | `i32.and`, `i32.or`, `u64.and`, `u64.or`, `u64.xor`, `u64.not` |
+| Left and right shift | `u32.shl`, `u32.shr` | `i32.shl`, `i32.shr`, `u64.shl`, `u64.shr` |
 | Boolean logic | `bool.and`, `bool.or`, `bool.not` | |
 
 - Comparisons return `bool`. `int.eq` also accepts a selected native integer
   alias as its exact type. `bool.and` and `bool.or` short-circuit.
-- A shift takes an `i32` count. Counts outside `[0, width)` trap.
+- A shift takes an `i32` count. Counts outside `[0, width)` trap. Left shifts
+  keep the low bits of the declared width. Right shifts extend the sign for
+  signed integers and fill with zeros for unsigned integers.
 - Division truncates toward zero. A zero divisor traps for division and
   remainder. `INT32_MIN / -1` traps, and `INT32_MIN % -1` is zero.
 - `(int.convert Type value)` converts a fitting integer and traps on an

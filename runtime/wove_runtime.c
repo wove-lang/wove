@@ -819,9 +819,26 @@ int32_t wvrt_u64_shift_count_at_span(int32_t wvrtcount, int32_t wvrtfile, int32_
 }
 
 // Interpret wrapped bits as a signed value using only in-range signed casts.
-static int32_t wvrt_i32_from_wrapped_bits(uint32_t wvrtbits) {
+int32_t wvrt_i32_from_wrapped_bits(uint32_t wvrtbits) {
 	if (wvrtbits <= INT32_MAX) { return (int32_t)wvrtbits; }
 	return -1 - (int32_t)(UINT32_MAX - wvrtbits);
+}
+
+// Shift a signed 32-bit word using a checked count and unsigned bit operations.
+int32_t wvrt_i32_shift_at_span(int32_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrtcount = wvrt_shift_count_at_span(wvrtcount, 32, wvrtfile, wvrtstart, wvrtend);
+	// Retain exactly the low 32 bits of a left shift.
+	if (!wvrtright) {
+		uint32_t bits = (uint32_t)((uint64_t)(uint32_t)wvrtvalue << wvrtcount);
+		return wvrt_i32_from_wrapped_bits(bits);
+	}
+	// Shift the complemented magnitude to extend the sign of a negative word.
+	if (wvrtvalue < 0) {
+		uint32_t inverted = (uint32_t)(-1 - wvrtvalue);
+		return -1 - (int32_t)(inverted >> wvrtcount);
+	}
+	return (int32_t)((uint32_t)wvrtvalue >> wvrtcount);
 }
 
 // Add in the modulo domain and return the corresponding signed value.
