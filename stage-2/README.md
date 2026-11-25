@@ -484,11 +484,16 @@ representation. Distinct Wove declarations have distinct types even when
 their C spelling is the same. Checked conversions and native alias
 dimensions in byte extents are tracked in [#198](https://github.com/wove-lang/wove/issues/198).
 
+A C bridge begins with its provider and quoted header. Its contiguous
+metadata prefix follows the header. Bridge-level cfg applies to the whole
+bridge, and each member may carry its own metadata.
+
 A pointer-backed resource declaration pairs a native C type literal with its
 destructor contract.
 
 ```lisp
 (bridge c-header "<stdio.h>"
+	(:doc "Declare owned stdio handles.")
 	(type (:pragma (c_owned (drop fclose))) File (c-type "FILE *"))
 	(fn tmpfile (params) (returns File))
 	(fn fgetc (params (stream (shared-ref File))) (returns i32)))

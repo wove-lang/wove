@@ -50,13 +50,16 @@ def is_metadata(node: Node) -> bool:
 	return isinstance(node, Form) and node.tag.startswith(":")
 
 
-# Locate the first ordinary child after any tag-adjacent metadata.
-def first_ordinary(children: list[Node]) -> int:
-	index = 1
-	# A contiguous prefix can precede the name or provider.
+# Identify a C bridge provider even when leading metadata occupies its slot.
+def c_header_provider_index(children: list[Node], index: int = 0) -> int | None:
+	# Find the provider solely to distinguish C bridge syntax from opaque providers.
 	while index < len(children) and is_metadata(children[index]):
 		index += 1
-	return index
+	# An empty remainder cannot identify a provider.
+	if index == len(children):
+		return None
+	provider = children[index]
+	return index if isinstance(provider, Atom) and not provider.quoted and provider.text == "c-header" else None
 
 
 # Follow only declaration containers when deciding whether a form owns a name.
@@ -80,20 +83,12 @@ def declaration_context(parents: list[tuple[int, list[Node]]], tag: str) -> bool
 		# A supported C bridge contributes members after its provider and header.
 		if not is_function or head.text != "bridge" or in_bridge:
 			return False
-		index = first_ordinary(children)
-		# The ancestor frame must have read both bridge fields before this member.
-		if index + 1 >= len(children):
-			return False
-		provider, header = children[index], children[index + 1]
-		# Other providers keep their payload grammar opaque.
-		if not (
-			isinstance(provider, Atom) and not provider.quoted and provider.text in ("c", "c-header")
-			and isinstance(header, Atom) and header.quoted
-		):
+		# The provider identifies member declarations while the enclosing form checks its opening.
+		if c_header_provider_index(children, 1) is None:
 			return False
 		in_bridge = True
-	# A standalone function also uses the fixed name slot.
-	return is_function
+	# Standalone functions and C bridges also have fixed opening slots.
+	return is_function or tag == "bridge"
 
 
 # Separate metadata from the logical operands of a completed form.
@@ -119,6 +114,23 @@ def read_form(children: list[Node], line: int, parents: list[tuple[int, list[Nod
 		identifier(children[0])
 		operands.append(children[0])
 		children = children[1:]
+	# C bridge documentation and pragmas follow the provider and quoted header.
+	if tag == "bridge" and declaration_context(parents, tag):
+		index = c_header_provider_index(children)
+		# Provider-specific data stays opaque for the other bridge forms.
+		if index is not None:
+			# A leading entry occupies the fixed provider slot.
+			if index != 0:
+				raise SourceError(children[0].line)
+			# A header with no operand points to the bridge opener.
+			if len(children) < 2:
+				raise SourceError(line)
+			header = children[1]
+			# Point a non-string header or interleaved entry to its original operand.
+			if not isinstance(header, Atom) or not header.quoted:
+				raise SourceError(header.line)
+			operands.extend(children[:2])
+			children = children[2:]
 	prefix_open = True
 	# The first ordinary field closes the one contiguous metadata prefix.
 	for child in children:

@@ -11,8 +11,9 @@ provider. Native fixtures select a narrow subset from `stdio.wove`. [Archived di
 
 ## Source forms
 
-- Each module contains a `bridge` with provider `c-header` and the original header
-  spelling, including its angle brackets. A bodyless `fn` records the Wove
+- Each bridge starts with `bridge c-header` and the quoted original header,
+  including its angle brackets. The bridge metadata follows the header. A
+  bodyless `fn` records the Wove
   parameter and return types. Its optional `(c-name "symbol")` records the
   native spelling when it differs. An omitted archive result becomes
   `(returns void)`. A fixed C operand uses `(const command i32 F_GETFD)`

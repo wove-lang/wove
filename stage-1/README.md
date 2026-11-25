@@ -104,14 +104,17 @@ The same naming syntax applies to functions in C bridges.
 Declaration groups carry that context through their members. Opaque
 metadata payloads can use the same form tags as ordinary data.
 
+A C bridge starts with `(bridge c-header "<header.h>"`. Place its metadata
+after the quoted header and before the first member.
+
 Other forms keep metadata immediately after the tag. For example,
 `(let (:doc "Keep the owner in this scope.") buffer (array.alloc u8 (i32 3)))`
 binds `buffer` in the function body. In function-local `let` and `let-mut`
 without metadata, the binding name follows the tag. Metadata entries use
 colon-prefixed tags such as `(:doc "text")`, `(:expect ...)`, and
 `(:pragma (cfg bootstrap) (inline always))`.
-An entry before a declaration name or after an ordinary field is a source
-error. The retired `with-meta`, `meta`, and `;;` spellings remain invalid. Quoted text can contain semicolons.
+An entry before the fixed opening slots or after an ordinary field is a
+source error. The retired `with-meta`, `meta`, and `;;` spellings remain invalid. Quoted text can contain semicolons.
 
 An `:expect` entry can group test and issue links on the form it describes.
 
@@ -158,7 +161,8 @@ defining file.
 
 The seed skips a `bridge` and all its members. A `use` with a bare
 provider tag other than `wove-file` is also skipped. Both forms must be
-readable IR. Their metadata and payloads belong to later stages. They
+readable IR, including the provider and quoted header of a C bridge.
+The seed skips their selection metadata and payloads. They
 contribute zero names and import edges in the seed. Bootstrap runtime
 operations keep their fixed C bindings.
 

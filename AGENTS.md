@@ -23,6 +23,9 @@ each group. For example, keep the Stage 2 scanner in `stage-2/source/scan.wove`.
 Write the bare name immediately after `module` and `fn`, including C bridge
 functions. Place their metadata prefix directly after that name.
 
+Start a C bridge with `(bridge c-header "<header.h>"`. Place its metadata
+prefix after the quoted header and before its members.
+
 In Wove modules under `stage-2/`, document each function and multiline
 control-flow form with a `(:doc "...")` entry at the start of its metadata
 prefix. Explain the form's purpose or an important invariant. Attach a
