@@ -14,6 +14,48 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
+# Interpret inline UTF-8 and file-backed data without normalizing newlines.
+def phase_bytes(value, fixtures):
+	if isinstance(value, str):
+		return value.encode("utf-8")
+	# File references are relative to the case manifest.
+	if isinstance(value, dict) and value.keys() == {"file"}:
+		return (fixtures / value["file"]).read_bytes()
+	raise ValueError(f"invalid phase data {value!r}")
+
+
+# Keep spaces, empty strings, and raw argument fixtures as separate operands.
+def supplied_arguments(arguments):
+	return [value if isinstance(value, str) else bytes.fromhex(value["hex"]) for value in arguments]
+
+
+# Compare an entire stream against one exact expectation or an explicit list of alternatives.
+def check_stream(label, phase, name, actual, expected, fixtures):
+	values = expected if isinstance(expected, list) else [expected]
+	snapshots = [phase_bytes(value, fixtures) for value in values]
+	assert actual in snapshots, (label, phase, name, actual, snapshots)
+
+
+# Check statuses and streams independently for compilation and execution.
+def check_phase(label, phase, result, expected, fixtures, diagnostic="-"):
+	assert result.returncode == int(expected["exit"]), (label, phase, result)
+	check_stream(label, phase, "stdout", result.stdout, expected.get("stdout", ""), fixtures)
+	# Keep JSON diagnostics structural even when the case has no output snapshot.
+	if diagnostic != "-":
+		assert json.loads(result.stderr) == json.loads(diagnostic), (label, phase, result.stderr)
+	# A byte-level snapshot can additionally check the original formatting.
+	if diagnostic == "-" or "stderr" in expected:
+		check_stream(label, phase, "stderr", result.stderr, expected.get("stderr", ""), fixtures)
+
+
+# Execute a published program using only the argv and stdin declared for the run phase.
+def run_program(root, program, label, fixtures, expected, phase="run"):
+	inputs = {"input": phase_bytes(expected["stdin"], fixtures)} if "stdin" in expected else {"stdin": subprocess.DEVNULL}
+	arguments = supplied_arguments(expected.get("argv", []))
+	result = subprocess.run([program, *arguments], cwd=root, capture_output=True, timeout=30, **inputs)
+	check_phase(label, phase, result, expected, fixtures)
+
+
 # Provide an executable wrapper and preserve a previous binary's bytes for failed builds.
 def prepare_tool(root, clang, options, target):
 	probe = root / options["probe"]
@@ -35,6 +77,7 @@ def prepare_tool(root, clang, options, target):
 		env["WOVE_REAL_CLANG"] = json.dumps([str(real_clang), *clang[1:]])
 	env.pop("WOVE_CLANG_STATUS", None)
 	env.pop("WOVE_CLANG_LINK_TARGET", None)
+	env.pop("WOVE_CLANG_STDOUT", None)
 	# Keep fixture-controlled AST outcomes local to this invocation.
 	for key in ("ast_status", "ast_output"):
 		name = "WOVE_CLANG_" + key.upper()
@@ -53,6 +96,9 @@ def prepare_tool(root, clang, options, target):
 	if "tool_dependency" in options:
 		env["WOVE_CLANG_DEPENDENCY"] = options["tool_dependency"]
 	env.update(options.get("environment", {}))
+	# A fixture can exercise compiler stdout independently of the program's output.
+	if "tool_stdout" in options:
+		env["WOVE_CLANG_STDOUT"] = options["tool_stdout"]
 	return env, previous
 
 
@@ -73,8 +119,8 @@ def check_tool_calls(root, options):
 			assert re.fullmatch(pattern, actual), (actual, pattern)
 
 
-# Check the retained unit, single tool launch, executable publication, and diagnostic.
-def check_binary(root, options, target, retained, value, diagnostic, result, patterns, previous, existing_c):
+# Check retained C and executable publication.
+def check_binary(root, options, target, retained, result, patterns, previous, existing_c):
 	check_c_artifacts(root, retained, existing_c)
 	generated = (root / retained).read_text()
 	# Apply the same retained-C pattern checks used by cc fixtures.
@@ -91,14 +137,11 @@ def check_binary(root, options, target, retained, value, diagnostic, result, pat
 	for stage in root.rglob(".wovec-bin.*"):
 		assert stage.parent == (root / retained).parent and not (stage / "program").exists(), stage
 	binary = root / target
-	# A failed build must preserve both the previously published bytes and its result.
-	if diagnostic != "-":
+	# A failed build with an existing target must preserve its executable bytes.
+	if result.returncode and previous is not None:
 		assert not binary.is_symlink() and binary.read_bytes() == previous
-		assert json.loads(result.stderr) == json.loads(diagnostic), result.stderr
-	else:
-		assert not result.stderr, result.stderr
-	built = subprocess.run([binary], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
-	assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), built
+	elif result.returncode == 0:
+		assert binary.is_file(), target
 
 
 # Confirm that emission changed only the declared retained C path.
@@ -139,6 +182,25 @@ def check_case(compiler, clang, runtime, fixtures, row):
 	flags = json.loads(options[1]) if len(options) > 1 else []
 	tool = json.loads(options[2]) if len(options) > 2 else None
 	preserve = len(options) > 3 and options[3] == "preserve"
+	phases = json.loads(options[4]) if len(options) > 4 else {}
+	arguments = supplied_arguments(json.loads(argv))
+	bin_command = bool(arguments) and arguments[0] in ("bin", b"bin")
+	compile_options = phases.get("compile", {})
+	if "exit" in compile_options:
+		raise ValueError(f"{label}: the compiler exit belongs in the TSV status column")
+	compile_expected = {"exit": int(status), **compile_options}
+	run_expected = phases.get("run")
+	# An explicit run phase always needs a successful bin invocation with an executable to check.
+	if "run" in phases:
+		if not isinstance(run_expected, dict) or "exit" not in run_expected:
+			raise ValueError(f"{label}: a run phase must declare its exit status")
+		if preserve or not bin_command or retained == "-" or int(status) or value != "-":
+			raise ValueError(f"{label}: a run phase requires successful bin emission and its own exit expectation")
+	# Older successful cases declare an exit-only run after emitting or linking retained C.
+	elif value != "-" and int(status) == 0:
+		if preserve or retained == "-":
+			raise ValueError(f"{label}: a native exit expectation requires retained C")
+		run_expected = {"exit": int(value)}
 	with TemporaryDirectory(prefix="native-cli-", dir=compiler.parent) as workspace:
 		root = Path(workspace)
 		# Some Clang cases need the physical path of the isolated workspace.
@@ -167,14 +229,14 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		# Existing C paths can also be Wove inputs. A failed command must preserve their bytes.
 		existing_c = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.c") if path.is_file()}
 		stages = {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()}
-		arguments = [argument.replace("{workspace}", physical) if isinstance(argument, str) else bytes.fromhex(argument["hex"])
-			for argument in json.loads(argv)]
+		compiler_argv = [argument.replace("{workspace}", physical) if isinstance(argument, str) else argument
+			for argument in arguments]
 		preserved = {root / path: (root / path).read_bytes() for path in (tool or {}).get("unchanged", [])}
 		env, previous = prepare_tool(root, clang, tool, target) if tool else (None, None)
 		before = publication_snapshot(root) if preserve else None
 		target_before = entry_snapshot(root / target)
-		result = subprocess.run([compiler, *arguments], cwd=root, env=env, capture_output=True, timeout=30)
-		assert (result.returncode, result.stdout) == (int(status), b""), (label, result)
+		result = subprocess.run([compiler, *compiler_argv], cwd=root, env=env, capture_output=True, timeout=30)
+		check_phase(label, "compile", result, compile_expected, fixtures, diagnostic)
 		assert all(path.read_bytes() == original for path, original in preserved.items()), label
 		# Check optional probes before inspecting published artifacts.
 		if tool:
@@ -182,35 +244,38 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		# A collision preserves every input and previous artifact with identical entries.
 		if preserve:
 			assert result.stderr.count(b"\n") == 1, (label, result.stderr)
-			assert json.loads(result.stderr) == json.loads(diagnostic), (label, result.stderr)
 			after = publication_snapshot(root)
 			# The manifest already checked any compiler observation recorded by the wrapper.
 			if tool and ("arguments" in tool or "queries" in tool):
 				after.pop(Path("clang.jsonl"), None)
 			assert after == before, label
 			return
-		# Binary fixtures run the executable published by the compiler itself.
-		if tool and "arguments" in tool:
-			check_binary(root, tool, target, retained, value, diagnostic, result, patterns, previous, existing_c)
+		# Bin runs the published program only after a successful compilation.
+		if bin_command and (result.returncode == 0 or (tool and "arguments" in tool)):
+			check_binary(root, tool or {}, target, retained, result, patterns, previous, existing_c)
+			if run_expected is not None:
+				run_program(root, root / target, label, fixtures, run_expected)
+			# Existing publication regressions separately exercise the preserved old target.
+			elif result.returncode and previous is not None and value != "-":
+				run_program(root, root / target, label, fixtures, {"exit": int(value)}, "preserved executable")
 			return
 		# cc leaves the requested target alone even when a file already occupies that path.
 		assert entry_snapshot(root / target) == target_before, (label, target)
 		check_c_artifacts(root, retained, existing_c)
 		assert {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()} == stages, label
 		if retained != "-":
-			assert not result.stderr, (label, result.stderr)
 			generated = (root / retained).read_text()
 			# The case can count defining symbols without pinning installation-dependent hashes.
 			for pattern, count in patterns.items():
 				assert len(re.findall(pattern, generated)) == count, (label, pattern)
-			program = root / "result"
-			subprocess.run([*clang, *flags, "-I", Path("runtime").resolve(), str(root / retained), runtime, "-o", str(program)],
-				cwd=root, check=True, timeout=30)
-			built = subprocess.run([program], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
-			assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), (label, built)
-		else:
+			# Legacy cc execution cases link retained C after verifying the compiler phase.
+			if run_expected is not None:
+				program = root / "result"
+				subprocess.run([*clang, *flags, "-I", Path("runtime").resolve(), str(root / retained), runtime, "-o", str(program)],
+					cwd=root, check=True, timeout=30)
+				run_program(root, program, label, fixtures, run_expected)
+		elif diagnostic != "-":
 			assert result.stderr.count(b"\n") == 1, (label, result.stderr)
-			assert json.loads(result.stderr) == json.loads(diagnostic), (label, result.stderr)
 
 
 # Run each external scenario with the same compiler settings as the suite.

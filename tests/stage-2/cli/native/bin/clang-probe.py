@@ -37,6 +37,10 @@ def main():
 			dependency = json.dumps(str(output.with_name(os.environ["WOVE_CLANG_DEPENDENCY"])))
 			sys.stdout.write(f'digraph "dependencies" {{\n  header_0 [ shape="box", label={dependency}];\n}}\n')
 		return int(os.environ["WOVE_CLANG_STATUS"])
+	# A case can expect forwarded tool stdout while verifying the program's streams separately.
+	if "WOVE_CLANG_STDOUT" in os.environ:
+		sys.stdout.write(os.environ["WOVE_CLANG_STDOUT"])
+		sys.stdout.flush()
 	clang = json.loads(os.environ["WOVE_REAL_CLANG"])
 	os.execvp(clang[0], [*clang, *arguments])
 
