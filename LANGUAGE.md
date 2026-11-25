@@ -67,6 +67,13 @@ named Wove record. `array.load` can read the table directly.
 In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
 
+In Stage 2, `(if condition (then value) (else value))` can be used as a
+value. The condition must be `bool`, and both arms must contain exactly one
+expression of the same type. The condition runs once and only the selected arm
+runs. A conditional record or fixed array supports direct reads. A value arm
+can produce a fresh owner. Transferring an existing binding still follows the
+usual move rules.
+
 ## Fieldless enums
 
 Stage 2 uses `(enum Status (variants (Ok) (IoError) (Invalid)))` to

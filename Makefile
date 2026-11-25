@@ -43,7 +43,7 @@ C_HEADER_MODULE := stage-2/c/headers.wove
 C_STANDARD_MODULE := stage-2/c/standard.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
-C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/numeric_ops.wove source/literals.wove source/extent.wove source/float_ops.wove source/enum_forms.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/loops.wove emit/arrays.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_variadic.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
+C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/numeric_ops.wove source/literals.wove source/extent.wove source/float_ops.wove source/enum_forms.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/conditional.wove emit/loops.wove emit/arrays.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_variadic.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
 	scalar/syntax.wove scalar/signatures.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/matches.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_BITS := stage-2/hashing/bits.wove
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove) $(HASHING_BITS)
@@ -174,7 +174,7 @@ test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-ha
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) $(PROCESS_MODULES) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
-		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
+		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv tests/stage-2/value_if/cases.tsv tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
 		tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \
 		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_arrays/cases.tsv \
 		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_rows/cases.tsv tests/stage-2/native_vectors/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
