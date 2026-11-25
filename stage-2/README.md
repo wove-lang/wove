@@ -17,7 +17,7 @@ Each `Token` carries a `u32` kind and an `i32` half-open span, `[start, end)`,
 relative to the supplied slice. The scanner uses the seed's whitespace set
 for both skipping separators and ending bare atoms. Separators consume their
 UTF-8 byte widths. A bare atom also stops at a parenthesis, semicolon,
-double quote, or backtick. Bare atoms have kind 1. Opening and closing
+apostrophe, double quote, or backtick. Bare atoms have kind 1. Opening and closing
 parentheses use kinds 40 and 41. An unquoted semicolon produces a one-byte lexical
 error of kind 3. End of input has kind 0 and both offsets equal to the slice
 length.
@@ -28,7 +28,7 @@ four hexadecimal digits. A raw byte below `0x20`, an invalid escape, or a
 missing quote gives error kind 3. The error starts at the opening quote and
 ends just after the offending byte or at the view end on truncation.
 
-Quoted tokens can contain semicolons, including the literal text `;;`.
+String and character tokens can contain semicolons.
 
 A raw backtick string also has kind 2. A doubled backtick belongs to the
 string and a single backtick closes it. Use the opening byte to distinguish
@@ -38,16 +38,21 @@ backslashes, quotes, and semicolons inside backticks. If the view ends
 before a closing backtick, the error span starts at the opener and ends at
 the view boundary.
 
+A single-quoted character has kind 4. Its span includes both quotes. The
+scanner reports an invalid payload or escape at the literal and stops an
+unterminated character at the end of its line or view.
+
 The `error` field of a token is zero on success. Error tokens use kind 3
 and carry a primary span with a numeric failure code.
 
 | Code | Failure |
 | --- | --- |
 | 1 | Unexpected delimiter |
-| 2 | Unterminated string |
+| 2 | Unterminated literal |
 | 3 | Invalid or incomplete escape |
 | 4 | Raw control byte in a string |
 | 5 | Invalid UTF-8 |
+| 25 | Character payload does not represent one byte |
 
 `source_diagnostic` reports code 5 with a one-byte span at the first
 invalid sequence and code 0 for a valid view. `admit_source` exposes the
@@ -73,7 +78,7 @@ and the number of rows needed for the source tree. Count one synthetic source
 root and one row for each opener, bare atom, or quoted atom.
 
 A failed check returns zero rows and the original diagnostic span. Lexer and
-admission errors retain codes 1–5. Structural checks use the following codes.
+admission errors retain their original codes. Structural checks use the following codes.
 
 | Code | Failure | Primary span |
 | --- | --- | --- |
@@ -90,8 +95,8 @@ order and returns the original check. Short storage returns code 11
 with the real root's span.
 
 Row 0 is the synthetic source root and covers the entire view. Node kinds
-are 0 for that root, 40 for a parenthesized form, 1 for a bare atom, and 2 for
-a quoted atom. Each row carries a half-open byte span and `parent`,
+are 0 for that root, 40 for a parenthesized form, 1 for a bare atom, 2 for
+a string, and 4 for a character. Each row carries a half-open byte span and `parent`,
 `first_child`, and `next_sibling` indices. An absent link is `-1`. A form
 spans both parentheses and has its tag as its first child.
 
@@ -197,7 +202,20 @@ requires an existing `let-mut` binding and a value of that binding's exact
 type. Forward calls use checked prototypes, and nested calls evaluate from
 left to right.
 
-An immutable module binding takes a typed numeric literal, a quoted
+Stage 2 integer atoms such as `0x80u8`, `-0x80i8`, and
+`0xffffffffffffffffu64` use an exact integer suffix. Uppercase `0X` and
+uppercase hexadecimal digits also work. Signed magnitudes must fit the
+named type, and unsigned hexadecimal spellings have no leading minus.
+The form `(u8 0x80)` supplies the type before the hexadecimal magnitude.
+
+A single-quoted character such as `','` or `'\n'` is an `i32` byte value.
+Use one printable ASCII character or one escape. The supported escapes
+are `\0`, `\a`, `\b`, `\t`, `\n`, `\v`, `\f`, `\r`, `\'`, `\\`, and
+`\xNN` with exactly two hexadecimal digits. Use `(u8 '\n')` or
+`(int.convert u8 '\n')` for an explicit byte conversion. The Python seed
+uses decimal integer spellings to build the compiler.
+
+An immutable module binding takes a typed numeric literal, a character, a quoted
 string, or a fixed-array initializer. Its name precedes metadata.
 
 ```lisp

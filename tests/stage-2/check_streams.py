@@ -14,13 +14,19 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "stage-1"))
 from compiler import metadata_enabled, selected_declarations
-from syntax import TOKEN, parse
+from syntax import TOKEN as SEED_TOKEN, parse
 
-KINDS = {"open": 40, "close": 41, "atom": 1, "string": 2}
+KINDS = {"open": 40, "close": 41, "atom": 1, "string": 2, "character": 4}
+SEED_ATOM = r'(?P<atom>[^\s();"`]+)'
+STAGE2_ATOM = r"""(?P<atom>[^\s();"`']+)"""
+TOKEN = re.compile(
+	r"(?P<character>'(?:\\[^\n]|[^'\\\n])*')|"
+	+ SEED_TOKEN.pattern.replace(SEED_ATOM, STAGE2_ATOM)
+)
 
 
-# Use the seed's universal-newline input while retaining each original byte boundary.
-def seed_stream(view):
+# Normalize line endings for the test tokenizer while retaining original byte boundaries.
+def expected_stream(view):
 	text = []
 	offsets = [0]
 	for match in re.finditer(r"\r\n|.", view.decode("utf-8"), re.DOTALL):
@@ -79,14 +85,14 @@ def read_stream(executable, path, view_length, bounds=()):
 	return rows
 
 
-# Match raw spans, original spellings, and coordinates against the seed's lexer.
+# Match raw spans, original spellings, and coordinates against the test tokenizer.
 def compare_stream(executable, path, bounds=()):
 	source = path.read_bytes()
 	base, end = bounds or (0, len(source))
 	view = source[base:end]
 	rows = read_stream(executable, path, len(view), bounds)
 	spellings = []
-	for index, (actual, expected) in enumerate(zip_longest(rows, seed_stream(view))):
+	for index, (actual, expected) in enumerate(zip_longest(rows, expected_stream(view))):
 		assert actual is not None and expected is not None, (path, index, actual, expected)
 		kind, start, stop, spelling = expected
 		expected_row = (kind, start, stop, 0, *position(source, base + start))
@@ -210,7 +216,7 @@ def check_decodings(executable, directory, manifest):
 		assert status == int(expected_row[3] != 0), label
 		# The seed is an independent reference for values representable in UTF-8.
 		if status == 0:
-			kind, _, _, spelling = next(seed_stream(parent[start:stop]))
+			kind, _, _, spelling = next(expected_stream(parent[start:stop]))
 			value, = parse("(value " + spelling.decode("utf-8") + ")").operands
 			assert kind == 2 and value.quoted and prefix == value.text.encode("utf-8"), label
 
