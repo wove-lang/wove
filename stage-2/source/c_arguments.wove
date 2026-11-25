@@ -15,10 +15,12 @@
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode))
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32)))
-	(struct CArguments (fields (strings i32) (bytes i32) (macro bool) (start i32) (end i32) (error u32)))
-	(struct CFormal (fields (position i32) (start i32) (end i32)))
+	(struct CArguments (fields (strings i32) (bytes i32) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
+	(struct CFormal (fields (position i32) (type_node i32) (start i32) (end i32)))
 
 	(let macro_directive "c_macro")
+	(let variadic_directive "c_variadic")
+	(let open_tail "...")
 
 	(fn c_byte_slice_type
 		(:doc `Return the exact shared or mutable byte-slice type code, or zero.`)
@@ -83,7 +85,7 @@
 		(:doc `Point an invalid native argument contract at its original source span.`)
 		(params (start i32) (end i32))
 		(returns CArguments)
-		(body (return (record.make CArguments (strings (i32 0)) (bytes (i32 0)) (macro (bool false))
+		(body (return (record.make CArguments (strings (i32 0)) (bytes (i32 0)) (macro (bool false)) (variadic (i32 0))
 			(start (local start)) (end (local end)) (error (u32 23))))))
 
 	(fn c_argument_error_at
@@ -93,17 +95,17 @@
 		(body (return (call c_argument_error (record.get (local node) start) (record.get (local node) end)))))
 
 	(fn checked_c_arguments
-		(:doc `Keep the argument contract counts and whether the header call expands a macro.`)
-		(params (strings i32) (bytes i32) (macro bool))
+		(:doc `Retain conversion counts, a macro marker, and the first variadic formal's ordinal.`)
+		(params (strings i32) (bytes i32) (macro bool) (variadic i32))
 		(returns CArguments)
-		(body (return (record.make CArguments (strings (local strings)) (bytes (local bytes)) (macro (local macro))
+		(body (return (record.make CArguments (strings (local strings)) (bytes (local bytes)) (macro (local macro)) (variadic (local variadic))
 			(start (i32 0)) (end (i32 0)) (error (u32 0))))))
 
 	(fn c_formal
 		(:doc `Keep an original formal position or the problem's source span.`)
-		(params (position i32) (site SourceNode))
+		(params (position i32) (type_node i32) (site SourceNode))
 		(returns CFormal)
-		(body (return (record.make CFormal (position (local position))
+		(body (return (record.make CFormal (position (local position)) (type_node (local type_node))
 			(start (record.get (local site) start)) (end (record.get (local site) end))))))
 
 	(fn accepts_c_formal
@@ -125,15 +127,15 @@
 			(return (bool.or (u32.eq (local view) (u32 34))
 				(bool.and (call is_c_bytes_mode (local mode)) (u32.eq (local view) (u32 38)))))))
 
-	(fn find_c_formal
-		(:doc `Resolve an exact formal name and check the type required by its contract role.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (name SourceNode) (mode u8))
+	(fn find_named_c_formal
+		(:doc `Resolve a bare formal name to its ordinal and declared type node.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (name SourceNode))
 		(returns CFormal)
 		(body
 			(if
 				(:doc "Quoted strings and forms cannot name a formal parameter.")
 				(bool.not (u32.eq (record.get (local name) kind) (u32 1)))
-				(then (return (call c_formal (i32 -1) (local name)))))
+				(then (return (call c_formal (i32 -1) (i32 -1) (local name)))))
 			(let-mut parameter (local first))
 			(let-mut index (i32 0))
 			(while
@@ -144,20 +146,32 @@
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 					(let spelling (slice.load (local nodes) (record.get (local parts) head)))
 					(if
-						(:doc "Resolve the directive operand before validating the named formal's type.")
+						(:doc "Return the declared formal's ordinal and type at the original name span.")
 						(call same_bytes (borrow-shared (local source))
 							(record.get (local spelling) start) (record.get (local spelling) end)
 							(borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end))
-						(then
-							(let type (slice.load (local nodes) (record.get (local parts) operands)))
-							(if
-								(:doc "An incompatible formal points to its declared type.")
-								(bool.not (call accepts_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (local mode)))
-								(then (return (call c_formal (i32 -1) (local type)))))
-							(return (call c_formal (local index) (local name)))))
+						(then (return (call c_formal (local index) (record.get (local parts) operands) (local name)))))
 					(set (local parameter) (record.get (local node) next_sibling))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
-			(return (call c_formal (i32 -1) (local name)))))
+			(return (call c_formal (i32 -1) (i32 -1) (local name)))))
+
+	(fn find_c_formal
+		(:doc `Check the named formal's type for the requested argument adaptation.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (name SourceNode) (mode u8))
+		(returns CFormal)
+		(body
+			(let formal (call find_named_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local first) (local name)))
+			(let type_node (record.get (local formal) type_node))
+			(if
+				(:doc "Only a resolved name carries a valid type node.")
+				(i32.lt (i32 -1) (local type_node))
+				(then
+					(let type (slice.load (local nodes) (local type_node)))
+					(if
+						(:doc "An incompatible formal points to its declared type.")
+						(bool.not (call accepts_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (local mode)))
+						(then (return (call c_formal (i32 -1) (i32 -1) (local type)))))))
+			(return (local formal))))
 
 	(fn reserve_c_argument
 		(:doc `Record one checked contract. Identical repeated directives keep the original contract.`)
@@ -176,15 +190,15 @@
 						(bool.and (u8.eq (local prior_mode) (local mode))
 							(bool.and (i32.eq (record.get (local prior) size) (local size))
 								(i32.eq (record.get (local prior) count) (local count))))
-						(then (return (call checked_c_arguments (i32 0) (i32 0) (bool false)))))
+						(then (return (call checked_c_arguments (i32 0) (i32 0) (bool false) (i32 0)))))
 					(return (call c_argument_error (record.get (local formal) start) (record.get (local formal) end)))))
 			(slice.store (local contracts) (local index)
 				(record.make CArgument (mode (local mode)) (size (local size)) (count (local count))))
 			(if
 				(:doc "Each bounded pointer contributes one extent check.")
 				(call is_c_bytes_mode (local mode))
-				(then (return (call checked_c_arguments (i32 0) (i32 1) (bool false)))))
-			(return (call checked_c_arguments (i32 1) (i32 0) (bool false)))))
+				(then (return (call checked_c_arguments (i32 0) (i32 1) (bool false) (i32 0)))))
+			(return (call checked_c_arguments (i32 1) (i32 0) (bool false) (i32 0)))))
 
 	(fn read_c_byte_extent
 		(:doc `Resolve c_bytes data count or c_bytes data size count in formal order.`)
@@ -259,7 +273,42 @@
 						(then (return (local bound))))
 					(set (local count) (i32.add.wrapping (local count) (record.get (local bound) strings)))
 					(set (local index) (record.get (local name) next_sibling))))
-			(return (call checked_c_arguments (local count) (i32 0) (bool false)))))
+			(return (call checked_c_arguments (local count) (i32 0) (bool false) (i32 0)))))
+
+	(fn matches_pragma
+		(:doc `Compare the entire spelling of a native pragma head or bare operand.`)
+		(params (source (shared-slice u8)) (node SourceNode) (spelling (shared-slice u8)))
+		(returns bool)
+		(body
+			(return (call same_bytes (borrow-shared (local source)) (record.get (local node) start) (record.get (local node) end)
+				(borrow-shared (local spelling)) (i32 0) (slice.len (local spelling))))))
+
+	(fn read_c_variadic
+		(:doc `Use a named formal after the fixed prefix as the declared variadic boundary.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (first i32) (operand i32))
+		(returns CArguments)
+		(body
+			(if
+				(:doc "An empty marker retains the current signature behavior.")
+				(i32.lt (local operand) (i32 0))
+				(then (return (call checked_c_arguments (i32 0) (i32 0) (bool false) (i32 0)))))
+			(let name (slice.load (local nodes) (local operand)))
+			(let extra (record.get (local name) next_sibling))
+			(if
+				(:doc "The marker has space for one boundary operand.")
+				(i32.lt (i32 -1) (local extra))
+				(then (return (call c_argument_error_at (slice.load (local nodes) (local extra))))))
+			(if
+				(:doc "An open tail retains the current declared argument list.")
+				(call matches_pragma (borrow-shared (local source)) (local name) (borrow-shared (local open_tail)))
+				(then (return (call checked_c_arguments (i32 0) (i32 0) (bool false) (i32 0)))))
+			(let formal (call find_named_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local first) (local name)))
+			(let position (record.get (local formal) position))
+			(if
+				(:doc "C requires a known boundary after at least one fixed formal.")
+				(i32.lt (local position) (i32 1))
+				(then (return (call c_argument_error_at (local name)))))
+			(return (call checked_c_arguments (i32 0) (i32 0) (bool false) (local position)))))
 
 	(fn read_c_directive
 		(:doc `Dispatch the recognized argument directives in the checked pragma stream.`)
@@ -277,19 +326,22 @@
 			(let begin (record.get (local parts) operands))
 			(if
 				(:doc "A function-like macro marker takes no operands.")
-				(call same_bytes (borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end)
-					(borrow-shared (local macro_directive)) (i32 0) (slice.len (local macro_directive)))
+				(call matches_pragma (borrow-shared (local source)) (local name) (borrow-shared (local macro_directive)))
 				(then
 					(if
 						(:doc "Point surplus operands to the malformed directive.")
 						(bool.not (i32.lt (local begin) (i32 0)))
 						(then (return (call c_argument_error_at (local node)))))
-					(return (call checked_c_arguments (i32 0) (i32 0) (bool true)))))
+					(return (call checked_c_arguments (i32 0) (i32 0) (bool true) (i32 0)))))
+			(if
+				(:doc "A named variadic boundary changes the C prototype without adapting the argument values.")
+				(call matches_pragma (borrow-shared (local source)) (local name) (borrow-shared (local variadic_directive)))
+				(then (return (call read_c_variadic (borrow-shared (local source)) (borrow-shared (local nodes)) (local first) (local begin)))))
 			(let mode (call c_argument_directive (borrow-shared (local source)) (local name)))
 			(if
 				(:doc "Other directives leave these argument contracts untouched.")
 				(call is_c_value_mode (local mode))
-				(then (return (call checked_c_arguments (i32 0) (i32 0) (bool false)))))
+				(then (return (call checked_c_arguments (i32 0) (i32 0) (bool false) (i32 0)))))
 			(if
 				(:doc "A native argument directive must name at least its data formal.")
 				(i32.lt (local begin) (i32 0))
@@ -314,6 +366,7 @@
 			(let-mut strings (i32 0))
 			(let-mut bytes (i32 0))
 			(let-mut macro (bool false))
+			(let-mut variadic (i32 0))
 			(while
 				(:doc "Only the function's pragma metadata can declare an argument contract.")
 				(bool.and (bool.not (i32.lt (local entry) (i32 0)))
@@ -338,10 +391,22 @@
 										(:doc "Forward the original malformed contract span.")
 										(u32.lt (u32 0) (record.get (local checked) error))
 										(then (return (local checked))))
+									(let tail (record.get (local checked) variadic))
 									(if
-										(:doc "Diagnose a second macro marker at that directive.")
-										(bool.and (local macro) (record.get (local checked) macro))
+										(:doc "Diagnose a repeated macro marker or a macro after a named variadic boundary.")
+										(bool.and (record.get (local checked) macro)
+											(bool.or (local macro) (i32.lt (i32 0) (local variadic))))
 										(then (return (call c_argument_error_at (local item)))))
+									(if
+										(:doc "Repeated boundaries must agree, and a function-like macro has no C prototype.")
+										(i32.lt (i32 0) (local tail))
+										(then
+											(if
+												(:doc "Point incompatible choices to the new directive.")
+												(bool.or (local macro) (bool.and (i32.lt (i32 0) (local variadic))
+													(bool.not (i32.eq (local tail) (local variadic)))))
+												(then (return (call c_argument_error_at (local item)))))
+											(set (local variadic) (local tail))))
 									(set (local macro) (bool.or (local macro) (record.get (local checked) macro)))
 									(set (local strings) (i32.add.wrapping (local strings) (record.get (local checked) strings)))
 									(set (local bytes) (i32.add.wrapping (local bytes) (record.get (local checked) bytes)))
@@ -363,4 +428,4 @@
 						(then (return (call c_argument_error_at (local type)))))
 					(set (local parameter) (record.get (local node) next_sibling))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
-			(return (call checked_c_arguments (local strings) (local bytes) (local macro))))))
+			(return (call checked_c_arguments (local strings) (local bytes) (local macro) (local variadic))))))
