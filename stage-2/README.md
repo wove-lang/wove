@@ -467,9 +467,16 @@ in source order. Use `(bind index item)` for an additional `i32` position.
 The index starts at zero in the captured view, including a checked byte
 subrange such as `(borrow-shared (array.range (local data) start end))`.
 A module byte string can supply either the whole view or a subrange.
-The bindings are immutable and scoped to the body. `continue` advances to
-the next iteration. Like `break` and `return`, it releases owners in the
-scopes it exits.
+Range bindings, indexes, and shared items are immutable and scoped to the
+body. `continue` advances to the next iteration. Like `break` and `return`,
+it releases owners in the scopes it exits.
+
+For writable iteration, use `(for (bind item) (borrow-mut (local data))
+(body (set (local item) value)))`. The loop holds an exclusive view. Each
+item names its original element and can be written or reborrowed for a call.
+An optional index stays immutable and relative to the view. To fill a byte
+window, borrow a checked `array.range` in the header or reborrow a named
+mutable view. Access through the source resumes after the loop exits.
 
 A `let` can bind a shared or mutable view of a named local array or array
 parameter. The binding itself is immutable. A mutable view permits writes
