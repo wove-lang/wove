@@ -27,9 +27,9 @@
 #define read_module wv_seed_fn_85
 #define emit_module wv_seed_fn_115
 #define resolve_graph wv_seed_fn_132
-#define inspect_callers wv_seed_fn_396
-#define run_scalar_graph wv_seed_fn_421
-#define discover_graph_tests wv_seed_fn_426
+#define inspect_callers wv_seed_fn_407
+#define run_scalar_graph wv_seed_fn_436
+#define discover_graph_tests wv_seed_fn_441
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -865,9 +865,12 @@ static void write_graph(const uint8_t *arena, const SuppliedFile *files, int32_t
 			printf("c-target %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
 				row.wv_field_7, row.wv_field_8, row.wv_field_9, row.wv_field_10, row.wv_field_11, row.wv_field_12);
 			// A pointer contract keeps the defining type and destructor, even for an aliased function.
-			if (row.wv_field_13 > 0) {
+			if (row.wv_field_13 > 0 && row.wv_field_14 >= 0) {
 				printf("c-owner %" PRId32 " %" PRId32 " %" PRId32 "\n",
 					row.wv_field_13, row.wv_field_14, row.wv_field_15);
+			} else if (row.wv_field_13 > 0) {
+				printf("c-integer %" PRId32 " %" PRId32 " %" PRId32 "\n",
+					row.wv_field_13, row.wv_field_16, row.wv_field_17);
 			}
 		}
 	}

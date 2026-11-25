@@ -6,12 +6,12 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 # C standard library bridge corpus
 
 The fourteen Wove files mirror the archived directory at `8ac13c06`. They are
-standalone source for the bridge design. The build and active import graph
-exclude the corpus. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
+standalone source for the bridge design. Each uses the current `c-header`
+provider. Native fixtures select a narrow subset from `stdio.wove`. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
 
 ## Source forms
 
-- Each module contains a `bridge` with provider `c` and the original header
+- Each module contains a `bridge` with provider `c-header` and the original header
   spelling, including its angle brackets. A bodyless `fn` records the Wove
   parameter and return types. Its optional `(c-name "symbol")` records the
   native spelling when it differs. An omitted archive result becomes
@@ -32,15 +32,16 @@ exclude the corpus. [Archived directory](https://github.com/wove-lang/.0.wove/tr
   the original comment delimiters, rationale, and declaration sketches.
 
 The current parser and renderer can read these forms structurally. The seed
-skips bridge members. Activating the corpus requires the declaration, type,
-selection, and lowering work below. [Seed bridge behavior](../../stage-1/README.md)
+skips bridge members. Stage 2 resolves selected native integer aliases in function signatures.
+Further activation requires the declaration, type, selection, and lowering
+work below. [Seed bridge behavior](../../stage-1/README.md)
 
 ## Active archive declarations
 
 | Header and declarations | Form or contract | Compiler behavior needed |
 | --- | --- | --- |
-| All fourteen headers and their active members | `(bridge c "<header>" …)`, bodyless `fn`, and `(c-name "symbol")` | Resolve a selected member from the declared header. Bind its Wove name and exact C name, discover macro or symbol availability in the selected target's header environment, check the native signature, and emit the right include, call, and link dependencies. |
-| `dirent.h` aliases for stream positions, GNU byte counts and offsets, `fcntl.h` typedefs, `math.h` floating and integer aliases, `signal.h` signal types, `spawn.h` attributes and actions, `stdio.h` file and position types, `sys/stat.h`, `sys/wait.h`, `time.h`, and `unistd.h` aliases | `(type Name (c-type "…"))` | Preserve the actual native spelling, nominal identity, pointer depth, signedness, size, and alignment. Native `long`, `size_t`, `pid_t`, and `long double` use the selected C ABI. |
+| All fourteen headers and their active members | `(bridge c-header "<header>" …)`, bodyless `fn`, and `(c-name "symbol")` | Resolve a selected member from the declared header. Bind its Wove name and exact C name, discover macro or symbol availability in the selected target's header environment, check the native signature, and emit the right include, call, and link dependencies. |
+| `dirent.h` aliases for stream positions, GNU byte counts and offsets, `fcntl.h` typedefs, `math.h` floating and integer aliases, `signal.h` signal types, `spawn.h` attributes and actions, `stdio.h` file and position types, `sys/stat.h`, `sys/wait.h`, `time.h`, and `unistd.h` aliases | `(type Name (c-type "…"))` | Integer aliases keep the selected native spelling and nominal identity in parameters, results, and locals. Wider native value classes, checked casts, and aliases as buffer extents require additional lowering. |
 | `fcntl.h` `Lock`, `spawn.h` `Scheduling`, `sys/stat.h` `Timespec` and both `Stat` views, `sys/wait.h` `SignalInfo`, and `time.h` `Stamp` | `struct` with `c-type` and `fields` | Allocate and pass the entire native object with its padding and unexposed members. Check field access against the selected header. Honor the platform timestamp names and the child-status view of `siginfo_t`. |
 | `sys/wait.h` `IdType` and `time.h` `Clock` | `enum` with `c-type` and `members` | Bind the C enum or typedef and its selected header members with their native values and argument representation. |
 | `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdio.h`, `sys/stat.h`, `sys/wait.h`, and `unistd.h` constant declarations | `const` with an explicit type | Read header-derived values in the checked C constant context and retain their declared Wove types. Guarded alternatives such as `UTIME_NOW` and `UTIME_OMIT` use the selected platform width. |

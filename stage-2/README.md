@@ -451,6 +451,15 @@ can lend empty views. The check traps at the data argument before entering
 C. A shared view passes a read-only pointer, and a mutable view passes a
 writable pointer to the same storage for the duration of the call.
 
+A bridge can declare an integer alias such as `(type Size (c-type "size_t"))`.
+Select it with `(type Size)` or rename it in the importing file. A function
+signature resolves each alias in its defining bridge or Wove namespace.
+Values carry that defining type through parameters, results, and locals.
+The emitted C keeps the header's native spelling and checks its integer
+representation. Distinct Wove declarations have distinct types even when
+their C spelling is the same. Checked conversions and native alias
+dimensions in byte extents are tracked in [#198](https://github.com/wove-lang/wove/issues/198).
+
 A pointer-backed resource declaration pairs a native C type literal with its
 destructor contract.
 
