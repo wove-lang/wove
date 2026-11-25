@@ -601,7 +601,8 @@ the target's C identifier. Without `c-name`, the two spellings are the same.
 
 The native `query_clang_header` API in `clang/query.wove` accepts a Clang
 executable, NUL-terminated target and include arguments, the header spelling,
-and the originating import span. It renders the embedded C probe, captures
+and the originating import span. Its `QuerySite` and `HeaderQuery` types are
+in `c/probe.wove`. It renders the embedded C probe, captures
 one AST document, and returns an index for exact `clang_declaration` lookup
 with the caller's declaration rows and decoded keys. For quoted project
 headers, pass the importing directory in the include options.

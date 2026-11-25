@@ -99,7 +99,7 @@ AST_LIVE := $(STAGE2)/ast/live
 GCC_INSPECTOR := stage-2/gcc/inspect.cc
 AST_LIVE_SOURCES := $(sort $(CLANG_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) \
 	$(PROCESS_LAUNCHER_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/c-stdlib/stdio.wove \
-	stage-2/json/frame.wove stage-2/clang/query.wove stage-2/clang/run.wove \
+	stage-2/json/frame.wove stage-2/c/probe.wove stage-2/clang/query.wove stage-2/clang/run.wove \
 	stage-2/gcc/build.wove stage-2/gcc/query.wove)
 AST_FIXTURES := tests/support/ast
 AST_PROBE := $(STAGE2)/ast/probe

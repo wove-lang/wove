@@ -25,6 +25,7 @@ syntax=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		-I) include=$2; shift ;;
+		-I*) include=${1#-I} ;;
 		-o) output=$2; shift ;;
 		-fplugin=*) plugin=${1#-fplugin=} ;;
 		-funsigned-char|-fsigned-char) target=$1 ;;

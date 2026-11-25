@@ -12,14 +12,15 @@ probes. Enum values retain GCC's full-width decimal text as JSON strings.
 The Stage 2 AST lookup used for Clang output also reads this output.
 
 `query_gcc_header` discovers the selected GCC's plugin include directory,
-materializes the embedded inspector in a private workspace, and uses that
+accepts resolved absolute and relative directory paths, materializes the
+embedded inspector in a private workspace, and uses that
 GCC's C++ frontend to build the plugin. It passes the caller's packed target
 and include arguments to the C probe. The inspector is built with the
 compiler's default host options so probe flags such as `-funsigned-char`
 affect the C translation unit.
 
-The query returns the same presence state, AST index, and import span as
-`query_clang_header`. Error 8 means plugin directory discovery failed.
+Both `query_gcc_header` and `query_clang_header` return the shared
+`HeaderQuery` from `stage-2/c/probe.wove`. Error 8 means plugin directory discovery failed.
 Error 9 means plugin compilation failed or did not produce a regular
 shared object. The shared query codes cover tool and plugin load failures,
 capture truncation, and malformed AST output. The private source and plugin
