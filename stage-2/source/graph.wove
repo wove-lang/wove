@@ -11,8 +11,9 @@
 	(use wove-file "./scan.wove"
 		(only check_source_form build_source_tree check_source_metadata is_identifier_head
 			(type SourceNode) (type Token) (type FormCheck)))
-	(use wove-file "./module.wove" (only form_parts read_module_for_target (type SelectedDeclaration)))
+	(use wove-file "./module.wove" (only form_parts read_module_for_target (type SelectedDeclaration) (type FormParts)))
 	(use wove-file "./strings.wove" (only decode_string))
+	(use wove-file "./extent.wove" (only immutable_extent_value))
 	(use wove-file "./paths.wove" (only resolve_path (type SuppliedFile)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "./imports.wove" (only import_keyword is_import_name read_import read_selector))
@@ -33,7 +34,7 @@
 			(signature_start i32) (signature_end i32) (native_type i32) (drop_start i32) (drop_end i32)
 			(type_start i32) (type_end i32) (name_node i32)
 			(header_file i32) (bridge_node i32) (default_file i32) (default_node i32) (native_file i32)
-			(optional bool) (requested_start i32) (requested_end i32) (value_macro bool)))
+			(optional bool) (requested_start i32) (requested_end i32) (value_macro bool) (extent i32)))
 	(struct GraphUse
 		(fields (start i32) (end i32) (path_start i32) (path_end i32) (first i32) (limit i32) (error u32) (provider u32)))
 	(struct GraphSelector
@@ -121,7 +122,8 @@
 	(fn collect_definition
 		(:doc `Record a local definition before imports can add aliases to its namespace.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(name i32) (declaration i32) (file i32) (namespace u32) (bindings (mut-array GraphBinding)) (count i32))
+			(name i32) (declaration i32) (file i32) (namespace u32) (extent i32)
+			(bindings (mut-array GraphBinding)) (count i32))
 		(returns GraphRead)
 		(body
 			(if
@@ -153,8 +155,66 @@
 					(native_type 0i32) (drop_start 0i32) (drop_end 0i32)
 					(type_start 0i32) (type_end 0i32) (name_node (local name))
 					(header_file -1i32) (bridge_node -1i32) (default_file -1i32) (default_node -1i32) (native_file -1i32)
-					(optional (bool false)) (requested_start -1i32) (requested_end -1i32) (value_macro (bool false))))
+					(optional (bool false)) (requested_start -1i32) (requested_end -1i32) (value_macro (bool false)) (extent (local extent))))
 			(return (call graph_read (i32.add.wrapping (local count) 1i32) 0i32 0i32 0u32))))
+
+	(fn collect_wove_definition
+		(:doc "Publish a selected function, type, or value in its module namespace.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(parts FormParts) (tag u32) (declaration i32) (file i32) (bindings (mut-array GraphBinding)) (count i32))
+		(returns GraphRead)
+		(body
+			(let-mut namespace 0u32)
+			(let-mut name (struct.get (local parts) name))
+			(if
+				(:doc "Types define their spelling in the first operand and own a separate namespace.")
+				(u32.eq (local tag) 7u32)
+				(then
+					(set (local namespace) 1u32)
+					(set (local name) (struct.get (local parts) operands))))
+			(let-mut extent -1i32)
+			(if
+				(:doc "Read a module value's initializer from the first ordinary operand after metadata.")
+				(u32.eq (local tag) 12u32)
+				(then
+					(set (local namespace) 2u32)
+					(set (local extent) (call immutable_extent_value (borrow-shared (local source))
+						(borrow-shared (local nodes)) (struct.get (local parts) operands)))))
+			(return (call collect_definition (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local name) (local declaration) (local file) (local namespace) (local extent)
+				(borrow-mut (local bindings)) (local count)))))
+
+	(fn is_wove_definition
+		(:doc "Recognize the selected root declarations that reserve names.")
+		(params (tag u32)) (returns bool)
+		(body (return (bool.or (u32.eq (local tag) 1u32)
+			(bool.or (u32.eq (local tag) 7u32) (u32.eq (local tag) 12u32))))))
+
+	(fn collect_standalone_bindings
+		(:doc "Publish the selected definitions for a single-module consumer that has no graph import pass.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (selected (shared-array SelectedDeclaration))
+			(length i32) (file i32) (bindings (mut-array GraphBinding))) (returns GraphRead)
+		(body
+			(let-mut index 0i32)
+			(let-mut count 0i32)
+			(while
+				(:doc "The selected rows exclude disabled and inactive declarations.")
+				(i32.lt (local index) (local length))
+				(body
+					(let declaration (struct.get (array.load (local selected) (local index)) node))
+					(let node (array.load (local nodes) (local declaration)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let tag (call import_keyword (borrow-shared (local source)) (array.load (local nodes) (struct.get (local parts) head))))
+					(if
+						(:doc "Single-module compilation resolves the same definition keys as a graph.")
+						(call is_wove_definition (local tag))
+						(then
+							(let result (call collect_wove_definition (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local node) (local parts) (local tag) (local declaration) (local file) (borrow-mut (local bindings)) (local count)))
+							(if (u32.lt 0u32 (struct.get (local result) error)) (then (return (local result))))
+							(set (local count) (struct.get (local result) next))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (call graph_read (local count) 0i32 0i32 0u32))))
 
 	(fn collect_selectors
 		(:doc `Cache selector spans and local name nodes before releasing the importer's source tree.`)
@@ -260,24 +320,11 @@
 						(array.load (local nodes) (struct.get (local parts) head))))
 					(if
 						(:doc "The local definition is visible to conflict checks on every edge.")
-						(bool.or (u32.eq (local tag) 1u32)
-							(bool.or (u32.eq (local tag) 7u32) (u32.eq (local tag) 12u32)))
+						(call is_wove_definition (local tag))
 						(then
-							(let-mut namespace 0u32)
-							(let-mut name (struct.get (local parts) name))
-							(if
-								(:doc "A Wove type declaration names its type in the separate namespace.")
-								(u32.eq (local tag) 7u32)
-								(then
-									(set (local namespace) 1u32)
-									(set (local name) (struct.get (local parts) operands))))
-							(if
-								(:doc "An immutable module binding has its own value namespace.")
-								(u32.eq (local tag) 12u32)
-								(then (set (local namespace) 2u32)))
-							(let result (call collect_definition (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local node) (local name) (local declaration) (local file)
-								(local namespace) (borrow-mut (local bindings)) (local binding_count)))
+							(let result (call collect_wove_definition (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local node) (local parts) (local tag) (local declaration) (local file)
+								(borrow-mut (local bindings)) (local binding_count)))
 							(let error (struct.get (local result) error))
 							(if
 								(:doc "Retain the original definition diagnostic.")
@@ -485,7 +532,8 @@
 					(native_file (struct.get (local target) native_file))
 					(optional (struct.get (local target) optional))
 					(requested_start (struct.get (local selector) original_start))
-					(requested_end (struct.get (local selector) original_end)) (value_macro (struct.get (local target) value_macro))))
+					(requested_end (struct.get (local selector) original_end)) (value_macro (struct.get (local target) value_macro))
+					(extent (struct.get (local target) extent))))
 			(return (call graph_read (i32.add.wrapping (local index) 1i32) 0i32 0i32 0u32))))
 
 	(fn bind_edge
@@ -645,7 +693,7 @@
 						(name_node -1i32) (header_file (struct.get (local header) file)) (bridge_node (struct.get (local header) node))
 						(default_file (struct.get (local header) default_file)) (default_node (struct.get (local header) default_node))
 						(native_file (local native_file)) (optional (struct.get (local member) optional))
-						(requested_start -1i32) (requested_end -1i32) (value_macro (struct.get (local member) value_macro))))
+						(requested_start -1i32) (requested_end -1i32) (value_macro (struct.get (local member) value_macro)) (extent -1i32)))
 					(let published (call publish_binding (borrow-shared (local source)) (local selector) (local importer)
 						(local target) (borrow-mut (local bindings)) (local count)))
 					(if
