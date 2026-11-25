@@ -21,6 +21,10 @@ def main():
 	if "-ast-dump=json" in arguments and ("WOVE_CLANG_AST_STATUS" in os.environ or "WOVE_CLANG_AST_OUTPUT" in os.environ):
 		sys.stdout.write(os.environ.get("WOVE_CLANG_AST_OUTPUT", ""))
 		return int(os.environ.get("WOVE_CLANG_AST_STATUS", "0"))
+	# Capture the bytes presented to Clang before the driver can clean up its stage.
+	if "WOVE_CLANG_CAPTURE_UNIT" in os.environ and "-o" in arguments:
+		output = Path(arguments[arguments.index("-o") + 1])
+		shutil.copyfile(output.with_name("main.c"), os.environ["WOVE_CLANG_CAPTURE_UNIT"])
 	# A fixture can replace the tool with a staged-output and status probe.
 	if "WOVE_CLANG_STATUS" in os.environ:
 		output = Path(arguments[arguments.index("-o") + 1])

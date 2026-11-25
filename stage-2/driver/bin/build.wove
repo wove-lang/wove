@@ -5,7 +5,8 @@
 
 	The private directory holds an immutable copy of the generated C and
 	the embedded runtime. Clang never receives the final executable path.
-	Keep the retained C even if the compiler reports a failure.`)
+	Ordinary builds keep checked C after a tool failure. Debug builds
+	commit each executable against its own retained source and symbols.`)
 
 	(use (:pragma (cfg (os "linux"))) c-header "<stdlib.h>" (only mkdtemp))
 	(use (:pragma (cfg (os "macos"))) c-header "<unistd.h>" (only mkdtemp))
@@ -14,6 +15,7 @@
 	(use c-header "<sys/stat.h>" (only lstat S_ISREG (type Stat)))
 	(use wove-file "../clang.wove" (only clang_program))
 	(use wove-file "../arguments.wove" (only frontend_capacity write_probe_options write_clang_arguments))
+	(use wove-file "./debug.wove" (only debug_directory name_debug_unit stage_debug_source))
 	(use wove-file "./dependencies.wove" (only check_resolved_headers))
 	(use wove-file "./jobs.wove" (only clang_trace_environment read_job_sysroot))
 	(use wove-file "../output.wove" (only retain_checked_unit))
@@ -194,49 +196,6 @@
 		(params (status i32) (retained bool)) (returns NativeBuild)
 		(body (return (struct.new NativeBuild (status (local status)) (retained (local retained))))))
 
-	(fn build_in_directory
-		(:doc `Keep the runtime and executable private until the generated source has compiled successfully.`)
-		(params (path (shared-slice u8)) (target (shared-slice u8)) (retained (shared-slice u8))
-			(protection BuildProtection) (target_index i32) (directory (shared-slice u8)) (unit (shared-slice u8))
-			(runtime (shared-slice u8)) (header (shared-slice u8)) (binary (shared-slice u8)) (trace (shared-slice u8)) (jobs (shared-slice u8))
-			(bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
-			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))) (returns NativeBuild)
-		(body
-			(let runtime_source (embed "../../../runtime/wove_runtime.c"))
-			(let runtime_header (embed "../../../runtime/wove_runtime.h"))
-			(if
-				(:doc `Both runtime assets must be available next to the private generated C unit.`)
-				(bool.not (bool.and (call stage_file (borrow-shared (local runtime)) (borrow-shared (local runtime_source)))
-					(call stage_file (borrow-shared (local header)) (borrow-shared (local runtime_header)))))
-				(then (return (call native_build_result
-					(call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure))) (bool false)))))
-			(let capacity (call frontend_capacity (slice.len (local bytes)) (slice.len (local config))
-				(slice.len (local arguments)) (slice.len (local directory))))
-			(let-mut options (array.alloc u8 (local capacity)))
-			(let option_end (call write_probe_options (borrow-shared (local bytes)) (borrow-shared (local config))
-				(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes))
-				(borrow-shared (local settings)) (borrow-shared (local directory)) (borrow-mut (local options))))
-			(let emitted (call compile_input (borrow-shared (local path)) (borrow-shared (local retained))
-				(borrow-shared (local unit)) (borrow-shared (slice.range (local options) 0i32 (local option_end)))
-				(local protection) (local target_index)))
-			(if (bool.not (i32.eq (local emitted) 0i32)) (then (return (call native_build_result (local emitted) (bool false)))))
-			(let tool (call invoke_clang (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
-				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
-				(borrow-shared (local directory)) (borrow-shared (local unit)) (borrow-shared (local binary)) (borrow-shared (local trace))
-				(borrow-shared (local jobs)) (local protection) (local target_index)))
-			(let status (struct.get (local tool) status))
-			(let checked (struct.get (local tool) checked))
-			(if (i32.lt 0i32 (local checked)) (then (return (call native_build_result (local checked) (bool false)))))
-			(let published (call retain_checked_unit (borrow-shared (local path)) (borrow-shared (local retained))
-				(borrow-shared (local unit)) (local target_index)))
-			(if (i32.lt 0i32 (local published)) (then (return (call native_build_result (local published) (bool false)))))
-			(if
-				(:doc `An ordinary tool failure still leaves the checked C available for inspection.`)
-				(bool.not (i32.eq (local status) 0i32))
-				(then (return (call native_build_result (call report_clang_status (local status)) (bool true)))))
-			(return (call native_build_result (call install_binary (borrow-shared (local path)) (borrow-shared (local target))
-				(borrow-shared (local binary)) (local target_index)) (bool true)))))
-
 	(fn discard_private_stage
 		(:doc `Remove optional tool output only from the compiler's reserved private directory.`)
 		(params (directory (shared-slice u8))) (returns void)
@@ -253,6 +212,108 @@
 			(slice.store (local packed) (local end) 0u8)
 			(let-mut output (array.alloc u8 0i32))
 			(let removed (call run_process_capture (borrow-shared (local remove_program)) (borrow-shared (local packed)) (borrow-mut (local output))))))
+
+	(fn publish_debug
+		(:doc `Make the complete debug directory available before installing the executable that names it.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (directory (shared-slice u8))
+			(debug (shared-slice u8)) (trace (shared-slice u8)) (jobs (shared-slice u8)) (target_index i32))
+		(returns i32)
+		(body
+			(let removed_trace (call unlink (borrow-shared (local trace))))
+			(let removed_jobs (call unlink (borrow-shared (local jobs))))
+			(if
+				(:doc `A relocation failure leaves the previous debug build and executable intact.`)
+				(bool.not (bool.and (call ensure_parents (borrow-shared (local debug)))
+					(i32.eq (call rename (borrow-shared (local directory)) (borrow-shared (local debug))) 0i32)))
+				(then (return (call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure))))))
+			(let binary (call append_path (borrow-shared (local debug)) (borrow-shared (local binary_suffix))))
+			(let status (call install_binary (borrow-shared (local path)) (borrow-shared (local target))
+				(borrow-shared (local binary)) (local target_index)))
+			(if
+				(:doc `An unsuccessful executable rename discards only this build's unpublished source and symbols.`)
+				(i32.lt 0i32 (local status))
+				(then (call discard_private_stage (borrow-shared (local debug)))))
+			(return (local status))))
+
+	(fn stage_runtime_asset
+		(:doc `Keep the included runtime file reachable from debug line tables after publication.`)
+		(params (path (shared-slice u8)) (debug (shared-slice u8)) (suffix (shared-slice u8))
+			(source (shared-slice u8))) (returns bool)
+		(body
+			(if
+				(:doc `Ordinary builds stage only the original embedded runtime bytes.`)
+				(call empty_bytes (borrow-shared (local debug)))
+				(then (return (call stage_file (borrow-shared (local path)) (borrow-shared (local source))))))
+			(let retained (call append_path (borrow-shared (local debug)) (borrow-shared (local suffix))))
+			(return (call stage_debug_source (borrow-shared (local path)) (borrow-shared (local retained))
+				(borrow-shared (local source))))))
+
+	(fn build_in_directory
+		(:doc `Keep the runtime and executable private until the generated source has compiled successfully.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (retained (shared-slice u8))
+			(protection BuildProtection) (target_index i32) (directory (shared-slice u8))
+			(debug (shared-slice u8)) (unit (shared-slice u8))
+			(runtime (shared-slice u8)) (header (shared-slice u8)) (binary (shared-slice u8)) (trace (shared-slice u8)) (jobs (shared-slice u8))
+			(bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
+			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))) (returns NativeBuild)
+		(body
+			(let runtime_source (embed "../../../runtime/wove_runtime.c"))
+			(let runtime_header (embed "../../../runtime/wove_runtime.h"))
+			(if
+				(:doc `Both runtime assets must be available next to the private generated C unit.`)
+				(bool.not (bool.and (call stage_runtime_asset (borrow-shared (local runtime)) (borrow-shared (local debug))
+						(borrow-shared (local source_suffix)) (borrow-shared (local runtime_source)))
+					(call stage_runtime_asset (borrow-shared (local header)) (borrow-shared (local debug))
+						(borrow-shared (local header_suffix)) (borrow-shared (local runtime_header)))))
+				(then (return (call native_build_result
+					(call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure))) (bool false)))))
+			(let capacity (call frontend_capacity (slice.len (local bytes)) (slice.len (local config))
+				(slice.len (local arguments)) (slice.len (local directory))))
+			(let-mut options (array.alloc u8 (local capacity)))
+			(let option_end (call write_probe_options (borrow-shared (local bytes)) (borrow-shared (local config))
+				(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes))
+				(borrow-shared (local settings)) (borrow-shared (local directory)) (borrow-mut (local options))))
+			(let emitted (call compile_input (borrow-shared (local path)) (borrow-shared (local retained))
+				(borrow-shared (local unit)) (borrow-shared (slice.range (local options) 0i32 (local option_end)))
+				(local protection) (local target_index)))
+			(if (bool.not (i32.eq (local emitted) 0i32)) (then (return (call native_build_result (local emitted) (bool false)))))
+			(let debug_build (u32.eq (struct.get (local invocation) mode) 1u32))
+			(if
+				(:doc `Add the final source location while the exact translation unit is still private.`)
+				(local debug_build)
+				(then
+					(let source (call append_path (borrow-shared (local debug)) (borrow-shared (local main_suffix))))
+					(if
+						(:doc `Do not invoke Clang with an incomplete debug source.`)
+						(bool.not (call name_debug_unit (borrow-shared (local unit)) (borrow-shared (local source))))
+						(then (return (call native_build_result
+							(call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure)))
+							(bool false)))))))
+			(let tool (call invoke_clang (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(borrow-shared (local directory)) (borrow-shared (local unit)) (borrow-shared (local binary)) (borrow-shared (local trace))
+				(borrow-shared (local jobs)) (local protection) (local target_index)))
+			(let status (struct.get (local tool) status))
+			(let checked (struct.get (local tool) checked))
+			(if (i32.lt 0i32 (local checked)) (then (return (call native_build_result (local checked) (bool false)))))
+			(if
+				(:doc `Only a successful debug invocation can publish its own source and symbol directory.`)
+				(local debug_build)
+				(then
+					(if (bool.not (i32.eq (local status) 0i32))
+						(then (return (call native_build_result (call report_clang_status (local status)) (bool false)))))
+					(return (call native_build_result (call publish_debug (borrow-shared (local path))
+						(borrow-shared (local target)) (borrow-shared (local directory)) (borrow-shared (local debug))
+						(borrow-shared (local trace)) (borrow-shared (local jobs)) (local target_index)) (bool false)))))
+			(let published (call retain_checked_unit (borrow-shared (local path)) (borrow-shared (local retained))
+				(borrow-shared (local unit)) (local target_index)))
+			(if (i32.lt 0i32 (local published)) (then (return (call native_build_result (local published) (bool false)))))
+			(if
+				(:doc `An ordinary tool failure still leaves the checked C available for inspection.`)
+				(bool.not (i32.eq (local status) 0i32))
+				(then (return (call native_build_result (call report_clang_status (local status)) (bool true)))))
+			(return (call native_build_result (call install_binary (borrow-shared (local path)) (borrow-shared (local target))
+				(borrow-shared (local binary)) (local target_index)) (bool true)))))
 
 	(fn finish_stage
 		(:doc `Remove an empty stage. Retain optional Clang side outputs beside the generated C.`)
@@ -293,11 +354,19 @@
 			(let binary (call append_path (borrow-shared (local directory)) (borrow-shared (local binary_suffix))))
 			(let trace (call append_path (borrow-shared (local directory)) (borrow-shared (local dependency_suffix))))
 			(let jobs (call append_path (borrow-shared (local directory)) (borrow-shared (local job_suffix))))
+			(let debug (call debug_directory (borrow-shared (local target)) (borrow-shared (local retained))
+				(borrow-shared (local directory)) (struct.get (local invocation) mode)))
 			(let result (call build_in_directory (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local retained))
-				(local protection) (local target_index) (borrow-shared (local directory)) (borrow-shared (local unit))
+				(local protection) (local target_index) (borrow-shared (local directory))
+				(borrow-shared (local debug)) (borrow-shared (local unit))
 				(borrow-shared (local runtime)) (borrow-shared (local header)) (borrow-shared (local binary)) (borrow-shared (local trace)) (borrow-shared (local jobs))
 				(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))))
+			(if
+				(:doc `A published debug directory already owns the private source and runtime files.`)
+				(bool.and (u32.eq (struct.get (local invocation) mode) 1u32)
+					(i32.eq (struct.get (local result) status) 0i32))
+				(then (return 0i32)))
 			(let removed_binary (call unlink (borrow-shared (local binary))))
 			(let removed_header (call unlink (borrow-shared (local header))))
 			(let removed_runtime (call unlink (borrow-shared (local runtime))))
