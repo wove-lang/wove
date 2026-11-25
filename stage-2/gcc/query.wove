@@ -1,0 +1,179 @@
+(module gcc_header_query
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Query C headers with the inspector built for the caller's selected GNU GCC.
+
+	Use the same import site, captured bytes, and declaration index as
+	query_clang_header. Supply target and include flags as NUL-terminated
+	arguments. Plugin discovery and compilation use the selected tool's
+	host defaults. Query error 8 is plugin directory discovery and 9 is
+	plugin compilation. After the plugin is built, GCC execution and AST
+	errors use the shared query codes. The private probe and plugin files
+	are removed after each query.`)
+
+	(use wove-file "../clang/query.wove" (only (type QuerySite) (type ClangQuery) render_header_source index_capture query_failed))
+	(use wove-file "../clang/run.wove" (only (type ClangRun) clang_run_at capture_probe))
+	(use wove-file "../clang/index.wove" (only (type ClangDeclaration)))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../io/temporary.wove" (only create_temporary_directory))
+	(use wove-file "../io/write.wove" (only write_new_file))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use wove-file "./build.wove" (only gcc_plugin_directory build_gcc_plugin append_argument))
+	(use c-header "<unistd.h>" (only unlink rmdir))
+	(use c-header "<errno.h>" (only errno ENOENT))
+
+	(let directory_suffix "/wove-gcc.XXXXXX")
+	(let inspector_suffix "/inspect.cc")
+	(let plugin_suffix "/inspect.so")
+	(let probe_suffix "/probe.c")
+	(let include_suffix "/include")
+	(let defaults "-pthread\u0000-std=c11\u0000")
+	(let probe_flags "-w\u0000-fsyntax-only\u0000-x\u0000c\u0000")
+	(let plugin_flag "-fplugin=")
+
+	(fn child_path
+		(:doc "Append a fixed child suffix to a private or discovered directory.")
+		(params (directory (shared-slice u8)) (suffix (shared-slice u8)))
+		(returns (owned-array u8))
+		(body
+			(let parent (slice.len (local directory)))
+			(let tail (slice.len (local suffix)))
+			(if
+				(:doc "Leave an empty path when the suffix cannot fit the native byte ABI.")
+				(i32.lt (i32.sub.wrapping 2147483647i32 (local tail)) (local parent))
+				(then
+					(let empty (array.alloc u8 0i32))
+					(return (move (local empty)))))
+			(let-mut path (array.alloc u8 (i32.add.wrapping (local parent) (local tail))))
+			(let at (call append_bytes (borrow-shared (local directory)) (borrow-mut (local path)) 0i32))
+			(let end (call append_bytes (borrow-shared (local suffix)) (borrow-mut (local path)) (local at)))
+			(return (move (local path)))))
+
+	(fn remove_query_file
+		(:doc "Remove a private pathname if it exists, including an incomplete plugin.")
+		(params (path (shared-slice u8)))
+		(returns bool)
+		(body
+			(let status (call unlink (borrow-shared (local path))))
+			(return (bool.or (i32.eq (local status) 0i32) (i32.eq (local errno) (local ENOENT))))))
+
+	(fn invoke_gcc
+		(:doc "Run a syntax-only GCC probe with the fresh plugin and the original target and include arguments.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (plugin (shared-slice u8))
+			(path (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(let fixed (i32.add.wrapping 2i32 (i32.add.wrapping (slice.len (local defaults))
+				(i32.add.wrapping (slice.len (local probe_flags)) (slice.len (local plugin_flag))))))
+			(let size (u64.add.wrapping (int.convert u64 (local fixed))
+				(u64.add.wrapping (int.convert u64 (slice.len (local options)))
+					(u64.add.wrapping (int.convert u64 (slice.len (local plugin))) (int.convert u64 (slice.len (local path)))))))
+			(if
+				(:doc "Check the combined packed length before writing the query flags.")
+				(u64.lt 2147483647u64 (local size))
+				(then (return (call clang_run_at 2u32 -1i32 0i32))))
+			(let-mut arguments (array.alloc u8 (int.convert i32 (local size))))
+			(let first (call append_bytes (borrow-shared (local defaults)) (borrow-mut (local arguments)) 0i32))
+			(let options_end (call append_bytes (borrow-shared (local options)) (borrow-mut (local arguments)) (local first)))
+			(let flags_end (call append_bytes (borrow-shared (local probe_flags)) (borrow-mut (local arguments)) (local options_end)))
+			(let plugin_start (call append_bytes (borrow-shared (local plugin_flag)) (borrow-mut (local arguments)) (local flags_end)))
+			(let plugin_end (call append_argument (borrow-shared (local plugin)) (borrow-mut (local arguments)) (local plugin_start)))
+			(let end (call append_argument (borrow-shared (local path)) (borrow-mut (local arguments)) (local plugin_end)))
+			(return (call capture_probe (borrow-shared (local program)) (borrow-shared (local arguments))
+				(borrow-mut (local output))))))
+
+	(fn build_and_probe
+		(:doc "Materialize both input sources before building and loading the inspector.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (include (shared-slice u8))
+			(inspector (shared-slice u8)) (plugin (shared-slice u8)) (path (shared-slice u8))
+			(source (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(let embedded (embed "./inspect.cc"))
+			(if
+				(:doc "Both writes must finish before the tool sees the compile or probe source.")
+				(bool.not (bool.and (call write_new_file (borrow-shared (local inspector)) (borrow-shared (local embedded)))
+					(call write_new_file (borrow-shared (local path)) (borrow-shared (local source)))))
+				(then (return (call clang_run_at 3u32 -1i32 0i32))))
+			(let built (call build_gcc_plugin (borrow-shared (local program)) (borrow-shared (local include))
+				(borrow-shared (local inspector)) (borrow-shared (local plugin))))
+			(if
+				(:doc "Only a checked inspector can be passed to -fplugin.")
+				(u32.lt 0u32 (record.get (local built) error))
+				(then (return (local built))))
+			(return (call invoke_gcc (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local plugin)) (borrow-shared (local path)) (borrow-mut (local output))))))
+
+	(fn probe_in_directory
+		(:doc "Use private source and output paths and release each one before the query returns.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (include (shared-slice u8))
+			(directory (shared-slice u8)) (source (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(if
+				(:doc "A failed reservation owns no directory or source files.")
+				(i32.eq (slice.len (local directory)) 0i32)
+				(then (return (call clang_run_at 3u32 -1i32 0i32))))
+			(let inspector (call child_path (borrow-shared (local directory)) (borrow-shared (local inspector_suffix))))
+			(let plugin (call child_path (borrow-shared (local directory)) (borrow-shared (local plugin_suffix))))
+			(let path (call child_path (borrow-shared (local directory)) (borrow-shared (local probe_suffix))))
+			(let result (call build_and_probe (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local include)) (borrow-shared (local inspector)) (borrow-shared (local plugin))
+				(borrow-shared (local path)) (borrow-shared (local source)) (borrow-mut (local output))))
+			(let removed_source (call remove_query_file (borrow-shared (local inspector))))
+			(let removed_plugin (call remove_query_file (borrow-shared (local plugin))))
+			(let removed_probe (call remove_query_file (borrow-shared (local path))))
+			(let removed_directory (i32.eq (call rmdir (borrow-shared (local directory))) 0i32))
+			(if
+				(:doc "Report cleanup failure only when no earlier error accounts for the result.")
+				(bool.and (u32.eq (record.get (local result) error) 0u32)
+					(bool.not (bool.and (bool.and (local removed_source) (local removed_plugin))
+						(bool.and (local removed_probe) (local removed_directory)))))
+				(then (return (call clang_run_at 3u32 (record.get (local result) status) (record.get (local result) length)))))
+			(return (local result))))
+
+	(fn run_gcc_probe
+		(:doc "Validate inputs and resolve GCC's plugin headers before reserving temporary paths.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (source (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(if
+				(:doc "An empty source is the renderer's error sentinel.")
+				(i32.eq (slice.len (local source)) 0i32)
+				(then (return (call clang_run_at 1u32 -1i32 0i32))))
+			(let count (slice.len (local options)))
+			(if
+				(:doc "A caller argument must end before the mandatory query flags begin.")
+				(bool.and (i32.lt 0i32 (local count))
+					(bool.not (u8.eq (slice.load (local options) (i32.sub.wrapping (local count) 1i32)) 0u8)))
+				(then (return (call clang_run_at 2u32 -1i32 0i32))))
+			(let-mut reported (array.alloc u8 16384i32))
+			(let located (call gcc_plugin_directory (borrow-shared (local program)) (borrow-mut (local reported))))
+			(if
+				(:doc "A missing or invalid plugin directory prevents any build attempt.")
+				(u32.lt 0u32 (record.get (local located) error))
+				(then (return (local located))))
+			(let include (call child_path (borrow-shared (slice.range (local reported) 0i32 (record.get (local located) length)))
+				(borrow-shared (local include_suffix))))
+			(let directory (call create_temporary_directory (borrow-shared (local directory_suffix))))
+			(return (call probe_in_directory (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local include)) (borrow-shared (local directory)) (borrow-shared (local source))
+				(borrow-mut (local output))))))
+
+	(fn query_gcc_header
+		(:doc "Render the shared probe, run GCC with its embedded inspector, and index the GCC output.")
+		(:expect (tests "stage-2/gcc/query.tsv") (issues "gh:wove-lang/wove:208"))
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8)) (extra (shared-slice u8))
+			(site QuerySite) (output (mut-slice u8)) (nodes (mut-slice JsonNode))
+			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
+		(returns ClangQuery)
+		(body
+			(let source (call render_header_source (borrow-shared (local header)) (borrow-shared (local extra))))
+			(let run (call run_gcc_probe (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local source)) (borrow-mut (local output))))
+			(if
+				(:doc "Retain the exact import position and the failed tool phase.")
+				(u32.lt 0u32 (record.get (local run) error))
+				(then (return (call query_failed (local site) (local run)))))
+			(return (call index_capture (borrow-shared (local output)) (local site) (local run)
+				(borrow-mut (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names)))))))
