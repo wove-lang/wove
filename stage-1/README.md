@@ -174,7 +174,9 @@ to the same path.
 
 The generated C starts with its ABI header `wove_runtime.h` and emits each
 additional header once in first-use order through the depth-first Wove
-import walk. C selections and bridge bodies remain opaque to the seed.
+import walk. For an existing project file, the seed compares the resolved
+containing directory and header filename, and preserves the first include
+spelling for Clang. C selections and bridge bodies remain opaque to the seed.
 A C-header use contributes no Wove names. Bootstrap runtime operations
 keep their fixed C bindings.
 

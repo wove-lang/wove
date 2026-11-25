@@ -1012,8 +1012,8 @@ def read_use(node: Form) -> tuple[str, Form]:
 	return source.text, checked_form(only, "only")
 
 
-# Read only the include operand of an active C-header use.
-def read_header_include(node: Form, directory: Path) -> str:
+# Derive the deduplication key and emitted operand from an active C-header use.
+def read_header_include(node: Form, directory: Path) -> tuple[str, str]:
 	# A C-header provider needs at least its header operand.
 	if len(node.operands) < 2:
 		raise SourceError(node.line)
@@ -1035,22 +1035,30 @@ def read_header_include(node: Form, directory: Path) -> str:
 		raise SourceError(operand.line)
 	# Angle brackets keep system search with the original checked path.
 	if opener == "<":
-		return f"<{spelling}>"
+		include = f"<{spelling}>"
+		return include, include
 
 	candidate = directory / spelling
-	# Find a local project file before leaving a search-relative name to Clang.
+	key = str(candidate)
+	anchored = spelling.startswith(("./", "../", "/"))
+	# Local files use their resolved containing directory for comparison.
 	try:
-		anchored = spelling.startswith(("./", "../", "/")) or candidate.is_file()
-	# Clang owns lookup when a search-relative candidate cannot be inspected.
+		# Keep the header basename so file aliases can retain their include context.
+		if candidate.is_file():
+			anchored = True
+			key = os.path.join(os.path.realpath(candidate.parent, strict=True), candidate.name)
+	# If the path cannot be inspected, keep the original lookup for Clang.
 	except OSError:
-		anchored = False
+		pass
 	# Anchor local paths without collapsing parent traversal across symlinks.
 	if anchored:
 		spelling = str(candidate)
+	else:
+		key = spelling
 	# The containing directory can contain spaces but must fit a C header-name token.
 	if any(byte in spelling for byte in '"\r\n\0'):
 		raise SourceError(operand.line)
-	return f'"{spelling}"'
+	return f'"{key}"', f'"{spelling}"'
 
 
 # Bind provider declarations directly so aliases retain the defining identity.
@@ -1117,7 +1125,7 @@ def load_modules(root: Module) -> tuple[list[Module], list[str]]:
 	# A file with no uses only needs signature preparation.
 	if not root.uses:
 		prepare_functions(root, entry=True)
-		return [root], []
+		return [root], [RUNTIME_INCLUDE]
 	path = Path(root.filename).resolve()
 	# The root text can also be supplied in memory under a prospective filename.
 	try:
@@ -1125,7 +1133,7 @@ def load_modules(root: Module) -> tuple[list[Module], list[str]]:
 	except FileNotFoundError:
 		root_identity = path
 	modules = {root_identity: root}
-	headers: dict[str, None] = {}
+	headers = {RUNTIME_INCLUDE: RUNTIME_INCLUDE}
 	active = {root_identity}
 	stack = [(root_identity, path, iter(root.uses), None)]
 	record_index = len(root.records)
@@ -1153,7 +1161,8 @@ def load_modules(root: Module) -> tuple[list[Module], list[str]]:
 		with source_file(importer.filename):
 			# An explicit C header contributes no Wove names or dependency edges.
 			if use_provider(use) == "c-header":
-				headers[read_header_include(use, path.parent)] = None
+				key, include = read_header_include(use, path.parent)
+				headers.setdefault(key, include)
 				continue
 			requested, only = read_use(use)
 			# Resolve from the file containing the use and collapse path aliases.
@@ -1179,7 +1188,7 @@ def load_modules(root: Module) -> tuple[list[Module], list[str]]:
 			value_index += len(provider.values)
 			active.add(target_identity)
 			stack.append((target_identity, target, iter(provider.uses), (importer, only)))
-	return list(modules.values()), list(headers)
+	return list(modules.values()), list(headers.values())
 
 
 # Emit a complete C translation unit after the source graph succeeds.
@@ -1193,8 +1202,7 @@ def compile_source(source: str, filename: str) -> str:
 		*(value.binding.value.c for value in values),
 	)
 
-	includes = dict.fromkeys((RUNTIME_INCLUDE, *headers))
-	lines = [f"#include {operand}" for operand in includes]
+	lines = [f"#include {operand}" for operand in headers]
 	lines.append("")
 	# Define every native type before functions use it by value.
 	for module in modules:
