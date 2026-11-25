@@ -263,14 +263,13 @@
 					(set (local index) (i32.add.wrapping (local index) 1i32))))))
 
 	(fn prepare_graph_file
-		(:doc `Build one measured source tree and register this file's types and module bindings.
+		(:doc `Build one measured source tree and register its defining type layouts.
 
 		Retain active declaration indices in the file's reserved tree range
 		so signature checking can follow selection order after all layouts exist.`)
 		(params (arena (shared-array u8)) (source (shared-array u8)) (input SuppliedFile) (tree ScalarTree)
 			(file i32) (active bool) (context SelectionContext) (flat (mut-array SourceNode)) (selected (mut-array SelectedDeclaration)) (views (mut-array ModuleRead))
-			(records (mut-array ScalarRecord)) (next_record i32)
-			(statements (mut-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+			(records (mut-array ScalarRecord)) (next_record i32))
 		(returns GraphSignatures)
 		(body
 			(let rows (struct.get (local tree) rows))
@@ -310,15 +309,6 @@
 				(then (return (call signatures_result 0i32 0i32 (local next_record) -1i32 (local file)
 					(i32.sub.wrapping (struct.get (local layouts) start) (local source_base))
 					(i32.sub.wrapping (struct.get (local layouts) end) (local source_base)) (struct.get (local layouts) error)))))
-			(let values (call register_module_bindings (borrow-shared (local arena)) (borrow-shared (local flat))
-				(borrow-shared (local declarations)) (struct.get (local module) count) (local base)
-				(borrow-mut (local statements)) (borrow-mut (local expressions))))
-			(if
-				(:doc "A module initializer failure uses its defining file's original span.")
-				(u32.lt 0u32 (struct.get (local values) error))
-				(then (return (call signatures_result 0i32 0i32 (local next_record) -1i32 (local file)
-					(i32.sub.wrapping (struct.get (local values) start) (local source_base))
-					(i32.sub.wrapping (struct.get (local values) end) (local source_base)) (struct.get (local values) error)))))
 			(array.store (local views) (local file) (local module))
 			(call copy_selections (borrow-shared (local declarations)) (struct.get (local module) count)
 				(local base) (borrow-mut (local selected)))
@@ -746,6 +736,42 @@
 										(call expression_row 0u32 (call native_owner_type (local declaration)) -1i32 -1i32 0i32 0i32 (bool false)))))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))))
 
+	(fn prepare_graph_values
+		(:doc `Resolve immutable module initializers after all named layouts are complete.`)
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(modules (shared-array GraphModule)) (trees (shared-array ScalarTree)) (bindings (shared-array GraphBinding))
+			(views (shared-array ModuleRead)) (selected (shared-array SelectedDeclaration))
+			(records (mut-array ScalarRecord)) (start_record i32)
+			(statements (mut-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns GraphSignatures)
+		(body
+			(let-mut next (local start_record))
+			(let-mut file 0i32)
+			(while
+				(:doc "Check each reached active file against its own selected type names.")
+				(i32.lt (local file) (array.len (local files)))
+				(body
+					(if
+						(:doc "Bridge-only and excluded files have no Wove bindings to plan.")
+						(struct.get (array.load (local modules) (local file)) active)
+						(then
+							(let base (struct.get (array.load (local trees) (local file)) base))
+							(let source_base (struct.get (array.load (local files) (local file)) source_start))
+							(let count (struct.get (array.load (local views) (local file)) count))
+							(let checked (call register_module_bindings (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(borrow-shared (local selected))
+								(local count) (local base) (local file) (local source_base) (borrow-shared (local bindings))
+								(borrow-mut (local records)) (local next) (borrow-mut (local statements)) (borrow-mut (local expressions))))
+							(if
+								(:doc "Report errors at offsets from the initializer's defining file.")
+								(u32.lt 0u32 (struct.get (local checked) error))
+								(then (return (call signatures_result 0i32 0i32 (local next) -1i32 (local file)
+									(i32.sub.wrapping (struct.get (local checked) start) (local source_base))
+									(i32.sub.wrapping (struct.get (local checked) end) (local source_base)) (struct.get (local checked) error)))))
+							(set (local next) (struct.get (local checked) operand))))
+					(set (local file) (i32.add.wrapping (local file) 1i32))))
+			(return (call signatures_result 0i32 0i32 (local next) -1i32 -1i32 0i32 0i32 0u32))))
+
 	(fn prepare_graph
 		(:doc `Collect every defining layout before any reached function signature uses it.`)
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
@@ -773,8 +799,7 @@
 									(struct.get (local input) source_end)))
 								(local input) (local tree) (local file) (struct.get (array.load (local modules) (local file)) active) (local context)
 								(borrow-mut (local nodes)) (borrow-mut (local selected)) (borrow-mut (local views))
-								(borrow-mut (local records)) (local next_record)
-								(borrow-mut (local statements)) (borrow-mut (local expressions))))
+								(borrow-mut (local records)) (local next_record)))
 							(if
 								(:doc "Stop at the originating file if a reached record layout is invalid.")
 								(u32.lt 0u32 (struct.get (local checked) error))
@@ -801,6 +826,15 @@
 				(then (return (call signatures_result 0i32 0i32 (local next_record) -1i32
 					(struct.get (local layouts) file) (struct.get (local layouts) start) (struct.get (local layouts) end)
 					(struct.get (local layouts) error)))))
+			(let values (call prepare_graph_values (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local nodes)) (borrow-shared (local modules)) (borrow-shared (local trees))
+				(borrow-shared (local bindings)) (borrow-shared (local views)) (borrow-shared (local selected))
+				(borrow-mut (local records)) (local next_record) (borrow-mut (local statements)) (borrow-mut (local expressions))))
+			(if
+				(:doc "Complete immutable value definitions before binding aliases to them.")
+				(u32.lt 0u32 (struct.get (local values) error))
+				(then (return (local values))))
+			(set (local next_record) (struct.get (local values) records))
 			(call register_graph_value_aliases (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local trees)) (borrow-shared (local bindings))
 				(borrow-mut (local statements)))
