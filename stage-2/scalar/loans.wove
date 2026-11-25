@@ -65,6 +65,33 @@
 						(then (return (bool false))))))
 			(return (bool true))))
 
+	(fn same_binding
+		(:doc `Compare binding rows within their local or parameter namespace.`)
+		(params (target i32) (local_binding bool) (other i32) (other_local bool))
+		(returns bool)
+		(body
+			(return (bool.and (i32.eq (local target) (local other))
+				(bool.or (bool.and (local local_binding) (local other_local))
+					(bool.not (bool.or (local local_binding) (local other_local))))))))
+
+	(fn projected_store_conflicts
+		(:doc `A projected indexed store holds its field through the index and value expressions.`)
+		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
+			(receiver i32) (target i32) (local_binding bool) (place i32))
+		(returns bool)
+		(body
+			(let root (record.get (slice.load (local expressions) (local receiver)) projection))
+			(if
+				(:doc "A whole fixed local uses the existing direct fixed-array store rules.")
+				(i32.lt (local root) (i32 0))
+				(then (return (bool false))))
+			(let binding (slice.load (local expressions) (local root)))
+			(return (bool.and
+				(call same_binding (local target) (local local_binding) (record.get (local binding) target)
+					(u32.eq (record.get (local binding) kind) (u32 6)))
+				(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
+					(local place) (local receiver))))))
+
 	(fn loan_conflicts
 		(:doc `Check whether an earlier loan and the requested access can coexist at an overlapping place.`)
 		(params (loan ScalarExpression) (exclusive bool))
@@ -97,8 +124,8 @@
 	(fn has_conflicting_loan
 		(:doc `Find a conflicting loan in earlier operands of an enclosing operation.
 
-		Call arguments hold their loans until the call returns. A direct
-		owner store holds its receiver loan through the index and value.
+		Call arguments hold their loans until the call returns. An owner
+		or projected array store holds its receiver through the index and value.
 		Loans made by nested calls in completed operands have already ended.`)
 		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
 			(index i32) (statement i32) (target i32) (local_binding bool) (place i32) (exclusive bool))
@@ -112,11 +139,19 @@
 					(let parent (record.get (slice.load (local nodes) (local child)) parent))
 					(let operation (slice.load (local expressions) (local parent)))
 					(let operation_kind (record.get (local operation) kind))
+					(let first (record.get (local operation) first))
+					(if
+						(:doc "An indexed field store excludes overlapping access while its later operands run.")
+						(bool.and (bool.and (u32.eq (local operation_kind) (u32 74))
+							(bool.not (i32.eq (local child) (local first))))
+							(call projected_store_conflicts (borrow-shared (local nodes)) (borrow-shared (local expressions))
+								(local first) (local target) (local local_binding) (local place)))
+						(then (return (bool true))))
 					(if
 						(:doc "A call argument or direct store receiver can still hold a loan of its source.")
 						(bool.or (u32.eq (local operation_kind) (u32 3)) (u32.eq (local operation_kind) (u32 40)))
 						(then
-							(let-mut earlier (record.get (local operation) first))
+							(let-mut earlier (local first))
 							(while
 								(:doc "Earlier operands are already checked in source evaluation order.")
 								(bool.not (i32.eq (local earlier) (local child)))
@@ -127,16 +162,13 @@
 										(bool.and (bool.and (local exclusive) (local local_binding))
 											(call native_loan_blocks_transfer (borrow-shared (local expressions)) (local loan) (local target)))
 										(then (return (bool true))))
-									(let loan_local (record.get (local loan) borrowed_owner))
-									(let same_namespace (bool.or (bool.and (local local_binding) (local loan_local))
-										(bool.not (bool.or (local local_binding) (local loan_local)))))
 									(if
 										(:doc "Compare defining bindings in the same namespace before comparing paths.")
-										(bool.and (i32.eq (local target) (record.get (local loan) target))
-											(bool.and (local same_namespace)
-												(bool.and (call loan_conflicts (local loan) (local exclusive))
-													(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
-														(local place) (record.get (local loan) projection)))))
+										(bool.and (call same_binding (local target) (local local_binding)
+											(record.get (local loan) target) (record.get (local loan) borrowed_owner))
+											(bool.and (call loan_conflicts (local loan) (local exclusive))
+												(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
+													(local place) (record.get (local loan) projection))))
 										(then (return (bool true))))
 									(set (local earlier) (record.get (slice.load (local nodes) (local earlier)) next_sibling))))))
 					(set (local child) (local parent))))
