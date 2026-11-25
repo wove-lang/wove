@@ -30,9 +30,9 @@
 #define default_selection wv_seed_fn_94
 #define target_os wv_seed_fn_95
 #define target_arch wv_seed_fn_96
-#define inspect_callers wv_seed_fn_531
-#define run_scalar_graph wv_seed_fn_564
-#define discover_graph_tests wv_seed_fn_572
+#define inspect_callers wv_seed_fn_540
+#define run_scalar_graph wv_seed_fn_573
+#define discover_graph_tests wv_seed_fn_581
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -50,7 +50,7 @@ typedef wv_seed_record_20 GraphBinding;
 typedef wv_seed_record_21 GraphUse;
 typedef wv_seed_record_22 GraphSelector;
 typedef wv_seed_record_23 GraphResult;
-typedef wv_seed_record_48 CallSite;
+typedef wv_seed_record_50 CallSite;
 typedef wv_seed_record_26 SuppliedFile;
 typedef wv_seed_record_60 CallerInspection;
 typedef wv_seed_record_64 GraphOutput;

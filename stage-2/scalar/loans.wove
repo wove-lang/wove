@@ -1,0 +1,143 @@
+(module scalar_loans
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Check call loans by binding identity and statically checked field path.`)
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "./records.wove" (only record_borrow_kind is_mutable_record_reference))
+	(use wove-file "./flow.wove" (only (value fixed_shared_loan) (value fixed_mut_loan)))
+	(use wove-file "./owners.wove" (only native_handle_borrow_kind))
+
+	(struct
+		(:doc `A checked expression at its source row.
+
+		Literals carry significant digit offsets in the arena. Conversions
+		and checked runtime operations carry the original file identity
+		in target and the half-open byte span in start and end. First
+		points at the initial operand to evaluate. A reborrow's target
+		is its defining parameter row or its source local's name row.
+		A range reborrow links to the evaluated slice in its child.
+		A place read links to its root binding expression in projection.
+		A projected loan links to the borrowed field expression there.
+		A negative projection means no projected storage.
+		An embed carries its path token span until asset resolution replaces it
+		with the byte range to emit. A module binding reference (62) names its
+		defining name node. The same row at a declaration marks its storage used.
+		A checked local records whether its binding permits writes.`)
+		ScalarExpression
+		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool) (borrowed_owner bool)
+			(mutable_place bool) (projection i32) (asset_start i32) (asset_end i32)))
+
+	(fn field_place_root
+		(:doc `Follow checked field projections toward the original binding or value expression.`)
+		(params (expressions (shared-slice ScalarExpression)) (place i32))
+		(returns i32)
+		(body
+			(let-mut root (local place))
+			(while
+				(:doc "Each checked field points at its immediate receiver.")
+				(u32.eq (record.get (slice.load (local expressions) (local root)) kind) (u32 52))
+				(body (set (local root) (record.get (slice.load (local expressions) (local root)) first))))
+			(return (local root))))
+
+	(fn paths_overlap
+		(:doc `Compare paths from the same binding. A path overlaps itself and all enclosing places.`)
+		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
+			(left i32) (right i32))
+		(returns bool)
+		(body
+			(if
+				(:doc "A whole binding covers every field below it.")
+				(bool.or (i32.lt (local left) (i32 0)) (i32.lt (local right) (i32 0)))
+				(then (return (bool true))))
+			(let-mut a (record.get (slice.load (local expressions) (local left)) projection))
+			(let-mut b (record.get (slice.load (local expressions) (local right)) projection))
+			(while
+				(:doc "Walk out from each root through the matched field ordinals.")
+				(bool.not (bool.or (i32.eq (local a) (local left)) (i32.eq (local b) (local right))))
+				(body
+					(set (local a) (record.get (slice.load (local nodes) (local a)) parent))
+					(set (local b) (record.get (slice.load (local nodes) (local b)) parent))
+					(if
+						(:doc "Different fields of the same enclosing record have independent storage.")
+						(bool.not (i32.eq (record.get (slice.load (local expressions) (local a)) target)
+							(record.get (slice.load (local expressions) (local b)) target)))
+						(then (return (bool false))))))
+			(return (bool true))))
+
+	(fn loan_conflicts
+		(:doc `Check whether an earlier loan and the requested access can coexist at an overlapping place.`)
+		(params (loan ScalarExpression) (exclusive bool))
+		(returns bool)
+		(body
+			(let kind (record.get (local loan) kind))
+			(if
+				(:doc "Record loans share a kind and retain their access mode in the checked type.")
+				(u32.eq (local kind) (call record_borrow_kind))
+				(then (return (bool.or (local exclusive) (call is_mutable_record_reference (record.get (local loan) type))))))
+			(return (bool.or
+				(bool.or (u32.eq (local kind) (u32 39)) (u32.eq (local kind) (local fixed_mut_loan)))
+				(bool.and (local exclusive)
+					(bool.or (u32.eq (local kind) (local fixed_shared_loan))
+						(bool.or (u32.eq (local kind) (u32 35)) (u32.eq (local kind) (u32 45)))))))))
+
+	(fn native_loan_blocks_transfer
+		(:doc `Compare a native loan's checked pointer binding before a local owner can be consumed.`)
+		(params (expressions (shared-slice ScalarExpression)) (loan ScalarExpression) (target i32))
+		(returns bool)
+		(body
+			(if
+				(:doc "Only a live native shared loan carries the original pointer in its child.")
+				(bool.not (u32.eq (record.get (local loan) kind) (call native_handle_borrow_kind)))
+				(then (return (bool false))))
+			(let pointer (slice.load (local expressions) (record.get (local loan) first)))
+			(return (bool.and (u32.eq (record.get (local pointer) kind) (u32 6))
+				(i32.eq (record.get (local pointer) target) (local target))))))
+
+	(fn has_conflicting_loan
+		(:doc `Find a conflicting loan in earlier operands of an enclosing operation.
+
+		Call arguments hold their loans until the call returns. A direct
+		owner store holds its receiver loan through the index and value.
+		Loans made by nested calls in completed operands have already ended.`)
+		(params (nodes (shared-slice SourceNode)) (expressions (shared-slice ScalarExpression))
+			(index i32) (statement i32) (target i32) (local_binding bool) (place i32) (exclusive bool))
+		(returns bool)
+		(body
+			(let-mut child (local index))
+			(while
+				(:doc "Walk from the current operand up to its statement.")
+				(bool.not (i32.eq (local child) (local statement)))
+				(body
+					(let parent (record.get (slice.load (local nodes) (local child)) parent))
+					(let operation (slice.load (local expressions) (local parent)))
+					(let operation_kind (record.get (local operation) kind))
+					(if
+						(:doc "A call argument or direct store receiver can still hold a loan of its source.")
+						(bool.or (u32.eq (local operation_kind) (u32 3)) (u32.eq (local operation_kind) (u32 40)))
+						(then
+							(let-mut earlier (record.get (local operation) first))
+							(while
+								(:doc "Earlier operands are already checked in source evaluation order.")
+								(bool.not (i32.eq (local earlier) (local child)))
+								(body
+									(let loan (slice.load (local expressions) (local earlier)))
+									(if
+										(:doc "A live native shared loan prevents transfer of its original local owner.")
+										(bool.and (bool.and (local exclusive) (local local_binding))
+											(call native_loan_blocks_transfer (borrow-shared (local expressions)) (local loan) (local target)))
+										(then (return (bool true))))
+									(let loan_local (record.get (local loan) borrowed_owner))
+									(let same_namespace (bool.or (bool.and (local local_binding) (local loan_local))
+										(bool.not (bool.or (local local_binding) (local loan_local)))))
+									(if
+										(:doc "Compare defining bindings in the same namespace before comparing paths.")
+										(bool.and (i32.eq (local target) (record.get (local loan) target))
+											(bool.and (local same_namespace)
+												(bool.and (call loan_conflicts (local loan) (local exclusive))
+													(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
+														(local place) (record.get (local loan) projection)))))
+										(then (return (bool true))))
+									(set (local earlier) (record.get (slice.load (local nodes) (local earlier)) next_sibling))))))
+					(set (local child) (local parent))))
+			(return (bool false)))))

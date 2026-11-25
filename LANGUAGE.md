@@ -79,6 +79,10 @@ decimal extent.
 - `(array.store (local data) index value)` writes into a mutable local array.
 
 Stage 2 can borrow fixed `u32` and `u64` local arrays as matching slices.
+A fixed `u8`, `u32`, or `u64` array field can also lend a matching slice
+with `(borrow-shared (record.get (local state) block))` or the mutable form.
+Sibling field paths can lend independently. A whole-record loan overlaps
+all of its fields.
 A Stage 2 function with result type `(owned-array u8)` can return a moved
 local with `(return (move (local buffer)))` or return a fresh owned call result.
 
