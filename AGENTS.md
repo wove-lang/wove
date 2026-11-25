@@ -11,6 +11,11 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 ## Implementation notes
 
+When compiler work exposes a Wove language gap, land the smallest language
+slice that supports the intended source before landing the code that uses it.
+Use the archived compiler as the behavioral reference for ports. Keep Stage 1
+extensions scoped to what the seed needs to build shared compiler source.
+
 Split reusable logic into focused modules. Organize related modules in
 directories named for their purpose, with short module filenames inside
 each group. For example, keep the Stage 2 scanner in `stage-2/source/scan.wove`.
