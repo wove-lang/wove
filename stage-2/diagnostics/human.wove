@@ -6,6 +6,7 @@
 	(use wove-file "./record.wove" (only (type Diagnostic)))
 	(use wove-file "../source/scan.wove" (only source_position is_line_ending))
 	(use wove-file "../text/utf8.wove" (only valid_utf8_width))
+	(use wove-file "../text/display_width.wove" (only width_transitions utf8_cells))
 	(use wove-file "../text/bytes.wove" (only write_byte))
 	(use wove-file "../text/copy.wove" (only append_bytes))
 	(use wove-file "../text/decimal_write.wove" (only write_decimal_u32 write_decimal_i32))
@@ -96,8 +97,25 @@
 					(set (local index) (local finish))))
 			(return (local next))))
 
+	(fn displayed_cells
+		(:doc "Match the excerpt's printable scalar or one-cell replacement.")
+		(params (source (shared-array u8)) (start i32) (bytes i32) (transitions (shared-array u32))) (returns i32)
+		(body
+			(if (i32.eq (local bytes) 1i32) (then (return 1i32)))
+			(return (call utf8_cells (borrow-shared (local source)) (local start) (local bytes)
+				(borrow-shared (local transitions))))))
+
+	(fn write_marker_cells
+		(:doc "Write the marker once per display cell or preserve a tab's next stop.")
+		(params (output (mut-array u8)) (offset i32) (mark u8) (cells i32)) (returns i32)
+		(body
+			(if (i32.eq (local cells) 0i32) (then (return (local offset))))
+			(let next (call write_byte (borrow-mut (local output)) (local offset) (local mark)))
+			(if (i32.eq (local cells) 2i32) (then (return (call write_byte (borrow-mut (local output)) (local next) (local mark)))))
+			(return (local next))))
+
 	(fn write_excerpt
-		(:doc "Place a caret at the primary column and underline the remainder visible on this line.")
+		(:doc "Place a caret and underline at the excerpt's display cells while retaining scalar coordinates in the heading.")
 		(params (source (shared-array u8)) (excerpt SourceExcerpt) (output (mut-array u8)) (offset i32))
 		(returns i32)
 		(body
@@ -107,32 +125,46 @@
 			(let text (call write_visible (borrow-shared (local source)) (local first) (local last)
 				(bool true) (borrow-mut (local output)) (local line)))
 			(let-mut next (call append_bytes (borrow-shared (local excerpt_indent)) (borrow-mut (local output)) (local text)))
+			(let transitions (call width_transitions))
 			(let-mut cursor (local first))
 			(let-mut column 1u32)
 			(while
-				(:doc "Use the scanner's scalar columns and repeat any leading tabs for alignment.")
+				(:doc "Advance to the scanner column and reserve as many cells as each preceding scalar displays.")
 				(bool.and (i32.lt (local cursor) (local last)) (u32.lt (local column) (struct.get (local excerpt) column)))
 				(body
+					(let bytes (call scalar_width (borrow-shared (local source)) (local cursor)))
+					(let cells (call displayed_cells (borrow-shared (local source)) (local cursor) (local bytes)
+						(borrow-shared (local transitions))))
 					(let-mut space 32u8)
 					(if (u8.eq (array.load (local source) (local cursor)) 9u8) (then (set (local space) 9u8)))
-					(set (local next) (call write_byte (borrow-mut (local output)) (local next) (local space)))
-					(set (local cursor) (i32.add.wrapping (local cursor) (call scalar_width (borrow-shared (local source)) (local cursor))))
+					(set (local next) (call write_marker_cells (borrow-mut (local output)) (local next) (local space) (local cells)))
+					(set (local cursor) (i32.add.wrapping (local cursor) (local bytes)))
 					(set (local column) (u32.add.wrapping (local column) 1u32))))
 			(set (local next) (call write_byte (borrow-mut (local output)) (local next) 94u8))
 			(let limit (struct.get (local excerpt) mark_end))
 			(if
-				(:doc "An empty span or an EOF location still gets the single caret.")
+				(:doc "The initial caret covers the first display cell. Empty spans still get one caret.")
 				(i32.lt (local cursor) (local limit))
 				(then
-					(set (local cursor) (i32.add.wrapping (local cursor) (call scalar_width (borrow-shared (local source)) (local cursor))))
+					(let bytes (call scalar_width (borrow-shared (local source)) (local cursor)))
+					(let cells (call displayed_cells (borrow-shared (local source)) (local cursor) (local bytes)
+						(borrow-shared (local transitions))))
+					(if
+						(:doc "Include the other cell of a wide starting scalar.")
+						(i32.eq (local cells) 2i32)
+						(then (set (local next) (call write_byte (borrow-mut (local output)) (local next) 126u8))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (local bytes)))
 					(while
-						(:doc "Extend the underline only across the selected scalars on this line.")
+						(:doc "Extend the underline across the remaining visible cells on the first line.")
 						(i32.lt (local cursor) (local limit))
 						(body
+							(let bytes (call scalar_width (borrow-shared (local source)) (local cursor)))
+							(let cells (call displayed_cells (borrow-shared (local source)) (local cursor) (local bytes)
+								(borrow-shared (local transitions))))
 							(let-mut marker 126u8)
 							(if (u8.eq (array.load (local source) (local cursor)) 9u8) (then (set (local marker) 9u8)))
-							(set (local next) (call write_byte (borrow-mut (local output)) (local next) (local marker)))
-							(set (local cursor) (i32.add.wrapping (local cursor) (call scalar_width (borrow-shared (local source)) (local cursor))))))))
+							(set (local next) (call write_marker_cells (borrow-mut (local output)) (local next) (local marker) (local cells)))
+							(set (local cursor) (i32.add.wrapping (local cursor) (local bytes)))))))
 			(if
 				(:doc "Indicate a span that continues past the displayed line.")
 				(struct.get (local excerpt) continues)

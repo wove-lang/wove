@@ -66,7 +66,7 @@ JSON_PROGRAMS := $(JSON_WRITER_PROGRAMS) $(JSON_READER_PROGRAMS) $(STAGE2)/json/
 DIAGNOSTIC_FIXTURES := tests/stage-2/diagnostics
 DIAGNOSTIC_PROGRAM := $(STAGE2)/diagnostics/json
 DIAGNOSTIC_SOURCES := stage-2/diagnostics/record.wove stage-2/diagnostics/json.wove
-HUMAN_DIAGNOSTIC := stage-2/diagnostics/human.wove
+HUMAN_DIAGNOSTIC := stage-2/diagnostics/human.wove stage-2/text/display_width.wove
 CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove $(VALUE_TEXT_MODULES)
 CLI_FIXTURES := tests/stage-2/cli
 CLI_CASES := $(CLI_FIXTURES)/cases.tsv
@@ -206,7 +206,7 @@ test-stage-2-native: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/check.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/diagnostics/check.py" "$(NATIVE_COMPILER)"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/diagnostics.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/standard.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/protection.tsv"
