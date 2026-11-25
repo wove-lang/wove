@@ -237,6 +237,51 @@ int64_t wvrt_signed_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wv
 		(type)wvrt_result; \
 	})
 
+// Test representability without narrowing the input or touching caller storage.
+#define wvrt_int_fits_type(type, value) (!__builtin_add_overflow((value), 0, &(type){0}))
+
+// Let the compiler check the exact pointee width and publish only a valid result.
+#define wvrt_int_try_overflow(check, left, right, output) \
+	__extension__ ({ \
+		__typeof__(*(output)) wvrt_left = (left); \
+		__typeof__(*(output)) wvrt_right = (right); \
+		__typeof__(*(output)) *wvrt_output = (output); \
+		__typeof__(*wvrt_output) wvrt_value; \
+		bool wvrt_ok = !check(wvrt_left, wvrt_right, &wvrt_value); \
+		/* An overflow builtin may write a truncated result on failure. */ \
+		if (wvrt_ok) { \
+			*wvrt_output = wvrt_value; \
+		} \
+		wvrt_ok; \
+	})
+
+// Return the selected signed minimum, or zero for an unsigned integer.
+#define wvrt_int_signed_min(value) \
+	_Generic((value), int8_t: INT8_MIN, int16_t: INT16_MIN, \
+		int32_t: INT32_MIN, int64_t: INT64_MIN, default: 0)
+
+// Avoid undefined signed arithmetic and leave the destination alone on failure.
+#define wvrt_int_try_divide(left, right, output, remainder) \
+	__extension__ ({ \
+		__typeof__(*(output)) wvrt_left = (left); \
+		__typeof__(*(output)) wvrt_right = (right); \
+		__typeof__(*(output)) *wvrt_output = (output); \
+		__typeof__(*wvrt_output) wvrt_min = wvrt_int_signed_min(wvrt_left); \
+		bool wvrt_remainder = (remainder); \
+		bool wvrt_ok = false; \
+		/* Check the divisor before either C operator can run. */ \
+		if (wvrt_right != 0) { \
+			bool wvrt_overflow = wvrt_min != 0 && wvrt_left == wvrt_min && wvrt_right == (__typeof__(wvrt_right))-1; \
+			/* The signed minimum remainder is zero without executing the C operation. */ \
+			if (!wvrt_overflow || wvrt_remainder) { \
+				*wvrt_output = (__typeof__(*wvrt_output))(wvrt_overflow ? 0 : \
+					(wvrt_remainder ? wvrt_left % wvrt_right : wvrt_left / wvrt_right)); \
+				wvrt_ok = true; \
+			} \
+		} \
+		wvrt_ok; \
+	})
+
 uint8_t wvrt_int_to_u8(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_int_to_i32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 uint32_t wvrt_int_to_u32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

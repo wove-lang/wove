@@ -16,6 +16,7 @@
 	(use wove-file "./locals.wove" (only find_local read_local_name))
 	(use wove-file "./matches.wove" (only plan_match_cases match_continues))
 	(use wove-file "./loops.wove" (only read_for_names read_iteration_source register_iteration_bindings is_iteration_statement))
+	(use wove-file "../source/integer_checks.wove" (only read_integer_check is_integer_check (value integer_fits) (type IntegerCheck)))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_conversion
 		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
 	(use wove-file "../text/character.wove" (only decode_character))
@@ -1604,6 +1605,47 @@
 				(call runtime_expression (local kind) (local type) (local node) (local word) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
+	(fn plan_integer_check
+		(:doc "Type a fit check or seed two arithmetic values followed by an exclusive writeback place.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(operation IntegerCheck) (index i32) (expected u32) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let kind (struct.get (local operation) kind))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local kind) 24u32))
+			(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
+			(let left (struct.get (local form) operand))
+			(if
+				(:doc "All checks produce a bool and require at least one input value.")
+				(bool.or (i32.lt (local left) 0i32) (bool.not (call value_matches_type (local expected) 12u32)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let type (struct.get (local operation) type))
+			(let right (struct.get (array.load (local nodes) (local left)) next_sibling))
+			(let-mut input (local type))
+			(if
+				(:doc "A fits expression accepts an integer of any width and signedness.")
+				(u32.eq (local kind) (local integer_fits))
+				(then
+					(if (i32.lt -1i32 (local right)) (then (return (call entry_at (local node) -1i32 24u32))))
+					(set (local input) 1u32))
+				(else
+					(if (i32.lt (local right) 0i32) (then (return (call entry_at (local node) -1i32 24u32))))
+					(let output (struct.get (array.load (local nodes) (local right)) next_sibling))
+					(if
+						(:doc "Arithmetic requires exactly two inputs and one explicit output loan.")
+						(bool.or (i32.lt (local output) 0i32)
+							(i32.lt -1i32 (struct.get (array.load (local nodes) (local output)) next_sibling)))
+						(then (return (call entry_at (local node) -1i32 24u32))))
+					(array.store (local expressions) (local right)
+						(call expression_row 0u32 (local type) -1i32 -1i32 0i32 0i32 (bool false)))
+					(array.store (local expressions) (local output)
+						(call expression_row 0u32 (call place_reference_type (local type) (bool true)) -1i32 -1i32 0i32 0i32 (bool false)))))
+			(array.store (local expressions) (local left)
+				(call expression_row 0u32 (local input) -1i32 -1i32 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local index)
+				(call expression_row (local kind) 12u32 (int.convert i32 (local type)) (local left) 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
 	(fn plan_conversion_operand
 		(:doc `Seed one evaluated operand and retain the exact result and runtime site.`)
 		(params (node SourceNode) (index i32) (value i32) (kind u32) (result u32) (operand_type u32)
@@ -3121,6 +3163,14 @@
 				(u32.eq (local tag) (local conditional_value))
 				(then (return (call plan_conditional (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (local expected) (borrow-mut (local expressions))))))
+			(if
+				(:doc "Recoverable integer forms check the exact written width and return success as a boolean.")
+				(call is_integer_check (local tag))
+				(then
+					(let operation (call read_integer_check (borrow-shared (local source))
+						(array.load (local nodes) (struct.get (local parts) head))))
+					(return (call plan_integer_check (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (local operation) (local index) (local expected) (borrow-mut (local expressions))))))
 			(if
 				(:doc "Typed forms derive the exact result and operand types from their head.")
 				(bool.or (call is_float_conversion (local tag))

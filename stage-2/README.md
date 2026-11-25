@@ -434,6 +434,17 @@ with the shared Wove C runtime. `(u8.from.u32 value)` applies the same
 check after requiring an exact `u32` operand. The `<destination>.from.<source>`
 form supports every pair of builtin integer types.
 
+`(T.fits value)` checks representability as a `bool` before a caller
+chooses whether to perform a conversion. For arithmetic with a recoverable
+result, write `(T.try_mul left right (borrow-mut place))`. The same form
+supports `try_add`, `try_sub`, `try_div`, and `try_rem`. Both input
+values and the destination have exactly type `T`. Input evaluation
+finishes in left-to-right order before the output loan starts, so
+`(i32.try_add (local count) 1i32 (borrow-mut (local count)))` can update
+the value it read. The writeback occurs only when the expression returns
+`true`. For any signed width, minimum divided by `-1` returns `false`,
+and minimum remainder `-1` writes zero and returns `true`.
+
 For any builtin integer `T`, `(T.to.le-bytes value)` and
 `(T.to.be-bytes value)` evaluate an exact `T` once and return an inline
 `(array u8 N)`. The width `N` is one for `i8` and `u8`, two for

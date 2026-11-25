@@ -1,0 +1,79 @@
+(module emit_integer_checks
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Write nontrapping integer operations from captured operands and the checked output place.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/integer_checks.wove" (only (value integer_fits) (value integer_try_add)
+		(value integer_try_sub) (value integer_try_mul) (value integer_try_div) (value integer_try_rem)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "./text.wove" (only c_byte c_literal_text c_type_text write_temporary_name))
+
+	(let fits_open "wvrt_int_fits_type(")
+	(let add_open "wvrt_int_try_overflow(__builtin_add_overflow,")
+	(let sub_open "wvrt_int_try_overflow(__builtin_sub_overflow,")
+	(let mul_open "wvrt_int_try_overflow(__builtin_mul_overflow,")
+	(let divide_open "wvrt_int_try_divide(")
+
+	(fn open_integer_try
+		(:doc "Select the overflow builtin or the guarded quotient and remainder helper.")
+		(params (kind u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "Addition uses the compiler's result-width check.")
+				(u32.eq (local kind) (local integer_try_add))
+				(then (return (call c_literal_text (borrow-shared (local add_open)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Subtraction uses the same result-width contract.")
+				(u32.eq (local kind) (local integer_try_sub))
+				(then (return (call c_literal_text (borrow-shared (local sub_open)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Multiplication uses the destination type even for promoted narrow inputs.")
+				(u32.eq (local kind) (local integer_try_mul))
+				(then (return (call c_literal_text (borrow-shared (local mul_open)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local divide_open)) (borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_integer_check
+		(:doc "Call the selected runtime operation after evaluating all of its children in source order.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row ScalarExpression) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let kind (struct.get (local row) kind))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "The range predicate takes a C type and one captured input.")
+				(u32.eq (local kind) (local integer_fits))
+				(then
+					(set (local cursor) (call c_literal_text (borrow-shared (local fits_open))
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor)
+						(int.convert u32 (struct.get (local row) target)) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing))))
+				(else
+					(set (local cursor) (call open_integer_try (local kind) (borrow-mut (local output))
+						(local cursor) (local writing)))))
+			(let start (struct.get (local row) first))
+			(let-mut operand (local start))
+			(while
+				(:doc "Use each capture once, with the writeback pointer after both arithmetic inputs.")
+				(i32.lt -1i32 (local operand))
+				(body
+					(if
+						(:doc "Separate each subsequent C argument from its predecessor.")
+						(bool.not (i32.eq (local operand) (local start)))
+						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))))
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local operand)
+						(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local operand) (struct.get (array.load (local nodes) (local operand)) next_sibling))))
+			(if
+				(:doc "Tell the guarded divide helper whether to compute the quotient or the remainder.")
+				(bool.or (u32.eq (local kind) (local integer_try_div)) (u32.eq (local kind) (local integer_try_rem)))
+				(then
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
+					(let-mut mode 48u8)
+					(if (u32.eq (local kind) (local integer_try_rem)) (then (set (local mode) 49u8)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (local mode) (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+)
