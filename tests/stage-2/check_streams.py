@@ -216,7 +216,7 @@ def check_decodings(executable, directory, manifest):
 		assert status == int(expected_row[3] != 0), label
 		# The seed is an independent reference for values representable in UTF-8.
 		if status == 0:
-			kind, _, _, spelling = next(seed_stream(parent[start:stop]))
+			kind, _, _, spelling = next(expected_stream(parent[start:stop]))
 			value, = parse("(value " + spelling.decode("utf-8") + ")").operands
 			assert kind == 2 and value.quoted and prefix == value.text.encode("utf-8"), label
 
