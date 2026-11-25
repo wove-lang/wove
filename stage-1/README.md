@@ -165,14 +165,24 @@ constructors, arrays, and slices. Each file can select its provider's local
 declarations, and each function resolves helpers and type names in its
 defining file.
 
-The seed skips a `bridge` and all its members. A `use` with a bare
-provider tag other than `wove-file` is also skipped. Both forms must be
-readable IR, including the provider and quoted header of a C bridge.
-The seed skips their selection metadata and payloads. They
-contribute zero names and import edges in the seed. Bootstrap runtime
-operations keep their fixed C bindings.
+An active `(use c-header "<stdint.h>" (only ...))` contributes a system
+include to the generated C. For a project header, use a path such as
+`"./local.h"`. Explicit relative paths and project files found beside the
+declaring Wove source are anchored there. Other quoted paths use Clang's
+include search. Bare and explicitly quoted project spellings can refer
+to the same path.
 
-The seed evaluates selection pragmas on a `use wove-file` before opening its provider.
+The generated C starts with its ABI header `wove_runtime.h` and emits each
+additional header once in first-use order through the depth-first Wove
+import walk. C selections and bridge bodies remain opaque to the seed.
+A C-header use contributes no Wove names. Bootstrap runtime operations
+keep their fixed C bindings.
+
+The seed skips other foreign providers and bridge declarations before
+interpreting their selection metadata. These forms still use structurally
+readable IR, including the provider and quoted header of a C bridge.
+The seed evaluates bootstrap selection before opening a Wove provider or
+collecting a C-header operand.
 It loads each file once by identity, so multiple paths to the same module
 share its declarations and use its first resolved path. An active missing
 file or cycle is diagnosed at the importing `use` line. Errors inside an

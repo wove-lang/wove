@@ -193,6 +193,7 @@ test-stage-2-blake2b: $(BLAKE2B_PROBE)
 test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
+	$(PYTHON) "$(OWNERSHIP_TESTS)/check_includes.py" "$(STAGE1)/imports.c_headers.c"
 
 # Track the imports active in each seed root.
 $(STAGE1)/wovec.c: $(COMPILER_ROOT) $(BOOTSTRAP_WOVE_SOURCES) $(SEED)
@@ -319,6 +320,8 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 # Keep required providers in the build graph even when a source file is missing.
 ROUND_TRIP_PROVIDERS := $(addprefix $(OWNERSHIP_TESTS)/imports/,left.wove right.wove nested/shared.wove)
 RUNTIME_LOCATION_PROVIDER := $(OWNERSHIP_TESTS)/slice.load_negative.wove
+C_HEADER_IMPORT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,imports.c_headers.wove imports/c_headers/provider.wove)
+C_HEADER_PROJECT_HEADER := $(OWNERSHIP_TESTS)/imports/c_headers/project.h
 MODULE_BINDINGS_PROVIDER := $(OWNERSHIP_TESTS)/modules/bindings.wove
 MODULE_IMPORTS_PROVIDER := $(OWNERSHIP_TESTS)/modules/import_values.wove
 MODULE_SELECT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,module.select.wove modules/bootstrap.wove \
@@ -327,6 +330,8 @@ TYPE_IMPORT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,types.round_trip.wove typ
 SOURCE_TREE_IMPORT := $(OWNERSHIP_TESTS)/types.source_tree.wove
 $(STAGE1)/imports.round_trip.c: $(ROUND_TRIP_PROVIDERS)
 $(STAGE1)/imports.host_declarations.c: $(OWNERSHIP_TESTS)/imports/nested/shared.wove
+$(STAGE1)/imports.c_headers.c: $(C_HEADER_IMPORT_SOURCES)
+$(STAGE1)/imports.c_headers.fixture.o: $(C_HEADER_PROJECT_HEADER)
 $(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
 $(STAGE1)/module.select.c: $(MODULE_SELECT_SOURCES)
 $(STAGE1)/module.bindings.c: $(MODULE_BINDINGS_PROVIDER)
@@ -334,13 +339,13 @@ $(STAGE1)/module.imports.c: $(MODULE_IMPORTS_PROVIDER)
 $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
-# Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
-REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) \
+# Force the compiler to report missing inputs that Make can skip under .SECONDARY.
+REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) \
 	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
 	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \
-	$(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
-.PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
+	$(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT) $(C_HEADER_IMPORT_SOURCES) $(C_HEADER_PROJECT_HEADER)
+.PHONY: $(filter-out $(wildcard $(REQUIRED_BUILD_SOURCES)),$(REQUIRED_BUILD_SOURCES))
 
 $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
