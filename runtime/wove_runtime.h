@@ -187,6 +187,10 @@ void wvrt_slice_store_u8_at_span(wvrt_mut_slice wvrt_view, int32_t wvrt_index, u
 int64_t wvrt_int_convert(int64_t wvrt_value, int64_t wvrt_min, int64_t wvrt_max,
 	wvrt_location wvrt_site);
 _Noreturn void wvrt_int_conversion_trap(int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+uint64_t wvrt_int_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+int64_t wvrt_signed_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 
 // Use the target compiler's integer range, including aliases wider than int64_t.
 #define wvrt_int_to_native(type, value, file, start, end) \

@@ -34,6 +34,12 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 - `(int.convert Type value)` converts a fitting integer and traps on an
   out-of-range value. Stage 2 also supports conversions to and from native
   integer aliases. The seed accepts `(i32.from-u8 byte)` as well.
+- Stage 2 also accepts typed checked forms such as `(u8.from.u32 value)`.
+  The operand must have the exact source type named in the tag.
+- Stage 2 integer byte conversions use `T.to.le-bytes`, `T.to.be-bytes`,
+  `T.from.le-bytes`, and `T.from.be-bytes`. They use fixed-width
+  two's-complement encodings for signed types. Encoding produces a fixed byte
+  array, and decoding requires a shared byte view of exactly that width.
 
 ## Values and storage
 

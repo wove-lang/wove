@@ -11,6 +11,8 @@
 	the name that will be used in C, and are indexed by original call node.
 	Retain source-level call sites before either inspection or lowering.`)
 
+	(use wove-file "../source/integer_ops.wove" (only read_integer_operation integer_byte_width is_integer_byte_conversion
+		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
 	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../source/module.wove" (only form_parts skip_disabled_siblings validate_form_metadata (type ModuleRead) (type SelectedDeclaration)))
@@ -29,7 +31,7 @@
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type find_record record_type record_index is_record_type
-			find_member member_value_type read_member_operand register_static_array fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
+			find_member member_value_type read_member_operand register_static_array find_fixed_array_type fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element byte_rows_owner_type is_native_integer native_integer_type find_native_node (type ScalarRecord)
 			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target record_receiver_type place_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
@@ -43,7 +45,7 @@
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar decimal_suffix_start scalar_operator word_shift_type is_i32_division is_fixed_initializer
-			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind (type ScalarOperator) (type EntryRead) (type StatementRead)))
+			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
 	(struct
 		(:doc `A checked signature and its defining source identity.
@@ -505,7 +507,7 @@
 		can use any readable array. A store receiver (56) needs writable
 		storage. The array planner validates the element type and inline layout.
 		An owner operand (57) transfers ownership. A C handle operand (58) can supply a call loan.
-		These expectations sit below the named record type range. Zero marks unvisited rows.`)
+		An exact byte view (63) is a shared descriptor. These expectations sit below the named record type range. Zero marks unvisited rows.`)
 		(params (expected u32) (actual u32))
 		(returns bool)
 		(body
@@ -544,6 +546,10 @@
 				(:doc "Both an owner transfer and a native borrow check the underlying owner identity.")
 				(bool.or (u32.eq (local expected) 57u32) (u32.eq (local expected) (local c_handle_reference)))
 				(then (return (call is_local_owner (local actual)))))
+			(if
+				(:doc "A direct decode operand must be shared. A mutable view can lend bytes explicitly.")
+				(u32.eq (local expected) (local exact_byte_view))
+				(then (return (u32.eq (local actual) 34u32))))
 			(return (u32.eq (local expected) (local actual)))))
 
 	(fn expression_row
@@ -1488,6 +1494,67 @@
 				(call runtime_expression (local kind) (local type) (local node) (local word) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
+	(fn plan_integer_operand
+		(:doc `Seed one evaluated operand and retain the exact result and runtime site.`)
+		(params (node SourceNode) (index i32) (value i32) (kind u32) (result u32) (operand_type u32)
+			(expected u32) (caller ScalarFunction) (view_start i32) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "The enclosing expression must accept the conversion's result type.")
+				(bool.not (call value_matches_type (local expected) (local result)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(array.store (local expressions) (local value)
+				(call expression_row 0u32 (local operand_type) -1i32 -1i32 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local index)
+				(call runtime_expression (local kind) (local result) (local node) (local value) (local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_named_integer_operation
+		(:doc `Check one typed integer or byte conversion using its explicit source and destination.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(head i32) (index i32) (tag u32) (expected u32) (caller ScalarFunction) (view_start i32)
+			(records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) 24u32))
+			(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
+			(let value (struct.get (local form) operand))
+			(if
+				(:doc "Each named operation consumes just one value.")
+				(bool.or (i32.lt (local value) 0i32)
+					(i32.lt -1i32 (struct.get (array.load (local nodes) (local value)) next_sibling)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let operation (call read_integer_operation (borrow-shared (local source)) (array.load (local nodes) (local head))))
+			(let-mut result (struct.get (local operation) type))
+			(let-mut input (struct.get (local operation) operand))
+			(let-mut kind (local tag))
+			(if
+				(:doc "Typed numerical conversions lower through the same checked operation as int.convert.")
+				(u32.eq (local tag) (local typed_integer_conversion))
+				(then (set (local kind) 33u32)))
+			(if
+				(:doc "An encoder produces the fixed byte layout already interned for the integer's width.")
+				(call is_integer_byte_encoder (local tag))
+				(then
+					(let shape (struct.new FixedArrayShape (element 10u32)
+						(extent (call integer_byte_width (local result)))))
+					(set (local result) (call find_fixed_array_type (borrow-shared (local records)) (local shape)))
+					(if (u32.eq (local result) 0u32) (then (return (call entry_at (local node) -1i32 24u32))))))
+			(if
+				(:doc "A decode can read a shared descriptor directly or check an explicit shared loan.")
+				(u32.eq (local input) (local exact_byte_view))
+				(then
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local nodes) (local value))))
+					(if
+						(:doc "Use the ordinary borrow planner for a named view or a byte range.")
+						(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+							(struct.get (local parts) head)) 35u32)
+						(then (set (local input) 35u32)))))
+			(return (call plan_integer_operand (local node) (local index) (local value) (local kind)
+				(local result) (local input) (local expected) (local caller) (local view_start) (borrow-mut (local expressions))))))
+
 	(fn plan_conversion
 		(:doc `Check a conversion target, seed its integer operand, and retain the original trap site.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
@@ -1513,16 +1580,8 @@
 				(:doc "Point at the target spelling when it names an unsupported type.")
 				(bool.not (call value_matches_type 1u32 (local target_type)))
 				(then (return (call entry_at (local target_node) -1i32 24u32))))
-			(if
-				(:doc "The selected type determines the result used by the enclosing expression.")
-				(bool.not (call value_matches_type (local expected) (local target_type)))
-				(then (return (call entry_at (local node) -1i32 24u32))))
-			(array.store (local expressions) (local value)
-				(call expression_row 0u32 1u32 -1i32 -1i32 0i32 0i32 (bool false)))
-			(array.store (local expressions) (local index)
-				(call runtime_expression 33u32 (local target_type) (local node) (local value)
-					(local caller) (local view_start)))
-			(return (call entry_at (local node) (local index) 0u32))))
+			(return (call plan_integer_operand (local node) (local index) (local value) 33u32
+				(local target_type) 1u32 (local expected) (local caller) (local view_start) (borrow-mut (local expressions))))))
 
 	(fn at_owner_use
 		(:doc `Use the full borrow or move span when a diagnostic carries an earlier transfer.`)
@@ -2090,7 +2149,8 @@
 				(:doc "Inline reads can also inspect a returned or constructed fixed array.")
 				(bool.or (local projected)
 					(bool.and (bool.not (local store))
-						(bool.or (u32.eq (local tag) 9u32) (call is_fixed_initializer (local tag)))))
+						(bool.or (u32.eq (local tag) 9u32)
+							(bool.or (call is_fixed_initializer (local tag)) (call is_integer_byte_encoder (local tag))))))
 				(then (return (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local caller) (local receiver) 42u32 (local statement)
 					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
@@ -2748,6 +2808,12 @@
 					(local index) (local expected) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(if
+				(:doc "Typed forms derive the exact result and operand types from their head.")
+				(bool.or (u32.eq (local tag) (local typed_integer_conversion)) (call is_integer_byte_conversion (local tag)))
+				(then (return (call plan_named_integer_operation (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (struct.get (local parts) head) (local index) (local tag) (local expected) (local caller) (local view_start)
+					(borrow-shared (local records)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A native storage constructor creates a new inactive owner for this binding.")
 				(u32.eq (local tag) (call native_alloc_kind))

@@ -377,7 +377,20 @@ preserves its numerical value when it fits the target `i8`, `u8`, `i32`,
 runtime diagnostic identifies the original file ID and half-open byte
 span of the conversion, including from a source subrange or an imported
 file. C emitted for conversions includes `wove_runtime.h` and links
-with the shared Wove C runtime.
+with the shared Wove C runtime. `(u8.from.u32 value)` applies the same
+check after requiring an exact `u32` operand. The `<destination>.from.<source>`
+form supports every pair of builtin integer types.
+
+For any builtin integer `T`, `(T.to.le-bytes value)` and
+`(T.to.be-bytes value)` evaluate an exact `T` once and return an inline
+`(array u8 N)`. The width `N` is one for `i8` and `u8`, four for
+`i32` and `u32`, and eight for `u64`. The inverse `T.from.le-bytes`
+and `T.from.be-bytes` forms take a shared byte view. They trap at the
+conversion span before reading if the view has fewer or more than `N`
+elements. Signed values use two's complement. The byte order is explicit
+on every host, and the view may start at any byte offset. For example,
+`(u32.from.le-bytes (borrow-shared (array.range (local source) 1i32 5i32)))`
+reads four bytes starting at index one.
 
 Helpers can take `(shared-array u8)` parameters using the runtime's
 `wvrt_slice` ABI. Pass a named view to another helper with
