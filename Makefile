@@ -22,6 +22,7 @@ SELF_HOST_ENTRY := $(SELF_HOST_SOURCE)/$(COMPILER_ROOT)
 SELF_HOST_VERIFIED := $(STAGE2)/wovec-self-hosted
 SELF_HOST_SMOKE := $(BUILD_DIR)/self-host-smoke
 SELF_HOST_INPUTS := tools/stage-compiler-inputs.sh
+BUILD_CLANG := tools/run-build-clang.sh
 NATIVE_DRIVER := stage-2/driver
 SOURCE_SCAN_MODULE := stage-2/source/scan.wove
 UTF8_MODULE := stage-2/text/utf8.wove
@@ -144,11 +145,12 @@ stage-1: $(BOOTSTRAP_COMPILER)
 stage-2: $(NATIVE_COMPILER)
 
 # Compare all native emissions from the same graph and exercise the final executable.
+self-host: export WOVE_BUILD_CLANG = $(CLANG)
 self-host: $(FINAL_COMPILER) $(STAGE2)/wovec.c $(SELF_HOST_SOURCE)/.ready
 	"$(FINAL_COMPILER)" cc "$(SELF_HOST_ENTRY)" -o "$(SELF_HOST_VERIFIED)"
 	cmp "$(STAGE2)/wovec.c" "$(BUILD_DIR)/.wovec-cache/default/wovec/bin/main.c"
 	cmp "$(STAGE2)/wovec.c" "$(STAGE2)/.wovec-cache/default/wovec-self-hosted/bin/main.c"
-	CLANG="$(CLANG)" "$(FINAL_COMPILER)" bin "$(NATIVE_CLI_FIXTURES)/input.wove" -o "$(SELF_HOST_SMOKE)"
+	CLANG="$(abspath $(BUILD_CLANG))" "$(FINAL_COMPILER)" bin "$(NATIVE_CLI_FIXTURES)/input.wove" -o "$(SELF_HOST_SMOKE)"
 	@status=0; "$(SELF_HOST_SMOKE)" || status=$$?; test "$$status" -eq 42
 
 # Preserve quoting in compiler settings until the runner splits them into arguments.
@@ -326,10 +328,11 @@ $(NATIVE_COMPILER): $(STAGE2)/wovec.c $(RUNTIME) $(RUNTIME_HEADER) $(BUILD_VERSI
 		$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime \
 			-include "$(RUNTIME)" "$<" -o "$$stage/wovec"; mv "$$stage/wovec" "$@")
 
-# Forward each quoted Make flag as one native CLI option for the final compiler.
-$(FINAL_COMPILER): $(NATIVE_COMPILER) $(SELF_HOST_SOURCE)/.ready wovec.jsonc $(BUILD_VERSION) force-build-info
+# Preserve the configured Make command and forward each flag as one native CLI option.
+$(FINAL_COMPILER): export WOVE_BUILD_CLANG = $(CLANG)
+$(FINAL_COMPILER): $(NATIVE_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_CLANG) wovec.jsonc $(BUILD_VERSION) force-build-info
 	$(call build_versioned,set -- $(CFLAGS); count=$$#; for flag do set -- "$$@" --cflag "$$flag"; done; shift "$$count"; \
-		CLANG="$(CLANG)" "$(NATIVE_COMPILER)" bin "$(SELF_HOST_ENTRY)" -o "$@" "$$@")
+		CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$(SELF_HOST_ENTRY)" -o "$@" "$$@")
 
 # Build utility-only Wove programs with the ordinary Python seed and runtime.
 $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o
