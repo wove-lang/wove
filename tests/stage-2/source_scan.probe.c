@@ -30,9 +30,9 @@
 #define default_selection wv_seed_fn_91
 #define target_os wv_seed_fn_92
 #define target_arch wv_seed_fn_93
-#define inspect_callers wv_seed_fn_424
-#define run_scalar_graph wv_seed_fn_453
-#define discover_graph_tests wv_seed_fn_461
+#define inspect_callers wv_seed_fn_431
+#define run_scalar_graph wv_seed_fn_460
+#define discover_graph_tests wv_seed_fn_468
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
