@@ -10,14 +10,16 @@
 
 	(use wove-file "./scan.wove"
 		(only check_source_form build_source_tree check_source_metadata is_identifier_head
-			(type SourceNode) (type Token)))
+			(type SourceNode) (type Token) (type FormCheck)))
 	(use wove-file "./module.wove" (only form_parts read_module_for_target (type SelectedDeclaration)))
 	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "./paths.wove" (only resolve_path (type SuppliedFile)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "./imports.wove" (only import_keyword is_import_name read_import read_selector))
 	(use wove-file "./types.wove" (only is_reserved_type_name))
-	(use wove-file "./c_headers.wove" (only (type HeaderMatch) find_c_header find_c_declaration))
+	(use wove-file "./tree_copy.wove" (only copy_tree))
+	(use wove-file "./c_scope.wove" (only connect_bridge_overlay))
+	(use wove-file "./c_headers.wove" (only (type HeaderMatch) find_c_header find_header_kind find_c_declaration))
 
 	(use wove-file "./target.wove" (only default_selection (type SelectionContext)))
 
@@ -29,7 +31,8 @@
 		(fields (owner i32) (start i32) (end i32) (file i32) (declaration i32) (namespace u32)
 			(provider u32) (header_start i32) (header_end i32) (native_start i32) (native_end i32)
 			(signature_start i32) (signature_end i32) (native_type i32) (drop_start i32) (drop_end i32)
-			(type_start i32) (type_end i32) (name_node i32)))
+			(type_start i32) (type_end i32) (name_node i32)
+			(header_file i32) (bridge_node i32) (default_file i32) (default_node i32) (native_file i32)))
 	(struct GraphUse
 		(fields (start i32) (end i32) (path_start i32) (path_end i32) (first i32) (limit i32) (error u32) (provider u32)))
 	(struct GraphSelector
@@ -142,7 +145,8 @@
 					(header_start -1i32) (header_end -1i32) (native_start -1i32) (native_end -1i32)
 					(signature_start -1i32) (signature_end -1i32)
 					(native_type 0i32) (drop_start 0i32) (drop_end 0i32)
-					(type_start 0i32) (type_end 0i32) (name_node (local name))))
+					(type_start 0i32) (type_end 0i32) (name_node (local name))
+					(header_file -1i32) (bridge_node -1i32) (default_file -1i32) (default_node -1i32) (native_file -1i32)))
 			(return (call graph_read (i32.add.wrapping (local count) 1i32) 0i32 0i32 0u32))))
 
 	(fn collect_selectors
@@ -229,7 +233,7 @@
 	(fn collect_module
 		(:doc `Summarize one selected declaration list in the graph tables.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(declarations (shared-slice SelectedDeclaration)) (length i32) (file i32)
+			(declarations (shared-slice SelectedDeclaration)) (length i32) (file i32) (check_headers bool)
 			(bindings (mut-slice GraphBinding)) (uses (mut-slice GraphUse)) (selectors (mut-slice GraphSelector))
 			(binding_offset i32) (use_offset i32) (selector_offset i32))
 		(returns FileRead)
@@ -289,13 +293,31 @@
 									(bool true) (record.get (local use) start) (record.get (local use) end) (local error)))))
 							(set (local selector_count) (record.get (local use) next))
 							(set (local use_count) (i32.add.wrapping (local use_count) 1i32))))
+					(let header (record.get (local parts) header))
+					(if
+						(:doc "Queue active project keys for validation even if they have no import.")
+						(bool.and (local check_headers) (i32.lt -1i32 (local header)))
+						(then
+							(let literal (slice.load (local nodes) (local header)))
+							(let start (record.get (local literal) start))
+							(let end (record.get (local literal) end))
+							(if
+								(:doc "Leave the operation table intact if it has no room for this key.")
+								(bool.not (i32.lt (local use_count) (slice.len (local uses))))
+								(then (return (call file_read (local binding_count) (local use_count) (local selector_count)
+									(bool true) (local start) (local end) 16u32))))
+							(slice.store (local uses) (local use_count)
+								(record.make GraphUse (start (local start)) (end (local end))
+									(path_start (local start)) (path_end (local end)) (first 0i32) (limit 0i32)
+									(error 0u32) (provider 9u32)))
+							(set (local use_count) (i32.add.wrapping (local use_count) 1i32))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return (call file_read (local binding_count) (local use_count) (local selector_count)
 				(bool true) 0i32 0i32 0u32))))
 
 	(fn read_graph_file
 		(:doc `Read a reached source in the graph mode and release its tree after collecting active references.`)
-		(params (source (shared-slice u8)) (file i32) (context SelectionContext)
+		(params (source (shared-slice u8)) (file i32) (context SelectionContext) (check_headers bool)
 			(bindings (mut-slice GraphBinding)) (uses (mut-slice GraphUse)) (selectors (mut-slice GraphSelector))
 			(binding_offset i32) (use_offset i32) (selector_offset i32))
 		(returns FileRead)
@@ -321,7 +343,7 @@
 				(then (return (call file_read (local binding_offset) (local use_offset) (local selector_offset)
 					(bool false) (record.get (local module) start) (record.get (local module) end) (local error)))))
 			(return (call collect_module (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local declarations)) (record.get (local module) count) (local file)
+				(borrow-shared (local declarations)) (record.get (local module) count) (local file) (local check_headers)
 				(borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))
 				(local binding_offset) (local use_offset) (local selector_offset)))))
 
@@ -450,7 +472,10 @@
 					(native_type (record.get (local target) native_type))
 					(drop_start (record.get (local target) drop_start)) (drop_end (record.get (local target) drop_end))
 					(type_start (record.get (local target) type_start)) (type_end (record.get (local target) type_end))
-					(name_node (record.get (local selector) local_node))))
+					(name_node (record.get (local selector) local_node))
+					(header_file (record.get (local target) header_file)) (bridge_node (record.get (local target) bridge_node))
+					(default_file (record.get (local target) default_file)) (default_node (record.get (local target) default_node))
+					(native_file (record.get (local target) native_file))))
 			(return (call graph_read (i32.add.wrapping (local index) 1i32) 0i32 0i32 0u32))))
 
 	(fn bind_edge
@@ -501,10 +526,52 @@
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return (call graph_read (local count) 0i32 0i32 0u32))))
 
+	(fn c_file_offset
+		(:doc "Translate a source offset and retain a missing destructor's negative sentinel.")
+		(params (position i32) (base i32)) (returns i32)
+		(body
+			(if (i32.lt (local position) 0i32) (then (return (local position))))
+			(return (i32.sub.wrapping (local position) (local base)))))
+
+	(fn c_scope_owner
+		(:doc "Translate a temporary combined tree row to the physical defining file.")
+		(params (header HeaderMatch) (primary_rows i32) (row i32)) (returns i32)
+		(body
+			(if (i32.lt (local row) (local primary_rows)) (then (return (record.get (local header) file))))
+			(return (record.get (local header) default_file))))
+
+	(fn c_scope_row_base
+		(:doc "The temporary namespace stores the primary provider first and bundled nodes after it.")
+		(params (header HeaderMatch) (primary_rows i32) (file i32)) (returns i32)
+		(body
+			(if (i32.eq (local file) (record.get (local header) file)) (then (return 0i32)))
+			(return (local primary_rows))))
+
+	(fn c_scope_error
+		(:doc "Translate an absolute error span to the original source within the selected namespace.")
+		(params (files (shared-slice SuppliedFile)) (header HeaderMatch) (count i32) (start i32) (end i32) (error u32))
+		(returns GraphRead)
+		(body
+			(let-mut file (record.get (local header) file))
+			(let fallback (record.get (local header) default_file))
+			(if
+				(:doc "Signature or dependency validation may fail in the bundled provider.")
+				(i32.lt -1i32 (local fallback))
+				(then
+					(let input (slice.load (local files) (local fallback)))
+					(if
+						(:doc "Use the original backing byte range of that file.")
+						(bool.and (bool.not (i32.lt (local start) (record.get (local input) source_start)))
+							(i32.lt (local start) (record.get (local input) source_end)))
+						(then (set (local file) (local fallback))))))
+			(let base (record.get (slice.load (local files) (local file)) source_start))
+			(return (record.make GraphRead (next (local count)) (start (i32.sub.wrapping (local start) (local base)))
+				(end (i32.sub.wrapping (local end) (local base))) (error (local error)) (file (local file))))))
+
 	(fn bind_c_members
 		(:doc `Bind each selected C member to its original declaration and checked native contract.`)
-		(params (source (shared-slice u8)) (provider_source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(importer i32) (header HeaderMatch) (edge GraphUse) (selectors (shared-slice GraphSelector))
+		(params (source (shared-slice u8)) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (nodes (shared-slice SourceNode))
+			(importer i32) (header HeaderMatch) (primary_rows i32) (edge GraphUse) (selectors (shared-slice GraphSelector))
 			(bindings (mut-slice GraphBinding)) (offset i32) (context SelectionContext))
 		(returns GraphRead)
 		(body
@@ -522,31 +589,52 @@
 						(:doc "A malformed selector keeps its cached importing span.")
 						(u32.lt 0u32 (local error))
 						(then (return (call graph_read (local count) (local start) (local end) (local error)))))
-					(let member (call find_c_declaration (borrow-shared (local provider_source)) (borrow-shared (local nodes))
-						(local header) (borrow-shared (local source)) (local start) (local end)
+					(let member (call find_c_declaration (borrow-shared (local arena)) (borrow-shared (local nodes))
+						(record.get (local header) node) (borrow-shared (local source)) (local start) (local end)
 						(record.get (local selector) namespace) (local context)))
 					(let namespace (record.get (local member) namespace))
 					(let rejected (record.get (local member) error))
 					(if
 						(:doc "A rejected C member belongs to the declaring Wove file.")
 						(u32.lt 0u32 (local rejected))
-						(then (return (record.make GraphRead (next (local count))
-							(start (record.get (local member) start)) (end (record.get (local member) end))
-							(error (local rejected)) (file (record.get (local header) file))))))
+						(then (return (call c_scope_error (borrow-shared (local files)) (local header) (local count)
+							(record.get (local member) start) (record.get (local member) end) (local rejected)))))
 					(let declaration (record.get (local member) declaration))
 					(if
 						(:doc "A missing C member points at the original requested spelling.")
 						(i32.lt (local declaration) 0i32)
 						(then (return (call graph_read (local count) (local start) (local end) 29u32))))
+					(let file (call c_scope_owner (local header) (local primary_rows) (local declaration)))
+					(let base (record.get (slice.load (local files) (local file)) source_start))
+					(let row_base (call c_scope_row_base (local header) (local primary_rows) (local file)))
+					(let type (record.get (local member) native_type))
+					(let-mut native_file -1i32)
+					(let-mut native_row 0i32)
+					(let-mut native_base 0i32)
+					(if
+						(:doc "An inherited type retains its own defining file and node.")
+						(i32.lt 0i32 (local type))
+						(then
+							(set (local native_file) (call c_scope_owner (local header) (local primary_rows) (local type)))
+							(set (local native_row) (i32.sub.wrapping (local type)
+								(call c_scope_row_base (local header) (local primary_rows) (local native_file))))
+							(set (local native_base) (record.get (slice.load (local files) (local native_file)) source_start))))
 					(let target (record.make GraphBinding (owner (local importer)) (start -1i32) (end -1i32)
-						(file (record.get (local header) file)) (declaration (local declaration)) (namespace (local namespace)) (provider 8u32)
+						(file (local file)) (declaration (i32.sub.wrapping (local declaration) (local row_base)))
+						(namespace (local namespace)) (provider 8u32)
 						(header_start (record.get (local header) start)) (header_end (record.get (local header) end))
-						(native_start (record.get (local member) native_start)) (native_end (record.get (local member) native_end))
-						(signature_start (record.get (local member) signature_start)) (signature_end (record.get (local member) signature_end))
-						(native_type (record.get (local member) native_type))
-						(drop_start (record.get (local member) drop_start)) (drop_end (record.get (local member) drop_end))
-						(type_start (record.get (local member) type_start)) (type_end (record.get (local member) type_end))
-						(name_node -1i32)))
+						(native_start (i32.sub.wrapping (record.get (local member) native_start) (local base)))
+						(native_end (i32.sub.wrapping (record.get (local member) native_end) (local base)))
+						(signature_start (i32.sub.wrapping (record.get (local member) signature_start) (local base)))
+						(signature_end (i32.sub.wrapping (record.get (local member) signature_end) (local base)))
+						(native_type (local native_row))
+						(drop_start (call c_file_offset (record.get (local member) drop_start) (local native_base)))
+						(drop_end (call c_file_offset (record.get (local member) drop_end) (local native_base)))
+						(type_start (i32.sub.wrapping (record.get (local member) type_start) (local native_base)))
+						(type_end (i32.sub.wrapping (record.get (local member) type_end) (local native_base)))
+						(name_node -1i32) (header_file (record.get (local header) file)) (bridge_node (record.get (local header) node))
+						(default_file (record.get (local header) default_file)) (default_node (record.get (local header) default_node))
+						(native_file (local native_file))))
 					(let published (call publish_binding (borrow-shared (local source)) (local selector) (local importer)
 						(local target) (borrow-mut (local bindings)) (local count)))
 					(if
@@ -557,8 +645,8 @@
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return (call graph_read (local count) 0i32 0i32 0u32))))
 
-	(fn bind_c_header_edge
-		(:doc `Decode and resolve a C provider key before checking any of its requested members.`)
+	(fn resolve_c_header_operation
+		(:doc "Validate a declared project key or resolve a C header use before checking its members.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (source (shared-slice u8)) (importer i32)
 			(edge GraphUse) (selectors (shared-slice GraphSelector)) (bindings (mut-slice GraphBinding)) (offset i32) (context SelectionContext))
 		(returns GraphRead)
@@ -574,6 +662,15 @@
 				(u32.lt 0u32 (record.get (local key) error))
 				(then (return (call graph_read (local offset) (record.get (local key) start)
 					(record.get (local key) end) (record.get (local key) error)))))
+			(if
+				(:doc "Check project declarations with the same target-aware lookup used for imports.")
+				(u32.eq (record.get (local edge) provider) 9u32)
+				(then
+					(let header (call find_header_kind (borrow-shared (local arena)) (borrow-shared (local files))
+						(borrow-shared (slice.range (local decoded) 0i32 (record.get (local key) written))) (local context) (bool false)))
+					(return (record.make GraphRead (next (local offset)) (start (record.get (local header) start))
+						(end (record.get (local header) end)) (error (record.get (local header) error))
+						(file (record.get (local header) file))))))
 			(let header (call find_c_header (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (slice.range (local decoded) 0i32 (record.get (local key) written))) (local context)))
 			(let provider (record.get (local header) file))
@@ -587,27 +684,77 @@
 				(:doc "A missing bridge is diagnosed at the original importing use.")
 				(i32.lt (local provider) 0i32)
 				(then (return (call graph_read (local offset) (record.get (local edge) start) (record.get (local edge) end) 27u32))))
-			(let input (slice.load (local files) (local provider)))
-			(return (call bind_c_header_file (borrow-shared (local source))
-				(borrow-shared (slice.range (local arena) (record.get (local input) source_start) (record.get (local input) source_end)))
+			(return (call bind_c_header_scope (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local source))
 				(local importer) (local header) (local edge) (borrow-shared (local selectors)) (borrow-mut (local bindings)) (local offset) (local context)))))
 
-	(fn bind_c_header_file
-		(:doc `Rebuild the selected provider's immutable tree once for all selectors on this edge.`)
-		(params (source (shared-slice u8)) (provider_source (shared-slice u8)) (importer i32) (header HeaderMatch)
-			(edge GraphUse) (selectors (shared-slice GraphSelector)) (bindings (mut-slice GraphBinding)) (offset i32) (context SelectionContext))
+	(fn measure_c_tree
+		(:doc "Measure the selected provider's checked source view before reserving temporary nodes.")
+		(params (arena (shared-slice u8)) (input SuppliedFile)) (returns FormCheck)
+		(body (return (call check_source_form
+			(borrow-shared (slice.range (local arena) (record.get (local input) source_start) (record.get (local input) source_end)))))))
+
+	(fn copy_c_tree
+		(:doc "Build the validated original tree and copy it with graph arena spans.")
+		(params (view (shared-slice u8)) (checked FormCheck) (base i32) (source_base i32) (flat (mut-slice SourceNode)))
+		(returns FormCheck)
+		(body
+			(let-mut nodes (array.alloc SourceNode (int.convert i32 (record.get (local checked) rows))))
+			(let built (call build_source_tree (borrow-shared (local view)) (local checked) (borrow-mut (local nodes))))
+			(if
+				(:doc "Copy only complete source trees.")
+				(u32.eq (record.get (local built) error) 0u32)
+				(then (call copy_tree (borrow-shared (local nodes)) (borrow-mut (local flat)) (local base) (local source_base))))
+			(return (local built))))
+
+	(fn bind_c_header_scope
+		(:doc "Build a temporary tree for each provider in the namespace and keep their original offsets.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (source (shared-slice u8)) (importer i32)
+			(header HeaderMatch) (edge GraphUse) (selectors (shared-slice GraphSelector))
+			(bindings (mut-slice GraphBinding)) (offset i32) (context SelectionContext))
 		(returns GraphRead)
 		(body
-			(let checked (call check_source_form (borrow-shared (local provider_source))))
-			(let-mut nodes (array.alloc SourceNode (int.convert i32 (record.get (local checked) rows))))
-			(let built (call build_source_tree (borrow-shared (local provider_source)) (local checked) (borrow-mut (local nodes))))
+			(let primary (slice.load (local files) (record.get (local header) file)))
+			(let checked (call measure_c_tree (borrow-shared (local arena)) (local primary)))
+			(let rows (int.convert i32 (record.get (local checked) rows)))
+			(let fallback (record.get (local header) default_file))
+			(let-mut extra 0i32)
 			(if
-				(:doc "Forward any tree construction failure at the original provider span.")
+				(:doc "Only an extending project header contributes bundled fallback rows.")
+				(i32.lt -1i32 (local fallback))
+				(then
+					(let size (call measure_c_tree (borrow-shared (local arena)) (slice.load (local files) (local fallback))))
+					(set (local extra) (int.convert i32 (record.get (local size) rows)))))
+			(if
+				(:doc "Keep both provider trees within signed row indices.")
+				(i32.lt (i32.sub.wrapping 2147483647i32 (local rows)) (local extra))
+				(then (return (call graph_read (local offset) (record.get (local edge) start) (record.get (local edge) end) 16u32))))
+			(let-mut flat (array.alloc SourceNode (i32.add.wrapping (local rows) (local extra))))
+			(let built (call copy_c_tree
+				(borrow-shared (slice.range (local arena) (record.get (local primary) source_start) (record.get (local primary) source_end)))
+				(local checked) 0i32 (record.get (local primary) source_start) (borrow-mut (local flat))))
+			(if
+				(:doc "Keep the original source span if building the checked primary tree fails.")
 				(u32.lt 0u32 (record.get (local built) error))
 				(then (return (record.make GraphRead (next (local offset)) (start (record.get (local built) start))
 					(end (record.get (local built) end)) (error (record.get (local built) error)) (file (record.get (local header) file))))))
-			(return (call bind_c_members (borrow-shared (local source)) (borrow-shared (local provider_source))
-				(borrow-shared (local nodes)) (local importer) (local header) (local edge)
+			(if
+				(:doc "Both original scopes get the same lookup order without changing their member links.")
+				(i32.lt -1i32 (local fallback))
+				(then
+					(let bundled (slice.load (local files) (local fallback)))
+					(let bundled_checked (call measure_c_tree (borrow-shared (local arena)) (local bundled)))
+					(let inherited (call copy_c_tree
+						(borrow-shared (slice.range (local arena) (record.get (local bundled) source_start) (record.get (local bundled) source_end)))
+						(local bundled_checked) (local rows) (record.get (local bundled) source_start) (borrow-mut (local flat))))
+					(if
+						(:doc "Bundled tree errors retain the bundled source location.")
+						(u32.lt 0u32 (record.get (local inherited) error))
+						(then (return (record.make GraphRead (next (local offset)) (start (record.get (local inherited) start))
+							(end (record.get (local inherited) end)) (error (record.get (local inherited) error)) (file (local fallback))))))
+					(call connect_bridge_overlay (borrow-mut (local flat)) (record.get (local header) node)
+						(i32.add.wrapping (local rows) (record.get (local header) default_node)))))
+			(return (call bind_c_members (borrow-shared (local source)) (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local flat)) (local importer) (local header) (local rows) (local edge)
 				(borrow-shared (local selectors)) (borrow-mut (local bindings)) (local offset) (local context)))))
 
 	(fn update_frame
@@ -674,13 +821,14 @@
 		order. Binding names are byte spans in the owner's view. Their targets
 		are a defining identity and the declaration's node index in that file's
 		checked tree. Provider kind 3 identifies Wove definitions. Kind 8 identifies
-		C targets with header, native name, and signature spans in the defining view.
+		C targets with original member, header, and native type identities. Those
+		components can come from different files in an overlaid header.
 		Keep the selection context in the result so graph consumers reuse the same selection.
 		Error spans are byte offsets in the named diagnostic file.
 		On failure, the counts report reached modules and the initialized binding prefix.`)
 		(:expect
 			(tests "stage-2/source_graphs.tsv" "stage-2/graph/targets/cases.tsv")
-			(issues "gh:wove-lang/wove:68" "gh:wove-lang/wove:138" "gh:wove-lang/wove:146" "gh:wove-lang/wove:190"))
+			(issues "gh:wove-lang/wove:68" "gh:wove-lang/wove:138" "gh:wove-lang/wove:146" "gh:wove-lang/wove:190" "gh:wove-lang/wove:227"))
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (entry i32) (context SelectionContext)
 			(modules (mut-slice GraphModule)) (bindings (mut-slice GraphBinding))
 			(uses (mut-slice GraphUse)) (selectors (mut-slice GraphSelector)) (disk bool) (loading bool) (edges (shared-slice DiskEdge)))
@@ -725,7 +873,9 @@
 						(then
 							(let loaded (call read_graph_file
 								(borrow-shared (slice.range (local arena) (local source_start) (local source_end)))
-								(local current) (local context) (borrow-mut (local bindings)) (borrow-mut (local uses))
+								(local current) (local context)
+								(bool.not (bool.or (local loading) (record.get (local file) bundled)))
+								(borrow-mut (local bindings)) (borrow-mut (local uses))
 								(borrow-mut (local selectors)) (local binding_count) (local use_count) (local selector_count)))
 							(set (local binding_count) (record.get (local loaded) bindings))
 							(let error (record.get (local loaded) error))
@@ -770,14 +920,15 @@
 						(else
 							(let edge (slice.load (local uses) (local next)))
 							(if
-								(:doc "A C header uses a declared key and does not traverse a Wove-file edge.")
-								(u32.eq (record.get (local edge) provider) 8u32)
+								(:doc "C header imports and project declarations resolve a key without traversing a Wove-file edge.")
+								(bool.or (u32.eq (record.get (local edge) provider) 8u32)
+									(u32.eq (record.get (local edge) provider) 9u32))
 								(then
 									(if
 										(:doc "A header declaration can live in a file reached by a later Wove edge.")
 										(bool.not (local loading))
 										(then
-											(let bound (call bind_c_header_edge (borrow-shared (local arena)) (borrow-shared (local files))
+											(let bound (call resolve_c_header_operation (borrow-shared (local arena)) (borrow-shared (local files))
 												(borrow-shared (slice.range (local arena) (local source_start) (local source_end)))
 												(local current) (local edge) (borrow-shared (local selectors))
 												(borrow-mut (local bindings)) (local binding_count) (local context)))
