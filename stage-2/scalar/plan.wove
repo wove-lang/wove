@@ -43,16 +43,16 @@
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type read_view_parameter_extent find_record record_type record_index is_record_type
 			find_member member_value_type read_member_operand register_static_array find_fixed_array_type fixed_array_type named_extent_site is_fixed_array is_enum_layout is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element byte_rows_owner_type is_native_integer native_integer_type find_native_node (type ScalarRecord)
-			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target record_receiver_type place_borrow_kind))
+			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target mutable_scalar_target record_receiver_type place_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
 	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
 	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind
 			is_optional_byte_owner_type optional_unwrap_kind))
-	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan field_place_root expression_row (value indirect_local_place) (value local_slice_view) (value local_slice_projection) (type ScalarExpression)))
+	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan field_place_root expression_row mutable_parameter_place (value indirect_local_place) (value local_slice_view) (value local_slice_projection) (type ScalarExpression)))
 	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding is_iteration_binding is_writable_local (type ScalarStatement)
 			(value c_writable_binding) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
-			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)
+			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment)
 			(value next_path) (value break_path) (value continue_path) (value break_statement) (value for_statement) (value for_mut_binding) (value for_element_assignment)))
 	(use wove-file "./conditional.wove" (only plan_conditional finish_conditional_value conditional_transfer_reaches is_pending_value
 		(value conditional_value) (value pending_conditional) (value pending_field_read) (value pending_array_read)))
@@ -1246,6 +1246,14 @@
 					(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions)) (borrow-shared (local statements))
 						(local index) (local statement) (local target) (bool false) -1i32 (bool false)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let pointee (call mutable_scalar_target (local actual)))
+			(if
+				(:doc "A scalar read uses the pointee's type, while its binding still identifies the original argument.")
+				(u32.lt 0u32 (local pointee))
+				(then
+					(if (bool.not (call value_matches_type (local type) (local pointee))) (then (return (call entry_at (local node) -1i32 24u32))))
+					(array.store (local expressions) (local index) (call mutable_parameter_place (local pointee) (local target)))
+					(return (call entry_at (local node) (local index) 0u32))))
 			(if
 				(:doc "Apply the parameter's declared type at this use.")
 				(bool.not (call value_matches_type (local type) (local actual)))
@@ -1257,11 +1265,12 @@
 	(fn check_statement_binding
 		(:doc `Check a declaration name or identify the binding written by an assignment.
 
-		Return the declaration's name node for let or let-mut and the checked
-		statement row for set. Other statements have no binding.`)
+		Return the name node for let or let-mut, the defining row for a set
+		to a local or global, and the checked place row for a set through a
+		scalar reference. Other statements have no binding.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
 			(parameters (shared-array ScalarParameter)) (statements (shared-array ScalarStatement))
-			(index i32) (statement StatementRead))
+			(index i32) (statement StatementRead) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(let kind (struct.get (local statement) kind))
@@ -1330,13 +1339,17 @@
 			(let parameter (call find_function_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (borrow-shared (local parameters)) (local name)))
 			(if
-				(:doc "A parameter is immutable and shares the outermost scope with the function body.")
+				(:doc "A parameter shares the outermost scope with the function body.")
 				(bool.not (i32.lt (local parameter) 0i32))
 				(then
 					(if
-						(:doc "Report an attempted parameter write at the reference name.")
+						(:doc "Assign through a mutable scalar formal or diagnose the other parameter kinds at the name.")
 						(local assigning)
-						(then (return (call entry_at (local name) -1i32 37u32))))
+						(then
+							(let type (call mutable_scalar_target (struct.get (array.load (local parameters) (local parameter)) type)))
+							(if (u32.eq (local type) 0u32) (then (return (call entry_at (local name) -1i32 37u32))))
+							(array.store (local expressions) (local operand) (call mutable_parameter_place (local type) (local parameter)))
+							(return (call entry_at (local name) (local operand) 0u32))))
 					(let first (array.load (local nodes) (struct.get (local caller) first_statement)))
 					(let here (array.load (local nodes) (local index)))
 					(if
@@ -3764,7 +3777,7 @@
 					(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions)) (local view_start)))))
 			(return (call check_statement_binding (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (borrow-shared (local parameters)) (borrow-shared (local statements))
-				(local index) (local statement)))))
+				(local index) (local statement) (borrow-mut (local expressions))))))
 
 	(fn plan_for
 		(:doc `Check the iterator before publishing its body bindings.
@@ -3934,27 +3947,35 @@
 					(set (local emitted_kind) (local field_assignment))
 					(set (local expected) (struct.get (array.load (local expressions) (local target)) type))))
 			(if
-				(:doc "An ordinary assignment uses the exact type and name of its checked binding.")
+				(:doc "Select the exact assignment type from the checked place or defining binding.")
 				(bool.and (u32.eq (local kind) 17u32) (bool.not (local field_place)))
 				(then
-					(let declaration (array.load (local statements) (local target)))
+					(let place (array.load (local expressions) (local target)))
 					(if
-						(:doc "Replacing a fixed local conflicts with every live view of its inline storage.")
-						(call has_scoped_array_loan (borrow-shared (local statements)) (borrow-shared (local expressions))
-							(local index) (struct.get (local declaration) target) (bool true) (bool true))
+						(:doc "A scalar reference assignment keeps the original parameter place.")
+						(u32.eq (struct.get (local place) kind) 2u32)
 						(then
-							(let place (array.load (local nodes) (struct.get (local statement) binding)))
-							(return (call body_error (local caller) (struct.get (local place) start) (struct.get (local place) end) 24u32))))
-					(if
-						(:doc "A foreign assignment writes the original C symbol instead of a generated local.")
-						(u32.eq (struct.get (local declaration) kind) (local c_writable_binding))
-						(then (set (local emitted_kind) (local c_value_assignment))))
-					(if
-						(:doc "Writing an iterator item updates the original element through its address.")
-						(u32.eq (struct.get (local declaration) kind) (local for_mut_binding))
-						(then (set (local emitted_kind) (local for_element_assignment))))
-					(set (local expected) (struct.get (local declaration) type))
-					(set (local target) (struct.get (local declaration) target))))
+							(set (local emitted_kind) (local parameter_assignment))
+							(set (local expected) (struct.get (local place) type)))
+						(else
+							(let declaration (array.load (local statements) (local target)))
+							(if
+								(:doc "Replacing a fixed local conflicts with every live view of its inline storage.")
+								(call has_scoped_array_loan (borrow-shared (local statements)) (borrow-shared (local expressions))
+									(local index) (struct.get (local declaration) target) (bool true) (bool true))
+								(then
+									(let place (array.load (local nodes) (struct.get (local statement) binding)))
+									(return (call body_error (local caller) (struct.get (local place) start) (struct.get (local place) end) 24u32))))
+							(if
+								(:doc "A foreign assignment writes the original C symbol instead of a generated local.")
+								(u32.eq (struct.get (local declaration) kind) (local c_writable_binding))
+								(then (set (local emitted_kind) (local c_value_assignment))))
+							(if
+								(:doc "Writing an iterator item updates the original element through its address.")
+								(u32.eq (struct.get (local declaration) kind) (local for_mut_binding))
+								(then (set (local emitted_kind) (local for_element_assignment))))
+							(set (local expected) (struct.get (local declaration) type))
+							(set (local target) (struct.get (local declaration) target))))))
 			(if
 				(:doc "Returns use the function's declared result and its required operand count.")
 				(u32.eq (local kind) 7u32)
