@@ -13,12 +13,14 @@ import re
 from syntax import IDENTIFIER, Atom, Form, Node, SourceError, form, identifier, parse
 
 
+I8 = "i8"
 I32 = "i32"
 U8 = "u8"
 U32 = "u32"
 BOOL = "bool"
 VOID = "void"
 SCALAR_LIMITS = {
+	I8: (-128, 127),
 	I32: (-(2**31), 2**31 - 1),
 	U8: (0, 255),
 	U32: (0, 2**32 - 1),
@@ -28,6 +30,7 @@ OWNED = "owned-array"
 SHARED = "shared-slice"
 MUT = "mut-slice"
 C_TYPE = {
+	I8: "int8_t",
 	I32: "int32_t",
 	U8: "uint8_t",
 	U32: "uint32_t",
@@ -88,6 +91,12 @@ class Binding:
 
 
 @dataclass(frozen=True)
+class ModuleValue:
+	binding: Binding
+	initializer: str | bytes
+
+
+@dataclass(frozen=True)
 class Function:
 	c_name: str
 	params: tuple[tuple[str, Type], ...]
@@ -105,6 +114,7 @@ class Module:
 	type_bindings: dict[str, Record] = field(default_factory=dict)
 	functions: dict[str, Function] = field(default_factory=dict)
 	bindings: dict[str, Function] = field(default_factory=dict)
+	values: dict[str, ModuleValue] = field(default_factory=dict)
 
 
 # Scalars and scalar-only records can be passed without a loan or transfer.
@@ -118,6 +128,69 @@ def c_type(kind: Type) -> str:
 	if isinstance(kind, BufferType):
 		return C_TYPE[kind.access]
 	return kind.c_name if isinstance(kind, Record) else C_TYPE[kind]
+
+
+# Validate a typed decimal literal before emitting its C spelling.
+def read_integer_literal(node: Form) -> Value:
+	literal, = form(node, arity=1).operands
+	# Accept only signed decimal atoms.
+	if not isinstance(literal, Atom) or literal.quoted or not re.fullmatch(r"-?[0-9]+", literal.text):
+		raise SourceError(node.line)
+	# Normalize leading zeros so C cannot interpret them as octal.
+	try:
+		number = int(literal.text)
+	except ValueError:
+		raise SourceError(node.line) from None
+	low, high = SCALAR_LIMITS[node.tag]
+	# Check the declared type before handing the literal to C.
+	if not low <= number <= high:
+		raise SourceError(node.line)
+	spelling = f"UINT32_C({number})" if node.tag == U32 else str(number)
+	return Value(node.tag, spelling)
+
+
+# Read an immutable scalar or byte table without evaluating runtime expressions.
+def read_module_value(node: Form, index: int) -> tuple[str, ModuleValue]:
+	name_node, initializer = form(node, "let", 2).operands
+	name = identifier(name_node)
+	c_name = f"wv_seed_binding_{index}"
+	# A quoted string supplies the exact bytes of a shared u8 slice.
+	if isinstance(initializer, Atom) and initializer.quoted:
+		# Reject string contents that cannot be represented as UTF-8.
+		try:
+			data = initializer.text.encode("utf-8")
+		except UnicodeEncodeError:
+			raise SourceError(initializer.line) from None
+		# Slice lengths fit the signed i32 domain.
+		if len(data) > SCALAR_LIMITS[I32][1]:
+			raise SourceError(initializer.line)
+		return name, ModuleValue(Binding(Value(BufferType(SHARED, U8), c_name)), data)
+	literal = checked_form(initializer)
+	# Only the supported integer literals can initialize a module scalar.
+	if literal.tag not in SCALAR_LIMITS:
+		raise SourceError(initializer.line)
+	value = read_integer_literal(literal)
+	return name, ModuleValue(Binding(Value(value.kind, c_name)), value.c)
+
+
+# Give each byte table one read-only backing array and a static shared view.
+def module_value_definition(declaration: ModuleValue) -> list[str]:
+	value = declaration.binding.value
+	initializer = declaration.initializer
+	# Scalars are stored in their declared C type.
+	if isinstance(initializer, str):
+		return [f"static const {c_type(value.kind)} {value.c} = {initializer};"]
+	lines = []
+	items = "NULL"
+	# Empty views need no backing allocation.
+	if initializer:
+		items = f"{value.c}_bytes"
+		bytes_c = ", ".join(str(byte) for byte in initializer)
+		lines.append(f"static const uint8_t {items}[{len(initializer)}] = {{{bytes_c}}};")
+	lines.append(
+		f"static const wvrt_slice {value.c} = {{{items}, {len(initializer)}, sizeof(uint8_t)}};"
+	)
+	return lines
 
 
 # Collect scalar fields in declaration order for the record's native layout.
@@ -228,12 +301,11 @@ def signature(function: Function) -> str:
 
 class FunctionEmitter:
 	# Initialize the function scope, C names, and ownership state.
-	def __init__(
-		self, function: Function, functions: dict[str, Function], records: dict[str, Record], source: str
-	):
+	def __init__(self, function: Function, module: Module, source: str):
 		self.function = function
-		self.functions = functions
-		self.records = records
+		self.functions = module.bindings
+		self.records = module.type_bindings
+		self.values = module.values
 		self.source = source
 		self.lines = []
 		self.scopes = [{
@@ -268,6 +340,10 @@ class FunctionEmitter:
 				if binding in self.moved:
 					raise SourceError(line)
 				return binding
+		declaration = self.values.get(symbol)
+		# A lexical lookup can fall back to the defining file's immutable binding.
+		if declaration is not None:
+			return declaration.binding
 		raise SourceError(line)
 
 	# Require the exact result type at the operation that consumes it.
@@ -461,24 +537,9 @@ class FunctionEmitter:
 			value = self.typed(operand, BOOL)
 			return self.temporary(BOOL, f"!{value.c}")
 
-		# Convert the decimal literal to a C-safe spelling.
+		# Function literals follow the same rules as module initializers.
 		if expr.tag in SCALAR_LIMITS:
-			literal, = form(expr, arity=1).operands
-			# Restrict the spelling to a signed decimal atom.
-			if not isinstance(literal, Atom) or literal.quoted or not re.fullmatch(r"-?[0-9]+", literal.text):
-				raise SourceError(node.line)
-			# Parse the value so C cannot interpret leading zeros as octal.
-			try:
-				number = int(literal.text)
-			# Treat values beyond Python’s conversion limit as source failures.
-			except ValueError:
-				raise SourceError(node.line) from None
-			low, high = SCALAR_LIMITS[expr.tag]
-			# Check the declared type before handing the literal to C.
-			if not low <= number <= high:
-				raise SourceError(node.line)
-			spelling = f"UINT32_C({number})" if expr.tag == U32 else str(number)
-			return Value(expr.tag, spelling)
+			return read_integer_literal(expr)
 
 		# Check the selected type's range before casting the result to its C type.
 		if expr.tag == "int.convert":
@@ -762,7 +823,7 @@ class FunctionEmitter:
 	def emit(self, retained: tuple[str, ...] = ()) -> list[str]:
 		body = self.function.body
 		self.lines.append(signature(self.function) + " {")
-		# Mark loaded provider functions as used while keeping their C linkage private.
+		# Keep loaded provider functions and module bindings private while marking them used.
 		for name in retained:
 			self.emit_line(f"(void){name};")
 		# A path reaching the end of the body may only exit a void function.
@@ -871,7 +932,7 @@ def source_file(filename: str) -> Iterator[None]:
 
 # Collect active local declarations and preserve their emission order.
 def read_module(
-	source: str, filename: str, record_index: int, function_index: int, *, entry: bool = False
+	source: str, filename: str, record_index: int, function_index: int, value_index: int, *, entry: bool = False
 ) -> Module:
 	# Parsing and declaration selection belong to the defining file.
 	with source_file(filename):
@@ -889,6 +950,7 @@ def read_module(
 		records = {}
 		function_declarations = {}
 		uses = []
+		values = {}
 		# Select active declarations before looking at any import's operands or path.
 		for node in selected_declarations(module.operands[1:], skip_host=True):
 			# Collect imports for the dependency walk.
@@ -901,6 +963,13 @@ def read_module(
 				if name in records:
 					raise SourceError(node.line)
 				records[name] = record
+			# Seed module storage only accepts immutable literal declarations.
+			elif node.tag == "let":
+				name, value = read_module_value(node, value_index + len(values))
+				# A file has one module binding per value name.
+				if name in values:
+					raise SourceError(node.line)
+				values[name] = value
 			# Collect function names now and check their signatures after imports bind.
 			else:
 				name = identifier(form(node, "fn", 4).operands[0])
@@ -911,7 +980,7 @@ def read_module(
 		# The root supplies the executable entry point even when a provider defines main.
 		if entry and "main" not in function_declarations:
 			raise SourceError(module.line)
-		return Module(filename, function_index, records, function_declarations, uses, records.copy())
+		return Module(filename, function_index, records, function_declarations, uses, records.copy(), values=values)
 
 
 # Resolve signatures in the file's complete type namespace before binding callers.
@@ -1000,6 +1069,7 @@ def load_modules(root: Module) -> list[Module]:
 	stack = [(root_identity, path, iter(root.uses), None)]
 	record_index = len(root.records)
 	function_index = len(root.function_declarations)
+	value_index = len(root.values)
 	absolute_paths = Path(root.filename).is_absolute()
 	# Keep active importers on the stack until their last use has been processed.
 	while stack:
@@ -1037,10 +1107,11 @@ def load_modules(root: Module) -> list[Module]:
 				continue
 			filename = str(target) if absolute_paths else os.path.relpath(target)
 			source = read_provider(target, filename, use)
-			provider = read_module(source, filename, record_index, function_index)
+			provider = read_module(source, filename, record_index, function_index, value_index)
 			modules[target_identity] = provider
 			record_index += len(provider.records)
 			function_index += len(provider.function_declarations)
+			value_index += len(provider.values)
 			active.add(target_identity)
 			stack.append((target_identity, target, iter(provider.uses), (importer, only)))
 	return list(modules.values())
@@ -1048,10 +1119,14 @@ def load_modules(root: Module) -> list[Module]:
 
 # Emit a complete C translation unit after the source graph succeeds.
 def compile_source(source: str, filename: str) -> str:
-	root = read_module(source, filename, 0, 0, entry=True)
+	root = read_module(source, filename, 0, 0, 0, entry=True)
 	modules = load_modules(root)
 	functions = [function for module in modules for function in module.functions.values()]
-	retained = tuple(function.c_name for module in modules[1:] for function in module.functions.values())
+	values = [value for module in modules for value in module.values.values()]
+	retained = (
+		*(function.c_name for module in modules[1:] for function in module.functions.values()),
+		*(value.binding.value.c for value in values),
+	)
 
 	lines = ['#include "wove_runtime.h"', ""]
 	# Define every native type before functions use it by value.
@@ -1059,6 +1134,12 @@ def compile_source(source: str, filename: str) -> str:
 		# Each record is emitted only for its defining file.
 		for record in module.records.values():
 			lines.extend(record_definition(record))
+	# Emit each module binding once, ahead of every function body.
+	for value in values:
+		lines.extend(module_value_definition(value))
+	# Separate static storage from function declarations when the file has bindings.
+	if values:
+		lines.append("")
 	lines.extend(signature(function) + ";" for function in functions)
 	lines.append("")
 	# Resolve names and trap locations in the function's defining file.
@@ -1069,5 +1150,5 @@ def compile_source(source: str, filename: str) -> str:
 			# Emit provider bodies only once, regardless of their local aliases.
 			for function in module.functions.values():
 				references = retained if function.c_name == "main" else ()
-				lines.extend(FunctionEmitter(function, module.bindings, module.type_bindings, path).emit(references))
+				lines.extend(FunctionEmitter(function, module, path).emit(references))
 	return "\n".join(lines)

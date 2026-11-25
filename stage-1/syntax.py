@@ -59,8 +59,9 @@ def first_ordinary(children: list[Node]) -> int:
 	return index
 
 
-# Follow only declaration containers when deciding whether a fn owns a name.
-def function_declaration(parents: list[tuple[int, list[Node]]]) -> bool:
+# Follow only declaration containers when deciding whether a form owns a name.
+def declaration_context(parents: list[tuple[int, list[Node]]], tag: str) -> bool:
+	is_function = tag == "fn"
 	in_bridge = False
 	# The synthetic accumulator has no tag and can host a standalone source form.
 	for depth in range(len(parents) - 1, 0, -1):
@@ -77,7 +78,7 @@ def function_declaration(parents: list[tuple[int, list[Node]]]) -> bool:
 		if head.text == "decls":
 			continue
 		# A supported C bridge contributes members after its provider and header.
-		if head.text != "bridge" or in_bridge:
+		if not is_function or head.text != "bridge" or in_bridge:
 			return False
 		index = first_ordinary(children)
 		# The ancestor frame must have read both bridge fields before this member.
@@ -91,7 +92,8 @@ def function_declaration(parents: list[tuple[int, list[Node]]]) -> bool:
 		):
 			return False
 		in_bridge = True
-	return True
+	# A standalone function also uses the fixed name slot.
+	return is_function
 
 
 # Separate metadata from the logical operands of a completed form.
@@ -104,7 +106,9 @@ def read_form(children: list[Node], line: int, parents: list[tuple[int, list[Nod
 	# The old attachment forms are reserved so they fail at their old spelling.
 	if tag in ("with-meta", "meta"):
 		raise SourceError(head.line)
-	named = (tag == "module" and len(parents) == 1) or (tag == "fn" and function_declaration(parents))
+	named = (tag == "module" and len(parents) == 1) or (
+		tag in ("fn", "let") and declaration_context(parents, tag)
+	)
 	metadata = []
 	operands = []
 	# A declaration's fixed name slot precedes any metadata entries.
