@@ -11,6 +11,8 @@
 	the name that will be used in C, and are indexed by original call node.
 	Retain source-level call sites before either inspection or lowering.`)
 
+	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value match_statement)))
+	(use wove-file "./matches.wove" (only plan_match_cases match_continues))
 	(use wove-file "../source/integer_ops.wove" (only read_integer_operation integer_byte_width is_integer_byte_conversion
 		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
@@ -31,7 +33,7 @@
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type find_record record_type record_index is_record_type
-			find_member member_value_type read_member_operand register_static_array find_fixed_array_type fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
+			find_member member_value_type read_member_operand register_static_array find_fixed_array_type fixed_array_type is_fixed_array is_enum_layout is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element byte_rows_owner_type is_native_integer native_integer_type find_native_node (type ScalarRecord)
 			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target record_receiver_type place_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
@@ -467,7 +469,8 @@
 					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local declaration)))
 					(if
 						(:doc "Types and module bindings have already been registered.")
-						(bool.not (bool.or (u32.eq (local kind) 48u32) (u32.eq (local kind) 15u32)))
+						(bool.not (bool.or (u32.eq (local kind) (local enum_declaration))
+							(bool.or (u32.eq (local kind) 48u32) (u32.eq (local kind) 15u32))))
 						(then
 							(let registered (call register_function (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local declaration) (local scope) (borrow-mut (local functions)) (local next_function)
@@ -890,7 +893,7 @@
 									(first (local first)) (previous_owner -1i32) (falls_through (bool false)) (move_site -1i32)))
 							(set (local first) (local index))))
 					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
-			(array.store (local statements) (local base) (call block_statement (local first) -1i32 (bool false)))
+			(array.store (local statements) (local base) (call block_statement (local first) -1i32 -1i32 (bool false)))
 			(return (call entry_at (array.load (local nodes) (local base)) (local next) 0u32))))
 
 	(fn find_function_parameter
@@ -2329,6 +2332,56 @@
 				(call runtime_expression 41u32 (call array_owner_type (local type)) (local node) (local count) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
+	(fn plan_enum_make
+		(:doc `Resolve a fieldless variant from its named nominal type and keep its checked ordinal.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (expected u32) (caller ScalarFunction) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local enum_constructor) 24u32))
+			(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
+			(let name (struct.get (local form) operand))
+			(if
+				(:doc "A fieldless constructor needs a type followed by exactly one variant.")
+				(i32.lt (local name) 0i32)
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let type_node (array.load (local nodes) (local name)))
+			(let variant (struct.get (local type_node) next_sibling))
+			(if
+				(:doc "Extra operands and omitted variants are malformed constructors.")
+				(bool.or (i32.lt (local variant) 0i32)
+					(i32.lt -1i32 (struct.get (array.load (local nodes) (local variant)) next_sibling)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings))
+				(struct.get (local caller) file) (struct.get (local caller) source_base) (local name)))
+			(if
+				(:doc "A constructor must select an enum visible in the defining file.")
+				(bool.not (bool.and (call is_record_type (local type))
+					(call is_enum_layout (array.load (local records) (call record_index (local type))))))
+				(then (return (call entry_at (local type_node) -1i32 24u32))))
+			(if
+				(:doc "An enum value retains its nominal type through assignment, calls, and returns.")
+				(bool.not (call value_matches_type (local expected) (local type)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let spelling (array.load (local nodes) (local variant)))
+			(if
+				(:doc "The constructor's variant is a bare name in the selected enum.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
+				(then (return (call entry_at (local spelling) -1i32 24u32))))
+			(let layout (array.load (local records) (call record_index (local type))))
+			(let ordinal (struct.get (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local layout) first) (struct.get (local layout) count) (local spelling)) ordinal))
+			(if
+				(:doc "Unknown variants point at the requested name.")
+				(i32.lt (local ordinal) 0i32)
+				(then (return (call entry_at (local spelling) -1i32 34u32))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local enum_constructor) (local type) (local ordinal) -1i32 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
 	(fn plan_record_make
 		(:doc `Check a constructor's complete named field set and seed values in source order.
 
@@ -2355,16 +2408,16 @@
 				(:doc "Report an unavailable type at its original name.")
 				(i32.lt (local type_row) 0i32)
 				(then (return (call entry_at (local spelling) -1i32 34u32))))
+			(let layout (array.load (local records) (local type_row)))
 			(if
-				(:doc "A native integer declaration has no fields to construct.")
-				(i32.lt (struct.get (array.load (local records) (local type_row)) count) 0i32)
+				(:doc "Native integers and fieldless enums do not have record fields to construct.")
+				(bool.or (i32.lt (struct.get (local layout) count) 0i32) (call is_enum_layout (local layout)))
 				(then (return (call entry_at (local spelling) -1i32 24u32))))
 			(let type (call record_type (local type_row)))
 			(if
 				(:doc "The result carries the defining record identity.")
 				(bool.not (call value_matches_type (local expected) (local type)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(let layout (array.load (local records) (local type_row)))
 			(let first (struct.get (local spelling) next_sibling))
 			(if
 				(:doc "Zero-initialize the entire native type for a caller-provided out object.")
@@ -2464,8 +2517,8 @@
 			(let type (struct.get (local value) type))
 			(let layout (array.load (local records) (call record_index (call record_receiver_type (local type)))))
 			(if
-				(:doc "Fixed arrays expose their items through array indexing.")
-				(call is_fixed_array (local layout))
+				(:doc "Fixed arrays and enums do not expose named record fields.")
+				(bool.or (call is_fixed_array (local layout)) (call is_enum_layout (local layout)))
 				(then (return (call entry_at (local reference) -1i32 24u32))))
 			(let field (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
 				(struct.get (local layout) first) (struct.get (local layout) count) (local name)))
@@ -2814,6 +2867,12 @@
 				(then (return (call plan_named_integer_operation (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (struct.get (local parts) head) (local index) (local tag) (local expected) (local caller) (local view_start)
 					(borrow-shared (local records)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "An enum constructor is a nominal scalar leaf even though its type has a layout row.")
+				(u32.eq (local tag) (local enum_constructor))
+				(then (return (call plan_enum_make (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local expected) (local caller) (borrow-shared (local records))
+					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A native storage constructor creates a new inactive owner for this binding.")
 				(u32.eq (local tag) (call native_alloc_kind))
@@ -3228,7 +3287,7 @@
 			(let then_start (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
 				(struct.get (local first_block) operand)))
 			(array.store (local statements) (local first)
-				(call block_statement (local then_start) -1i32 (bool true)))
+				(call block_statement (local then_start) -1i32 -1i32 (bool true)))
 			(let alternate (struct.get (local first_node) next_sibling))
 			(if
 				(:doc "An explicit else must be the final arm and supplies its own first statement.")
@@ -3253,7 +3312,7 @@
 					(let else_start (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
 						(struct.get (local else_arm) operand)))
 					(array.store (local statements) (local alternate)
-						(call block_statement (local else_start) -1i32 (bool true)))))
+						(call block_statement (local else_start) -1i32 -1i32 (bool true)))))
 			(return (call entry_at (local node) (local first) 0u32))))
 
 	(fn is_field_assignment
@@ -3436,6 +3495,26 @@
 				(:doc "A checked expression can refine its expected type to its actual type.")
 				(bool.not (i32.lt (local value) 0i32))
 				(then (set (local type) (struct.get (array.load (local expressions) (local value)) type))))
+			(if
+				(:doc "Use the checked subject's exact enum to resolve every case before planning the arms.")
+				(u32.eq (local kind) (local match_statement))
+				(then
+					(let subject (array.load (local nodes) (local value)))
+					(if
+						(:doc "Statement match accepts only fieldless enum subjects.")
+						(bool.not (bool.and (call is_record_type (local type))
+							(call is_enum_layout (array.load (local records) (call record_index (local type))))))
+						(then (return (call body_error (local caller) (struct.get (local subject) start)
+							(struct.get (local subject) end) 24u32))))
+					(let arms (call plan_match_cases (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (struct.get (local subject) next_sibling)
+						(array.load (local records) (call record_index (local type))) (borrow-mut (local statements))))
+					(if
+						(:doc "A missing, duplicate, or unknown case retains its source diagnostic.")
+						(u32.lt 0u32 (struct.get (local arms) error))
+						(then (return (call body_error (local caller) (struct.get (local arms) start)
+							(struct.get (local arms) end) (struct.get (local arms) error)))))
+					(set (local first) (struct.get (local arms) operand))))
 			(array.store (local statements) (local index)
 				(struct.new ScalarStatement (kind (local emitted_kind)) (target (local target)) (value (local value))
 					(type (local type))
@@ -3505,7 +3584,7 @@
 							(let owner (array.load (local statements) (struct.get (local exit) owner)))
 							(let arm (array.load (local statements) (local block)))
 							(array.store (local statements) (local block)
-								(call block_statement (struct.get (local arm) first) (local previous_owner) (local falls_through)))
+								(call block_statement (struct.get (local arm) first) (struct.get (local arm) target) (local previous_owner) (local falls_through)))
 							(if
 								(:doc "A continuing loop must keep every owner that was live at entry.")
 								(bool.and (bool.and (local falls_through) (u32.eq (struct.get (local owner) kind) 25u32))
@@ -3532,10 +3611,16 @@
 									(set (local falls_through) (bool true)))
 								(else
 									(let first (struct.get (local owner) first))
-									(set (local falls_through)
-										(bool.or (local falls_through)
-											(bool.or (i32.eq (local block) (local first))
-												(struct.get (array.load (local statements) (local first)) falls_through))))
+									(if
+										(:doc "An exhaustive match can continue only through one of its checked arms.")
+										(u32.eq (struct.get (local owner) kind) (local match_statement))
+										(then (set (local falls_through) (call match_continues (borrow-shared (local nodes))
+											(borrow-shared (local statements)) (local first))))
+										(else
+											(set (local falls_through)
+												(bool.or (local falls_through)
+													(bool.or (i32.eq (local block) (local first))
+														(struct.get (array.load (local statements) (local first)) falls_through))))))
 									(set (local block) (struct.get (local exit) block))
 									(set (local index) (struct.get (local exit) statement)))))
 						(else
@@ -3579,7 +3664,7 @@
 					(return (call body_error (local caller) (struct.get (local node) start)
 						(struct.get (local node) end) 24u32))))
 			(array.store (local statements) (local outer)
-				(call block_statement (struct.get (local caller) first_statement) (local previous_owner) (local falls_through)))
+				(call block_statement (struct.get (local caller) first_statement) -1i32 (local previous_owner) (local falls_through)))
 			(return (call body_success (local site_count)))))
 
 	(fn plan_bodies
