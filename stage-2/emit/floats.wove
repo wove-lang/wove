@@ -1,0 +1,147 @@
+(module emit_floats
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Write native floating literals, bit copies, and checked numerical conversions.`)
+
+	(use wove-file "../source/types.wove" (only is_builtin_float (value f32_type) (value f64_type)))
+	(use wove-file "../source/float_ops.wove" (only (value float_from_bits) (value float_to_bits)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "./text.wove" (only c_byte c_span c_cast c_literal_text write_temporary_name))
+	(use wove-file "./runtime.wove" (only close_runtime_call))
+
+	(let point_zero ".0")
+	(let from_u32_bits "wvrt_f32_from_bits(")
+	(let to_u32_bits "wvrt_f32_to_bits(")
+	(let from_u64_bits "wvrt_f64_from_bits(")
+	(let to_u64_bits "wvrt_f64_to_bits(")
+	(let narrow_f32 "wvrt_f32_narrow(")
+	(let float_to_integer "wvrt_float_to_integer(")
+	(let i8_bounds ",-129.0,0x1p7")
+	(let u8_bounds ",-1.0,0x1p8")
+	(let i32_bounds ",-2147483649.0,0x1p31")
+	(let u32_bounds ",-1.0,0x1p32")
+	(let u64_bounds ",-1.0,0x1p64")
+
+	(fn write_floating_literal
+		(:doc `Retain the original sign and digits and let Clang round to the final width.`)
+		(params (source (shared-array u8)) (row ScalarExpression)
+			(output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (call c_span (borrow-shared (local source)) (struct.get (local row) start)
+				(struct.get (local row) end) (borrow-mut (local output)) (local offset) (local writing)))
+			(if
+				(:doc "An integer-shaped decimal must become a C floating literal, including negative zero.")
+				(i32.eq (struct.get (local row) target) 2i32)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local point_zero))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(if
+				(:doc "Use the binary32 suffix so a float is never rounded through double.")
+				(u32.eq (struct.get (local row) type) (local f32_type))
+				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 70u8 (local writing)))))
+			(return (local cursor))))
+
+	(fn open_bit_copy
+		(:doc `Choose the runtime bit-copy function from the direction and float width.`)
+		(params (type u32) (from_bits bool) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "Select a word-sized bit copy without a numeric conversion.")
+				(u32.eq (local type) (local f32_type))
+				(then
+					(if
+						(:doc "Copy a u32 into a C float object.")
+						(local from_bits)
+						(then (return (call c_literal_text (borrow-shared (local from_u32_bits))
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(return (call c_literal_text (borrow-shared (local to_u32_bits))
+						(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Copy a u64 into a C double object.")
+				(local from_bits)
+				(then (return (call c_literal_text (borrow-shared (local from_u64_bits))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local to_u64_bits))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_integer_bounds
+		(:doc `Write the exact open interval whose truncated values fit the destination type.`)
+		(params (type u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "The lower limit is one less than INT8_MIN.")
+				(u32.eq (local type) 61u32)
+				(then (return (call c_literal_text (borrow-shared (local i8_bounds))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "The unsigned byte upper limit is exactly 256.")
+				(u32.eq (local type) 10u32)
+				(then (return (call c_literal_text (borrow-shared (local u8_bounds))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Both signed word limits are exactly representable in double.")
+				(u32.eq (local type) 5u32)
+				(then (return (call c_literal_text (borrow-shared (local i32_bounds))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "The unsigned word upper limit is exactly 2^32.")
+				(u32.eq (local type) 11u32)
+				(then (return (call c_literal_text (borrow-shared (local u32_bounds))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local u64_bounds))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_floating_conversion
+		(:doc `Convert one captured operand and pass the original span to checks that can trap.`)
+		(params (source (shared-array u8)) (row ScalarExpression) (input u32) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let kind (struct.get (local row) kind))
+			(let target (struct.get (local row) type))
+			(let from_bits (u32.eq (local kind) (local float_from_bits)))
+			(let to_bits (u32.eq (local kind) (local float_to_bits)))
+			(let checked_integer (bool.and (bool.not (bool.or (local from_bits) (local to_bits)))
+				(bool.not (call is_builtin_float (local target)))))
+			(let narrow (bool.and (u32.eq (local input) (local f64_type)) (u32.eq (local target) (local f32_type))))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Bit operations pass the original type to a width-matched copy.")
+				(bool.or (local from_bits) (local to_bits))
+				(then
+					(let-mut type (local input))
+					(if (local from_bits) (then (set (local type) (local target))))
+					(set (local cursor) (call open_bit_copy (local type) (local from_bits)
+						(borrow-mut (local output)) (local cursor) (local writing))))
+				(else
+					(if
+						(:doc "The narrow helper checks finite range and rounds directly to float.")
+						(local narrow)
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local narrow_f32))
+							(borrow-mut (local output)) (local cursor) (local writing))))
+						(else
+							(set (local cursor) (call c_cast (borrow-mut (local output)) (local cursor) (local target) (local writing)))
+							(if
+								(:doc "A float-to-integer cast must check the source before truncating.")
+								(local checked_integer)
+								(then (set (local cursor) (call c_literal_text (borrow-shared (local float_to_integer))
+									(borrow-mut (local output)) (local cursor) (local writing)))))))))
+			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (struct.get (local row) first)
+				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "Only integer destinations use a destination-specific open interval.")
+				(local checked_integer)
+				(then (set (local cursor) (call write_integer_bounds (local target)
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(if
+				(:doc "Attach the Wove span to either checked numerical conversion.")
+				(bool.or (local checked_integer) (local narrow))
+				(then (return (call close_runtime_call (borrow-mut (local output)) (local cursor)
+					(struct.get (local row) target) (struct.get (local row) start) (struct.get (local row) end) (local writing)))))
+			(if
+				(:doc "Bit copies close a runtime call. Plain C casts have no call to close.")
+				(bool.or (local from_bits) (local to_bits))
+				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+			(return (local cursor)))))
