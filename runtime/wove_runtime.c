@@ -93,6 +93,12 @@ void wvrt_check_c_handle(const volatile void *wvrthandle, int32_t wvrtfile,
 	if (wvrthandle == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "missing C handle"); }
 }
 
+// Guard the pointer-out slot before C can overwrite a live owned handle.
+void wvrt_check_c_handle_empty(const volatile void *wvrt_handle, int32_t wvrt_file,
+	int32_t wvrt_start, int32_t wvrt_end) {
+	if (wvrt_handle != NULL) { wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C handle is already initialized"); }
+}
+
 // Validate the requested prefix before a C call borrows the original byte storage.
 void wvrt_check_c_bytes(wvrt_slice wvrtview, int64_t wvrtsize, int64_t wvrtcount,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
