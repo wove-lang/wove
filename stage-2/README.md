@@ -1130,7 +1130,7 @@ executable reads host arguments, resolves command and project settings, and
 reads source files through explicit checked-in POSIX C-header imports.
 
 ```sh
-build/wovec cc --check input.wove
+build/wovec cc --check input.wove other.wove
 build/wovec cc input.wove -o build/input
 build/wovec bin input.wove -o build/input
 build/input
@@ -1142,17 +1142,19 @@ probes used by both native commands and for the final Clang invocation in
 The driver applies the resolved standard after forwarded options at both
 the Clang driver and frontend levels.
 
-`cc` and `bin` take one explicit UTF-8 source path. Builds require an
-explicit output target with a basename. `cc --check` checks the selected
-entry, imports, embeds, and C availability without creating output.
-It exits successfully for a valid entry and ignores any supplied `-o`.
+Ordinary `cc` and `bin` builds take one explicit UTF-8 source path and
+require an output target with a basename. `cc --check` accepts one or
+more explicit UTF-8 source paths and checks each entry's imports, embeds,
+and C availability without creating output. It checks entries in operand
+order, continues after an entry fails, and exits successfully only if
+every entry passes. A check ignores any supplied `-o`.
 The `cc` command and ordinary `bin` builds write
 `main.c` below `<target-parent>/.wovec-cache/<profile>/<target-name>/bin/`.
 To compile retained C manually when it uses runtime operations, use
 `-I runtime` and link `runtime/wove_runtime.c`. The driver reads `wovec.jsonc` from its
 working directory for profile selection. `--profile NAME` selects that
-profile and uses its name in the retained path. Argument and source
-failures print one JSON diagnostic to stderr.
+profile and uses its name in the retained path. Diagnostics go to stderr
+as one JSON object per line.
 
 The entry can select names from other files with `use wove-file`. The
 resolver opens only active edges under the native selection context.

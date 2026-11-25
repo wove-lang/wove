@@ -40,9 +40,13 @@ def check_stream(label, phase, name, actual, expected, fixtures):
 def check_phase(label, phase, result, expected, fixtures, diagnostic="-"):
 	assert result.returncode == int(expected["exit"]), (label, phase, result)
 	check_stream(label, phase, "stdout", result.stdout, expected.get("stdout", ""), fixtures)
-	# Keep JSON diagnostics structural even when the case has no output snapshot.
+	# Compare one compact JSON record per line, retaining the order of check entries.
 	if diagnostic != "-":
-		assert json.loads(result.stderr) == json.loads(diagnostic), (label, phase, result.stderr)
+		records = json.loads(diagnostic)
+		if not isinstance(records, list):
+			records = [records]
+		assert result.stderr.count(b"\n") == len(records), (label, phase, result.stderr)
+		assert [json.loads(line) for line in result.stderr.splitlines()] == records, (label, phase, result.stderr)
 	# A byte-level snapshot can additionally check the original formatting.
 	if diagnostic == "-" or "stderr" in expected:
 		check_stream(label, phase, "stderr", result.stderr, expected.get("stderr", ""), fixtures)
@@ -243,8 +247,6 @@ def check_case(compiler, clang, runtime, fixtures, row):
 			check_tool_calls(root, tool)
 		# Check-only runs and rejected publication preserve the existing entries and their contents.
 		if preserve:
-			if result.returncode:
-				assert result.stderr.count(b"\n") == 1, (label, result.stderr)
 			after = publication_snapshot(root)
 			# The manifest already checked any compiler observation recorded by the wrapper.
 			if tool and ("arguments" in tool or "queries" in tool):
@@ -275,8 +277,6 @@ def check_case(compiler, clang, runtime, fixtures, row):
 				subprocess.run([*clang, *flags, "-I", Path("runtime").resolve(), str(root / retained), runtime, "-o", str(program)],
 					cwd=root, check=True, timeout=30)
 				run_program(root, program, label, fixtures, run_expected)
-		elif diagnostic != "-":
-			assert result.stderr.count(b"\n") == 1, (label, result.stderr)
 
 
 # Run each external scenario with the same compiler settings as the suite.

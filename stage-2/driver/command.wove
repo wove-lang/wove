@@ -1,7 +1,7 @@
 (module native_cli_command
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Resolve a native invocation and run cc or bin from one explicit entry.
+	(:doc `Resolve a native invocation to check explicit entries or build one entry.
 
 	Use the resolver's original argument rows to lend the source path,
 	output target, and profile to the driver. An optional wovec.jsonc
@@ -26,21 +26,62 @@
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 
 	(let explicit_bin_target "bin requires one explicit source and an explicit output target")
-	(let explicit_check_source "cc --check requires one explicit source")
+	(let explicit_check_source "cc --check requires at least one explicit source")
 	(let clang_required "bin currently requires clang")
 
 	(fn report_required_target
 		(:doc `Keep the explicit-operand diagnostic specific to the selected command.`)
-		(params (bin bool) (check_only bool) (index i32)) (returns i32)
+		(params (bin bool) (index i32)) (returns i32)
 		(body
 			(if (local bin) (then (return (call report_argv 12u32 (local index) (borrow-shared (local explicit_bin_target))))))
-			(if (local check_only) (then (return (call report_argv 12u32 (local index) (borrow-shared (local explicit_check_source))))))
 			(return (call report_argv 12u32 (local index) (borrow-shared (local explicit_target_required))))))
+
+	(fn admit_source_path
+		(:doc "Require the UTF-8 path spelling used by source and argv diagnostics.")
+		(params (path (shared-array u8)) (index i32)) (returns i32)
+		(body
+			(if
+				(:doc "Point an invalid path at its original operand before a file read.")
+				(i32.lt -1i32 (call admit_source (borrow-shared (local path))))
+				(then (return (call report_argv 3u32 (local index) (borrow-shared (local non_utf8_source))))))
+			(return 0i32)))
+
+	(fn check_entries
+		(:doc "Check each explicit entry in operand order and retain the highest reported exit status.")
+		(:expect (tests "stage-2/cli/native/check.tsv") (issues "gh:wove-lang/wove:94"))
+		(params (bytes (shared-array u8)) (arguments (shared-array CommandArgument)) (first i32) (rows i32)
+			(options (shared-array u8)) (no_output (shared-array u8)) (protection BuildProtection))
+		(returns i32)
+		(body
+			(let-mut row (local first))
+			(let-mut status 0i32)
+			(while
+				(:doc "Each graph reports its own failure and leaves subsequent entries available for checking.")
+				(i32.lt -1i32 (local row))
+				(body
+					(let input (array.load (local arguments) (local row)))
+					(let start (struct.get (local input) start))
+					(let end (struct.get (local input) end))
+					(let-mut result (call admit_source_path (borrow-shared (array.range (local bytes) (local start) (local end)))
+						(struct.get (local input) argv_index)))
+					(if
+						(:doc "Only admitted path spellings can be used to open the source graph.")
+						(i32.eq (local result) 0i32)
+						(then (set (local result) (call compile_input
+							(borrow-shared (array.range (local bytes) (local start) (local end)))
+							(borrow-shared (local no_output)) (borrow-shared (local no_output))
+							(borrow-shared (local options)) (local protection) -1i32 (bool true)))))
+					(if
+						(:doc "Preserve a diagnostic stream failure even if later source checks produce ordinary failures.")
+						(i32.lt (local status) (local result))
+						(then (set (local status) (local result))))
+					(set (local row) (call first_command_argument (borrow-shared (local arguments))
+						(i32.add.wrapping (local row) 1i32) (local rows) -1i32))))
+			(return (local status))))
 
 	(fn execute_cc
 		(:doc "Forward the same resolved probe options to cc and check-only compilation.")
-		(:expect (tests "stage-2/cli/native/check.tsv") (issues "gh:wove-lang/wove:94"))
-		(params (path (shared-array u8)) (retained (shared-array u8)) (protection BuildProtection) (target_index i32)
+		(params (first i32) (retained (shared-array u8)) (protection BuildProtection) (target_index i32)
 			(check_only bool) (bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
 			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting)))
 		(returns i32)
@@ -51,10 +92,20 @@
 			(let frontend (call write_probe_options (borrow-shared (local bytes)) (borrow-shared (local config))
 				(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes))
 				(borrow-shared (local settings)) (borrow-shared (local no_stage)) (borrow-mut (local options))))
+			(let end (struct.get (local frontend) probe_end))
+			(if
+				(:doc "Every explicit check entry uses the same resolved target and probe options.")
+				(local check_only)
+				(then (return (call check_entries (borrow-shared (local bytes)) (borrow-shared (local arguments))
+					(local first) (struct.get (local invocation) rows)
+					(borrow-shared (array.range (local options) 0i32 (local end)))
+					(borrow-shared (local no_stage)) (local protection)))))
+			(let input (array.load (local arguments) (local first)))
 			(return (call compile_input
-				(borrow-shared (local path))
+				(borrow-shared (array.range (local bytes) (struct.get (local input) start) (struct.get (local input) end)))
 				(borrow-shared (local retained)) (borrow-shared (local no_stage))
-				(borrow-shared (array.range (local options) 0i32 (struct.get (local frontend) probe_end))) (local protection) (local target_index) (local check_only)))))
+				(borrow-shared (array.range (local options) 0i32 (local end)))
+				(local protection) (local target_index) (bool false)))))
 
 	(fn execute_build
 		(:doc `Pass the resolved source and profile to checking or compilation.`)
@@ -69,26 +120,39 @@
 			(let checked (call first_command_argument (borrow-shared (local arguments)) 0i32 (local rows) -5i32))
 			(let check_only (bool.and (i32.lt -1i32 (local checked))
 				(u32.eq (struct.get (array.load (local arguments) (local checked)) scalar) 1u32)))
+			(let first (call first_command_argument (borrow-shared (local arguments)) 0i32 (local rows) -1i32))
 			(if
-				(:doc "Only cc and bin consume one explicit source operand in this driver.")
+				(:doc "Check mode accepts every explicit input and has no publication destination.")
+				(local check_only)
+				(then
+					(if
+						(:doc "Report the missing source before preparing options for the entry checks.")
+						(i32.lt (local first) 0i32)
+						(then (return (call report_argv 12u32 0i32 (borrow-shared (local explicit_check_source))))))
+					(let no_output (array.alloc u8 0i32))
+					(return (call execute_cc (local first) (borrow-shared (local no_output))
+						(call no_destination_protection) -1i32 (bool true)
+						(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+						(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))))))
+			(if
+				(:doc "Ordinary compilation takes one explicit source with cc or bin.")
 				(bool.or (bool.not (bool.or (u32.eq (local command) 1u32) (local bin)))
 					(i32.eq (local operands) 0i32))
-				(then (return (call report_required_target (local bin) (local check_only) 0i32))))
-			(let first (call first_command_argument (borrow-shared (local arguments)) 0i32 (local rows) -1i32))
+				(then (return (call report_required_target (local bin) 0i32))))
 			(if
 				(:doc "Point at the first extra source operand when the caller supplies several.")
 				(i32.lt 1i32 (local operands))
 				(then
 					(let extra (call first_command_argument (borrow-shared (local arguments))
 						(i32.add.wrapping (local first) 1i32) (local rows) -1i32))
-					(return (call report_required_target (local bin) (local check_only)
+					(return (call report_required_target (local bin)
 						(struct.get (array.load (local arguments) (local extra)) argv_index)))))
 			(let output (call command_setting (local invocation) (borrow-shared (local arguments))
 				(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 19i32))
 			(if
 				(:doc "Publication requires an explicit build.output option such as -o.")
-				(bool.and (bool.not (local check_only)) (bool.not (u32.eq (struct.get (local output) origin) 2u32)))
-				(then (return (call report_required_target (local bin) (local check_only) 0i32))))
+				(bool.not (u32.eq (struct.get (local output) origin) 2u32))
+				(then (return (call report_required_target (local bin) 0i32))))
 			(let input (array.load (local arguments) (local first)))
 			(let profile (call first_command_argument (borrow-shared (local arguments)) 0i32 (local rows) -2i32))
 			(let-mut start 0i32)
@@ -113,19 +177,9 @@
 							(borrow-shared (local clang_required))))))))
 			(let path_start (struct.get (local input) start))
 			(let path_end (struct.get (local input) end))
-			(if
-				(:doc `A source diagnostic needs a UTF-8 argument spelling.`)
-				(i32.lt -1i32 (call admit_source (borrow-shared (array.range (local bytes) (local path_start) (local path_end)))))
-				(then (return (call report_argv 3u32 (struct.get (local input) argv_index) (borrow-shared (local non_utf8_source))))))
-			(if
-				(:doc "Check-only invocations have no publication destination.")
-				(local check_only)
-				(then
-					(let no_output (array.alloc u8 0i32))
-					(return (call execute_cc (borrow-shared (array.range (local bytes) (local path_start) (local path_end)))
-						(borrow-shared (local no_output)) (call no_destination_protection) -1i32 (bool true)
-						(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
-						(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))))))
+			(let admitted (call admit_source_path (borrow-shared (array.range (local bytes) (local path_start) (local path_end)))
+				(struct.get (local input) argv_index)))
+			(if (i32.lt 0i32 (local admitted)) (then (return (local admitted))))
 			(let target (array.load (local arguments) (struct.get (local output) row)))
 			(let target_start (struct.get (local target) start))
 			(let target_end (struct.get (local target) end))
@@ -160,7 +214,7 @@
 						(borrow-shared (local retained)) (local protection) (local target_index)
 						(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 						(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))))))
-			(return (call execute_cc (borrow-shared (array.range (local bytes) (local path_start) (local path_end)))
+			(return (call execute_cc (local first)
 				(borrow-shared (local retained)) (local protection) (local target_index) (bool false)
 				(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))))))
