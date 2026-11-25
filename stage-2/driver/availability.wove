@@ -9,6 +9,7 @@
 	(use wove-file "../c/headers.wove" (only c_header_form))
 	(use wove-file "../clang/query.wove" (only query_clang_frontend (type QuerySite)))
 	(use wove-file "../clang/index.wove" (only clang_declaration (type ClangIndex) (type ClangDeclaration)))
+	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes include_position write_includes (type CInclude)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
@@ -76,11 +77,11 @@
 							(slice.store (local results) (local row) (int.convert u8 (local status)))))
 					(set (local row) (i32.add.wrapping (local row) 1i32))))))
 
-	(fn lookup_header
+	(fn lookup_header_ast
 		(:doc "Grow bounded capture and reader storage when an otherwise usable header needs more room.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
 			(first i32) (program (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8))
-			(directory (shared-slice u8)) (results (mut-slice u8)))
+			(directory (shared-slice u8)) (prefix (shared-slice u8)) (results (mut-slice u8)))
 		(returns u32)
 		(body
 			(let site (call selected_site (slice.load (local bindings) (local first))))
@@ -94,7 +95,7 @@
 					(let-mut decls (array.alloc ClangDeclaration (int.convert i32 (u32.shr (int.convert u32 (local width)) 6i32))))
 					(let-mut names (array.alloc u8 (int.convert i32 (u32.shr (int.convert u32 (local width)) 1i32))))
 					(let query (call query_clang_frontend (borrow-shared (local program)) (borrow-shared (local options))
-						(borrow-shared (local directory)) (borrow-shared (local header)) (local site)
+						(borrow-shared (local directory)) (borrow-shared (local prefix)) (borrow-shared (local header)) (local site)
 						(borrow-mut (local capture)) (borrow-mut (local nodes)) (borrow-mut (local decls)) (borrow-mut (local names))))
 					(let error (record.get (local query) error))
 					(if
@@ -120,6 +121,47 @@
 						(then (return 75u32)))
 					(set (local width) (i32.add.wrapping (local width) (local width)))))
 			(return 74u32)))
+
+	(fn lookup_header
+		(:doc "Give the queried header the same preceding include directives as the emitted C unit.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
+			(first i32) (program (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8))
+			(directory (shared-slice u8)) (results (mut-slice u8)))
+		(returns u32)
+		(body
+			(let capacity (call include_capacity (borrow-shared (local bindings))))
+			(if
+				(:doc "The include plan must fit in the driver's slices.")
+				(i32.lt (record.get (local capacity) bytes) 0i32)
+				(then (return 75u32)))
+			(let-mut paths (array.alloc u8 (record.get (local capacity) bytes)))
+			(let-mut headers (array.alloc CInclude (record.get (local capacity) rows)))
+			(let plan (call prepare_includes (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (borrow-mut (local paths)) (borrow-mut (local headers))))
+			(if
+				(:doc "An invalid include plan cannot be passed to the frontend.")
+				(u32.lt 0u32 (record.get (local plan) error))
+				(then (return 75u32)))
+			(let before (call include_position (borrow-shared (local paths)) (borrow-shared (local headers))
+				(record.get (local plan) count) (borrow-shared (local header))))
+			(if
+				(:doc "The target must have a position in the resolved include order.")
+				(i32.lt (local before) 0i32)
+				(then (return 75u32)))
+			(let-mut empty (array.alloc u8 0i32))
+			(let width (call write_includes (borrow-shared (local paths)) (borrow-shared (local headers))
+				(local before) (borrow-mut (local empty)) (bool false)))
+			(if
+				(:doc "Bound the complete prefix before allocating output storage.")
+				(u32.lt 2147483647u32 (local width))
+				(then (return 75u32)))
+			(let-mut prefix (array.alloc u8 (int.convert i32 (local width))))
+			(let end (call write_includes (borrow-shared (local paths)) (borrow-shared (local headers))
+				(local before) (borrow-mut (local prefix)) (bool true)))
+			(return (call lookup_header_ast (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
+				(borrow-shared (local options)) (borrow-shared (local header)) (borrow-shared (local directory))
+				(borrow-shared (slice.range (local prefix) 0i32 (int.convert i32 (local end)))) (borrow-mut (local results))))))
 
 	(fn probe_include_path
 		(:doc "Use the defining Wove file's directory for project headers in retained-only builds.")

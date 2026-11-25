@@ -1,0 +1,104 @@
+(module native_probe_options
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Keep dependency and compilation database output options with the final C build.")
+
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+
+	(let dependency_switches "-M\u0000-MM\u0000-MD\u0000-MMD\u0000-MG\u0000-MP\u0000-MV\u0000")
+	(let dependency_operand_prefix "-M")
+
+	(fn packed_option_end
+		(:doc "Find the terminator or the end of the packed argument view.")
+		(params (options (shared-slice u8)) (start i32)) (returns i32)
+		(body
+			(let-mut end (local start))
+			(while
+				(:doc "Never read beyond the supplied view while seeking the separator.")
+				(bool.and (i32.lt (local end) (slice.len (local options)))
+					(bool.not (u8.eq (slice.load (local options) (local end)) 0u8)))
+				(body (set (local end) (i32.add.wrapping (local end) 1i32))))
+			(return (local end))))
+
+	(fn dependency_switch
+		(:doc "Match standalone Clang dependency-generation controls exactly.")
+		(params (options (shared-slice u8)) (start i32) (end i32)) (returns bool)
+		(body
+			(let-mut at 0i32)
+			(while
+				(:doc "Try each complete control spelling in the packed table.")
+				(i32.lt (local at) (slice.len (local dependency_switches)))
+				(body
+					(let stop (call packed_option_end (borrow-shared (local dependency_switches)) (local at)))
+					(if
+						(:doc "A prefix match alone cannot consume another frontend option.")
+						(call same_bytes (borrow-shared (local options)) (local start) (local end)
+							(borrow-shared (local dependency_switches)) (local at) (local stop))
+						(then (return (bool true))))
+					(set (local at) (i32.add.wrapping (local stop) 1i32))))
+			(return (bool false))))
+
+	(fn dependency_operand
+		(:doc "Recognize the joined and separate forms of -MF, -MT, -MQ, and -MJ.")
+		(params (options (shared-slice u8)) (start i32) (end i32)) (returns bool)
+		(body
+			(if
+				(:doc "The two-byte prefix must precede a complete option name.")
+				(i32.lt (i32.sub.wrapping (local end) (local start)) 3i32)
+				(then (return (bool false))))
+			(let kind (i32.add.wrapping (local start) 2i32))
+			(if
+				(:doc "Only the shared dependency prefix admits a file or target operand.")
+				(bool.not (call same_bytes (borrow-shared (local options)) (local start) (local kind)
+					(borrow-shared (local dependency_operand_prefix)) 0i32 2i32))
+				(then (return (bool false))))
+			(let byte (slice.load (local options) (local kind)))
+			(return (bool.or (bool.or (u8.eq (local byte) 70u8) (u8.eq (local byte) 84u8))
+				(bool.or (u8.eq (local byte) 81u8) (u8.eq (local byte) 74u8))))))
+
+	(fn copy_probe_options
+		(:doc "Copy ordered frontend options while consuming dependency controls and their operands.")
+		(params (options (shared-slice u8)) (output (mut-slice u8))) (returns i32)
+		(body
+			(let length (slice.len (local options)))
+			(let-mut cursor 0i32)
+			(let-mut start 0i32)
+			(while
+				(:doc "Each step crosses one complete option or an option and its separate operand.")
+				(i32.lt (local start) (local length))
+				(body
+					(let end (call packed_option_end (borrow-shared (local options)) (local start)))
+					(if
+						(:doc "A truncated list must never reach the process launcher.")
+						(i32.eq (local end) (local length))
+						(then (return -1i32)))
+					(let-mut next (i32.add.wrapping (local end) 1i32))
+					(if
+						(:doc "A filename or target supplied separately belongs to the omitted output option.")
+						(call dependency_operand (borrow-shared (local options)) (local start) (local end))
+						(then
+							(if
+								(:doc "A joined operand already ends at the next argument.")
+								(i32.eq (i32.sub.wrapping (local end) (local start)) 3i32)
+								(then
+									(let stop (call packed_option_end (borrow-shared (local options)) (local next)))
+									(if
+										(:doc "A separate operand requires its own terminator.")
+										(i32.eq (local stop) (local length))
+										(then (return -1i32)))
+									(set (local next) (i32.add.wrapping (local stop) 1i32)))))
+						(else
+							(if
+								(:doc "Copy ordinary options with their original separator.")
+								(bool.not (call dependency_switch (borrow-shared (local options)) (local start) (local end)))
+								(then
+									(set (local cursor) (call append_bytes
+										(borrow-shared (slice.range (local options) (local start) (local next)))
+										(borrow-mut (local output)) (local cursor)))
+									(if
+										(:doc "Propagate a destination capacity failure.")
+										(i32.lt (local cursor) 0i32)
+										(then (return -1i32)))))))
+					(set (local start) (local next))))
+			(return (local cursor)))))

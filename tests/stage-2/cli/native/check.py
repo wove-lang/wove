@@ -116,9 +116,11 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		stages = {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()}
 		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
 			for argument in json.loads(argv)]
+		preserved = {root / path: (root / path).read_bytes() for path in (tool or {}).get("unchanged", [])}
 		env, previous = prepare_tool(root, clang, tool, target) if tool else (None, None)
 		result = subprocess.run([compiler, *arguments], cwd=root, env=env, capture_output=True, timeout=30)
 		assert (result.returncode, result.stdout) == (int(status), b""), (label, result)
+		assert all(path.read_bytes() == original for path, original in preserved.items()), label
 		# Check optional probes before inspecting published artifacts.
 		if tool:
 			check_tool_calls(root, tool)
