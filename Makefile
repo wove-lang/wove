@@ -294,6 +294,7 @@ $(STAGE1)/wovec.c $(SOURCE_PROBE_C):
 
 # Build the seed-selected entry and its fixed bootstrap runtime in one C translation unit.
 $(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(RUNTIME) $(RUNTIME_HEADER) $(BOOTSTRAP_RUNTIME)
+	@printf 'Building %s\n' "$@"
 	$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime \
 		-include "$(RUNTIME)" -include "$(BOOTSTRAP_RUNTIME)" "$<" -o "$@"
 
@@ -328,7 +329,7 @@ $(STAGE2)/wovec.c: $(BOOTSTRAP_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_VERS
 
 # Build the second compiler and the shared runtime in one C translation unit.
 $(NATIVE_COMPILER): $(STAGE2)/wovec.c $(RUNTIME) $(RUNTIME_HEADER) $(BUILD_VERSION) force-build-info
-	$(call build_versioned,stage=$$(mktemp -d "$(@D)/.wovec.XXXXXX"); trap 'rm -rf -- "$$stage"' 0; \
+	$(call build_versioned,printf 'Building %s\n' "$@"; stage=$$(mktemp -d "$(@D)/.wovec.XXXXXX"); trap 'rm -rf -- "$$stage"' 0; \
 		$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime \
 			-include "$(RUNTIME)" "$<" -o "$$stage/wovec"; mv "$$stage/wovec" "$@")
 
