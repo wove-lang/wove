@@ -1088,6 +1088,12 @@ build/wovec bin input.wove -o build/input
 build/input
 ```
 
+The profile's `cc.cstd` selects C11, C17, or C23 for the capability
+probes used by both native commands and for the final Clang invocation in
+`bin`. The default is C11. The `--cstd` option overrides the profile.
+The driver applies the resolved standard after forwarded options at both
+the Clang driver and frontend levels.
+
 `cc` and `bin` take one explicit UTF-8 source path and an explicit output
 target with a basename. The `cc` command and ordinary `bin` builds write
 `main.c` below `<target-parent>/.wovec-cache/<profile>/<target-name>/bin/`.

@@ -8,3 +8,10 @@ int wove_query_exact_suffix(void);
 
 // Enum tags have a separate namespace from the probe's enumerator.
 enum wvpr_header_present { wove_query_unrelated = 0 };
+
+// Expose a declaration that identifies the language mode of the standalone probe.
+#if __STDC_VERSION__ == 201112L
+int wove_query_c11(void);
+#elif __STDC_VERSION__ == 201710L
+int wove_query_c17(void);
+#endif
