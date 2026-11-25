@@ -77,9 +77,10 @@ NATIVE_STDIO := stage-2/io/stdio.wove
 DRIVER_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove sys_stat.wove fcntl.wove unistd.wove errno.wove)
 NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
-	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) $(PROCESS_LAUNCHER_SOURCES) $(DRIVER_C_PROVIDERS))
+	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove \
+	$(PROCESS_LAUNCHER_SOURCES) $(DRIVER_C_PROVIDERS))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
-PROCESS_MODULES := stage-2/io/process.wove stage-2/io/capture/descriptors.wove stage-2/io/capture/child.wove
+PROCESS_MODULES := stage-2/io/process.wove stage-2/io/temporary.wove stage-2/io/capture/descriptors.wove stage-2/io/capture/child.wove
 PROCESS_FIXTURES := tests/stage-2/process
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
 PROCESS_DESCRIPTOR_CASES := $(PROCESS_FIXTURES)/descriptors.tsv
@@ -94,6 +95,10 @@ TEST_RUNTIME := $(STAGE2)/test/libwove_test.a
 CLANG_FIXTURES := tests/stage-2/clang
 CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
+CLANG_LIVE := $(STAGE2)/clang/live
+CLANG_LIVE_SOURCES := $(sort $(CLANG_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) \
+	$(PROCESS_LAUNCHER_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/c-stdlib/stdio.wove \
+	stage-2/json/frame.wove stage-2/clang/query.wove stage-2/clang/run.wove)
 AST_FIXTURES := tests/support/ast
 AST_PROBE := $(STAGE2)/ast/probe
 GCC_FIXTURES := tests/stage-2/gcc
@@ -216,9 +221,18 @@ test-stage-2-process: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2-process: $(SOURCE_SCAN)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" "$(PROCESS_CASES)" "$(PROCESS_DESCRIPTOR_CASES)" "$(PROCESS_INHERITANCE_CASES)"
 
-# Check generated C input and captured JSON separately from native command launching.
-test-stage-2-clang: $(AST_PROBE) $(CLANG_TEMPLATE)
+# Check generated C, archived JSON, and live tool invocation.
+test-stage-2-clang: $(AST_PROBE) $(CLANG_LIVE) $(CLANG_TEMPLATE)
 	sh "$(AST_FIXTURES)/check.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" "$(CLANG_FIXTURES)/cases.tsv" $(CLANG)
+	sh "$(CLANG_FIXTURES)/check-live.sh" "$(CLANG_LIVE)" "$(CLANG_FIXTURES)/live.tsv" "$(CLANG)"
+
+# Embed the same checked-in template in the standalone native header query.
+$(CLANG_LIVE).c: $(CLANG_FIXTURES)/live.wove $(CLANG_LIVE_SOURCES) $(CLANG_TEMPLATE) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
+	mkdir -p "$(@D)"
+	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^) --asset "$(CLANG_TEMPLATE)"
+
+$(CLANG_LIVE): $(CLANG_LIVE).c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime $^ -o "$@"
 
 # Check an archived-format GCC capture through the shared AST lookup fixture.
 test-stage-2-gcc: $(AST_PROBE)

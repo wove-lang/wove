@@ -9,10 +9,8 @@
 	The caller owns both endpoints on success.`)
 
 	(use wove-file "../../text/copy.wove" (only append_bytes))
-	(use c-header "<stdlib.h>" (only getenv))
+	(use wove-file "../temporary.wove" (only create_temporary_directory))
 	(use c-header "<unistd.h>" (only close unlink rmdir STDERR_FILENO))
-	(use (:pragma (cfg (os "linux"))) c-header "<stdlib.h>" (only mkdtemp))
-	(use (:pragma (cfg (os "macos"))) c-header "<unistd.h>" (only mkdtemp))
 	(use (:pragma (cfg (any (os "linux") (all (os "macos") (os_min 270000)))))
 		c-header "<unistd.h>" (only pipe2))
 	(use (:pragma (cfg (any (os "linux") (all (os "macos") (os_min 270000)))))
@@ -23,8 +21,6 @@
 
 	(struct CaptureDescriptors (fields (reader i32) (writer i32)))
 
-	(let temporary_key "TMPDIR")
-	(let default_temporary_root "/tmp")
 	(let directory_suffix "/wove-capture.XXXXXX")
 	(let fifo_suffix "/stdout")
 
@@ -85,6 +81,10 @@
 		(:doc `Build the FIFO path, remove the private directory, and restore blocking reads.`)
 		(params (directory (shared-slice u8))) (returns CaptureDescriptors)
 		(body
+			(if
+				(:doc "A failed directory creation leaves no FIFO to open.")
+				(i32.eq (slice.len (local directory)) 0i32)
+				(then (return (call absent_capture))))
 			(let parent (slice.len (local directory)))
 			(let suffix (slice.len (local fifo_suffix)))
 			(if
@@ -107,48 +107,12 @@
 			(call close_capture_descriptors (local ends))
 			(return (call absent_capture))))
 
-	(fn open_fifo_under
-		(:doc `Create a private directory in the selected temporary root before opening a named FIFO.`)
-		(params (root (shared-slice u8))) (returns CaptureDescriptors)
-		(body
-			(let prefix (slice.len (local root)))
-			(let suffix (slice.len (local directory_suffix)))
-			(if
-				(:doc "Leave the filesystem untouched when the template cannot fit a Wove byte view.")
-				(i32.lt (i32.sub.wrapping 2147483647i32 (local suffix)) (local prefix))
-				(then (return (call absent_capture))))
-			(let-mut path (array.alloc u8 (i32.add.wrapping (local prefix) (local suffix))))
-			(let next (call append_bytes (borrow-shared (local root)) (borrow-mut (local path)) 0i32))
-			(let written (call append_bytes (borrow-shared (local directory_suffix)) (borrow-mut (local path)) (local next)))
-			(let created (call mkdtemp (borrow-mut (local path))))
-			(if
-				(:doc "A C failure leaves no directory for the caller to remove.")
-				(owner.is-null (local created))
-				(then (return (call absent_capture))))
-			(let directory (move (optional.unwrap (local created))))
-			(return (call open_fifo_directory (borrow-shared (local directory))))))
-
-	(fn open_fifo_in_environment
-		(:doc `Choose /tmp for an empty TMPDIR while keeping a nonempty path byte for byte.`)
-		(params (root (shared-slice u8))) (returns CaptureDescriptors)
-		(body
-			(if
-				(:doc "An empty present value uses the same fallback as an absent variable.")
-				(i32.eq (slice.len (local root)) 0i32)
-				(then (return (call open_fifo_under (borrow-shared (local default_temporary_root))))))
-			(return (call open_fifo_under (borrow-shared (local root))))))
-
 	(fn open_capture_fifo
-		(:doc `Open the private FIFO transport using the process environment's temporary root.`)
+		(:doc "Open the private FIFO transport using the process environment's temporary root.")
 		(params) (returns CaptureDescriptors)
 		(body
-			(let temporary (call getenv (borrow-shared (local temporary_key))))
-			(if
-				(:doc "The default root is needed when the environment has no TMPDIR value.")
-				(owner.is-null (local temporary))
-				(then (return (call open_fifo_under (borrow-shared (local default_temporary_root))))))
-			(let root (move (optional.unwrap (local temporary))))
-			(return (call open_fifo_in_environment (borrow-shared (local root))))))
+			(let directory (call create_temporary_directory (borrow-shared (local directory_suffix))))
+			(return (call open_fifo_directory (borrow-shared (local directory))))))
 
 	(fn create_capture_descriptors
 		(:doc `Prefer the kernel's atomic close-on-exec pipe, with a FIFO for an older kernel.`)
