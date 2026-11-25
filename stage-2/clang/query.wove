@@ -9,92 +9,40 @@
 	declaration rows, and decoded keys. Use clang_declaration with the
 	returned index and those rows and keys after a successful present result.
 
-	A complete probe reporting zero is a successful absence. Error codes are
-	1 invalid probe input, 2 invalid packed options, 3 temporary source I/O,
-	4 tool launch, host capture, or nonzero child status, 5 truncated stdout,
-	6 malformed or incomplete probe output, and 7 insufficient AST workspace.
-	The result keeps the import span, captured byte count, child status, and
-	any diagnostic from the JSON index or required presence constant.`)
+	See c/probe.wove for the shared result and failure codes.`)
 
-	(use wove-file "./source.wove" (only render_clang_probe))
+	(use wove-file "../c/probe.wove"
+		(only (type (as QuerySite ProbeSite)) (type HeaderQuery) render_header_source index_capture query_failed probe_run_at))
 	(use wove-file "./run.wove" (only (type ClangRun) clang_run_at run_clang_probe))
-	(use wove-file "./index.wove" (only (type ClangIndex) (type ClangDeclaration) clang_index clang_index_result clang_declaration))
-	(use wove-file "./values.wove" (only (type ProbeWord) clang_enum_value clang_probe_u32))
+	(use wove-file "./index.wove" (only (type ClangIndex) (type ClangDeclaration)))
+	(use wove-file "./values.wove" (only (type ProbeWord)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
-	(use wove-file "../json/frame.wove" (only json_frame))
 
 	(struct QuerySite (fields (file i32) (start i32) (end i32)))
 	(struct ClangQuery
 		(fields (site QuerySite) (run ClangRun) (index ClangIndex) (fact ProbeWord) (error u32) (present bool)))
 
-	(let enum_kind "EnumDecl")
-	(let probe_enum "wvpr_c_probe")
-	(let header_present "wvpr_header_present")
-
-	(fn query_result
-		(:doc "Only a complete valid probe can publish the header presence bit.")
-		(params (site QuerySite) (run ClangRun) (index ClangIndex) (fact ProbeWord) (error u32))
-		(returns ClangQuery)
-		(body (return (record.make ClangQuery (site (local site)) (run (local run)) (index (local index))
-			(fact (local fact)) (error (local error))
-			(present (bool.and (u32.eq (local error) 0u32) (u32.eq (record.get (local fact) value) 1u32)))))))
-
-	(fn query_failed
-		(:doc "Preserve transport information while marking the AST slots unavailable.")
-		(params (site QuerySite) (run ClangRun)) (returns ClangQuery)
-		(body (return (call query_result (local site) (local run)
-			(call clang_index_result 0u32 0i32 0i32 0i32 0i32 0i32) (record.make ProbeWord (error 0u32) (start 0i32) (end 0i32) (value 0u32))
-			(record.get (local run) error)))))
-
-	(fn query_indexed
-		(:doc "Validate one translation unit and read the exact enum member that establishes presence.")
-		(params (source (shared-slice u8)) (site QuerySite) (run ClangRun) (index ClangIndex)
-			(nodes (shared-slice JsonNode)) (entries (shared-slice ClangDeclaration)) (names (shared-slice u8)))
-		(returns ClangQuery)
+	(fn query_rendered
+		(:doc "Invoke Clang only with a complete rendered source and index the successful capture.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (source (shared-slice u8))
+			(site ProbeSite) (output (mut-slice u8)) (nodes (mut-slice JsonNode))
+			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
+		(returns HeaderQuery)
 		(body
-			(let code (record.get (local index) error))
 			(if
-				(:doc "Scratch exhaustion is separate from malformed JSON and retains the reader's detail.")
-				(u32.lt 0u32 (local code))
-				(then
-					(let-mut error 6u32)
-					(if
-						(:doc "JSON rows, declaration rows, and decoded names are caller-provided capacities.")
-						(bool.or (u32.eq (local code) 11u32)
-							(bool.or (u32.eq (local code) 14u32) (u32.eq (local code) 15u32)))
-						(then (set (local error) 7u32)))
-					(return (call query_result (local site) (local run) (local index) (record.make ProbeWord (error 0u32) (start 0i32) (end 0i32) (value 0u32)) (local error)))))
-			(let tail (call json_frame (borrow-shared (local source)) (record.get (local index) end)))
+				(:doc "An empty source marks a failed render before any child is started.")
+				(i32.eq (slice.len (local source)) 0i32)
+				(then (return (call query_failed (local site) (call probe_run_at 1u32 -1i32 0i32)))))
+			(let capture (call run_clang_probe (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local source)) (borrow-mut (local output))))
+			(let run (call probe_run_at (record.get (local capture) error)
+				(record.get (local capture) status) (record.get (local capture) length)))
 			(if
-				(:doc "A single staged source must produce a single AST document and optional trailing layout.")
-				(bool.or (u32.lt 0u32 (record.get (local tail) error))
-					(i32.lt (record.get (local tail) start) (record.get (local tail) end)))
-				(then
-					(let detail (record.make ProbeWord (error 10u32)
-						(start (record.get (local tail) start)) (end (record.get (local tail) end)) (value 0u32)))
-					(return (call query_result (local site) (local run) (local index) (local detail) 6u32))))
-			(let enumeration (call clang_declaration (local index) (borrow-shared (local entries)) (borrow-shared (local names))
-				(borrow-shared (local enum_kind)) (borrow-shared (local probe_enum))))
-			(let fact (call clang_probe_u32 (borrow-shared (local source))
-				(call clang_enum_value (borrow-shared (local source)) (local index) (borrow-shared (local nodes))
-					(local enumeration) (borrow-shared (local header_present)))))
-			(if
-				(:doc "Missing, malformed, and out-of-domain presence values are invalid probe output.")
-				(bool.or (u32.lt 0u32 (record.get (local fact) error)) (u32.lt 1u32 (record.get (local fact) value)))
-				(then (return (call query_result (local site) (local run) (local index) (local fact) 6u32))))
-			(return (call query_result (local site) (local run) (local index) (local fact) 0u32))))
-
-	(fn index_capture
-		(:doc "Index only the populated prefix of the caller's immutable capture view.")
-		(params (capture (shared-slice u8)) (site QuerySite) (run ClangRun)
-			(nodes (mut-slice JsonNode)) (entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
-		(returns ClangQuery)
-		(body
-			(let length (record.get (local run) length))
-			(let index (call clang_index (borrow-shared (slice.range (local capture) 0i32 (local length))) 0i32
-				(borrow-mut (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names))))
-			(return (call query_indexed (borrow-shared (slice.range (local capture) 0i32 (local length))) (local site) (local run)
-				(local index) (borrow-shared (local nodes)) (borrow-shared (local entries)) (borrow-shared (local names))))))
+				(:doc "Do not interpret partial output or treat a failed invocation as header absence.")
+				(u32.lt 0u32 (record.get (local run) error))
+				(then (return (call query_failed (local site) (local run)))))
+			(return (call index_capture (borrow-shared (local output)) (local site) (local run)
+				(borrow-mut (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names))))))
 
 	(fn query_clang_header
 		(:doc "Render the embedded template, invoke Clang, and index a complete successful capture.")
@@ -104,26 +52,14 @@
 			(entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
 		(returns ClangQuery)
 		(body
-			(let template (embed "./templates/probe_header.tmpl.h"))
-			(let-mut measure (array.alloc u8 0i32))
-			(let size (call render_clang_probe (borrow-shared (local template)) (borrow-shared (local header))
-				(borrow-shared (local extra)) (borrow-mut (local measure))))
-			(if
-				(:doc "Only a capacity result has a valid positive size to allocate.")
-				(bool.not (u32.eq (record.get (local size) error) 4u32))
-				(then (return (call query_failed (local site) (call clang_run_at 1u32 -1i32 0i32)))))
-			(let-mut source (array.alloc u8 (record.get (local size) required)))
-			(let rendered (call render_clang_probe (borrow-shared (local template)) (borrow-shared (local header))
-				(borrow-shared (local extra)) (borrow-mut (local source))))
-			(if
-				(:doc "Never launch a query with an incomplete translation unit.")
-				(u32.lt 0u32 (record.get (local rendered) error))
-				(then (return (call query_failed (local site) (call clang_run_at 1u32 -1i32 0i32)))))
-			(let run (call run_clang_probe (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local source)) (borrow-mut (local output))))
-			(if
-				(:doc "Do not interpret partial output or treat a failed invocation as header absence.")
-				(u32.lt 0u32 (record.get (local run) error))
-				(then (return (call query_failed (local site) (local run)))))
-			(return (call index_capture (borrow-shared (local output)) (local site) (local run)
-				(borrow-mut (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names)))))))
+			(let source (call render_header_source (borrow-shared (local header)) (borrow-shared (local extra))))
+			(let origin (record.make ProbeSite (file (record.get (local site) file))
+				(start (record.get (local site) start)) (end (record.get (local site) end))))
+			(let result (call query_rendered (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local source)) (local origin) (borrow-mut (local output)) (borrow-mut (local nodes))
+				(borrow-mut (local entries)) (borrow-mut (local names))))
+			(let run (record.get (local result) run))
+			(return (record.make ClangQuery (site (local site))
+				(run (call clang_run_at (record.get (local run) error) (record.get (local run) status) (record.get (local run) length)))
+				(index (record.get (local result) index)) (fact (record.get (local result) fact))
+				(error (record.get (local result) error)) (present (record.get (local result) present)))))))

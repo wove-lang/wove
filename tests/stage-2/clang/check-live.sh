@@ -58,7 +58,7 @@ while IFS="$tab" read -r label tool header kind name error present found bytes r
 		target) set -- "--target=i386-unknown-linux-gnu" -I "$scratch/include space" ;;
 	esac
 	# Wove owns every result assertion. The shell supplies tools and fixture inputs.
-	WOVE_CLANG_FIXTURE_OUTPUT="$tool" "$query" "$program" "$header" "$kind" "$name" \
+	WOVE_CLANG_FIXTURE_OUTPUT="$tool" "$query" clang "$program" "$header" "$kind" "$name" \
 		"$error" "$present" "$found" "$bytes" "$rows" "$status" "$@" || {
 		failure=$?
 		printf '%s failed with status %s\n' "$label" "$failure" >&2

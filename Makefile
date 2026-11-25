@@ -95,10 +95,12 @@ TEST_RUNTIME := $(STAGE2)/test/libwove_test.a
 CLANG_FIXTURES := tests/stage-2/clang
 CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
-CLANG_LIVE := $(STAGE2)/clang/live
-CLANG_LIVE_SOURCES := $(sort $(CLANG_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) \
+AST_LIVE := $(STAGE2)/ast/live
+GCC_INSPECTOR := stage-2/gcc/inspect.cc
+AST_LIVE_SOURCES := $(sort $(CLANG_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) \
 	$(PROCESS_LAUNCHER_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/c-stdlib/stdio.wove \
-	stage-2/json/frame.wove stage-2/clang/query.wove stage-2/clang/run.wove)
+	stage-2/json/frame.wove stage-2/c/probe.wove stage-2/clang/query.wove stage-2/clang/run.wove \
+	stage-2/gcc/build.wove stage-2/gcc/query.wove)
 AST_FIXTURES := tests/support/ast
 AST_PROBE := $(STAGE2)/ast/probe
 GCC_FIXTURES := tests/stage-2/gcc
@@ -222,25 +224,27 @@ test-stage-2-process: $(SOURCE_SCAN)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" "$(PROCESS_CASES)" "$(PROCESS_DESCRIPTOR_CASES)" "$(PROCESS_INHERITANCE_CASES)"
 
 # Check generated C, archived JSON, and live tool invocation.
-test-stage-2-clang: $(AST_PROBE) $(CLANG_LIVE) $(CLANG_TEMPLATE)
+test-stage-2-clang: $(AST_PROBE) $(AST_LIVE) $(CLANG_TEMPLATE)
 	sh "$(AST_FIXTURES)/check.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" "$(CLANG_FIXTURES)/cases.tsv" $(CLANG)
-	sh "$(CLANG_FIXTURES)/check-live.sh" "$(CLANG_LIVE)" "$(CLANG_FIXTURES)/live.tsv" $(CLANG)
+	sh "$(CLANG_FIXTURES)/check-live.sh" "$(AST_LIVE)" "$(CLANG_FIXTURES)/live.tsv" $(CLANG)
 
-# Embed the same checked-in template in the standalone native header query.
-$(CLANG_LIVE).c: $(CLANG_FIXTURES)/live.wove $(CLANG_LIVE_SOURCES) $(CLANG_TEMPLATE) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
+# Embed the C probe template and GCC inspector in the shared live query fixture.
+$(AST_LIVE).c: $(AST_FIXTURES)/live.wove $(AST_LIVE_SOURCES) $(CLANG_TEMPLATE) $(GCC_INSPECTOR) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
 	mkdir -p "$(@D)"
-	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^) --asset "$(CLANG_TEMPLATE)"
+	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^) --asset "$(CLANG_TEMPLATE)" "$(GCC_INSPECTOR)"
 
-$(CLANG_LIVE): $(CLANG_LIVE).c $(STAGE1)/runtime.o
+$(AST_LIVE): $(AST_LIVE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime $^ -o "$@"
 
 # Check an archived-format GCC capture through the shared AST lookup fixture.
-test-stage-2-gcc: $(AST_PROBE)
+test-stage-2-gcc: $(AST_PROBE) $(AST_LIVE)
 	sh "$(AST_FIXTURES)/check.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" "$(GCC_FIXTURES)/cases.tsv"
+	sh "$(GCC_FIXTURES)/check-query.sh" "$(AST_LIVE)" "$(GCC_FIXTURES)/query.tsv" mock "$(GCC)"
 
 # Build and load the plugin only on hosts with matching GNU GCC plugin headers.
-test-stage-2-gcc-live: $(AST_PROBE) $(CLANG_TEMPLATE)
-	sh "$(GCC_FIXTURES)/check-live.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" stage-2/gcc/inspect.cc "$(GCC)" "$(GCC_CXX)"
+test-stage-2-gcc-live: $(AST_PROBE) $(AST_LIVE) $(CLANG_TEMPLATE)
+	sh "$(GCC_FIXTURES)/check-live.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" "$(GCC_INSPECTOR)" "$(GCC)" "$(GCC_CXX)"
+	sh "$(GCC_FIXTURES)/check-query.sh" "$(AST_LIVE)" "$(GCC_FIXTURES)/query.tsv" live "$(GCC)"
 
 # Check incremental hashes and field framing against independent digest vectors.
 test-stage-2-blake2b: $(BLAKE2B_PROBE)

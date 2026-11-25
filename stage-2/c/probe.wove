@@ -1,0 +1,154 @@
+(module c_header_probe
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Render, capture, and index the shared C header probe.
+
+	Both frontend drivers supply the original import span. A complete probe
+	with presence zero is a successful absence. Code 1 is bad probe input,
+	2 invalid packed options, 3 temporary source I/O, 4 a tool or capture
+	failure, 5 truncated stdout, 6 malformed probe output, and 7 insufficient
+	AST workspace. Drivers can report additional setup failures. The index
+	and presence fact retain diagnostic details from the captured document.`)
+
+	(use wove-file "../clang/source.wove" (only render_clang_probe))
+	(use wove-file "../clang/index.wove"
+		(only (type ClangIndex) (type ClangDeclaration) clang_index clang_index_result clang_declaration))
+	(use wove-file "../clang/values.wove" (only (type ProbeWord) clang_enum_value clang_probe_u32))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../json/frame.wove" (only json_frame))
+	(use wove-file "../io/process.wove" (only run_process_capture))
+
+	(struct ProbeRun (fields (error u32) (status i32) (length i32)))
+
+	(struct QuerySite (fields (file i32) (start i32) (end i32)))
+	(struct HeaderQuery
+		(fields (site QuerySite) (run ProbeRun) (index ClangIndex) (fact ProbeWord) (error u32) (present bool)))
+
+	(let enum_kind "EnumDecl")
+	(let probe_enum "wvpr_c_probe")
+	(let header_present "wvpr_header_present")
+
+	(fn probe_run_at
+		(:doc "Keep the child status and the number of bytes that fit in the capture.")
+		(params (error u32) (status i32) (length i32))
+		(returns ProbeRun)
+		(body (return (record.make ProbeRun (error (local error)) (status (local status)) (length (local length))))))
+
+	(fn probe_options_complete
+		(:doc "Accept empty options or a packed list whose final argument has its terminator.")
+		(params (options (shared-slice u8)))
+		(returns bool)
+		(body
+			(let length (slice.len (local options)))
+			(return (bool.or (i32.eq (local length) 0i32)
+				(u8.eq (slice.load (local options) (i32.sub.wrapping (local length) 1i32)) 0u8)))))
+
+	(fn capture_probe
+		(:doc "Classify bounded frontend stdout in the same way for either C probe driver.")
+		(params (program (shared-slice u8)) (arguments (shared-slice u8)) (output (mut-slice u8)))
+		(returns ProbeRun)
+		(body
+			(let captured (call run_process_capture (borrow-shared (local program)) (borrow-shared (local arguments))
+				(borrow-mut (local output))))
+			(let status (record.get (local captured) status))
+			(let length (record.get (local captured) length))
+			(if
+				(:doc "A launch, capture, or child failure takes precedence over parsing the child's bytes.")
+				(bool.not (i32.eq (local status) 0i32))
+				(then (return (call probe_run_at 4u32 (local status) (local length)))))
+			(if
+				(:doc "Distinguish a bounded capture from a malformed complete document.")
+				(record.get (local captured) overflow)
+				(then (return (call probe_run_at 5u32 (local status) (local length)))))
+			(return (call probe_run_at 0u32 (local status) (local length)))))
+
+	(fn query_result
+		(:doc "Only a complete valid probe can publish the header presence bit.")
+		(params (site QuerySite) (run ProbeRun) (index ClangIndex) (fact ProbeWord) (error u32))
+		(returns HeaderQuery)
+		(body (return (record.make HeaderQuery (site (local site)) (run (local run)) (index (local index))
+			(fact (local fact)) (error (local error))
+			(present (bool.and (u32.eq (local error) 0u32) (u32.eq (record.get (local fact) value) 1u32)))))))
+
+	(fn query_failed
+		(:doc "Preserve transport information while marking the AST slots unavailable.")
+		(params (site QuerySite) (run ProbeRun)) (returns HeaderQuery)
+		(body (return (call query_result (local site) (local run)
+			(call clang_index_result 0u32 0i32 0i32 0i32 0i32 0i32) (record.make ProbeWord (error 0u32) (start 0i32) (end 0i32) (value 0u32))
+			(record.get (local run) error)))))
+
+	(fn query_indexed
+		(:doc "Validate one translation unit and read the exact enum member that establishes presence.")
+		(params (source (shared-slice u8)) (site QuerySite) (run ProbeRun) (index ClangIndex)
+			(nodes (shared-slice JsonNode)) (entries (shared-slice ClangDeclaration)) (names (shared-slice u8)))
+		(returns HeaderQuery)
+		(body
+			(let code (record.get (local index) error))
+			(if
+				(:doc "Scratch exhaustion is separate from malformed JSON and retains the reader's detail.")
+				(u32.lt 0u32 (local code))
+				(then
+					(let-mut error 6u32)
+					(if
+						(:doc "JSON rows, declaration rows, and decoded names are caller-provided capacities.")
+						(bool.or (u32.eq (local code) 11u32)
+							(bool.or (u32.eq (local code) 14u32) (u32.eq (local code) 15u32)))
+						(then (set (local error) 7u32)))
+					(return (call query_result (local site) (local run) (local index) (record.make ProbeWord (error 0u32) (start 0i32) (end 0i32) (value 0u32)) (local error)))))
+			(let tail (call json_frame (borrow-shared (local source)) (record.get (local index) end)))
+			(if
+				(:doc "A single staged source must produce a single AST document and optional trailing layout.")
+				(bool.or (u32.lt 0u32 (record.get (local tail) error))
+					(i32.lt (record.get (local tail) start) (record.get (local tail) end)))
+				(then
+					(let detail (record.make ProbeWord (error 10u32)
+						(start (record.get (local tail) start)) (end (record.get (local tail) end)) (value 0u32)))
+					(return (call query_result (local site) (local run) (local index) (local detail) 6u32))))
+			(let enumeration (call clang_declaration (local index) (borrow-shared (local entries)) (borrow-shared (local names))
+				(borrow-shared (local enum_kind)) (borrow-shared (local probe_enum))))
+			(let fact (call clang_probe_u32 (borrow-shared (local source))
+				(call clang_enum_value (borrow-shared (local source)) (local index) (borrow-shared (local nodes))
+					(local enumeration) (borrow-shared (local header_present)))))
+			(if
+				(:doc "Missing, malformed, and out-of-domain presence values are invalid probe output.")
+				(bool.or (u32.lt 0u32 (record.get (local fact) error)) (u32.lt 1u32 (record.get (local fact) value)))
+				(then (return (call query_result (local site) (local run) (local index) (local fact) 6u32))))
+			(return (call query_result (local site) (local run) (local index) (local fact) 0u32))))
+
+	(fn index_capture
+		(:doc "Index only the populated prefix of the caller's immutable capture view.")
+		(params (capture (shared-slice u8)) (site QuerySite) (run ProbeRun)
+			(nodes (mut-slice JsonNode)) (entries (mut-slice ClangDeclaration)) (names (mut-slice u8)))
+		(returns HeaderQuery)
+		(body
+			(let length (record.get (local run) length))
+			(let index (call clang_index (borrow-shared (slice.range (local capture) 0i32 (local length))) 0i32
+				(borrow-mut (local nodes)) (borrow-mut (local entries)) (borrow-mut (local names))))
+			(return (call query_indexed (borrow-shared (slice.range (local capture) 0i32 (local length))) (local site) (local run)
+				(local index) (borrow-shared (local nodes)) (borrow-shared (local entries)) (borrow-shared (local names))))))
+
+	(fn render_header_source
+		(:doc "Allocate and fill the embedded C header probe for either frontend.")
+		(params (header (shared-slice u8)) (extra (shared-slice u8)))
+		(returns (owned-array u8))
+		(body
+			(let template (embed "../clang/templates/probe_header.tmpl.h"))
+			(let-mut measure (array.alloc u8 0i32))
+			(let size (call render_clang_probe (borrow-shared (local template)) (borrow-shared (local header))
+				(borrow-shared (local extra)) (borrow-mut (local measure))))
+			(if
+				(:doc "Only a capacity result has a valid positive size to allocate.")
+				(bool.not (u32.eq (record.get (local size) error) 4u32))
+				(then
+					(let empty (array.alloc u8 0i32))
+					(return (move (local empty)))))
+			(let-mut source (array.alloc u8 (record.get (local size) required)))
+			(let rendered (call render_clang_probe (borrow-shared (local template)) (borrow-shared (local header))
+				(borrow-shared (local extra)) (borrow-mut (local source))))
+			(if
+				(:doc "Never launch a query with an incomplete translation unit.")
+				(u32.lt 0u32 (record.get (local rendered) error))
+				(then
+					(let empty (array.alloc u8 0i32))
+					(return (move (local empty)))))
+			(return (move (local source))))))
