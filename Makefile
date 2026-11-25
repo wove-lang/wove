@@ -75,7 +75,7 @@ BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove)
 DRIVER_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove sys_stat.wove fcntl.wove unistd.wove errno.wove)
 NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
-	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(DRIVER_C_PROVIDERS))
+	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) stage-2/text/copy.wove $(DRIVER_C_PROVIDERS))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
 PROCESS_MODULE := stage-2/io/process.wove
 PROCESS_FIXTURES := tests/stage-2/process
