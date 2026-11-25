@@ -531,13 +531,13 @@ quoted project paths use quoted includes. The C compiler reads the native
 declarations from those headers.
 
 Mark a value-returning function-like macro with `(:pragma (c_macro))`
-after the bridge function name. Scalar built-ins and native integer
-aliases use the same exact Wove signature rules as C functions. The
-emitter captures each argument in a typed temporary before expanding
-the original macro spelling, even if an alias selects it. Argument
-expressions still run once in source order when the macro repeats or
-discards an operand. The invocation's result is stored in its declared
-Wove type.
+after the bridge function name. Macros use the same exact signatures
+and native argument contracts as C functions, including borrowed
+references and converted C strings. The emitter captures each argument
+in a typed temporary before expanding the original macro spelling.
+Argument expressions run once in source order even when the macro
+repeats or discards an operand. The invocation's result is stored in
+its declared Wove type.
 
 Use `(:pragma (c_cstr parameter ...))` or `(:pragma (c_cstr_raw parameter ...))`
 after the bridge function name to pass one or more shared byte slices as

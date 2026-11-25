@@ -10,4 +10,7 @@
 #define MACRO_IGNORE(value) UINT32_MAX
 #define MACRO_IS_BYTE(value) _Generic((value), uint8_t: 1, default: 0)
 
+#define MACRO_FIRST_BYTE(data) ((int32_t)(unsigned char)(data)[0])
+#define MACRO_VIEW(data, count) ((count) == 1 ? (((uint8_t *)(data))[0] = 42) : 0)
+
 #endif
