@@ -1,0 +1,104 @@
+(module emit_c_vectors
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Emit detached call vectors and owned snapshots of borrowed C string tables.`)
+
+	(use wove-file "../c/arguments.wove" (only is_c_vector_mode))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/plan.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "./text.wove" (only c_byte c_literal_text c_span write_temporary_name))
+	(use wove-file "./runtime.wove" (only close_runtime_call))
+
+	(let vector_type "char *const *")
+	(let prepare_open "=wvrt_cstrs_prepare(")
+	(let drop_open "wvrt_cstrs_drop(")
+	(let snapshot_decl "extern char **")
+	(let snapshot_decl_end ";\n")
+	(let snapshot_open "wvrt_snapshot_cstrs_at_span(")
+
+	(fn write_c_vector_name
+		(:doc `Name a table using the captured view's source position and a suffix reserved for vector scratch.`)
+		(params (source (shared-slice u8)) (argument i32) (tree_base i32) (output (mut-slice u8))
+			(offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let name (call write_temporary_name (borrow-shared (local source)) (local argument) (local tree_base)
+				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local name) 118u8 (local writing)))))
+
+	(fn write_vector_scratch
+		(:doc `Prepare a captured view before invocation or release its table after result adaptation.`)
+		(params (source (shared-slice u8)) (node SourceNode) (argument i32) (caller ScalarFunction)
+			(release bool) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let tree_base (record.get (local caller) tree_base))
+			(if
+				(:doc "Cleanup only uses the vector temporary and preserves the call's errno.")
+				(local release)
+				(then
+					(let open (call c_literal_text (borrow-shared (local drop_open)) (borrow-mut (local output)) (local offset) (local writing)))
+					(let name (call write_c_vector_name (borrow-shared (local source)) (local argument) (local tree_base)
+						(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+					(let close (call c_byte (borrow-mut (local output)) (local name) 41u8 (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local close) 59u8 (local writing)))))
+			(let type (call c_literal_text (borrow-shared (local vector_type)) (borrow-mut (local output)) (local offset) (local writing)))
+			(let name (call write_c_vector_name (borrow-shared (local source)) (local argument) (local tree_base)
+				(borrow-mut (local output)) (local type) (local name_prefix) (local writing)))
+			(let open (call c_literal_text (borrow-shared (local prepare_open)) (borrow-mut (local output)) (local name) (local writing)))
+			(let view (call write_temporary_name (borrow-shared (local source)) (local argument) (local tree_base)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let base (record.get (local caller) source_base))
+			(let close (call close_runtime_call (borrow-mut (local output)) (local view) (record.get (local caller) file)
+				(i32.sub.wrapping (record.get (local node) start) (local base))
+				(i32.sub.wrapping (record.get (local node) end) (local base)) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local close) 59u8 (local writing)))))
+
+	(fn write_c_vector_scratch
+		(:doc `Visit the C string vectors in the checked formal order.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parameters (shared-slice ScalarParameter))
+			(first i32) (caller ScalarFunction) (callee ScalarFunction) (release bool)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut argument (local first))
+			(let-mut formal (record.get (local callee) params))
+			(let-mut cursor (local offset))
+			(while
+				(:doc "Each vector argument owns one temporary table.")
+				(i32.lt -1i32 (local argument))
+				(body
+					(let node (slice.load (local nodes) (local argument)))
+					(if
+						(:doc "Other captured arguments have their own conversion rules.")
+						(call is_c_vector_mode (record.get (slice.load (local parameters) (local formal)) c_mode))
+						(then (set (local cursor) (call write_vector_scratch (borrow-shared (local source)) (local node)
+							(local argument) (local caller) (local release) (borrow-mut (local output))
+							(local cursor) (local name_prefix) (local writing)))))
+					(set (local formal) (i32.add.wrapping (local formal) 1i32))
+					(set (local argument) (record.get (local node) next_sibling))))
+			(return (local cursor))))
+
+	(fn write_c_vector_declaration
+		(:doc `Declare the borrowed global's exact C type once, including when the header omits it.`)
+		(params (source (shared-slice u8)) (name SourceNode) (output (mut-slice u8))
+			(offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let declare (call c_literal_text (borrow-shared (local snapshot_decl)) (borrow-mut (local output)) (local offset) (local writing)))
+			(let symbol (call c_span (borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end)
+				(borrow-mut (local output)) (local declare) (local writing)))
+			(return (call c_literal_text (borrow-shared (local snapshot_decl_end)) (borrow-mut (local output)) (local symbol) (local writing)))))
+
+	(fn write_c_vector_snapshot
+		(:doc `Copy the borrowed global's current rows into distinct Wove owners at this use.`)
+		(params (source (shared-slice u8)) (name SourceNode) (site ScalarExpression)
+			(output (mut-slice u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local snapshot_open)) (borrow-mut (local output)) (local offset) (local writing)))
+			(let value (call c_span (borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end)
+				(borrow-mut (local output)) (local open) (local writing)))
+			(return (call close_runtime_call (borrow-mut (local output)) (local value) (record.get (local site) target)
+				(record.get (local site) start) (record.get (local site) end) (local writing))))))

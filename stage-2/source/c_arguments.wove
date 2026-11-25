@@ -9,20 +9,22 @@
 	(use wove-file "./scan.wove" (only (type SourceNode)))
 	(use wove-file "./module.wove" (only form_parts source_keyword (type FormParts)))
 	(use wove-file "./types.wove" (only source_builtin_type reference_mode))
+	(use wove-file "./owned.wove" (only is_byte_owner_descriptor))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "../c/arguments.wove"
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
-			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode))
+			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode))
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (mutable_scalar bool) (storage_mut bool) (nullable bool)))
-	(struct CArguments (fields (strings i32) (extents i32) (nulls i32) (initializers i32) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
+	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
 	(struct CFormal (fields (position i32) (type_node i32) (start i32) (end i32)))
 
 	(struct CViewType (fields (access u32) (element i32)))
 
 	(let array_directive "c_array")
+	(let vector_directive "c_cstrs")
 	(let null_directive "c_null")
 	(let nullable_directive "c_nullable")
 	(let init_directive "c_init")
@@ -64,6 +66,21 @@
 				(then (return (record.get (local view) access))))
 			(return 0u32)))
 
+	(fn c_row_slice_type
+		(:doc `Return the access mode of a view whose elements own bytes.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode))
+		(returns u32)
+		(body
+			(let view (call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let element (record.get (local view) element))
+			(if
+				(:doc "Only owned byte rows can be marshalled into a C string table.")
+				(bool.and (i32.lt -1i32 (local element))
+					(call is_byte_owner_descriptor (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local nodes) (local element))))
+				(then (return (record.get (local view) access))))
+			(return 0u32)))
+
 	(fn c_argument_directive
 		(:doc `Map a recognized pragma to its native argument mode. Other directives leave the ABI unchanged.`)
 		(params (source (shared-slice u8)) (head SourceNode))
@@ -71,6 +88,10 @@
 		(body
 			(let start (record.get (local head) start))
 			(let width (i32.sub.wrapping (record.get (local head) end) (local start)))
+			(if
+				(:doc "Use detached vector storage for the complete c_cstrs spelling.")
+				(call matches_pragma (borrow-shared (local source)) (local head) (borrow-shared (local vector_directive)))
+				(then (return (call c_vector_mode))))
 			(if
 				(:doc "An array bound counts native elements.")
 				(call matches_pragma (borrow-shared (local source)) (local head) (borrow-shared (local array_directive)))
@@ -114,7 +135,7 @@
 		(:doc `Point an invalid native argument contract at its original source span.`)
 		(params (start i32) (end i32))
 		(returns CArguments)
-		(body (return (record.make CArguments (strings 0i32) (extents 0i32) (nulls 0i32) (initializers 0i32) (macro (bool false)) (variadic 0i32)
+		(body (return (record.make CArguments (strings 0i32) (vectors (bool false)) (extents 0i32) (nulls 0i32) (initializers 0i32) (macro (bool false)) (variadic 0i32)
 			(start (local start)) (end (local end)) (error 23u32)))))
 
 	(fn c_argument_error_at
@@ -127,7 +148,7 @@
 		(:doc `Retain conversion counts, a macro marker, and the first variadic formal's ordinal.`)
 		(params (strings i32) (extents i32) (nulls i32) (macro bool) (variadic i32))
 		(returns CArguments)
-		(body (return (record.make CArguments (strings (local strings)) (extents (local extents)) (nulls (local nulls)) (initializers 0i32) (macro (local macro)) (variadic (local variadic))
+		(body (return (record.make CArguments (strings (local strings)) (vectors (bool false)) (extents (local extents)) (nulls (local nulls)) (initializers 0i32) (macro (local macro)) (variadic (local variadic))
 			(start 0i32) (end 0i32) (error 0u32)))))
 
 	(fn c_formal
@@ -156,11 +177,17 @@
 				(:doc "Both extent operands must have resolved to integer types.")
 				(call is_c_value_mode (local mode))
 				(then (return (record.get (local formal) integer))))
+			(let rows (call c_row_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
 			(if
-				(:doc "Native array contracts apply to either checked view access mode.")
+				(:doc "C string vectors borrow the rows through a shared projection.")
+				(call is_c_vector_mode (local mode))
+				(then (return (u32.eq (local rows) 34u32))))
+			(if
+				(:doc "A native array exposes copyable elements through either view access mode.")
 				(call is_c_array_mode (local mode))
-				(then (return (u32.lt 0u32 (record.get
-					(call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)) access)))))
+				(then (return (bool.and (u32.eq (local rows) 0u32)
+					(u32.lt 0u32 (record.get
+						(call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)) access))))))
 			(if
 				(:doc "Initialization needs mutable caller-owned storage and excludes nullable formals.")
 				(call is_c_storage_init_mode (local mode))
@@ -265,8 +292,8 @@
 				(call accepts_c_null (local mode))
 				(then (return (call checked_c_arguments 0i32 0i32 1i32 (bool false) 0i32))))
 			(if
-				(:doc "Initializer formals carry their own storage slot and need no conversion count.")
-				(call is_c_storage_init_mode (local mode))
+				(:doc "Vector and initializer formals are found in the final checked contract table.")
+				(bool.or (call is_c_storage_init_mode (local mode)) (call is_c_vector_mode (local mode)))
 				(then (return (call checked_c_arguments 0i32 0i32 0i32 (bool false) 0i32))))
 			(return (call checked_c_arguments 1i32 0i32 0i32 (bool false) 0i32))))
 
@@ -577,6 +604,7 @@
 			(let-mut parameter (local first))
 			(let-mut index 0i32)
 			(let-mut initializers 0i32)
+			(let-mut vectors (bool false))
 			(while
 				(:doc "Every slice formal must define its native ABI.")
 				(bool.not (i32.lt (local parameter) 0i32))
@@ -585,9 +613,11 @@
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 					(let type (slice.load (local nodes) (record.get (local parts) operands)))
 					(let mode (record.get (slice.load (local contracts) (local index)) mode))
+					(let vector (call is_c_vector_mode (local mode)))
+					(set (local vectors) (bool.or (local vectors) (local vector)))
 					(if
-						(:doc "Null-capable and initializing pointer formals require a fixed C signature.")
-						(bool.and (bool.or (call accepts_c_null (local mode)) (call is_c_storage_init_mode (local mode)))
+						(:doc "Converted vectors, nullable pointers, and storage initialization use fixed C signatures.")
+						(bool.and (bool.or (local vector) (bool.or (call accepts_c_null (local mode)) (call is_c_storage_init_mode (local mode))))
 							(bool.or (record.get (local arguments) macro) (i32.lt 0i32 (record.get (local arguments) variadic))))
 						(then (return (call c_argument_error_at (local type)))))
 					(if
@@ -602,7 +632,7 @@
 						(then (set (local initializers) (i32.add.wrapping (local initializers) 1i32))))
 					(set (local parameter) (record.get (local node) next_sibling))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
-			(return (record.make CArguments (strings (record.get (local arguments) strings))
+			(return (record.make CArguments (strings (record.get (local arguments) strings)) (vectors (local vectors))
 				(extents (record.get (local arguments) extents))
 				(nulls (i32.add.wrapping (record.get (local nulls) nulls) (record.get (local arguments) nulls)))
 				(initializers (local initializers)) (macro (record.get (local arguments) macro))

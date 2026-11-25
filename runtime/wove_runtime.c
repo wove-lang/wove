@@ -126,6 +126,60 @@ void wvrt_cstr_drop(char *wvrtstorage) {
 	errno = wvrt_saved_errno;
 }
 
+// Copy byte rows into one call-scoped allocation for the table and terminated payloads.
+char *const *wvrt_cstrs_prepare(wvrt_slice wvrtrows, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Require the exact row descriptor before interpreting its backing storage.
+	if (wvrtrows.wvrt_length < 0 || wvrtrows.wvrt_element_size != sizeof(wvrt_array *) ||
+		(wvrtrows.wvrt_length > 0 && wvrtrows.wvrt_items == NULL)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "invalid C string vector");
+	}
+	const size_t wvrt_count = (size_t)wvrtrows.wvrt_length;
+	// Reserve one pointer for the terminating null, including for a zero-row vector.
+	if (wvrt_count >= SIZE_MAX / sizeof(char *)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "C string vector allocation size overflow");
+	}
+	const size_t wvrt_table_size = (wvrt_count + 1) * sizeof(char *);
+	size_t wvrt_size = wvrt_table_size;
+	wvrt_array *const *wvrt_rows = wvrtrows.wvrt_items;
+	// Validate every row and measure its full terminated size before allocating.
+	for (size_t wvrt_i = 0; wvrt_i < wvrt_count; ++wvrt_i) {
+		const wvrt_array *wvrt_row = wvrt_rows[wvrt_i];
+		// An unfilled row has no byte storage, unlike an owned zero-length row.
+		if (wvrt_row == NULL) {
+			wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "uninitialized byte row");
+		}
+		const size_t wvrt_length = (size_t)wvrt_row->wvrt_length;
+		// Native C strings cannot preserve an embedded NUL.
+		if (wvrt_length > 0 && memchr(wvrt_row->wvrt_items, 0, wvrt_length) != NULL) {
+			wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "embedded NUL in C string vector argument");
+		}
+		// Include the trailing NUL for each row in the total allocation size.
+		if (wvrt_length >= SIZE_MAX - wvrt_size) {
+			wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "C string vector allocation size overflow");
+		}
+		wvrt_size += wvrt_length + 1;
+	}
+	char **wvrt_table = malloc(wvrt_size);
+	if (wvrt_table == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not allocate C string vector"); }
+	char *wvrt_payload = (char *)wvrt_table + wvrt_table_size;
+	// Keep each copied row distinct, including an empty row's terminating byte.
+	for (size_t wvrt_i = 0; wvrt_i < wvrt_count; ++wvrt_i) {
+		const wvrt_array *wvrt_row = wvrt_rows[wvrt_i];
+		const size_t wvrt_length = (size_t)wvrt_row->wvrt_length;
+		wvrt_table[wvrt_i] = wvrt_payload;
+		if (wvrt_length > 0) { memcpy(wvrt_payload, wvrt_row->wvrt_items, wvrt_length); }
+		wvrt_payload[wvrt_length] = '\0';
+		wvrt_payload += wvrt_length + 1;
+	}
+	wvrt_table[wvrt_count] = NULL;
+	return wvrt_table;
+}
+
+// Release a generated table and its adjacent bytes while preserving the native errno.
+void wvrt_cstrs_drop(char *const *wvrt_table) {
+	wvrt_cstr_drop((char *)wvrt_table);
+}
+
 // Report a host argument conversion failure before calling the Wove entry.
 static int wvrt_host_arguments_error(void) {
 	fputs("runtime error: could not capture host arguments\n", stderr);
@@ -408,6 +462,40 @@ wvrt_array *wvrt_snapshot_cstr_at_span(char *wvrttext, void (*wvrtrelease)(void 
 wvrt_array *wvrt_snapshot_chars_at_span(char *wvrttext, void (*wvrtrelease)(char *),
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	return wvrt_snapshot_cstr(wvrttext, NULL, wvrtrelease, wvrtfile, wvrtstart, wvrtend);
+}
+
+// Build an independent row owner for each element of the borrowed, terminated native table.
+wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrttable, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	const int wvrt_saved_errno = errno;
+	int32_t wvrt_count = 0;
+	// A missing table represents an empty Wove vector.
+	while (wvrttable != NULL && wvrttable[wvrt_count] != NULL) {
+		// Keep row counts representable by Wove's array descriptor.
+		if (wvrt_count == INT32_MAX) {
+			wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "C string snapshot vector is too long");
+		}
+		++wvrt_count;
+	}
+	wvrt_array *wvrt_rows = wvrt_array_new_rows_at_span(wvrt_count, wvrtfile, wvrtstart, wvrtend);
+	wvrt_array **wvrt_items = wvrt_rows->wvrt_items;
+	// Leave a safely droppable prefix if a row cannot be copied.
+	for (int32_t wvrt_i = 0; wvrt_i < wvrt_count; ++wvrt_i) {
+		const size_t wvrt_length = strlen(wvrttable[wvrt_i]);
+		wvrt_array *wvrt_row = NULL;
+		// Allocate an ordinary byte owner even when the borrowed string is empty.
+		if (wvrt_length <= INT32_MAX) {
+			wvrt_row = wvrt_array_try_new((int32_t)wvrt_length, sizeof(uint8_t), _Alignof(uint8_t));
+		}
+		// Only the Wove prefix is owned and must be released on failure.
+		if (wvrt_row == NULL) {
+			wvrt_array_drop(wvrt_rows);
+			wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not snapshot C string vector row");
+		}
+		if (wvrt_length > 0) { memcpy(wvrt_row->wvrt_items, wvrttable[wvrt_i], wvrt_length); }
+		wvrt_items[wvrt_i] = wvrt_row;
+	}
+	errno = wvrt_saved_errno;
+	return wvrt_rows;
 }
 
 // Extract the same Wove allocation after checking a snapshot's presence.

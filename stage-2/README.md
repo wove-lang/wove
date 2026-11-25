@@ -445,6 +445,15 @@ caller binds the result with `let` or `let-mut` and can read, borrow, or
 move it through its normal owner lifetime. A zero-length result follows
 the same ownership rules.
 
+`(array.alloc (owned-array u8) count)` allocates a vector with initially
+unfilled row slots. Use `(slice.store (local rows) index (move (local row)))`
+or a call returning a fresh byte owner to fill or replace a slot. A
+replacement releases the previous row. A loan such as
+`(borrow-shared (slice.load (local rows) index))` borrows the stored byte
+slice for the call and reports an unfilled slot at the indexed access.
+The vector owns its filled rows and can be returned through
+`(returns (owned-array (owned-array u8)))`.
+
 `(bool.and left right)` evaluates the right operand when the left is true.
 `(bool.or left right)` evaluates it when the left is false. Both operands
 are type-checked as `bool`. Each operand that runs does so once, with the
@@ -711,6 +720,19 @@ release each present C result exactly once after copying. The release has C
 signature `void (void *)` or `void (char *)`. Both forms require
 `(returns (optional (owned-array u8)))`. C null stays absent and an empty C
 string produces a present zero-length owner.
+
+Use `(:pragma (c_cstrs arguments environment))` on shared views of owned
+byte rows. Each argument supplies a detached `char *const *` table with a
+null terminator and a separate terminated string per row. An empty vector
+still provides its terminator, and an empty row provides one NUL byte.
+Embedded NUL bytes trap at the vector argument. Native edits to the copies
+leave the original Wove rows intact.
+
+A read-only native `let` with `(:pragma (c_snapshot cstrs))` reads a
+`char **` global such as `environ`. Each local initializer copies the
+table and its rows into `(owned-array (owned-array u8))`. A null table
+yields an empty owner. The C table and rows must stay valid until the
+copy completes.
 
 A fixed C signature can declare `(mut-ref T)` for writable scalar storage.
 Use `(borrow-mut (local value))` on a mutable local or borrow a writable
