@@ -78,6 +78,15 @@ float wvrt_f32_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int
 	return (float)wvrtvalue;
 }
 
+// Trap at the argument that failed to meet its callee's required slice length.
+void wvrt_check_slice_extent_at_span(int32_t wvrt_length, int32_t wvrt_expected,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	// The actual descriptor and the declared extent count the same element type.
+	if (wvrt_length != wvrt_expected) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "array borrow length does not match parameter extent");
+	}
+}
+
 // A borrowed native handle must be present before it is passed to C.
 void wvrt_check_c_handle(const volatile void *wvrthandle, int32_t wvrtfile,
 	int32_t wvrtstart, int32_t wvrtend) {
