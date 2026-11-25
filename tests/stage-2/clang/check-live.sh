@@ -7,7 +7,7 @@ set -f
 
 query=$1
 manifest=$2
-clang=$3
+shift 2
 fixtures=$(dirname "$manifest")/fixtures
 tab=$(printf '\t')
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/wove-live-clang.XXXXXX")
@@ -16,6 +16,27 @@ mkdir "$scratch/include space" "$scratch/query workspace"
 cp "$fixtures/live_query.h" "$scratch/include space/live_query.h"
 cp "$fixtures/live-tool.sh" "$scratch/tool with spaces"
 chmod +x "$scratch/tool with spaces"
+# Adapt a configured tool command to the query's single-executable interface.
+write_clang_wrapper() {
+	printf '%s\n' '#!/bin/sh'
+	printf '%s' 'exec'
+	# Keep every configured word literal, including spaces and single quotes.
+	for argument do
+		quoted=$(printf '%s.' "$argument" | sed "s/'/'\\\\''/g")
+		printf " '%s'" "${quoted%.}"
+	done
+	printf '%s\n' ' "$@"'
+}
+
+# Pass a plain executable directly. Wrap only commands with fixed arguments.
+if [ "$#" -eq 1 ]; then
+	clang=$1
+else
+	clang="$scratch/configured clang"
+	write_clang_wrapper "$@" > "$clang"
+	chmod +x "$clang"
+fi
+
 export TMPDIR="$scratch/query workspace"
 export WOVE_CLANG_FIXTURE_CLANG="$clang"
 

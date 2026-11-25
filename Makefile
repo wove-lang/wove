@@ -224,7 +224,7 @@ test-stage-2-process: $(SOURCE_SCAN)
 # Check generated C, archived JSON, and live tool invocation.
 test-stage-2-clang: $(AST_PROBE) $(CLANG_LIVE) $(CLANG_TEMPLATE)
 	sh "$(AST_FIXTURES)/check.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" "$(CLANG_FIXTURES)/cases.tsv" $(CLANG)
-	sh "$(CLANG_FIXTURES)/check-live.sh" "$(CLANG_LIVE)" "$(CLANG_FIXTURES)/live.tsv" "$(CLANG)"
+	sh "$(CLANG_FIXTURES)/check-live.sh" "$(CLANG_LIVE)" "$(CLANG_FIXTURES)/live.tsv" $(CLANG)
 
 # Embed the same checked-in template in the standalone native header query.
 $(CLANG_LIVE).c: $(CLANG_FIXTURES)/live.wove $(CLANG_LIVE_SOURCES) $(CLANG_TEMPLATE) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
