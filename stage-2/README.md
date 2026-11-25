@@ -319,9 +319,14 @@ write through field paths. A mutable loan starts at a `let-mut` local
 or an existing mutable reference. Reborrow a reference parameter with
 the same explicit forms to pass it to another call.
 
+For built-in scalars, a `(mut-ref T)` parameter receives an exclusive call
+loan of a mutable place of exactly `T`. In the callee, `(local name)` reads
+the scalar and `(set (local name) value)` writes the exact type back to that
+place. `(borrow-mut (local name))` forwards the same storage to another call.
+
 A borrow can name a static field path such as
-`(borrow-mut (struct.get (local state) pending))` to lend a nested
-record. A fixed integer array field can lend a slice of
+`(borrow-mut (struct.get (local state) pending))` to lend a nested record
+or writable scalar field. A fixed integer array field can lend a slice of
 the same element type. The path can start at a local or a record
 parameter, and a mutable loan needs a `let-mut` local or a mutable
 reference parameter.

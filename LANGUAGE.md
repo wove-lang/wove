@@ -66,6 +66,9 @@ named Wove record. `array.load` can read the table directly.
 
 In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
+A `(mut-ref T)` parameter can also borrow a writable place of an exact
+built-in scalar type. In the callee, `(local name)` reads the scalar and
+`(set (local name) value)` updates the caller's storage.
 
 In Stage 2, `(if condition (then value) (else value))` can be used as a
 value. The condition must be `bool`, and both arms must contain exactly one
