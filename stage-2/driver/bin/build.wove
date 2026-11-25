@@ -1,0 +1,281 @@
+(module native_bin_build
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Build one native executable and install it with a same-filesystem rename.
+
+	The private directory holds an immutable copy of the generated C and
+	the embedded runtime. Clang never receives the final executable path.
+	Keep the retained C even if the compiler reports a failure.`)
+
+	(use c-header "<stdlib.h>" (only getenv))
+	(use (:pragma (cfg (os "linux"))) c-header "<stdlib.h>" (only mkdtemp))
+	(use (:pragma (cfg (os "macos"))) c-header "<unistd.h>" (only mkdtemp))
+	(use c-header "<unistd.h>" (only access X_OK unlink rmdir))
+	(use c-header "<stdio.h>" (only rename))
+	(use c-header "<sys/stat.h>" (only lstat S_ISREG (type Stat)))
+	(use wove-file "./arguments.wove" (only write_clang_arguments))
+	(use wove-file "../diagnostics.wove" (only report_argv (value project_file) (value invalid_target) (value non_utf8_source)))
+	(use wove-file "../output.wove" (only valid_output_target retained_c_path))
+	(use wove-file "../publication.wove" (only ensure_parents stage_file))
+	(use wove-file "../files.wove" (only canonical_path path_identity same_path_identity))
+	(use wove-file "../paths.wove" (only directory_width join_file_path))
+	(use wove-file "../source.wove" (only compile_input))
+	(use wove-file "../../cli/command/resolve.wove" (only (type CommandInvocation)))
+	(use wove-file "../../cli/command/args.wove" (only (type CommandArgument)))
+	(use wove-file "../../config/project.wove" (only (type ProjectSetting)))
+	(use wove-file "../../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../../io/process.wove" (only run_process_capture))
+	(use wove-file "../../io/stdio.wove" (only write_stdout))
+	(use wove-file "../../source/scan.wove" (only admit_source))
+	(use wove-file "../../text/copy.wove" (only append_bytes))
+	(use wove-file "../../text/decimal_write.wove" (only write_decimal_i32))
+
+	(let clang "clang")
+	(let clang_environment "CLANG")
+	(let temporary_name ".wovec-bin.XXXXXX")
+	(let main_suffix "/main.c")
+	(let binary_suffix "/program")
+	(let source_suffix "/wove_runtime.c")
+	(let header_suffix "/wove_runtime.h")
+	(let publish_binary_failure "could not publish executable")
+	(let native_argument_failure "could not pack native compiler arguments")
+	(let clang_failure "clang failed with status ")
+
+	(fn empty_path
+		(:doc `Return a zero-length owner to mark a failed path operation.`)
+		(params) (returns (owned-array u8))
+		(body
+			(let path (array.alloc u8 0i32))
+			(return (move (local path)))))
+
+	(fn empty_bytes
+		(:doc `Check an owned byte buffer through its borrowed view.`)
+		(params (bytes (shared-slice u8))) (returns bool)
+		(body (return (i32.eq (slice.len (local bytes)) 0i32))))
+
+	(fn append_path
+		(:doc `Join a private directory with a fixed filename suffix within the signed byte ABI.`)
+		(params (directory (shared-slice u8)) (suffix (shared-slice u8))) (returns (owned-array u8))
+		(body
+			(let start (slice.len (local directory)))
+			(let width (slice.len (local suffix)))
+			(if
+				(:doc `Neither a failed directory nor an unrepresentable path can name a staged file.`)
+				(bool.or (i32.eq (local start) 0i32)
+					(i32.lt (i32.sub.wrapping 2147483647i32 (local width)) (local start)))
+				(then (return (call empty_path))))
+			(let-mut path (array.alloc u8 (i32.add.wrapping (local start) (local width))))
+			(let first (call append_bytes (borrow-shared (local directory)) (borrow-mut (local path)) 0i32))
+			(let end (call append_bytes (borrow-shared (local suffix)) (borrow-mut (local path)) (local first)))
+			(return (move (local path)))))
+
+	(fn stage_directory
+		(:doc `Create a private sibling directory on the output filesystem.`)
+		(params (target (shared-slice u8))) (returns (owned-array u8))
+		(body
+			(if
+				(:doc `Prepare only the parent directories before reserving the private stage.`)
+				(bool.not (call ensure_parents (borrow-shared (local target))))
+				(then (return (call empty_path))))
+			(let parent (call directory_width (borrow-shared (local target))))
+			(let suffix (slice.len (local temporary_name)))
+			(if
+				(:doc `The mkdtemp template must fit one byte slice.`)
+				(i32.lt (i32.sub.wrapping 2147483647i32 (local suffix)) (local parent))
+				(then (return (call empty_path))))
+			(let-mut template (array.alloc u8 (i32.add.wrapping (local parent) (local suffix))))
+			(let copied (call append_bytes (borrow-shared (slice.range (local target) 0i32 (local parent)))
+				(borrow-mut (local template)) 0i32))
+			(let end (call append_bytes (borrow-shared (local temporary_name)) (borrow-mut (local template)) (local copied)))
+			(let created (call mkdtemp (borrow-mut (local template))))
+			(if
+				(:doc `A failed reservation owns no directory.`)
+				(owner.is-null (local created))
+				(then (return (call empty_path))))
+			(let directory (move (optional.unwrap (local created))))
+			(let absolute (call canonical_path (borrow-shared (local directory))))
+			(if
+				(:doc `Remove the directory if we cannot give Clang an absolute argument path.`)
+				(call empty_bytes (borrow-shared (local absolute)))
+				(then (let removed (call rmdir (borrow-shared (local directory))))))
+			(return (move (local absolute)))))
+
+	(fn default_clang_program
+		(:doc `Copy the default executable name into the same owner type as getenv.`)
+		(params) (returns (owned-array u8))
+		(body
+			(let-mut program (array.alloc u8 (slice.len (local clang))))
+			(let end (call append_bytes (borrow-shared (local clang)) (borrow-mut (local program)) 0i32))
+			(return (move (local program)))))
+
+	(fn clang_program
+		(:doc `Use CLANG as one executable name or use clang through PATH.`)
+		(params) (returns (owned-array u8))
+		(body
+			(let configured (call getenv (borrow-shared (local clang_environment))))
+			(if
+				(:doc `An absent override selects the default executable.`)
+				(owner.is-null (local configured))
+				(then (return (call default_clang_program))))
+			(let program (move (optional.unwrap (local configured))))
+			(if
+				(:doc `Treat an explicitly empty override as the default executable as well.`)
+				(call empty_bytes (borrow-shared (local program)))
+				(then (return (call default_clang_program))))
+			(return (move (local program)))))
+
+	(fn report_clang_status
+		(:doc `Make the native status visible in the diagnostic and propagate child exit or signal status.`)
+		(params (status i32)) (returns i32)
+		(body
+			(let-mut message (array.alloc u8 (i32.add.wrapping (slice.len (local clang_failure)) 11i32)))
+			(let start (call append_bytes (borrow-shared (local clang_failure)) (borrow-mut (local message)) 0i32))
+			(let end (call write_decimal_i32 (borrow-mut (local message)) (local start) (local status)))
+			(let diagnostic (call report_argv 68u32 0i32 (borrow-shared (slice.range (local message) 0i32 (local end)))))
+			(if (i32.lt 0i32 (local status)) (then (return (local status))))
+			(return (local diagnostic))))
+
+	(fn protected_target
+		(:doc `Preserve the entry and project configuration when the output aliases either file.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8))) (returns bool)
+		(body
+			(let output (call path_identity (borrow-shared (local target))))
+			(return (bool.or (call same_path_identity (local output) (call path_identity (borrow-shared (local path))))
+				(call same_path_identity (local output) (call path_identity (borrow-shared (local project_file))))))))
+
+	(fn install_binary
+		(:doc `Publish only a regular executable present after successful Clang completion.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (binary (shared-slice u8)) (target_index i32))
+		(returns i32)
+		(body
+			(let-mut info (record.make Stat))
+			(let inspected (call lstat (borrow-shared (local binary)) (borrow-mut (local info))))
+			(let regular (bool.and (i32.eq (local inspected) 0i32) (call S_ISREG (record.get (local info) st_mode))))
+			(if
+				(:doc `Only a regular directory entry can remain executable after the rename.`)
+				(bool.and (local regular)
+					(bool.and (i32.eq (call access (borrow-shared (local binary)) (local X_OK)) 0i32)
+						(bool.and (bool.not (call protected_target (borrow-shared (local path)) (borrow-shared (local target))))
+							(i32.eq (call rename (borrow-shared (local binary)) (borrow-shared (local target))) 0i32))))
+				(then (return 0i32)))
+			(return (call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure))))))
+
+	(fn invoke_clang
+		(:doc `Pass the retained profile options and private unit to one compiler and linker invocation.`)
+		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
+			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(directory (shared-slice u8)) (unit (shared-slice u8)) (binary (shared-slice u8))) (returns i32)
+		(body
+			(let source_extent (u64.add.wrapping (int.convert u64 (slice.len (local bytes)))
+				(u64.add.wrapping (int.convert u64 (slice.len (local config)))
+					(int.convert u64 (slice.len (local arguments))))))
+			(let path_extent (u64.add.wrapping (int.convert u64 (slice.len (local directory)))
+				(u64.add.wrapping (int.convert u64 (slice.len (local unit))) (int.convert u64 (slice.len (local binary))))))
+			(let width (u64.add.wrapping 256u64 (u64.add.wrapping (local path_extent) (u64.shl (local source_extent) 2i32))))
+			(if
+				(:doc `Each selected source byte can contribute a flag byte, a prefix and a terminator at most once.`)
+				(u64.lt 2147483647u64 (local width))
+				(then (return (call report_argv 70u32 0i32 (borrow-shared (local native_argument_failure))))))
+			(let-mut packed (array.alloc u8 (int.convert i32 (local width))))
+			(let end (call write_clang_arguments (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(borrow-shared (local directory)) (borrow-shared (local unit)) (borrow-shared (local binary)) (borrow-mut (local packed))))
+			(if
+				(:doc `An invalid packed option must fail before the tool sees any arguments.`)
+				(i32.lt (local end) 0i32)
+				(then (return (call report_argv 70u32 0i32 (borrow-shared (local native_argument_failure))))))
+			(let program (call clang_program))
+			(let-mut output (array.alloc u8 65536i32))
+			(let result (call run_process_capture (borrow-shared (local program))
+				(borrow-shared (slice.range (local packed) 0i32 (local end))) (borrow-mut (local output))))
+			(let status (record.get (local result) status))
+			(let length (record.get (local result) length))
+			(if
+				(:doc `Forward the bounded stdout prefix. Clang's stderr is inherited.`)
+				(i32.lt 0i32 (local length))
+				(then (let written (call write_stdout (borrow-shared (slice.range (local output) 0i32 (local length)))))))
+			(if (bool.not (i32.eq (local status) 0i32)) (then (return (call report_clang_status (local status)))))
+			(return 0i32)))
+
+	(fn build_in_directory
+		(:doc `Keep the runtime and executable private until the generated source has compiled successfully.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8))
+			(input_index i32) (target_index i32) (directory (shared-slice u8)) (unit (shared-slice u8))
+			(runtime (shared-slice u8)) (header (shared-slice u8)) (binary (shared-slice u8))
+			(bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
+			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))) (returns i32)
+		(body
+			(let emitted (call compile_input (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+				(record.get (local invocation) mode) (borrow-shared (local unit)) (local input_index) (local target_index)))
+			(if (bool.not (i32.eq (local emitted) 0i32)) (then (return (local emitted))))
+			(let runtime_source (embed "../../../runtime/wove_runtime.c"))
+			(let runtime_header (embed "../../../runtime/wove_runtime.h"))
+			(if
+				(:doc `Both runtime assets must be available next to the private generated C unit.`)
+				(bool.not (bool.and (call stage_file (borrow-shared (local runtime)) (borrow-shared (local runtime_source)))
+					(call stage_file (borrow-shared (local header)) (borrow-shared (local runtime_header)))))
+				(then (return (call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure))))))
+			(let status (call invoke_clang (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(borrow-shared (local directory)) (borrow-shared (local unit)) (borrow-shared (local binary))))
+			(if (bool.not (i32.eq (local status) 0i32)) (then (return (local status))))
+			(return (call install_binary (borrow-shared (local path)) (borrow-shared (local target))
+				(borrow-shared (local binary)) (local target_index)))))
+
+	(fn finish_stage
+		(:doc `Remove an empty stage. Retain optional Clang side outputs beside the generated C.`)
+		(params (directory (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32))
+		(returns void)
+		(body
+			(if
+				(:doc `An ordinary build leaves nothing to move after the known files are unlinked.`)
+				(i32.eq (call rmdir (borrow-shared (local directory))) 0i32)
+				(then (return)))
+			(let retained (call retained_c_path (borrow-shared (local target)) (borrow-shared (local profile)) (local mode)))
+			(let start (call directory_width (borrow-shared (local directory))))
+			(let output (call join_file_path (borrow-shared (local retained))
+				(borrow-shared (slice.range (local directory) (local start) (slice.len (local directory))))))
+			(let moved (call rename (borrow-shared (local directory)) (borrow-shared (local output))))))
+
+	(fn compile_binary
+		(:doc `Own the private stage across emission, native compilation, and publication.`)
+		(:expect (tests "stage-2/cli/native/bin.tsv") (issues "gh:wove-lang/wove:192"))
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8))
+			(input_index i32) (target_index i32) (bytes (shared-slice u8)) (config (shared-slice u8))
+			(invocation CommandInvocation) (arguments (shared-slice CommandArgument))
+			(nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))) (returns i32)
+		(body
+			(if
+				(:doc `Reject invalid source spelling before preparing any destination.`)
+				(i32.lt -1i32 (call admit_source (borrow-shared (local path))))
+				(then (return (call report_argv 3u32 (local input_index) (borrow-shared (local non_utf8_source))))))
+			(if
+				(:doc `A native target must end in a valid filename.`)
+				(bool.not (call valid_output_target (borrow-shared (local target))))
+				(then (return (call report_argv 3u32 (local target_index) (borrow-shared (local invalid_target))))))
+			(if
+				(:doc `Protect the same entry and project paths as the retained-C publisher.`)
+				(call protected_target (borrow-shared (local path)) (borrow-shared (local target)))
+				(then (return (call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure))))))
+			(let directory (call stage_directory (borrow-shared (local target))))
+			(if
+				(:doc `Only a reserved directory can receive build artifacts.`)
+				(call empty_bytes (borrow-shared (local directory)))
+				(then (return (call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure))))))
+			(let unit (call append_path (borrow-shared (local directory)) (borrow-shared (local main_suffix))))
+			(let runtime (call append_path (borrow-shared (local directory)) (borrow-shared (local source_suffix))))
+			(let header (call append_path (borrow-shared (local directory)) (borrow-shared (local header_suffix))))
+			(let binary (call append_path (borrow-shared (local directory)) (borrow-shared (local binary_suffix))))
+			(let status (call build_in_directory (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+				(local input_index) (local target_index) (borrow-shared (local directory)) (borrow-shared (local unit))
+				(borrow-shared (local runtime)) (borrow-shared (local header)) (borrow-shared (local binary))
+				(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))))
+			(let removed_binary (call unlink (borrow-shared (local binary))))
+			(let removed_header (call unlink (borrow-shared (local header))))
+			(let removed_runtime (call unlink (borrow-shared (local runtime))))
+			(let removed_unit (call unlink (borrow-shared (local unit))))
+			(call finish_stage (borrow-shared (local directory)) (borrow-shared (local target))
+				(borrow-shared (local profile)) (record.get (local invocation) mode))
+			(return (local status))))
+)

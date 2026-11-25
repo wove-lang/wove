@@ -1035,14 +1035,15 @@ reads source files through explicit checked-in POSIX C-header imports.
 
 ```sh
 build/stage-2/wovec cc input.wove -o build/input
-clang -std=c11 build/.wovec-cache/default/input/bin/main.c -o build/input
+build/stage-2/wovec bin input.wove -o build/input
+build/input
 ```
 
-`cc` takes one explicit UTF-8 source path and an explicit output target
-with a basename. It writes
+`cc` and `bin` take one explicit UTF-8 source path and an explicit output
+target with a basename. Both write
 `main.c` below `<target-parent>/.wovec-cache/<profile>/<target-name>/bin/`.
-For output that uses Wove runtime operations, compile with `-I runtime`
-and link `runtime/wove_runtime.c`. The command reads `wovec.jsonc` from its
+To compile retained C manually when it uses runtime operations, use
+`-I runtime` and link `runtime/wove_runtime.c`. The driver reads `wovec.jsonc` from its
 working directory for profile selection. `--profile NAME` selects that
 profile and uses its name in the retained path. Argument and source
 failures print one JSON diagnostic to stderr.
@@ -1055,6 +1056,15 @@ symlink, and hard-link paths share the same defining source and emitted
 functions. An unavailable provider reports the original importing use.
 Selected embeds use their defining module's directory. The complete
 graph emits as one retained C translation unit.
+
+`bin` launches Clang once with the selected profile's native options and
+a private copy of the generated unit containing the packaged runtime.
+It uses `clang` from PATH or the executable named by `CLANG`. After Clang
+succeeds, it checks that the staged output is a regular executable before
+renaming it onto the target. On tool failure it reports the status and
+leaves any previous executable in place.
+The driver keeps optional Clang side outputs, such as a Darwin debug
+bundle, in a private per-build directory beside retained C when possible.
 
 ## Structured JSON diagnostics
 
