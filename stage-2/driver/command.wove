@@ -1,7 +1,7 @@
 (module native_cli_command
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Resolve a native invocation and run cc from one explicit entry.
+	(:doc `Resolve a native invocation and run cc or bin from one explicit entry.
 
 	Use the resolver's original argument rows to lend the source path,
 	output target, and profile to the driver. An optional wovec.jsonc
@@ -11,6 +11,7 @@
 		(only report_argv report_project (value project_file) (value explicit_target_required)
 			(value invalid_arguments) (value invalid_config) (value unreadable_file)))
 	(use wove-file "./source.wove" (only compile_input))
+	(use wove-file "./bin/build.wove" (only compile_binary))
 	(use wove-file "./files.wove" (only file_stamp file_is_absent read_source_file))
 	(use wove-file "../cli/argv.wove" (only (type ArgSpan)))
 	(use wove-file "../cli/command/args.wove" (only first_command_argument (type CommandArgument)))
@@ -18,19 +19,31 @@
 	(use wove-file "../config/project.wove" (only (type ProjectSetting)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 
-	(fn execute_cc
+	(let explicit_bin_target "bin requires one explicit source and an explicit output target")
+	(let clang_required "bin currently requires clang")
+
+	(fn report_required_target
+		(:doc `Keep the explicit-operand diagnostic specific to the selected command.`)
+		(params (bin bool) (index i32)) (returns i32)
+		(body
+			(if (local bin) (then (return (call report_argv 12u32 (local index) (borrow-shared (local explicit_bin_target))))))
+			(return (call report_argv 12u32 (local index) (borrow-shared (local explicit_target_required))))))
+
+	(fn execute_build
 		(:doc `Pass the resolved single source, explicit output, and validated profile to compilation.`)
-		(params (bytes (shared-slice u8)) (invocation CommandInvocation) (arguments (shared-slice CommandArgument))
+		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation) (arguments (shared-slice CommandArgument))
 			(nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting)))
 		(returns i32)
 		(body
+			(let command (record.get (local invocation) command))
+			(let bin (u32.eq (local command) 2u32))
 			(let operands (record.get (local invocation) operands))
 			(let rows (record.get (local invocation) rows))
 			(if
-				(:doc "This driver entry needs a cc command and one explicit source operand.")
-				(bool.or (bool.not (u32.eq (record.get (local invocation) command) 1u32))
+				(:doc "Only cc and bin consume one explicit source operand in this driver.")
+				(bool.or (bool.not (bool.or (u32.eq (local command) 1u32) (local bin)))
 					(i32.eq (local operands) 0i32))
-				(then (return (call report_argv 12u32 0i32 (borrow-shared (local explicit_target_required))))))
+				(then (return (call report_required_target (local bin) 0i32))))
 			(let first (call first_command_argument (borrow-shared (local arguments)) 0i32 (local rows) -1i32))
 			(if
 				(:doc "Point at the first extra source operand when the caller supplies several.")
@@ -38,14 +51,14 @@
 				(then
 					(let extra (call first_command_argument (borrow-shared (local arguments))
 						(i32.add.wrapping (local first) 1i32) (local rows) -1i32))
-					(return (call report_argv 12u32
-						(record.get (slice.load (local arguments) (local extra)) argv_index) (borrow-shared (local explicit_target_required))))))
+					(return (call report_required_target (local bin)
+						(record.get (slice.load (local arguments) (local extra)) argv_index)))))
 			(let output (call command_setting (local invocation) (borrow-shared (local arguments))
 				(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 19i32))
 			(if
 				(:doc "The target must come from an explicit build.output option such as -o.")
 				(bool.not (u32.eq (record.get (local output) origin) 2u32))
-				(then (return (call report_argv 12u32 0i32 (borrow-shared (local explicit_target_required))))))
+				(then (return (call report_required_target (local bin) 0i32))))
 			(let checked (call first_command_argument (borrow-shared (local arguments)) 0i32 (local rows) -5i32))
 			(if
 				(:doc "A check-only invocation must never publish a C unit.")
@@ -65,13 +78,32 @@
 					(let selection (slice.load (local arguments) (local profile)))
 					(set (local start) (record.get (local selection) start))
 					(set (local end) (record.get (local selection) end))))
+			(if
+				(:doc `The first native build path launches Clang. Diagnose other selections at the option's value.`)
+				(local bin)
+				(then
+					(let tool (call first_command_argument (borrow-shared (local arguments)) 0i32 (local rows) -6i32))
+					(if
+						(:doc `Only an explicit GCC selection differs from the Clang default.`)
+						(bool.and (i32.lt -1i32 (local tool))
+							(u32.eq (record.get (slice.load (local arguments) (local tool)) scalar) 1u32))
+						(then (return (call report_argv 12u32 (record.get (slice.load (local arguments) (local tool)) argv_index)
+							(borrow-shared (local clang_required))))))
+					(return (call compile_binary
+						(borrow-shared (slice.range (local bytes) (record.get (local input) start) (record.get (local input) end)))
+						(borrow-shared (slice.range (local bytes) (record.get (local target) start) (record.get (local target) end)))
+						(borrow-shared (slice.range (local bytes) (local start) (local end)))
+						(record.get (local input) argv_index) (record.get (local target) argv_index)
+						(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+						(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))))))
+			(let no_stage (array.alloc u8 0i32))
 			(return (call compile_input
 				(borrow-shared (slice.range (local bytes) (record.get (local input) start) (record.get (local input) end)))
 				(borrow-shared (slice.range (local bytes) (record.get (local target) start) (record.get (local target) end)))
 				(borrow-shared (slice.range (local bytes) (local start) (local end))) (record.get (local invocation) mode)
-				(record.get (local input) argv_index) (record.get (local target) argv_index)))))
+				(borrow-shared (local no_stage)) (record.get (local input) argv_index) (record.get (local target) argv_index)))))
 
-	(fn run_native_cc
+	(fn run_native_build
 		(:doc `Read the optional project and resolve the host argv before opening the requested source.`)
 		(params (bytes (shared-slice u8)) (argv (shared-slice ArgSpan)))
 		(returns i32)
@@ -116,5 +148,5 @@
 						(then (return (call report_project (local error) (record.get (local invocation) start)
 							(record.get (local invocation) end) (borrow-shared (local invalid_config))))))
 					(return (call report_argv (local error) (record.get (local invocation) argv_index) (borrow-shared (local invalid_arguments))))))
-			(return (call execute_cc (borrow-shared (local bytes)) (local invocation) (borrow-shared (local arguments))
+			(return (call execute_build (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation) (borrow-shared (local arguments))
 				(borrow-shared (local nodes)) (borrow-shared (local settings)))))))

@@ -1,0 +1,234 @@
+(module native_bin_arguments
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Pack Clang's arguments from the resolved project and explicit options.
+
+	Keep each decoded option as one argument. The process launcher takes
+	NUL-terminated rows and adds the executable name as argv[0].`)
+
+	(use wove-file "../../cli/command/args.wove" (only first_command_argument (type CommandArgument)))
+	(use wove-file "../../cli/command/resolve.wove" (only command_setting (type CommandInvocation) (type CommandSetting)))
+	(use wove-file "../../config/defaults.wove" (only write_default_cflag))
+	(use wove-file "../../config/project.wove" (only (type ProjectSetting)))
+	(use wove-file "../../json/reader.wove" (only json_decode_string (type JsonNode)))
+	(use wove-file "../../text/copy.wove" (only append_bytes))
+	(use wove-file "../platform.wove" (only host_os))
+
+	(let no_prefix "")
+	(let define_prefix "-D")
+	(let library_prefix "-l")
+	(let relative_prefix "./")
+	(let c11 "-std=c11")
+	(let c17 "-std=c17")
+	(let c23 "-std=c23")
+	(let thin_lto "-flto=thin")
+	(let full_lto "-flto=full")
+	(let gnu_features "-D_GNU_SOURCE")
+	(let darwin_features "-D_DARWIN_C_SOURCE")
+	(let include_flag "-I")
+	(let output_flag "-o")
+	(let math_library "-lm")
+
+	(fn write_argument
+		(:doc `Append one argument and one terminator, rejecting unrepresentable bytes or capacity.`)
+		(params (value (shared-slice u8)) (prefix (shared-slice u8)) (output (mut-slice u8)) (cursor i32)) (returns i32)
+		(body
+			(if
+				(:doc `A failed cursor stays failed. Leave room for both byte views and the terminator.`)
+				(bool.or (i32.lt (local cursor) 0i32)
+					(u64.lt (int.convert u64 (slice.len (local output)))
+						(u64.add.wrapping (int.convert u64 (slice.len (local value)))
+							(u64.add.wrapping (int.convert u64 (slice.len (local prefix)))
+								(u64.add.wrapping (int.convert u64 (local cursor)) 1u64)))))
+				(then (return -1i32)))
+			(let-mut index 0i32)
+			(while
+				(:doc `An escaped JSON NUL must never split one configured flag into additional arguments.`)
+				(i32.lt (local index) (slice.len (local value)))
+				(body
+					(if (u8.eq (slice.load (local value) (local index)) 0u8) (then (return -1i32)))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(let start (call append_bytes (borrow-shared (local prefix)) (borrow-mut (local output)) (local cursor)))
+			(let end (call append_bytes (borrow-shared (local value)) (borrow-mut (local output)) (local start)))
+			(slice.store (local output) (local end) 0u8)
+			(return (i32.add.wrapping (local end) 1i32))))
+
+	(fn write_plain_argument
+		(:doc `Forward one argument without adding a prefix.`)
+		(params (value (shared-slice u8)) (output (mut-slice u8)) (cursor i32)) (returns i32)
+		(body (return (call write_argument (borrow-shared (local value)) (borrow-shared (local no_prefix))
+			(borrow-mut (local output)) (local cursor)))))
+
+	(fn write_option
+		(:doc `Apply the argument spelling for definitions, named libraries, and relative link files.`)
+		(params (rule i32) (value (shared-slice u8)) (output (mut-slice u8)) (cursor i32)) (returns i32)
+		(body
+			(if
+				(:doc `Definitions must be one joined -D argument even when their value contains spaces.`)
+				(i32.eq (local rule) 14i32)
+				(then (return (call write_argument (borrow-shared (local value)) (borrow-shared (local define_prefix))
+					(borrow-mut (local output)) (local cursor)))))
+			(if
+				(:doc `Turn a configured library name into a linker search argument.`)
+				(i32.eq (local rule) 16i32)
+				(then (return (call write_argument (borrow-shared (local value)) (borrow-shared (local library_prefix))
+					(borrow-mut (local output)) (local cursor)))))
+			(if
+				(:doc `Disambiguate link filenames from command options and Clang response files.`)
+				(bool.and (i32.eq (local rule) 17i32)
+					(bool.and (i32.lt 0i32 (slice.len (local value)))
+						(bool.or (u8.eq (slice.load (local value) 0i32) 45u8)
+							(u8.eq (slice.load (local value) 0i32) 64u8))))
+				(then (return (call write_argument (borrow-shared (local value)) (borrow-shared (local relative_prefix))
+					(borrow-mut (local output)) (local cursor)))))
+			(return (call write_plain_argument (borrow-shared (local value)) (borrow-mut (local output)) (local cursor)))))
+
+	(fn write_argv_options
+		(:doc `Walk surviving CLI values in order, including when other rules occur between them.`)
+		(params (bytes (shared-slice u8)) (arguments (shared-slice CommandArgument)) (rows i32) (setting CommandSetting)
+			(rule i32) (output (mut-slice u8)) (cursor i32)) (returns i32)
+		(body
+			(let-mut end (local cursor))
+			(let-mut row (record.get (local setting) row))
+			(let-mut remaining (record.get (local setting) count))
+			(while
+				(:doc `The resolver gives the first effective row and the exact number of values after the last clear.`)
+				(i32.lt 0i32 (local remaining))
+				(body
+					(let found (call first_command_argument (borrow-shared (local arguments)) (local row) (local rows) (local rule)))
+					(let item (slice.load (local arguments) (local found)))
+					(set (local end) (call write_option (local rule)
+						(borrow-shared (slice.range (local bytes) (record.get (local item) start) (record.get (local item) end)))
+						(borrow-mut (local output)) (local end)))
+					(set (local row) (i32.add.wrapping (local found) 1i32))
+					(set (local remaining) (i32.sub.wrapping (local remaining) 1i32))))
+			(return (local end))))
+
+	(fn write_config_options
+		(:doc `Decode the selected JSONC list directly from its validated source nodes.`)
+		(params (config (shared-slice u8)) (nodes (shared-slice JsonNode)) (array_node i32)
+			(rule i32) (output (mut-slice u8)) (cursor i32)) (returns i32)
+		(body
+			(let-mut end (local cursor))
+			(let-mut row (record.get (slice.load (local nodes) (local array_node)) first_child))
+			(while
+				(:doc `Every list child is one string, and decoded bytes fit within the raw quoted token's width.`)
+				(bool.and (i32.lt -1i32 (local row)) (i32.lt -1i32 (local end)))
+				(body
+					(let item (slice.load (local nodes) (local row)))
+					(let start (record.get (local item) start))
+					(let finish (record.get (local item) end))
+					(let-mut scratch (array.alloc u8 (i32.sub.wrapping (local finish) (local start))))
+					(let decoded (call json_decode_string (borrow-shared (local config)) (local start) (local finish)
+						(borrow-mut (local scratch))))
+					(if (u32.lt 0u32 (record.get (local decoded) error)) (then (return -1i32)))
+					(set (local end) (call write_option (local rule)
+						(borrow-shared (slice.range (local scratch) 0i32 (record.get (local decoded) written)))
+						(borrow-mut (local output)) (local end)))
+					(set (local row) (record.get (local item) next_sibling))))
+			(return (local end))))
+
+	(fn write_default_options
+		(:doc `Copy the built-in optimization and debugging arguments for the resolved mode.`)
+		(params (mode u32) (count i32) (output (mut-slice u8)) (cursor i32)) (returns i32)
+		(body
+			(let-mut end (local cursor))
+			(let-mut row 0i32)
+			(let-mut scratch (array.alloc u8 3i32))
+			(while
+				(:doc `Only cflags has a nonempty built-in list.`)
+				(i32.lt (local row) (local count))
+				(body
+					(let width (call write_default_cflag (local mode) (local row) (borrow-mut (local scratch))))
+					(set (local end) (call write_plain_argument (borrow-shared (slice.range (local scratch) 0i32 (local width)))
+						(borrow-mut (local output)) (local end)))
+					(set (local row) (i32.add.wrapping (local row) 1i32))))
+			(return (local end))))
+
+	(fn write_standard
+		(:doc `Set the selected C dialect after user C flags so the compiler and generated unit agree.`)
+		(params (standard u32) (output (mut-slice u8)) (cursor i32)) (returns i32)
+		(body
+			(if
+				(:doc `Use the C17 driver dialect when selected.`)
+				(u32.eq (local standard) 17u32)
+				(then (return (call write_plain_argument (borrow-shared (local c17)) (borrow-mut (local output)) (local cursor)))))
+			(if
+				(:doc `Use the C23 driver dialect when selected.`)
+				(u32.eq (local standard) 23u32)
+				(then (return (call write_plain_argument (borrow-shared (local c23)) (borrow-mut (local output)) (local cursor)))))
+			(return (call write_plain_argument (borrow-shared (local c11)) (borrow-mut (local output)) (local cursor)))))
+
+	(fn write_lto
+		(:doc `Add the resolved Clang link-time optimization mode when it is enabled.`)
+		(params (mode u32) (output (mut-slice u8)) (cursor i32)) (returns i32)
+		(body
+			(if
+				(:doc `Thin LTO is distinct from full-module LTO.`)
+				(u32.eq (local mode) 1u32)
+				(then (return (call write_plain_argument (borrow-shared (local thin_lto)) (borrow-mut (local output)) (local cursor)))))
+			(if
+				(:doc `An explicit full mode reaches both compilation and linking.`)
+				(u32.eq (local mode) 2u32)
+				(then (return (call write_plain_argument (borrow-shared (local full_lto)) (borrow-mut (local output)) (local cursor)))))
+			(return (local cursor))))
+
+	(fn write_clang_arguments
+		(:doc `Write the fixed build invocation and apply each effective profile list exactly once.`)
+		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
+			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(directory (shared-slice u8)) (unit (shared-slice u8)) (binary (shared-slice u8)) (output (mut-slice u8))) (returns i32)
+		(body
+			(let posix (call write_plain_argument (borrow-shared (local gnu_features)) (borrow-mut (local output)) 0i32))
+			(let platform (call write_plain_argument (borrow-shared (local darwin_features)) (borrow-mut (local output)) (local posix)))
+			(let include (call write_plain_argument (borrow-shared (local include_flag)) (borrow-mut (local output)) (local platform)))
+			(let search (call write_plain_argument (borrow-shared (local directory)) (borrow-mut (local output)) (local include)))
+			(let-mut end (local search))
+			(let rules (array.make (array i32 5) 13i32 14i32 15i32 17i32 16i32))
+			(let-mut index 0i32)
+			(while
+				(:doc `Compiler switches precede the unit. Link requests follow it, with named libraries last.`)
+				(i32.lt (local index) 5i32)
+				(body
+					(let rule (array.load (local rules) (local index)))
+					(if
+						(:doc `Seal the compiler options and input before writing any linker options.`)
+						(i32.eq (local rule) 15i32)
+						(then
+							(let dialect (call command_setting (local invocation) (borrow-shared (local arguments))
+								(borrow-shared (local nodes)) (borrow-shared (local settings)) 4u32 21i32))
+							(set (local end) (call write_standard (record.get (local dialect) scalar) (borrow-mut (local output)) (local end)))
+							(let lto (call command_setting (local invocation) (borrow-shared (local arguments))
+								(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 18i32))
+							(set (local end) (call write_lto (record.get (local lto) scalar) (borrow-mut (local output)) (local end)))
+							(set (local end) (call write_plain_argument (borrow-shared (local unit)) (borrow-mut (local output)) (local end)))))
+					(let setting (call command_setting (local invocation) (borrow-shared (local arguments))
+						(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 (local rule)))
+					(let origin (record.get (local setting) origin))
+					(if
+						(:doc `An explicit list, including an empty clear, wins over the project and built-in lists.`)
+						(u32.eq (local origin) 2u32)
+						(then
+							(set (local end) (call write_argv_options (borrow-shared (local bytes)) (borrow-shared (local arguments))
+								(record.get (local invocation) rows) (local setting) (local rule) (borrow-mut (local output)) (local end))))
+						(else
+							(if
+								(:doc `Use only the selected project list when one was supplied.`)
+								(u32.eq (local origin) 1u32)
+								(then
+									(set (local end) (call write_config_options (borrow-shared (local config))
+										(borrow-shared (local nodes)) (record.get (local setting) row) (local rule)
+										(borrow-mut (local output)) (local end))))
+								(else
+									(set (local end) (call write_default_options (record.get (local invocation) mode)
+										(record.get (local setting) count) (borrow-mut (local output)) (local end)))))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(if
+				(:doc `Linux keeps the system math library as a separate link dependency.`)
+				(u8.eq (call host_os) 1u8)
+				(then
+					(set (local end) (call write_plain_argument (borrow-shared (local math_library))
+						(borrow-mut (local output)) (local end)))))
+			(let option (call write_plain_argument (borrow-shared (local output_flag)) (borrow-mut (local output)) (local end)))
+			(return (call write_plain_argument (borrow-shared (local binary)) (borrow-mut (local output)) (local option)))))
+)

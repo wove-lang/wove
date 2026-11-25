@@ -14,11 +14,58 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
+# Provide an executable wrapper and preserve a previous binary's bytes for failed builds.
+def prepare_binary(root, clang, options, target):
+	probe = root / options["probe"]
+	probe.chmod(0o700)
+	binary = root / target
+	previous = binary.read_bytes() if binary.is_file() else None
+	# An existing fixture executable must remain runnable after a failed tool invocation.
+	if previous is not None:
+		binary.chmod(0o700)
+	env = {**os.environ, "CLANG": str(probe), "WOVE_CLANG_LOG": str(root / "clang.jsonl"),
+		"WOVE_REAL_CLANG": json.dumps(clang)}
+	env.pop("WOVE_CLANG_STATUS", None)
+	# The fixture controls whether the probe delegates or writes a failed partial stage.
+	if "tool_status" in options:
+		env["WOVE_CLANG_STATUS"] = str(options["tool_status"])
+	return env, previous
+
+
+# Check the retained unit, single tool launch, executable publication, and diagnostic.
+def check_binary(root, options, target, retained, value, diagnostic, result, patterns, previous):
+	artifacts = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.c") if path.is_file())
+	assert artifacts == [retained], artifacts
+	generated = (root / retained).read_text()
+	# Apply the same retained-C pattern checks used by cc fixtures.
+	for pattern, count in patterns.items():
+		assert len(re.findall(pattern, generated)) == count, pattern
+	calls = [json.loads(line) for line in (root / "clang.jsonl").read_text().splitlines()]
+	expected = options.get(sys.platform, options["arguments"])
+	assert len(calls) == 1 and len(calls[0]) == len(expected), calls
+	# Fixture expressions account for the private paths chosen by the driver.
+	for actual, pattern in zip(calls[0], expected, strict=True):
+		assert re.fullmatch(pattern, actual), (actual, pattern)
+	# Toolchain flags can request side outputs, which belong with retained C.
+	for stage in root.rglob(".wovec-bin.*"):
+		assert stage.parent == (root / retained).parent and not (stage / "program").exists(), stage
+	binary = root / target
+	# A failed build must preserve both the previously published bytes and its result.
+	if diagnostic != "-":
+		assert binary.read_bytes() == previous
+		assert json.loads(result.stderr) == json.loads(diagnostic), result.stderr
+	else:
+		assert not result.stderr, result.stderr
+	built = subprocess.run([binary], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+	assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), built
+
+
 # Exercise one invocation with the project and files specified by its fixture row.
 def check_case(compiler, clang, runtime, fixtures, row):
 	label, inputs, argv, status, target, retained, value, diagnostic, *options = row
 	patterns = json.loads(options[0]) if options else {}
 	flags = json.loads(options[1]) if len(options) > 1 else []
+	binary = json.loads(options[2]) if len(options) > 2 else None
 	with TemporaryDirectory(prefix="native-cli-", dir=compiler.parent) as workspace:
 		root = Path(workspace)
 		entries = json.loads(inputs)
@@ -47,8 +94,13 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		stages = {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()}
 		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
 			for argument in json.loads(argv)]
-		result = subprocess.run([compiler, *arguments], cwd=root, capture_output=True, timeout=30)
+		env, previous = prepare_binary(root, clang, binary, target) if binary else (None, None)
+		result = subprocess.run([compiler, *arguments], cwd=root, env=env, capture_output=True, timeout=30)
 		assert (result.returncode, result.stdout) == (int(status), b""), (label, result)
+		# Binary fixtures run the executable published by the compiler itself.
+		if binary:
+			check_binary(root, binary, target, retained, value, diagnostic, result, patterns, previous)
+			return
 		# cc retains C beside its requested target without creating the target itself.
 		assert not (root / target).exists(), (label, target)
 		artifacts = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.c") if path.is_file())
