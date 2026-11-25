@@ -36,13 +36,13 @@ C_ARGUMENT_MODULE := stage-2/c/arguments.wove
 C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove emit/embeds.wove emit/c.wove emit/arrays.wove emit/bindings.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_variadic.wove emit/c_bytes.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
 	scalar/syntax.wove scalar/signatures.wove scalar/flow.wove scalar/host_entry.wove scalar/plan.wove scalar/graph.wove scalar/c_types.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_BITS := stage-2/hashing/bits.wove
-HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_BITS)
+HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove) $(HASHING_BITS)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
 HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,base32hex base16)
 BASE32HEX_SOURCE := stage-2/hashing/base32hex.wove
-BASE16_SOURCES = stage-2/emit/text.wove $(C_IDENTIFIER_MODULE) $(SOURCE_TYPE_MODULE) $(BASE32HEX_SOURCE) $(BOOTSTRAP_WOVE_SOURCES)
+BASE16_SOURCES = stage-2/emit/text.wove stage-2/hashing/base16.wove $(C_IDENTIFIER_MODULE) $(SOURCE_TYPE_MODULE) $(BASE32HEX_SOURCE) $(BOOTSTRAP_WOVE_SOURCES)
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
 BLAKE2B_SOURCES := $(addprefix stage-2/hashing/,blake2b.wove blake2b/word.wove blake2b/compress.wove)
