@@ -630,7 +630,9 @@ writable pointer to the same storage for the duration of the call.
 
 Use `(:pragma (c_array data count))` when a C argument points to a
 bounded array of integers. The extent is a nonnegative decimal `i32`
-literal or the name of an integer formal, including a native alias.
+literal or the name of a C formal declared with `u8`, `i32`, `u32`, or
+a native integer alias. For a 64-bit count, declare an alias such as
+`(type Count (c-type "uint64_t"))` and use `Count` as the formal's type.
 The check uses the number of elements in the slice and traps at the
 data argument before entering C if the count is negative or too large.
 A shared slice passes a `const` pointer to the exact declared element

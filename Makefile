@@ -71,7 +71,7 @@ COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
 NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove graph.wove output.wove platform.wove files.wove disk.wove disk_files.wove)
-BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove)
+BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove unistd.wove)
 DRIVER_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove sys_stat.wove fcntl.wove unistd.wove errno.wove)
 NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
