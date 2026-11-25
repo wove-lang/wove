@@ -55,6 +55,29 @@ void wvrt_cstr_drop(char *wvrt_storage);
 void wvrt_check_c_bytes(wvrt_slice wvrt_view, int64_t wvrt_size, int64_t wvrt_count,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 
+// Test the sign without converting unsigned values into a signed domain.
+#define WVRT_INTEGER_NEGATIVE(value) ((value) <= 0 && (value) != 0)
+
+// Reduce a native product to the slice's i32 domain while retaining failure priority.
+#define wvrt_check_c_bytes_native(view, size, count, file, start, end) \
+	__extension__ ({ \
+		__auto_type wvrt_size = (size); \
+		__auto_type wvrt_count = (count); \
+		int32_t wvrt_product; \
+		int64_t wvrt_extent; \
+		/* A negative factor is invalid even when the product would be zero. */ \
+		if (WVRT_INTEGER_NEGATIVE(wvrt_size) || WVRT_INTEGER_NEGATIVE(wvrt_count)) { \
+			wvrt_extent = -1; \
+		/* A product above INT32_MAX exceeds every valid slice length. */ \
+		} else if (__builtin_mul_overflow(wvrt_size, wvrt_count, &wvrt_product)) { \
+			wvrt_extent = (int64_t)INT32_MAX + 1; \
+		/* Forward a fitting product to the shared slice check. */ \
+		} else { \
+			wvrt_extent = wvrt_product; \
+		} \
+		wvrt_check_c_bytes((view), 1, wvrt_extent, (file), (start), (end)); \
+	})
+
 void wvrt_check_c_handle(const volatile void *wvrt_handle, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
 
@@ -98,6 +121,21 @@ void wvrt_slice_store_u8_at_span(wvrt_mut_slice wvrt_view, int32_t wvrt_index, u
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int64_t wvrt_int_convert(int64_t wvrt_value, int64_t wvrt_min, int64_t wvrt_max,
 	wvrt_location wvrt_site);
+_Noreturn void wvrt_int_conversion_trap(int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+// Use the target compiler's integer range, including aliases wider than int64_t.
+#define wvrt_int_to_native(type, value, file, start, end) \
+	__extension__ ({ \
+		/* Overflow builtins cannot store a boolean. Check the 0..1 range explicitly. */ \
+		__typeof__(_Generic((type)0, _Bool: (unsigned char)0, default: (type)0)) wvrt_result; \
+		/* Addition of zero checks representability without first narrowing the value. */ \
+		if (__builtin_add_overflow((value), 0, &wvrt_result) || \
+			_Generic((type)0, _Bool: wvrt_result > 1, default: false)) { \
+			wvrt_int_conversion_trap((file), (start), (end)); \
+		} \
+		(type)wvrt_result; \
+	})
+
 uint8_t wvrt_int_to_u8(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_int_to_i32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 uint32_t wvrt_int_to_u32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
