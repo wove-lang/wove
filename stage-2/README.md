@@ -567,6 +567,11 @@ native argument contract. Parameter names must be unique within the signature. T
 importing file's function namespace. Its binding keeps the defining declaration
 and the raw header, native symbol, and signature spans in that file.
 
+A bodyless C bridge function can put a quoted native target before its
+parameters, as in `(fn absolute (c-name "abs") (params (value i32)) (returns i32))`.
+The Wove selector uses the declared function name. Calls and C ABI checks use
+the target's C identifier. Without `c-name`, the two spellings are the same.
+
 Bridge `const`, `let`, and `let-mut` declarations provide typed values
 from the C header. A bare selection tries functions first. Use
 `(value O_CLOEXEC)` or `(value (as errno error_indicator))` to select
