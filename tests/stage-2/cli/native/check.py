@@ -141,7 +141,9 @@ def check_case(compiler, clang, runtime, fixtures, row):
 	preserve = len(options) > 3 and options[3] == "preserve"
 	with TemporaryDirectory(prefix="native-cli-", dir=compiler.parent) as workspace:
 		root = Path(workspace)
-		entries = json.loads(inputs)
+		# Some Clang cases need the physical path of the isolated workspace.
+		physical = str(root.resolve())
+		entries = {path.replace("{workspace}", physical): source for path, source in json.loads(inputs).items()}
 		# Map fixture files to their supplied names in the command's working directory.
 		for destination, source in entries.items():
 			path = root / destination
@@ -165,7 +167,7 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		# Existing C paths can also be Wove inputs. A failed command must preserve their bytes.
 		existing_c = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.c") if path.is_file()}
 		stages = {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()}
-		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
+		arguments = [argument.replace("{workspace}", physical) if isinstance(argument, str) else bytes.fromhex(argument["hex"])
 			for argument in json.loads(argv)]
 		preserved = {root / path: (root / path).read_bytes() for path in (tool or {}).get("unchanged", [])}
 		env, previous = prepare_tool(root, clang, tool, target) if tool else (None, None)
