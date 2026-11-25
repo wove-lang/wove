@@ -26,10 +26,13 @@ def prepare_binary(root, clang, options, target):
 	env = {**os.environ, "CLANG": str(probe), "WOVE_CLANG_LOG": str(root / "clang.jsonl"),
 		"WOVE_REAL_CLANG": json.dumps(clang)}
 	env.pop("WOVE_CLANG_STATUS", None)
+	env.pop("WOVE_CLANG_LINK_TARGET", None)
 	# The fixture controls whether the probe delegates or writes a failed partial stage.
 	if "tool_status" in options:
 		env["WOVE_CLANG_STATUS"] = str(options["tool_status"])
-		env["WOVE_CLANG_OUTPUT"] = options.get("tool_output", "partial")
+	# A successful simulated tool can supply a fixture-backed relative symlink.
+	if "tool_link_target" in options:
+		env["WOVE_CLANG_LINK_TARGET"] = str(root / options["tool_link_target"])
 	return env, previous
 
 

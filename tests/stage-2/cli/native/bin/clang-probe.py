@@ -7,6 +7,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 
 
@@ -20,9 +21,9 @@ def main():
 	if "WOVE_CLANG_STATUS" in os.environ:
 		output = Path(arguments[arguments.index("-o") + 1])
 		# The output entry may be a relative symlink to a real executable in the stage.
-		if os.environ["WOVE_CLANG_OUTPUT"] == "symlink":
+		if "WOVE_CLANG_LINK_TARGET" in os.environ:
 			executable = output.with_suffix(".real")
-			executable.write_bytes(b"#!/bin/sh\nexit 42\n")
+			shutil.copyfile(os.environ["WOVE_CLANG_LINK_TARGET"], executable)
 			executable.chmod(0o700)
 			output.symlink_to(executable.name)
 		else:
