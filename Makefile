@@ -202,6 +202,7 @@ test-stage-2-native: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/protection.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/phases.tsv"
 
 # Check generated metadata and version invalidation in an isolated build.
 test-stage-2-version: $(NATIVE_COMPILER) $(BUILD_VERSION)
