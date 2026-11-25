@@ -21,7 +21,7 @@
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode c_null_argument_kind))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
-	(use wove-file "../source/types.wove" (only void_type is_builtin_integer reference_mode))
+	(use wove-file "../source/types.wove" (only void_type is_builtin_integer builtin_type_keyword reference_mode))
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type find_record record_type record_index is_record_type
 			find_member member_value_type read_member_operand fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_slice_element slice_element_code slice_element_type is_readable_slice is_writable_slice
@@ -36,7 +36,7 @@
 			(value c_writable_binding) (value c_value_expression) (value c_value_assignment) (value c_handle_reference)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar scalar_operator word_shift_type is_i32_division is_fixed_initializer is_fixed_access
+		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar decimal_suffix_start scalar_operator word_shift_type is_i32_division is_fixed_initializer is_fixed_access
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name (type ScalarOperator) (type EntryRead) (type StatementRead)))
 
 	(struct
@@ -476,6 +476,48 @@
 				(first (local first)) (start (local start)) (end (local end)) (negative (local negative))
 				(borrowed_owner (bool false)) (mutable_place (bool false)) (projection (i32 -1)) (asset_start (i32 0)) (asset_end (i32 0))))))
 
+	(fn plan_decimal_value
+		(:doc `Record a bounded decimal value using only the original sign and digit span.`)
+		(params (source (shared-slice u8)) (node SourceNode) (end i32) (type u32)
+			(index i32) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let spelling (call decimal_scalar (borrow-shared (local source))
+				(record.get (local node) start) (local end) (local type)))
+			(let digits (record.get (local spelling) digits))
+			(if
+				(:doc "An invalid spelling or magnitude points at the whole original atom.")
+				(i32.lt (local digits) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 25)))))
+			(slice.store (local expressions) (local index)
+				(call expression_row (u32 1) (local type) (i32 -1) (i32 -1)
+					(local digits) (local end) (record.get (local spelling) negative)))
+			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn plan_suffixed_decimal
+		(:doc `Check the exact integer type named after a decimal atom's digits.`)
+		(params (source (shared-slice u8)) (node SourceNode) (index i32) (expected u32)
+			(expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let end (record.get (local node) end))
+			(let suffix (call decimal_suffix_start (borrow-shared (local source)) (record.get (local node) start) (local end)))
+			(if
+				(:doc "Other atoms do not supply a scalar expression.")
+				(i32.lt (local suffix) (i32 0))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let type (call builtin_type_keyword (borrow-shared (local source)) (local suffix) (i32.sub.wrapping (local end) (local suffix))))
+			(if
+				(:doc "The suffix must name a supported integer type.")
+				(bool.not (call is_builtin_integer (local type)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 25)))))
+			(if
+				(:doc "An enclosing operation can require a different exact type.")
+				(bool.not (call value_matches_type (local expected) (local type)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(return (call plan_decimal_value (borrow-shared (local source)) (local node) (local suffix)
+				(local type) (local index) (borrow-mut (local expressions))))))
+
 	(fn plan_literal
 		(:doc `Check one literal operand and record its normalized C spelling.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
@@ -505,16 +547,12 @@
 					(slice.store (local expressions) (local index)
 						(call expression_row (local kind) (local type) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false)))
 					(return (call entry_at (local node) (local index) (u32 0)))))
-			(let spelling (call decimal_scalar (borrow-shared (local source)) (local value) (local type)))
-			(let digits (record.get (local spelling) digits))
 			(if
-				(:doc "An invalid spelling or magnitude points at the original value atom.")
-				(i32.lt (local digits) (i32 0))
+				(:doc "The typed list's magnitude must be an unquoted decimal atom.")
+				(bool.not (u32.eq (record.get (local value) kind) (u32 1)))
 				(then (return (call entry_at (local value) (i32 -1) (u32 25)))))
-			(slice.store (local expressions) (local index)
-				(call expression_row (u32 1) (local type) (i32 -1) (i32 -1)
-					(local digits) (record.get (local value) end) (record.get (local spelling) negative)))
-			(return (call entry_at (local node) (local index) (u32 0)))))
+			(return (call plan_decimal_value (borrow-shared (local source)) (local value) (record.get (local value) end)
+				(local type) (local index) (borrow-mut (local expressions))))))
 
 	(fn find_module_binding
 		(:doc `Resolve a local or selected immutable name to its defining declaration.`)
@@ -568,6 +606,11 @@
 						(call expression_row (u32 0) (u32 34) (i32 -1) (i32 -1)
 							(local start) (local end) (bool false)))
 					(return (call entry_at (local node) (local index) (u32 0)))))
+			(if
+				(:doc "A typed atom is an integer initializer with its width declared in the suffix.")
+				(u32.eq (record.get (local node) kind) (u32 1))
+				(then (return (call plan_suffixed_decimal (borrow-shared (local source)) (local node)
+					(local index) (u32 1) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
 			(if
@@ -2289,6 +2332,11 @@
 					(local node) (local index) (local caller) (local statement) (local expected) (local view_start)
 					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 					(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A typed atom retains its own value span when checked against a consumer.")
+				(u32.eq (record.get (local node) kind) (u32 1))
+				(then (return (call plan_suffixed_decimal (borrow-shared (local source)) (local node)
+					(local index) (local expected) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
 			(if
