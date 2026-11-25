@@ -30,9 +30,9 @@
 #define default_selection wv_seed_fn_94
 #define target_os wv_seed_fn_95
 #define target_arch wv_seed_fn_96
-#define inspect_callers wv_seed_fn_434
-#define run_scalar_graph wv_seed_fn_464
-#define discover_graph_tests wv_seed_fn_472
+#define inspect_callers wv_seed_fn_455
+#define run_scalar_graph wv_seed_fn_487
+#define discover_graph_tests wv_seed_fn_495
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -44,18 +44,18 @@ typedef wv_seed_record_13 SelectedDeclaration;
 typedef wv_seed_record_14 ModuleRead;
 typedef wv_seed_record_16 SelectionContext;
 typedef wv_seed_record_18 EmitResult;
-typedef wv_seed_record_53 EmbedAsset;
+typedef wv_seed_record_54 EmbedAsset;
 typedef wv_seed_record_19 GraphModule;
 typedef wv_seed_record_20 GraphBinding;
 typedef wv_seed_record_21 GraphUse;
 typedef wv_seed_record_22 GraphSelector;
 typedef wv_seed_record_23 GraphResult;
-typedef wv_seed_record_44 CallSite;
+typedef wv_seed_record_45 CallSite;
 typedef wv_seed_record_26 SuppliedFile;
-typedef wv_seed_record_56 CallerInspection;
-typedef wv_seed_record_60 GraphOutput;
-typedef wv_seed_record_61 DiscoveredTest;
-typedef wv_seed_record_62 TestDiscovery;
+typedef wv_seed_record_57 CallerInspection;
+typedef wv_seed_record_61 GraphOutput;
+typedef wv_seed_record_62 DiscoveredTest;
+typedef wv_seed_record_63 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 

@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 The fourteen Wove files mirror the archived directory at `8ac13c06`. They are
 standalone source for the bridge design. Each uses the current `c-header`
-provider. Native fixtures select a narrow subset from `stdio.wove`. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
+provider. Native fixtures select members from `stdio.wove` and the Linux and macOS `Stat` views. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
 
 ## Source forms
 
@@ -33,7 +33,8 @@ provider. Native fixtures select a narrow subset from `stdio.wove`. [Archived di
   the original comment delimiters, rationale, and declaration sketches.
 
 The current parser and renderer can read these forms structurally. The seed
-skips bridge members. Stage 2 resolves selected native integer aliases in function signatures.
+skips bridge members. Stage 2 resolves selected native integer aliases and
+record views and lowers checked record fields and call-scoped borrows.
 Further activation requires the declaration, type, selection, and lowering
 work below. [Seed bridge behavior](../../stage-1/README.md)
 
@@ -43,12 +44,12 @@ work below. [Seed bridge behavior](../../stage-1/README.md)
 | --- | --- | --- |
 | All fourteen headers and their active members | `(bridge c-header "<header>" …)`, bodyless `fn`, and `(c-name "symbol")` | Resolve a selected member from the declared header. Bind its Wove name and exact C name, discover macro or symbol availability in the selected target's header environment, check the native signature, and emit the right include, call, and link dependencies. |
 | `dirent.h` aliases for stream positions, GNU byte counts and offsets, `fcntl.h` typedefs, `math.h` floating and integer aliases, `signal.h` signal types, `spawn.h` attributes and actions, `stdio.h` file and position types, `sys/stat.h`, `sys/wait.h`, `time.h`, and `unistd.h` aliases | `(type Name (c-type "…"))` | Integer aliases keep the selected native spelling and nominal identity in parameters, results, and locals. Wider native value classes, checked casts, and aliases as buffer extents require additional lowering. |
-| `fcntl.h` `Lock`, `spawn.h` `Scheduling`, `sys/stat.h` `Timespec` and both `Stat` views, `sys/wait.h` `SignalInfo`, and `time.h` `Stamp` | `struct` with `c-type` and `fields` | Allocate and pass the entire native object with its padding and unexposed members. Check field access against the selected header. Honor the platform timestamp names and the child-status view of `siginfo_t`. |
+| `fcntl.h` `Lock`, `spawn.h` `Scheduling`, `sys/stat.h` `Timespec` and both `Stat` views, `sys/wait.h` `SignalInfo`, and `time.h` `Stamp` | `struct` with `c-type` and `fields` | Allocate, borrow, and read the header's complete native object. The Linux and macOS `Stat` fixtures cover target-specific timestamps and native field types. Specialized union and alias views such as the child status in `siginfo_t` need separate validation. |
 | `sys/wait.h` `IdType` and `time.h` `Clock` | `enum` with `c-type` and `members` | Bind the C enum or typedef and its selected header members with their native values and argument representation. |
 | `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdio.h`, `sys/stat.h`, `sys/wait.h`, and `unistd.h` constant declarations | `const` with an explicit type | Read header-derived values in the checked C constant context and retain their declared Wove types. Guarded alternatives such as `UTIME_NOW` and `UTIME_OMIT` use the selected platform width. |
 | `errno.h` `errno`, `math.h` `signgam` and floating values, `stdio.h` standard streams, `unistd.h` `optind`, `opterr`, `optopt`, and `environ` | Typed `let` and `let-mut` | Distinguish native lvalues, read-only header expressions, borrowed stream handles, and copied snapshots. Evaluate `errno` through the header lvalue even when it expands to a macro. |
 | `math.h` native math families, including `__fabsf16` and the Darwin half-width guard, and `sys/stat.h` Linux timestamp controls | `f16`, `f32`, `f64`, `i64`, and native `long double` | Check and lower the declared scalar types in arguments, results, constants, and out pointees. Preserve target floating representation and narrowing behavior. |
-| `dirent.h` raw reads and `fdclosedir`, guarded members in `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdlib.h`, `sys/stat.h`, and `unistd.h` | `(cfg (all …))`, `any`, `os`, `arch`, `os_min`, feature names | Source and scalar bridge selection accept a supplied OS, architecture, and deployment version. Remaining work includes host target discovery, feature selection, native layouts, and the unsupported member shapes. |
+| `dirent.h` raw reads and `fdclosedir`, guarded members in `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdlib.h`, `sys/stat.h`, and `unistd.h` | `(cfg (all …))`, `any`, `os`, `arch`, `os_min`, feature names | Source and scalar bridge selection accept a supplied OS, architecture, and deployment version. Remaining work includes host target discovery, feature selection, and additional member shapes. |
 | `fcntl.h` `fcntl_*` | `(const command i32 F_GETFD)` and `c-name` | Supply the header constant automatically in its original C position. The Wove caller supplies only the ordinary operands. |
 | Native pointer parameters across the corpus, including `math.h` `frexp`, `fcntl.h` lock operations, and `time.h` `clock_gettime` | `shared-ref`, `mut-ref`, typed and byte slices | Lower declared native pointees and maintain borrow lifetimes through the call. Allow writable out parameters only through the applicable mutable views. |
 

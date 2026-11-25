@@ -218,6 +218,18 @@ The first row is index zero. Empty arguments have equal endpoints, and
 zero user arguments supply two empty views. Wove borrows both views for
 the entry call. The wrapper releases the backing storage on return.
 
+A C bridge can expose fields of a native record with
+`(struct Stat (c-type "struct stat") (fields (st_size Offset)))`.
+Select its type and the relevant function with `use c-header`.
+`(let-mut info (record.make Stat))` zero-initializes storage of the
+header's complete type with its native alignment. A `(mut-ref Stat)`
+C parameter takes `(borrow-mut (local info))` for the duration of the
+call. A `(shared-ref Stat)` takes a shared borrow and passes a const
+pointer. Subsequent `(record.get (local info) st_size)` reads the
+native field with its declared Wove type. The C header verifies
+the field spelling and type, including the platform-specific
+timestamp members in the bundled Stat views.
+
 A module-local `(struct Token (fields (kind u32) (start i32)))` defines
 a named, copyable record. Fields can use `bool`, `i8`, `u8`, `i32`, or `u32`.
 `(record.make Token (kind (u32 40)) (start (i32 2)))` evaluates each
@@ -235,6 +247,8 @@ can follow the signatures that refer to them.
 `i32.eq` and `i32.lt` compare signed operands. `u8.eq`, `u8.lt`,
 `u32.eq`, and `u32.lt` compare unsigned operands. Each comparison
 requires operands of its named scalar type and returns `bool`.
+`(int.eq Type left right)` also compares two integers of the exact
+named type, including native aliases such as `Device` and `Inode`.
 `i32.add.wrapping` and `i32.sub.wrapping` take `i32` operands and
 return their signed 32-bit result modulo 2^32. Each binary operand is
 evaluated once, left to right. Emitted C widens the arithmetic,

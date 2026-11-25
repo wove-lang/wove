@@ -47,23 +47,24 @@ def read_cases(manifest):
 		elif kind == "asset" and label is not None:
 			path, contents = fields
 			assets.append((path, b"" if contents == "-" else bytes.fromhex(contents)))
-		elif kind == "native" and label is not None:
-			status, *flags = fields
-			native = flags, [(int(status), [], None, b"", b"")]
+		# Platform-specific C headers are compiled on the corresponding host.
+		elif kind in {"native", "native-on"} and label is not None:
+			host, status, *flags = ["", *fields] if kind == "native" else fields
+			native = host, flags, [(int(status), [], None, b"", b"")]
 		# Runtime traps use the same native recipe with exact stderr.
 		elif kind == "native-trap" and label is not None:
 			diagnostic, *flags = fields
-			native = flags, [(1, [], None, b"", json.loads(diagnostic).encode("utf-8"))]
+			native = "", flags, [(1, [], None, b"", json.loads(diagnostic).encode("utf-8"))]
 		# Additional vectors may supply a display name independent of the executable.
 		elif kind == "native-argv" and native is not None:
 			status, argv, *display = fields
 			argv0, = display or ["null"]
-			native[1].append((int(status), json.loads(argv), json.loads(argv0), b"", b""))
+			native[2].append((int(status), json.loads(argv), json.loads(argv0), b"", b""))
 		# A program that reports results can attach expected streams to any invocation.
 		elif kind == "native-output" and native is not None:
 			stdout, stderr = (json.loads(field).encode("utf-8") for field in fields)
-			status, argv, argv0, _, _ = native[1][-1]
-			native[1][-1] = (status, argv, argv0, stdout, stderr)
+			status, argv, argv0, _, _ = native[2][-1]
+			native[2][-1] = (status, argv, argv0, stdout, stderr)
 		# A native behavior case may assert just the probe’s leading rows.
 		elif kind in {"expect", "expect-prefix"} and label is not None:
 			prefix = prefix or kind == "expect-prefix"
@@ -130,8 +131,8 @@ def check_manifest(probe, manifest):
 			print("expected:\n" + "\n".join(expected), file=sys.stderr)
 			print(f"actual:\n{run.stdout}{run.stderr}", file=sys.stderr)
 			return 1
-		if native is not None:
-			check_native(probe, label, run.stdout, *native)
+		if native is not None and native[0] in ("", sys.platform):
+			check_native(probe, label, run.stdout, *native[1:])
 	return 0
 
 
