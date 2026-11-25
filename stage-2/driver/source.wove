@@ -7,7 +7,7 @@
 	and write C with the shared emitter, keeping the file's original spans
 	on failure. Publish only a complete emitted translation unit.`)
 
-	(use wove-file "./diagnostics.wove" (only report_source
+	(use wove-file "./diagnostics.wove" (only report_source report_file
 		(value invalid_source) (value unreadable_file) (value unreadable_asset)))
 	(use wove-file "./output.wove" (only publish_input))
 	(use wove-file "./input_files.wove" (only check_asset_inputs))
@@ -26,8 +26,8 @@
 	(fn emit_input
 		(:doc `Retry a short emitter destination, retaining only the first complete unit.`)
 		(params (path (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8))
-			(target_index i32) (source (shared-array u8)) (nodes (shared-array SourceNode)) (module ModuleRead)
-			(declarations (shared-array SelectedDeclaration)) (assets (mut-array EmbedAsset)))
+			(target_index i32) (source (shared-array u8)) (source_size i32) (nodes (shared-array SourceNode)) (module ModuleRead)
+			(declarations (shared-array SelectedDeclaration)) (assets (mut-array EmbedAsset)) (human bool))
 		(returns i32)
 		(body
 			(let-mut capacity 4096i32)
@@ -45,12 +45,13 @@
 						(u32.eq (local error) 0u32)
 						(then
 							(return (call publish_input (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
-								(borrow-shared (array.range (local output) 0i32 (struct.get (local result) written)))))))
+								(borrow-shared (array.range (local output) 0i32 (struct.get (local result) written))) (local human)))))
 					(if
 						(:doc "A source error or exhausted growth limit retains the emitter's span.")
 						(bool.or (bool.not (u32.eq (local error) 16u32)) (i32.lt 1073741823i32 (local capacity)))
 						(then (return (call report_source (borrow-shared (local path)) (local error)
-							(struct.get (local result) start) (struct.get (local result) end) (borrow-shared (local invalid_source))))))
+							(struct.get (local result) start) (struct.get (local result) end) (borrow-shared (local invalid_source))
+							(borrow-shared (array.range (local source) 0i32 (local source_size))) (local human)))))
 					(set (local capacity) (i32.add.wrapping (local capacity) (local capacity)))))
 			(return 1i32)))
 
@@ -59,7 +60,7 @@
 		(params (path (shared-array u8)) (canonical (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8))
 			(protection BuildProtection) (target_index i32) (check_only bool)
 			(source (shared-array u8)) (nodes (shared-array SourceNode)) (module ModuleRead)
-			(declarations (shared-array SelectedDeclaration)))
+			(declarations (shared-array SelectedDeclaration)) (human bool))
 		(returns i32)
 		(body
 			(let-mut requests (array.alloc EmbedAsset (array.len (local nodes))))
@@ -71,22 +72,23 @@
 				(:doc "The semantic plan reports malformed or ill-typed source before requesting any files.")
 				(u32.lt 0u32 (struct.get (local checked) error))
 				(then (return (call report_source (borrow-shared (local path)) (struct.get (local checked) error)
-					(struct.get (local checked) start) (struct.get (local checked) end) (borrow-shared (local invalid_source))))))
+					(struct.get (local checked) start) (struct.get (local checked) end) (borrow-shared (local invalid_source))
+					(borrow-shared (local source)) (local human)))))
 			(if
 				(:doc "A module without active embeds already has a complete source arena.")
 				(i32.eq (struct.get (local checked) written) 0i32)
 				(then
 					(if (local check_only) (then (return 0i32)))
 					(return (call emit_input (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
-					(borrow-shared (local source)) (borrow-shared (local nodes))
-					(local module) (borrow-shared (local declarations)) (borrow-mut (local requests))))))
+					(borrow-shared (local source)) (array.len (local source)) (borrow-shared (local nodes))
+					(local module) (borrow-shared (local declarations)) (borrow-mut (local requests)) (local human)))))
 			(if
 				(:doc "Check destination aliases when this invocation will publish.")
 				(bool.not (local check_only))
 				(then
 					(let no_files (array.alloc SuppliedFile 0i32))
 					(let conflict (call check_asset_inputs (borrow-shared (local canonical)) (borrow-shared (local source))
-						(borrow-shared (local no_files)) (borrow-shared (local requests)) (local protection)))
+						(borrow-shared (local no_files)) (borrow-shared (local requests)) (local protection) (local human)))
 					(if (i32.lt 0i32 (local conflict)) (then (return (local conflict))))))
 			(let measured (call load_input_assets (borrow-shared (local canonical)) (borrow-shared (local source))
 				(borrow-mut (local requests)) (borrow-mut (local none)) (bool false)))
@@ -94,7 +96,8 @@
 				(:doc "A missing or invalid asset is diagnosed at the selected path token.")
 				(u32.lt 0u32 (struct.get (local measured) error))
 				(then (return (call report_source (borrow-shared (local path)) (struct.get (local measured) error)
-					(struct.get (local measured) start) (struct.get (local measured) end) (borrow-shared (local unreadable_asset))))))
+					(struct.get (local measured) start) (struct.get (local measured) end) (borrow-shared (local unreadable_asset))
+					(borrow-shared (local source)) (local human)))))
 			(let-mut arena (array.alloc u8 (struct.get (local measured) count)))
 			(call copy_source_prefix (borrow-shared (local source)) (borrow-mut (local arena)))
 			(let loaded (call load_input_assets (borrow-shared (local canonical)) (borrow-shared (local source))
@@ -103,19 +106,20 @@
 				(:doc "A failed or changed file cannot leave partial data in retained C.")
 				(u32.lt 0u32 (struct.get (local loaded) error))
 				(then (return (call report_source (borrow-shared (local path)) (struct.get (local loaded) error)
-					(struct.get (local loaded) start) (struct.get (local loaded) end) (borrow-shared (local unreadable_asset))))))
+					(struct.get (local loaded) start) (struct.get (local loaded) end) (borrow-shared (local unreadable_asset))
+					(borrow-shared (local source)) (local human)))))
 			(if
 				(:doc "The checked single module and its selected assets are ready.")
 				(local check_only)
 				(then (return 0i32)))
 			(return (call emit_input (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (local target_index)
-				(borrow-shared (local arena)) (borrow-shared (local nodes))
-				(local module) (borrow-shared (local declarations)) (borrow-mut (local requests))))))
+				(borrow-shared (local arena)) (array.len (local source)) (borrow-shared (local nodes))
+				(local module) (borrow-shared (local declarations)) (borrow-mut (local requests)) (local human)))))
 
 	(fn compile_input
 		(:doc `Read the checked entry and select the emitter while carrying its publication protection.`)
 		(params (path (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8))
-			(probe_options (shared-array u8)) (protection BuildProtection) (target_index i32) (check_only bool))
+			(probe_options (shared-array u8)) (protection BuildProtection) (target_index i32) (check_only bool) (human bool))
 		(returns i32)
 		(body
 			(let canonical (call canonical_path (borrow-shared (local path))))
@@ -124,19 +128,20 @@
 			(if
 				(:doc "A missing or unreadable file has no source bytes yet.")
 				(i32.lt (local length) 0i32)
-				(then (return (call report_source (borrow-shared (local path)) 64u32 0i32 0i32 (borrow-shared (local unreadable_file))))))
+				(then (return (call report_file (borrow-shared (local path)) 64u32 0i32 0i32 (borrow-shared (local unreadable_file)) (local human)))))
 			(let-mut source (array.alloc u8 (local length)))
 			(let read (call read_source_file (borrow-shared (local canonical)) (local stamp) (borrow-mut (local source))))
 			(if
 				(:doc "Keep a failed read at the input path.")
 				(bool.not (local read))
-				(then (return (call report_source (borrow-shared (local path)) 64u32 0i32 0i32 (borrow-shared (local unreadable_file))))))
+				(then (return (call report_file (borrow-shared (local path)) 64u32 0i32 0i32 (borrow-shared (local unreadable_file)) (local human)))))
 			(let checked (call check_source_form (borrow-shared (local source))))
 			(if
 				(:doc "Lexing and form errors already identify their original byte spans.")
 				(u32.lt 0u32 (struct.get (local checked) error))
 				(then (return (call report_source (borrow-shared (local path)) (struct.get (local checked) error)
-					(struct.get (local checked) start) (struct.get (local checked) end) (borrow-shared (local invalid_source))))))
+					(struct.get (local checked) start) (struct.get (local checked) end) (borrow-shared (local invalid_source))
+					(borrow-shared (local source)) (local human)))))
 			(let rows (int.convert i32 (struct.get (local checked) rows)))
 			(let-mut nodes (array.alloc SourceNode (local rows)))
 			(let built (call build_source_tree (borrow-shared (local source)) (local checked) (borrow-mut (local nodes))))
@@ -151,7 +156,7 @@
 						(borrow-shared (local declarations)) (struct.get (local module) count) 3u32))
 				(then (return (call compile_disk_graph (borrow-shared (local path)) (borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options))
 					(local protection) (local target_index) (local check_only)
-					(borrow-shared (local canonical)) (borrow-shared (local source)) (local stamp)))))
+					(borrow-shared (local canonical)) (borrow-shared (local source)) (local stamp) (local human)))))
 			(if
 				(:doc "C-header imports and declarations use the supplied-source graph with the embedded providers.")
 				(bool.and (u32.eq (struct.get (local module) error) 0u32)
@@ -159,8 +164,8 @@
 						(borrow-shared (local declarations)) (struct.get (local module) count) 8u32))
 				(then (return (call compile_bundled_input (borrow-shared (local path)) (borrow-shared (local canonical))
 					(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options))
-					(local protection) (local target_index) (local check_only) (borrow-shared (local source)) (local rows)))))
+					(local protection) (local target_index) (local check_only) (borrow-shared (local source)) (local rows) (local human)))))
 			(return (call compile_assets (borrow-shared (local path)) (borrow-shared (local canonical))
 				(borrow-shared (local destination)) (borrow-shared (local staged))
 				(local protection) (local target_index) (local check_only) (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local module) (borrow-shared (local declarations)))))))
+				(local module) (borrow-shared (local declarations)) (local human))))))
