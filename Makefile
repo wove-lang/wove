@@ -38,6 +38,7 @@ TEST_DISCOVERY_MODULE := stage-2/scalar/tests.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
 SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/owned.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_optional.wove stage-2/source/c_names.wove stage-2/source/c_formals.wove stage-2/source/c_scope.wove stage-2/source/tree_copy.wove stage-2/source/c_arguments.wove stage-2/source/c_owners.wove stage-2/source/c_records.wove stage-2/source/c_snapshots.wove
 C_HEADER_MODULE := stage-2/c/headers.wove
+C_STANDARD_MODULE := stage-2/c/standard.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
 C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove emit/embeds.wove emit/c.wove emit/arrays.wove emit/bindings.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_variadic.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
@@ -73,7 +74,7 @@ CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors host_entry jobs) $(C
 JOB_BUDGET_MODULE := $(NATIVE_DRIVER)/jobs.wove
 CONFIG_FIXTURES := tests/stage-2/config
 CONFIG_PROGRAM := $(STAGE2)/config/project
-CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove project.wove schema.wove values.wove)
+CONFIG_SOURCES := $(C_STANDARD_MODULE) $(addprefix stage-2/config/,compiler.wove defaults.wove project.wove schema.wove values.wove)
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
@@ -102,7 +103,7 @@ TEST_RUNTIME := $(STAGE2)/test/libwove_test.a
 CLANG_FIXTURES := tests/stage-2/clang
 CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
-CLANG_QUERY_SOURCES := $(CLANG_SOURCES) $(JSON_FRAME_MODULE) stage-2/c/probe.wove stage-2/clang/query.wove stage-2/clang/run.wove stage-2/clang/trace.wove
+CLANG_QUERY_SOURCES := $(CLANG_SOURCES) $(C_STANDARD_MODULE) $(JSON_FRAME_MODULE) stage-2/c/probe.wove stage-2/clang/query.wove stage-2/clang/run.wove stage-2/clang/trace.wove
 AST_LIVE := $(STAGE2)/ast/live
 GCC_INSPECTOR := stage-2/gcc/inspect.cc
 AST_LIVE_SOURCES := $(sort $(CLANG_QUERY_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) \
@@ -201,6 +202,7 @@ test-stage-2-native: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-native: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/standard.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/protection.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/phases.tsv"
 	sh "$(NATIVE_CLI_FIXTURES)/debug/check.sh" "$(PYTHON)" "$(abspath $(NATIVE_COMPILER))" "$(NATIVE_CLI_FIXTURES)/debug/cases.tsv"

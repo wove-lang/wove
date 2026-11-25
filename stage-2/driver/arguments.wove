@@ -9,18 +9,18 @@
 	(use wove-file "../cli/command/args.wove" (only first_command_argument (type CommandArgument)))
 	(use wove-file "../cli/command/resolve.wove" (only command_setting (type CommandInvocation) (type CommandSetting)))
 	(use wove-file "../config/defaults.wove" (only write_default_cflag))
+	(use wove-file "../c/standard.wove" (only write_c_standard))
 	(use wove-file "../config/project.wove" (only (type ProjectSetting)))
 	(use wove-file "../json/reader.wove" (only json_decode_string (type JsonNode)))
 	(use wove-file "../text/copy.wove" (only append_bytes))
 	(use wove-file "./platform.wove" (only host_os))
 
+	(struct FrontendOptions (fields (common_end i32) (probe_end i32) (standard u32)))
+
 	(let no_prefix "")
 	(let define_prefix "-D")
 	(let library_prefix "-l")
 	(let relative_prefix "./")
-	(let c11 "-std=c11")
-	(let c17 "-std=c17")
-	(let c23 "-std=c23")
 	(let thin_lto "-flto=thin")
 	(let full_lto "-flto=full")
 	(let gnu_features "-D_GNU_SOURCE")
@@ -148,20 +148,6 @@
 					(set (local row) (i32.add.wrapping (local row) 1i32))))
 			(return (local end))))
 
-	(fn write_standard
-		(:doc `Set the selected C dialect after user C flags so the compiler and generated unit agree.`)
-		(params (standard u32) (output (mut-array u8)) (cursor i32)) (returns i32)
-		(body
-			(if
-				(:doc `Use the C17 driver dialect when selected.`)
-				(u32.eq (local standard) 17u32)
-				(then (return (call write_plain_argument (borrow-shared (local c17)) (borrow-mut (local output)) (local cursor)))))
-			(if
-				(:doc `Use the C23 driver dialect when selected.`)
-				(u32.eq (local standard) 23u32)
-				(then (return (call write_plain_argument (borrow-shared (local c23)) (borrow-mut (local output)) (local cursor)))))
-			(return (call write_plain_argument (borrow-shared (local c11)) (borrow-mut (local output)) (local cursor)))))
-
 	(fn write_lto
 		(:doc `Add the resolved Clang link-time optimization mode when it is enabled.`)
 		(params (mode u32) (output (mut-array u8)) (cursor i32)) (returns i32)
@@ -213,13 +199,13 @@
 			(return (call write_plain_argument (borrow-shared (local darwin_features)) (borrow-mut (local output)) (local posix)))))
 
 	(fn frontend_capacity
-		(:doc "Bound the buffer for decoded flags, prefix bytes, terminators, and the private include directory.")
-		(params (bytes i32) (config i32) (arguments i32) (directory i32)) (returns i32)
+		(:doc "Bound the buffer for decoded flags, terminators, and caller-supplied native paths.")
+		(params (bytes i32) (config i32) (arguments i32) (paths u64)) (returns i32)
 		(body
 			(let extent (u64.add.wrapping (int.convert u64 (local bytes))
 				(u64.add.wrapping (int.convert u64 (local config)) (int.convert u64 (local arguments)))))
 			(let width (u64.add.wrapping 256u64
-				(u64.add.wrapping (int.convert u64 (local directory)) (u64.shl (local extent) 2i32))))
+				(u64.add.wrapping (local paths) (u64.shl (local extent) 2i32))))
 			(if
 				(:doc "Reserve one byte for reporting options that exceed a native slice.")
 				(u64.lt 2147483647u64 (local width))
@@ -252,35 +238,44 @@
 			(let defines (call write_effective_options (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings)) (local define_rule)
 				(borrow-mut (local output)) (local flags)))
-			(let dialect (call command_setting (local invocation) (borrow-shared (local arguments))
-				(borrow-shared (local nodes)) (borrow-shared (local settings)) 4u32 21i32))
-			(let end (call write_standard (struct.get (local dialect) scalar) (borrow-mut (local output)) (local defines)))
 			(if
 				(:doc "Binary compilation also uses the selected link-time optimization mode.")
 				(local bin)
 				(then
 					(let lto (call command_setting (local invocation) (borrow-shared (local arguments))
 						(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 18i32))
-					(return (call write_lto (struct.get (local lto) scalar) (borrow-mut (local output)) (local end)))))
-			(return (local end))))
+					(return (call write_lto (struct.get (local lto) scalar) (borrow-mut (local output)) (local defines)))))
+			(return (local defines))))
+
+	(fn write_clang_standard
+		(:doc "Set the driver and frontend dialects after forwarded options.")
+		(params (standard u32) (output (mut-array u8)) (cursor i32)) (returns i32)
+		(body
+			(let driver (call write_c_standard (local standard) (borrow-mut (local output)) (local cursor)))
+			(let frontend (call write_plain_argument (borrow-shared (local clang_frontend_flag)) (borrow-mut (local output)) (local driver)))
+			(return (call write_c_standard (local standard) (borrow-mut (local output)) (local frontend)))))
 
 	(fn write_probe_options
-		(:doc "Keep malformed frontend options detectable if source resolution needs a live probe.")
+		(:doc "Resolve the dialect once and write it after the shared frontend options for the probe.")
 		(params (bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
 			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting))
-			(directory (shared-array u8)) (output (mut-array u8)))
-		(returns i32)
+			(directory (shared-array u8)) (output (mut-array u8))) (returns FrontendOptions)
 		(body
-			(let end (call write_frontend_arguments (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+			(let dialect (call command_setting (local invocation) (borrow-shared (local arguments))
+				(borrow-shared (local nodes)) (borrow-shared (local settings)) 4u32 21i32))
+			(let standard (struct.get (local dialect) scalar))
+			(let common_end (call write_frontend_arguments (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
 				(borrow-shared (local directory)) (borrow-mut (local output))))
+			(let probe_end (call write_clang_standard (local standard) (borrow-mut (local output)) (local common_end)))
 			(if
-				(:doc "An unterminated byte is rejected if the compiler launches a header probe.")
-				(i32.lt (local end) 0i32)
+				(:doc "An unterminated byte signals an invalid prefix if a header needs a live probe.")
+				(i32.lt (local probe_end) 0i32)
 				(then
 					(array.store (local output) 0i32 1u8)
-					(return 1i32)))
-			(return (local end))))
+					(return (struct.new FrontendOptions (common_end -1i32) (probe_end 1i32) (standard (local standard))))))
+			(return (struct.new FrontendOptions (common_end (local common_end)) (probe_end (local probe_end))
+				(standard (local standard))))))
 
 	(fn write_include_trace
 		(:doc `Stream all frontend include graphs to private stdout independently of make depfile settings.`)
@@ -292,16 +287,14 @@
 			(return (call write_plain_argument (borrow-shared (local stdout_path)) (borrow-mut (local output)) (local file)))))
 
 	(fn write_clang_arguments
-		(:doc `Write the fixed build invocation and apply each effective profile list exactly once.`)
+		(:doc `Append the native input and linker options, then apply the resolved C standard.`)
 		(params (bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
 			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting))
-			(directory (shared-array u8)) (unit (shared-array u8)) (binary (shared-array u8))
-			(output (mut-array u8))) (returns i32)
+			(unit (shared-array u8)) (binary (shared-array u8)) (output (mut-array u8)) (frontend FrontendOptions))
+		(returns i32)
 		(body
-			(let frontend (call write_frontend_arguments (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
-				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
-				(borrow-shared (local directory)) (borrow-mut (local output))))
-			(let-mut end (call write_plain_argument (borrow-shared (local unit)) (borrow-mut (local output)) (local frontend)))
+			(let-mut end (call write_plain_argument (borrow-shared (local unit)) (borrow-mut (local output))
+				(struct.get (local frontend) common_end)))
 			(let rules (array.new (array i32 3) 15i32 17i32 16i32))
 			(let-mut index 0i32)
 			(while
@@ -319,7 +312,8 @@
 				(then
 					(set (local end) (call write_plain_argument (borrow-shared (local math_library))
 						(borrow-mut (local output)) (local end)))))
-			(let option (call write_plain_argument (borrow-shared (local output_flag)) (borrow-mut (local output)) (local end)))
+			(let standard (call write_clang_standard (struct.get (local frontend) standard) (borrow-mut (local output)) (local end)))
+			(let option (call write_plain_argument (borrow-shared (local output_flag)) (borrow-mut (local output)) (local standard)))
 			(let binary_end (call write_plain_argument (borrow-shared (local binary)) (borrow-mut (local output)) (local option)))
 			(return (call write_include_trace (borrow-mut (local output)) (local binary_end)))))
 )

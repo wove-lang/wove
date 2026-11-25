@@ -46,6 +46,9 @@ def main():
 		sys.stdout.write(os.environ["WOVE_CLANG_STDOUT"])
 		sys.stdout.flush()
 	clang = json.loads(os.environ["WOVE_REAL_CLANG"])
+	# Older fixture toolchains can use an equivalent spelling after argv is recorded.
+	aliases = json.loads(os.environ.get("WOVE_CLANG_TEST_ALIASES", "{}"))
+	arguments = [aliases.get(argument, argument) for argument in arguments]
 	os.execvp(clang[0], [*clang, *arguments])
 
 

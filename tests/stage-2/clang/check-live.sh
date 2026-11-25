@@ -55,8 +55,9 @@ while IFS="$tab" read -r label tool header kind name error present found bytes r
 	set --
 	# The spaced include directory must stay in a single argv element.
 	case "$options" in
-		target) set -- "--target=i386-unknown-linux-gnu" -I "$scratch/include space" ;;
+		target|target-c17) set -- "--target=i386-unknown-linux-gnu" -I "$scratch/include space" ;;
 	esac
+	[ "$options" != target-c17 ] || set -- "$@" -std=c17
 	# Wove owns every result assertion. The shell supplies tools and fixture inputs.
 	WOVE_CLANG_FIXTURE_OUTPUT="$tool" "$query" clang "$program" "$header" "$kind" "$name" \
 		"$error" "$present" "$found" "$bytes" "$rows" "$status" "$@" || {
