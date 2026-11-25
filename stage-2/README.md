@@ -256,9 +256,17 @@ write through field paths. A mutable loan starts at a `let-mut` local
 or an existing mutable reference. Reborrow a reference parameter with
 the same explicit forms to pass it to another call.
 
-The loan lasts through the call. A mutable loan excludes other access
-to the same record while later arguments are evaluated. A shared loan
-allows other shared access during that call. An earlier by-value
+A borrow can name a static field path such as
+`(borrow-mut (record.get (local state) pending))` to lend a nested
+record. A fixed `u8`, `u32`, or `u64` array field can lend a slice of
+the same element type. The path can start at a local or a record
+parameter, and a mutable loan needs a `let-mut` local or a mutable
+reference parameter.
+
+A loan lasts through later argument evaluation and the call. Mutable
+loans exclude other accesses to the same field, its descendants, or
+its enclosing records. Shared loans allow other shared access to those
+places. Disjoint siblings can be borrowed together. An earlier by-value
 argument keeps the value it had when evaluated.
 
 Functions can take and return locally declared or explicitly imported records.
