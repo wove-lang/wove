@@ -5,9 +5,9 @@
 
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "./paths.wove" (only directory_width))
-	(use wove-file "./bin/arguments.wove" (only write_plain_argument))
+	(use wove-file "./arguments.wove" (only write_plain_argument))
 	(use wove-file "../c/headers.wove" (only c_header_form))
-	(use wove-file "../clang/query.wove" (only query_clang_header (type QuerySite)))
+	(use wove-file "../clang/query.wove" (only query_clang_frontend (type QuerySite)))
 	(use wove-file "../clang/index.wove" (only clang_declaration (type ClangIndex) (type ClangDeclaration)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
@@ -80,10 +80,9 @@
 		(:doc "Grow bounded capture and reader storage when an otherwise usable header needs more room.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
 			(first i32) (program (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8))
-			(results (mut-slice u8)))
+			(directory (shared-slice u8)) (results (mut-slice u8)))
 		(returns u32)
 		(body
-			(let empty (array.alloc u8 0i32))
 			(let site (call selected_site (slice.load (local bindings) (local first))))
 			(let-mut width 1048576i32)
 			(while
@@ -94,8 +93,8 @@
 					(let-mut nodes (array.alloc JsonNode (int.convert i32 (u32.shr (int.convert u32 (local width)) 3i32))))
 					(let-mut decls (array.alloc ClangDeclaration (int.convert i32 (u32.shr (int.convert u32 (local width)) 6i32))))
 					(let-mut names (array.alloc u8 (int.convert i32 (u32.shr (int.convert u32 (local width)) 1i32))))
-					(let query (call query_clang_header (borrow-shared (local program)) (borrow-shared (local options))
-						(borrow-shared (local header)) (borrow-shared (local empty)) (local site)
+					(let query (call query_clang_frontend (borrow-shared (local program)) (borrow-shared (local options))
+						(borrow-shared (local directory)) (borrow-shared (local header)) (local site)
 						(borrow-mut (local capture)) (borrow-mut (local nodes)) (borrow-mut (local decls)) (borrow-mut (local names))))
 					(let error (record.get (local query) error))
 					(if
@@ -125,16 +124,18 @@
 	(fn probe_include_path
 		(:doc "Use the defining Wove file's directory for project headers in retained-only builds.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
-			(binding GraphBinding) (canonical (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8))
-			(first i32) (program (shared-slice u8)) (source_directory bool) (results (mut-slice u8)))
+			(canonical (shared-slice u8)) (options (shared-slice u8)) (header (shared-slice u8))
+			(first i32) (program (shared-slice u8)) (directory (shared-slice u8)) (results (mut-slice u8)))
 		(returns u32)
 		(body
 			(if
 				(:doc "System headers use the selected tool's options; bin uses the native build's include search.")
-				(bool.or (bool.not (local source_directory)) (u8.eq (slice.load (local header) 0i32) 60u8))
+				(bool.or (i32.lt 0i32 (slice.len (local directory))) (u8.eq (slice.load (local header) 0i32) 60u8))
 				(then (return (call lookup_header (borrow-shared (local arena)) (borrow-shared (local files))
 					(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
-					(borrow-shared (local options)) (borrow-shared (local header)) (borrow-mut (local results))))))
+					(borrow-shared (local options)) (borrow-shared (local header))
+					(borrow-shared (local directory)) (borrow-mut (local results))))))
+			(let binding (slice.load (local bindings) (local first)))
 			(if
 				(:doc "The entry path may be virtual in the bundled graph; use its canonical input path.")
 				(i32.eq (record.get (local binding) header_file) 0i32)
@@ -178,19 +179,19 @@
 				(:doc "Reject a malformed native directory before passing its bytes to Clang.")
 				(i32.lt (local end) 0i32)
 				(then (return 75u32)))
+			(let empty (array.alloc u8 0i32))
 			(return (call lookup_header (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
 				(borrow-shared (slice.range (local packed) 0i32 (local end))) (borrow-shared (local header))
-				(borrow-mut (local results))))))
+				(borrow-shared (local empty)) (borrow-mut (local results))))))
 
 	(fn probe_decoded_header
 		(:doc "Apply the same delimiter convention as C emission for a bare project path.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
 			(first i32) (program (shared-slice u8)) (canonical (shared-slice u8)) (options (shared-slice u8))
-			(header (shared-slice u8)) (source_directory bool) (results (mut-slice u8)))
+			(header (shared-slice u8)) (directory (shared-slice u8)) (results (mut-slice u8)))
 		(returns u32)
 		(body
-			(let binding (slice.load (local bindings) (local first)))
 			(let form (call c_header_form (borrow-shared (local header))))
 			(if
 				(:doc "A probe accepts the same validated header path forms as emitted includes.")
@@ -200,9 +201,9 @@
 				(:doc "Already-delimited spellings preserve the provided include mode.")
 				(u32.eq (local form) 2u32)
 				(then (return (call probe_include_path (borrow-shared (local arena)) (borrow-shared (local files))
-					(borrow-shared (local bindings)) (local binding) (borrow-shared (local canonical))
+					(borrow-shared (local bindings)) (borrow-shared (local canonical))
 					(borrow-shared (local options)) (borrow-shared (local header)) (local first)
-					(borrow-shared (local program)) (local source_directory) (borrow-mut (local results))))))
+					(borrow-shared (local program)) (borrow-shared (local directory)) (borrow-mut (local results))))))
 			(let length (slice.len (local header)))
 			(if
 				(:doc "Reserve space for both project quotes.")
@@ -213,15 +214,15 @@
 			(let end (call append_bytes (borrow-shared (local header)) (borrow-mut (local quoted)) 1i32))
 			(slice.store (local quoted) (local end) 34u8)
 			(return (call probe_include_path (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local bindings)) (local binding) (borrow-shared (local canonical))
+				(borrow-shared (local bindings)) (borrow-shared (local canonical))
 				(borrow-shared (local options)) (borrow-shared (local quoted)) (local first)
-				(borrow-shared (local program)) (local source_directory) (borrow-mut (local results))))))
+				(borrow-shared (local program)) (borrow-shared (local directory)) (borrow-mut (local results))))))
 
 	(fn probe_binding
 		(:doc "Decode the header from the selected bridge's own source file.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
 			(first i32) (program (shared-slice u8)) (canonical (shared-slice u8)) (options (shared-slice u8))
-			(source_directory bool) (results (mut-slice u8)))
+			(directory (shared-slice u8)) (results (mut-slice u8)))
 		(returns u32)
 		(body
 			(let binding (slice.load (local bindings) (local first)))
@@ -240,7 +241,7 @@
 			(return (call probe_decoded_header (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
 				(borrow-shared (local canonical)) (borrow-shared (local options))
-				(borrow-shared (slice.range (local spelling) 0i32 (record.get (local decoded) written))) (local source_directory)
+				(borrow-shared (slice.range (local spelling) 0i32 (record.get (local decoded) written))) (borrow-shared (local directory))
 				(borrow-mut (local results))))))
 
 	(fn cached_status
@@ -251,7 +252,7 @@
 	(fn verify_bindings
 		(:doc "Probe each selected header lazily and report the first failed optional selection in original order.")
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
-			(first i32) (canonical (shared-slice u8)) (options (shared-slice u8)) (source_directory bool))
+			(first i32) (canonical (shared-slice u8)) (options (shared-slice u8)) (directory (shared-slice u8)))
 		(returns Availability)
 		(body
 			(let program (call clang_program))
@@ -273,7 +274,7 @@
 								(then
 									(set (local status) (call probe_binding (borrow-shared (local arena)) (borrow-shared (local files))
 										(borrow-shared (local bindings)) (local row) (borrow-shared (local program))
-										(borrow-shared (local canonical)) (borrow-shared (local options)) (local source_directory)
+										(borrow-shared (local canonical)) (borrow-shared (local options)) (borrow-shared (local directory))
 										(borrow-mut (local results))))
 									(if
 										(:doc "Use the memoized exact lookup after a successful probe.")
@@ -294,7 +295,7 @@
 		(:doc "Leave graphs without selected optional functions on their filesystem-only path.")
 		(:expect (tests "stage-2/cli/native/cases.tsv" "stage-2/cli/native/bin.tsv") (issues "gh:wove-lang/wove:212"))
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (bindings (shared-slice GraphBinding))
-			(canonical (shared-slice u8)) (options (shared-slice u8)) (source_directory bool))
+			(canonical (shared-slice u8)) (options (shared-slice u8)) (directory (shared-slice u8)))
 		(returns Availability)
 		(body
 			(let-mut row 0i32)
@@ -307,6 +308,6 @@
 						(record.get (slice.load (local bindings) (local row)) optional)
 						(then (return (call verify_bindings (borrow-shared (local arena)) (borrow-shared (local files))
 							(borrow-shared (local bindings)) (local row) (borrow-shared (local canonical))
-							(borrow-shared (local options)) (local source_directory)))))
+							(borrow-shared (local options)) (borrow-shared (local directory))))))
 					(set (local row) (i32.add.wrapping (local row) 1i32))))
 			(return (record.make Availability (error 0u32) (file -1i32) (start 0i32) (end 0i32))))))

@@ -1,4 +1,4 @@
-(module native_bin_arguments
+(module native_c_arguments
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Pack Clang's arguments from the resolved project and explicit options.
@@ -6,13 +6,13 @@
 	Keep each decoded option as one argument. The process launcher takes
 	NUL-terminated rows and adds the executable name as argv[0].`)
 
-	(use wove-file "../../cli/command/args.wove" (only first_command_argument (type CommandArgument)))
-	(use wove-file "../../cli/command/resolve.wove" (only command_setting (type CommandInvocation) (type CommandSetting)))
-	(use wove-file "../../config/defaults.wove" (only write_default_cflag))
-	(use wove-file "../../config/project.wove" (only (type ProjectSetting)))
-	(use wove-file "../../json/reader.wove" (only json_decode_string (type JsonNode)))
-	(use wove-file "../../text/copy.wove" (only append_bytes))
-	(use wove-file "../platform.wove" (only host_os))
+	(use wove-file "../cli/command/args.wove" (only first_command_argument (type CommandArgument)))
+	(use wove-file "../cli/command/resolve.wove" (only command_setting (type CommandInvocation) (type CommandSetting)))
+	(use wove-file "../config/defaults.wove" (only write_default_cflag))
+	(use wove-file "../config/project.wove" (only (type ProjectSetting)))
+	(use wove-file "../json/reader.wove" (only json_decode_string (type JsonNode)))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use wove-file "./platform.wove" (only host_os))
 
 	(let no_prefix "")
 	(let define_prefix "-D")
@@ -209,17 +209,38 @@
 			(let posix (call write_plain_argument (borrow-shared (local gnu_features)) (borrow-mut (local output)) 0i32))
 			(return (call write_plain_argument (borrow-shared (local darwin_features)) (borrow-mut (local output)) (local posix)))))
 
-	(fn write_probe_options
-		(:doc "Forward the C options and dialect that determine which native declarations are visible.")
+	(fn frontend_capacity
+		(:doc "Bound the buffer for decoded flags, prefix bytes, terminators, and the private include directory.")
+		(params (bytes i32) (config i32) (arguments i32) (directory i32)) (returns i32)
+		(body
+			(let extent (u64.add.wrapping (int.convert u64 (local bytes))
+				(u64.add.wrapping (int.convert u64 (local config)) (int.convert u64 (local arguments)))))
+			(let width (u64.add.wrapping 256u64
+				(u64.add.wrapping (int.convert u64 (local directory)) (u64.shl (local extent) 2i32))))
+			(if
+				(:doc "Reserve one byte for reporting options that exceed a native slice.")
+				(u64.lt 2147483647u64 (local width))
+				(then (return 1i32)))
+			(return (int.convert i32 (local width)))))
+
+	(fn write_frontend_arguments
+		(:doc "Pack the same declaration-affecting arguments for the Clang probe and the build.")
 		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
 			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
-			(bin bool) (output (mut-slice u8)))
+			(directory (shared-slice u8)) (output (mut-slice u8)))
 		(returns i32)
 		(body
-			(let start (call write_feature_flags (borrow-mut (local output))))
+			(let-mut start (call write_feature_flags (borrow-mut (local output))))
+			(if
+				(:doc "Binary compilation searches the private build directory containing the runtime assets.")
+				(i32.lt 0i32 (slice.len (local directory)))
+				(then
+					(let include (call write_plain_argument (borrow-shared (local include_flag)) (borrow-mut (local output)) (local start)))
+					(set (local start) (call write_plain_argument (borrow-shared (local directory)) (borrow-mut (local output)) (local include)))))
 			(let flags (call write_effective_options (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings)) 13i32
 				(borrow-mut (local output)) (local start)))
+			(let bin (u32.eq (record.get (local invocation) command) 2u32))
 			(let-mut define_rule 22i32)
 			(if
 				(:doc "Binary definitions use the selected build mode's list.")
@@ -230,7 +251,33 @@
 				(borrow-mut (local output)) (local flags)))
 			(let dialect (call command_setting (local invocation) (borrow-shared (local arguments))
 				(borrow-shared (local nodes)) (borrow-shared (local settings)) 4u32 21i32))
-			(return (call write_standard (record.get (local dialect) scalar) (borrow-mut (local output)) (local defines)))))
+			(let end (call write_standard (record.get (local dialect) scalar) (borrow-mut (local output)) (local defines)))
+			(if
+				(:doc "Binary compilation also uses the selected link-time optimization mode.")
+				(local bin)
+				(then
+					(let lto (call command_setting (local invocation) (borrow-shared (local arguments))
+						(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 18i32))
+					(return (call write_lto (record.get (local lto) scalar) (borrow-mut (local output)) (local end)))))
+			(return (local end))))
+
+	(fn write_probe_options
+		(:doc "Keep malformed frontend options detectable if source resolution needs a live probe.")
+		(params (bytes (shared-slice u8)) (config (shared-slice u8)) (invocation CommandInvocation)
+			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
+			(directory (shared-slice u8)) (output (mut-slice u8)))
+		(returns i32)
+		(body
+			(let end (call write_frontend_arguments (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(borrow-shared (local directory)) (borrow-mut (local output))))
+			(if
+				(:doc "An unterminated byte is rejected if the compiler launches a header probe.")
+				(i32.lt (local end) 0i32)
+				(then
+					(slice.store (local output) 0i32 1u8)
+					(return 1i32)))
+			(return (local end))))
 
 	(fn write_clang_arguments
 		(:doc `Write the fixed build invocation and apply each effective profile list exactly once.`)
@@ -238,28 +285,17 @@
 			(arguments (shared-slice CommandArgument)) (nodes (shared-slice JsonNode)) (settings (shared-slice ProjectSetting))
 			(directory (shared-slice u8)) (unit (shared-slice u8)) (binary (shared-slice u8)) (output (mut-slice u8))) (returns i32)
 		(body
-			(let platform (call write_feature_flags (borrow-mut (local output))))
-			(let include (call write_plain_argument (borrow-shared (local include_flag)) (borrow-mut (local output)) (local platform)))
-			(let search (call write_plain_argument (borrow-shared (local directory)) (borrow-mut (local output)) (local include)))
-			(let-mut end (local search))
-			(let rules (array.make (array i32 5) 13i32 14i32 15i32 17i32 16i32))
+			(let frontend (call write_frontend_arguments (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
+				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
+				(borrow-shared (local directory)) (borrow-mut (local output))))
+			(let-mut end (call write_plain_argument (borrow-shared (local unit)) (borrow-mut (local output)) (local frontend)))
+			(let rules (array.make (array i32 3) 15i32 17i32 16i32))
 			(let-mut index 0i32)
 			(while
-				(:doc `Compiler switches precede the unit. Link requests follow it, with named libraries last.`)
-				(i32.lt (local index) 5i32)
+				(:doc "Link requests follow the source unit, with named libraries last.")
+				(i32.lt (local index) 3i32)
 				(body
 					(let rule (array.load (local rules) (local index)))
-					(if
-						(:doc `Seal the compiler options and input before writing any linker options.`)
-						(i32.eq (local rule) 15i32)
-						(then
-							(let dialect (call command_setting (local invocation) (borrow-shared (local arguments))
-								(borrow-shared (local nodes)) (borrow-shared (local settings)) 4u32 21i32))
-							(set (local end) (call write_standard (record.get (local dialect) scalar) (borrow-mut (local output)) (local end)))
-							(let lto (call command_setting (local invocation) (borrow-shared (local arguments))
-								(borrow-shared (local nodes)) (borrow-shared (local settings)) 3u32 18i32))
-							(set (local end) (call write_lto (record.get (local lto) scalar) (borrow-mut (local output)) (local end)))
-							(set (local end) (call write_plain_argument (borrow-shared (local unit)) (borrow-mut (local output)) (local end)))))
 					(set (local end) (call write_effective_options (borrow-shared (local bytes)) (borrow-shared (local config))
 						(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
 						(local rule) (borrow-mut (local output)) (local end)))

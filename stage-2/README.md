@@ -608,8 +608,9 @@ when the selector gives it a local alias.
 
 The probe uses resolved C flags, definitions, and the selected C dialect.
 For a quoted project header, retained-only `cc` also searches the directory
-of the Wove bridge. A binary build uses its configured header search flags.
-Availability errors use the importing source span.
+of the Wove bridge. A binary build probes from its private build directory
+with the same frontend arguments and staged runtime headers used for
+compilation. Availability errors use the importing source span.
 
 | Code | Meaning |
 | --- | --- |

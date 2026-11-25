@@ -13,7 +13,6 @@
 
 	(let directory_suffix "/wove-clang.XXXXXX")
 	(let source_suffix "/probe.c")
-	(let defaults "-pthread\u0000-std=c11\u0000")
 	(let ast_flags "-Wno-everything\u0000-Xclang\u0000-ast-dump=json\u0000-fsyntax-only\u0000-x\u0000c\u0000--\u0000")
 
 	(fn clang_run_at
@@ -23,11 +22,11 @@
 		(body (return (record.make ClangRun (error (local error)) (status (local status)) (length (local length))))))
 
 	(fn invoke_clang
-		(:doc "Forward complete caller arguments between the defaults and mandatory AST dump flags.")
+		(:doc "Forward complete frontend arguments before the mandatory AST dump flags.")
 		(params (program (shared-slice u8)) (options (shared-slice u8)) (path (shared-slice u8)) (output (mut-slice u8)))
 		(returns ClangRun)
 		(body
-			(let flags (i32.add.wrapping (slice.len (local defaults)) (slice.len (local ast_flags))))
+			(let flags (slice.len (local ast_flags)))
 			(let path_length (slice.len (local path)))
 			(let option_length (slice.len (local options)))
 			(let limit (i32.sub.wrapping 2147483646i32 (local flags)))
@@ -38,8 +37,7 @@
 				(then (return (call clang_run_at 2u32 -1i32 0i32))))
 			(let end (i32.add.wrapping (i32.add.wrapping (local flags) (local path_length)) (local option_length)))
 			(let-mut arguments (array.alloc u8 (i32.add.wrapping (local end) 1i32)))
-			(let prefix (call append_bytes (borrow-shared (local defaults)) (borrow-mut (local arguments)) 0i32))
-			(let options_end (call append_bytes (borrow-shared (local options)) (borrow-mut (local arguments)) (local prefix)))
+			(let options_end (call append_bytes (borrow-shared (local options)) (borrow-mut (local arguments)) 0i32))
 			(let flag_end (call append_bytes (borrow-shared (local ast_flags)) (borrow-mut (local arguments)) (local options_end)))
 			(let path_end (call append_bytes (borrow-shared (local path)) (borrow-mut (local arguments)) (local flag_end)))
 			(slice.store (local arguments) (local path_end) 0u8)
@@ -68,7 +66,7 @@
 			(return (local result))))
 
 	(fn run_in_directory
-		(:doc "Construct the source path in the supplied private directory and remove the directory after use.")
+		(:doc "Write the probe beside the caller's C unit in the supplied private directory.")
 		(params (program (shared-slice u8)) (options (shared-slice u8)) (directory (shared-slice u8))
 			(source (shared-slice u8)) (output (mut-slice u8)))
 		(returns ClangRun)
@@ -76,36 +74,45 @@
 			(let parent (slice.len (local directory)))
 			(let suffix (slice.len (local source_suffix)))
 			(if
-				(:doc "A failed temporary directory creation leaves no path to clean.")
-				(i32.eq (local parent) 0i32)
+				(:doc "Check the directory and reserve space for the source basename.")
+				(bool.or (i32.eq (local parent) 0i32)
+					(i32.lt (i32.sub.wrapping 2147483647i32 (local suffix)) (local parent)))
 				(then (return (call clang_run_at 3u32 -1i32 0i32))))
-			(if
-				(:doc "Release the directory if its child path would exceed the byte view range.")
-				(i32.lt (i32.sub.wrapping 2147483647i32 (local suffix)) (local parent))
-				(then
-					(let removed (call rmdir (borrow-shared (local directory))))
-					(return (call clang_run_at 3u32 -1i32 0i32))))
 			(let-mut path (array.alloc u8 (i32.add.wrapping (local parent) (local suffix))))
 			(let next (call append_bytes (borrow-shared (local directory)) (borrow-mut (local path)) 0i32))
 			(let end (call append_bytes (borrow-shared (local source_suffix)) (borrow-mut (local path)) (local next)))
-			(let result (call write_probe (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local path)) (borrow-shared (local source)) (borrow-mut (local output))))
+			(return (call write_probe (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local path)) (borrow-shared (local source)) (borrow-mut (local output))))))
+
+	(fn run_in_temporary_directory
+		(:doc "Remove the temporary directory owned by a standalone or retained-C query.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (source (shared-slice u8)) (output (mut-slice u8)))
+		(returns ClangRun)
+		(body
+			(let directory (call create_temporary_directory (borrow-shared (local directory_suffix))))
+			(let result (call run_in_directory (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local directory)) (borrow-shared (local source)) (borrow-mut (local output))))
 			(let removed (call rmdir (borrow-shared (local directory))))
 			(if
-				(:doc "Report a failed directory removal if tool execution and capture succeeded.")
+				(:doc "Report removal failure once the completed capture has no earlier error.")
 				(bool.and (bool.not (i32.eq (local removed) 0i32)) (u32.eq (record.get (local result) error) 0u32))
 				(then (return (call clang_run_at 3u32 (record.get (local result) status) (record.get (local result) length)))))
 			(return (local result))))
 
 	(fn run_clang_probe
-		(:doc "Capture a Clang probe in a private workspace and remove the workspace before returning.")
-		(params (program (shared-slice u8)) (options (shared-slice u8)) (source (shared-slice u8)) (output (mut-slice u8)))
+		(:doc "Capture the AST using the supplied frontend arguments and private directory when available.")
+		(params (program (shared-slice u8)) (options (shared-slice u8)) (directory (shared-slice u8))
+			(source (shared-slice u8)) (output (mut-slice u8)))
 		(returns ClangRun)
 		(body
 			(if
 				(:doc "Reject a missing separator before mandatory flags can join the caller's argument.")
 				(bool.not (call probe_options_complete (borrow-shared (local options))))
 				(then (return (call clang_run_at 2u32 -1i32 0i32))))
-			(let directory (call create_temporary_directory (borrow-shared (local directory_suffix))))
-			(return (call run_in_directory (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local directory)) (borrow-shared (local source)) (borrow-mut (local output)))))))
+			(if
+				(:doc "A binary build shares its source directory and quote-include search with the probe.")
+				(i32.lt 0i32 (slice.len (local directory)))
+				(then (return (call run_in_directory (borrow-shared (local program)) (borrow-shared (local options))
+					(borrow-shared (local directory)) (borrow-shared (local source)) (borrow-mut (local output))))))
+			(return (call run_in_temporary_directory (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local source)) (borrow-mut (local output)))))))
