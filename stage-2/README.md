@@ -311,6 +311,15 @@ original owner. Borrowing or moving the old binding again reports
 `ownership.use_after_move` with the attempted operation and the original
 move span.
 
+A Wove helper can declare `(returns (owned-array u8))` and transfer an
+array with `(return (move (local data)))`. This transfers the original
+allocation on that exit while releasing the other live owners. An
+alternate path still sees the local until it transfers or releases it.
+A wrapper can also return the fresh owner from a call directly. The
+caller binds the result with `let` or `let-mut` and can read, borrow, or
+move it through its normal owner lifetime. A zero-length result follows
+the same ownership rules.
+
 `(bool.and left right)` evaluates the right operand when the left is true.
 `(bool.or left right)` evaluates it when the left is false. Both operands
 are type-checked as `bool`. Each operand that runs does so once, with the
