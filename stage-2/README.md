@@ -453,7 +453,7 @@ test. A return inside the loop exits the function. A loop can skip its
 body, so a value-returning function still needs a return on the path
 after the loop.
 
-[FNV-1a](hashing/fnv1a.wove) exposes the 31-bit seed with `fnv1a_seed`
+[FNV-1a](hashing/fnv1a.wove) exposes the immutable 31-bit seed `fnv1a_seed`
 and updates it one raw byte at a time with `fnv1a_byte`. The declaration
 identity builder supplies the order and delimiters for its components.
 
