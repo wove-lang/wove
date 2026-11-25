@@ -453,6 +453,19 @@ trap at the conversion span if the result cannot fit, including for NaN and
 infinity. `f32.from.f64` keeps native rounding, subnormals, and nonfinite
 values, and traps on finite values outside the binary32 range.
 
+A `let` can bind a shared or mutable view of a named local array or array
+parameter. The binding itself is immutable. A mutable view permits writes
+through its descriptor. For example, `(let window (borrow-mut (array.range
+(local output) start end)))` holds a checked byte range and can lend it to
+several helpers through `(borrow-mut (local window))`.
+
+The loan lasts to the end of the binding's block. A shared view permits reads
+of the source and excludes writes, replacement, and moves. A mutable view
+also excludes reads through the source. Reborrows follow the same rule for
+their immediate parent view. Each scope exit, including `break`, `continue`,
+and `return`, ends its view loans. A view uses the source's existing storage.
+To borrow a range from a fixed inline array, first bind a view of the whole array.
+
 Helpers can take `(shared-array u8)` parameters using the runtime's
 `wvrt_slice` ABI. Pass a named view to another helper with
 `(borrow-shared (local data))`. `(array.len (local data))` returns its

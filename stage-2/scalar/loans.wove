@@ -1,11 +1,11 @@
 (module scalar_loans
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Check call loans by binding identity and statically checked field path.`)
+	(:doc `Check scoped and call loans by binding identity and statically checked field path.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "./records.wove" (only place_borrow_kind is_mutable_place_reference is_writable_slice))
-	(use wove-file "./flow.wove" (only (value fixed_shared_loan) (value fixed_mut_loan)))
+	(use wove-file "./flow.wove" (only (type ScalarStatement) (value fixed_shared_loan) (value fixed_mut_loan)))
 	(use wove-file "./owners.wove" (only native_handle_borrow_kind is_native_storage_write_loan))
 
 	(struct
@@ -17,6 +17,8 @@
 		points at the initial operand to evaluate. A reborrow's target
 		is its defining parameter row or its source local's name row.
 		A range reborrow links to the evaluated slice in its child.
+		The borrowed_owner flag uses the local namespace for a loan's target,
+		including when the source is a named view.
 		A place read links to its root binding expression in projection.
 		A projected loan links to the borrowed field expression there.
 		A negative projection means no projected storage. An integer literal
@@ -28,6 +30,16 @@
 		ScalarExpression
 		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool) (borrowed_owner bool)
 			(mutable_place bool) (projection i32) (asset_start i32) (asset_end i32)))
+
+	(let local_slice_view 146u32)
+	(let local_slice_projection 147u32)
+
+	(fn is_local_slice_view
+		(:doc `Recognize a descriptor read or reborrow from a named view local.`)
+		(params (kind u32))
+		(returns bool)
+		(body (return (bool.or (u32.eq (local kind) (local local_slice_view))
+			(u32.eq (local kind) (local local_slice_projection))))))
 
 	(fn field_place_root
 		(:doc `Follow checked field projections toward the original binding or value expression.`)
@@ -104,8 +116,8 @@
 				(u32.eq (local kind) (call place_borrow_kind))
 				(then (return (bool.or (local exclusive) (call is_mutable_place_reference (struct.get (local loan) type))))))
 			(if
-				(:doc "A range retains the access mode of its call loan.")
-				(u32.eq (local kind) 45u32)
+				(:doc "Ranges and local reborrows retain the requested access mode.")
+				(bool.or (u32.eq (local kind) 45u32) (call is_local_slice_view (local kind)))
 				(then (return (bool.or (local exclusive) (call is_writable_slice (struct.get (local loan) type))))))
 			(return (bool.or
 				(bool.or (u32.eq (local kind) 39u32) (u32.eq (local kind) (local fixed_mut_loan)))
@@ -129,6 +141,31 @@
 			(return (bool.and (u32.eq (struct.get (local pointer) kind) 6u32)
 				(i32.eq (struct.get (local pointer) target) (local target))))))
 
+	(fn has_scoped_array_loan
+		(:doc `Check active lexical loans of a local array, parameter, or parent view.
+
+		A shared loan permits reads of its source. A mutable loan excludes
+		every access through the source for the lifetime of the binding.`)
+		(params (statements (shared-array ScalarStatement)) (expressions (shared-array ScalarExpression))
+			(statement i32) (target i32) (local_binding bool) (exclusive bool))
+		(returns bool)
+		(body
+			(let-mut index (struct.get (array.load (local statements) (local statement)) previous_loan))
+			(while
+				(:doc "Only declarations on the current lexical chain can impose a loan.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let declaration (array.load (local statements) (local index)))
+					(let origin (array.load (local expressions) (struct.get (local declaration) value)))
+					(if
+						(:doc "A reborrow keeps its immediate parent subject to the same permission check.")
+						(bool.and (call same_binding (local target) (local local_binding)
+							(struct.get (local origin) target) (struct.get (local origin) borrowed_owner))
+							(bool.or (local exclusive) (call is_writable_slice (struct.get (local declaration) type))))
+						(then (return (bool true))))
+					(set (local index) (struct.get (local declaration) previous_loan))))
+			(return (bool false))))
+
 	(fn has_conflicting_loan
 		(:doc `Find a conflicting loan in earlier operands of an enclosing operation.
 
@@ -136,9 +173,15 @@
 		or projected array store holds its receiver through the index and value.
 		Loans made by nested calls in completed operands have already ended.`)
 		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
-			(index i32) (statement i32) (target i32) (local_binding bool) (place i32) (exclusive bool))
+			(statements (shared-array ScalarStatement)) (index i32) (statement i32)
+			(target i32) (local_binding bool) (place i32) (exclusive bool))
 		(returns bool)
 		(body
+			(if
+				(:doc "A named view holds its loan independently of other operands.")
+				(call has_scoped_array_loan (borrow-shared (local statements)) (borrow-shared (local expressions))
+					(local statement) (local target) (local local_binding) (local exclusive))
+				(then (return (bool true))))
 			(let-mut child (local index))
 			(while
 				(:doc "Walk from the current operand up to its statement.")
