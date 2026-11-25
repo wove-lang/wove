@@ -112,6 +112,10 @@ while read -r mode source expected origin extra <&3 || [ -n "${mode:-}" ]; do
 		range-trap)
 			check_trap "$location" "$expected" "$program" "slice range out of bounds"
 			;;
+		# Invalid shift counts report the shift operation's original line.
+		shift-trap)
+			check_trap "$location" "$expected" "$program" "shift count out of range"
+			;;
 		# Reject unknown modes so every listed fixture is exercised.
 		*)
 			printf 'unknown test mode in %s: %s\n' "$manifest" "$mode" >&2

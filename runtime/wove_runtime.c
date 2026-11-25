@@ -388,6 +388,26 @@ uint32_t wvrt_u32_sub_wrapping(uint32_t wvrtleft, uint32_t wvrtright) {
 	return (uint32_t)((uint64_t)wvrtleft - wvrtright);
 }
 
+// Use the Wove operand width even when the C shift widens the word.
+static bool wvrt_valid_u32_shift_count(int32_t wvrtcount) {
+	return 0 <= wvrtcount && wvrtcount < 32;
+}
+
+// Validate a seed shift count before it reaches the C shift.
+int32_t wvrt_u32_shift_count(int32_t wvrtcount, wvrt_location wvrtsite) {
+	if (!wvrt_valid_u32_shift_count(wvrtcount)) { wvrt_trap(wvrtsite, "shift count out of range"); }
+	return wvrtcount;
+}
+
+// Validate a native shift count and keep the original file and span.
+int32_t wvrt_u32_shift_count_at_span(int32_t wvrtcount, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Both signed and width failures point at the full shift operation.
+	if (!wvrt_valid_u32_shift_count(wvrtcount)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "shift count out of range");
+	}
+	return wvrtcount;
+}
+
 // Interpret wrapped bits as a signed value using only in-range signed casts.
 static int32_t wvrt_i32_from_wrapped_bits(uint32_t wvrtbits) {
 	if (wvrtbits <= INT32_MAX) { return (int32_t)wvrtbits; }
