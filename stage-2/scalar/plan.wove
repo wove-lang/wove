@@ -33,7 +33,7 @@
 	(use wove-file "../source/c_arguments.wove" (only read_c_view_type c_row_slice_type))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null c_null_argument_kind
-		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode
+		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode c_handle_mut_mode is_c_exclusive_owner_mode
 		is_c_storage_mode is_c_storage_init_mode is_c_consuming_mode))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
 	(use wove-file "../source/types.wove" (only void_type is_builtin_integer is_builtin_float is_builtin_scalar builtin_type_keyword reference_mode))
@@ -68,11 +68,12 @@
 		and declaration still refer to the source tree. A Wove body can be empty.
 		The original C formals include native-only constants. A positive
 		c_variadic names the first source row in the checked C tail.
-		A C text snapshot releases the native string only when c_snapshot_drop is present.`)
+		A C text snapshot can retain a release symbol or an inline field name.
+		Both refer to the packed defining source tree.`)
 		ScalarFunction
 		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
 			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_vectors bool) (c_extents i32) (c_macro bool) (c_variadic i32) (c_nulls i32) (c_storage bool)
-			(c_snapshot bool) (c_snapshot_drop i32) (c_formals i32) (c_fixed bool)
+			(c_snapshot bool) (c_snapshot_drop i32) (c_snapshot_field i32) (c_formals i32) (c_fixed bool)
 			(file i32) (tree_base i32) (tree_limit i32) (source_base i32) (body i32)))
 	(struct ScalarParameter
 		(fields (name i32) (type u32) (position i32) (c_mode u8) (c_size i32) (c_count i32) (extent i32)))
@@ -290,9 +291,12 @@
 										(then (set (local mode) (call storage_argument_mode (local reference))))
 										(else
 											(if
-												(:doc "Only the bare pointer handle form transfers ownership.")
+												(:doc "A bare pointer handle transfers ownership and a mutable reference lends it exclusively.")
 												(u32.eq (local reference) 0u32)
-												(then (set (local mode) (call c_consume_mode)))))))
+												(then (set (local mode) (call c_consume_mode)))
+												(else
+													(if (u32.eq (local reference) 2u32)
+														(then (set (local mode) (call c_handle_mut_mode)))))))))
 								(else
 									(if
 										(:doc "A place reference retains its exact pointee and mutability.")
@@ -443,7 +447,7 @@
 					(result (struct.get (local signature) result)) (first_statement (struct.get (local signature) first_statement))
 					(body (struct.get (local signature) body))
 					(identity (local identity)) (entry (local entry)) (c_strings 0i32) (c_vectors (bool false)) (c_extents 0i32) (c_macro (bool false)) (c_variadic 0i32) (c_nulls 0i32) (c_storage (bool false))
-					(c_snapshot (bool false)) (c_snapshot_drop -1i32) (c_formals -1i32) (c_fixed (bool false))
+					(c_snapshot (bool false)) (c_snapshot_drop -1i32) (c_snapshot_field -1i32) (c_formals -1i32) (c_fixed (bool false))
 					(file (struct.get (local scope) file)) (tree_base (struct.get (local scope) tree_base))
 					(tree_limit (struct.get (local scope) tree_limit)) (source_base (struct.get (local scope) source_base))))
 			(return (call entry_at (local node) (local limit) 0u32))))
@@ -1482,7 +1486,8 @@
 							(let-mut native_formal -1i32)
 							(if
 								(:doc "Keep the native owner argument mode on the unvisited row through its formal.")
-								(bool.or (call is_c_storage_mode (local mode)) (call is_c_consuming_mode (local mode)))
+								(bool.or (call is_c_exclusive_owner_mode (local mode))
+									(bool.or (call is_c_storage_mode (local mode)) (call is_c_consuming_mode (local mode))))
 								(then (set (local native_formal) (local formal))))
 							(if
 								(:doc "Byte slice arguments use their reborrow keyword code. Typed slices keep the exact formal type.")
@@ -2070,7 +2075,7 @@
 				(bool.or (bool.not (u32.eq (local expected) (struct.get (local resolved) type)))
 					(bool.and (local implicit) (bool.not (u32.eq (struct.get (local resolved) kind) (local c_value_expression)))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(let exclusive (bool.or (u8.eq (local mode) (call c_storage_mut_mode)) (call is_c_storage_init_mode (local mode))))
+			(let exclusive (call is_c_exclusive_owner_mode (local mode)))
 			(let local_owner (u32.eq (struct.get (local resolved) kind) 6u32))
 			(if
 				(:doc "Initialized and ordinary mutable loans both require original writable ownership.")
@@ -2091,7 +2096,7 @@
 					(array.store (local expressions) (local pointer) (local resolved))))
 			(let-mut kind (call native_handle_borrow_kind))
 			(if
-				(:doc "An exclusive storage loan records whether it needs an active or inactive object.")
+				(:doc "An exclusive native loan records whether it needs an active or inactive owner.")
 				(local exclusive)
 				(then
 					(set (local kind) (call native_storage_mut_borrow_kind))
@@ -2227,7 +2232,7 @@
 		(body
 			(if
 				(:doc "A library-owned pointer handle can be supplied directly to its shared native formal.")
-				(bool.and (call is_native_owner (local expected)) (bool.not (call is_c_storage_mode (local mode))))
+				(bool.and (call is_native_owner (local expected)) (u8.eq (local mode) (call c_value_mode)))
 				(then
 					(let form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 					(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local form) head)))
@@ -2239,8 +2244,8 @@
 							(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))))
 			(let-mut keyword (call call_loan_keyword (local expected)))
 			(if
-				(:doc "Storage initialization and mutation both need the exclusive borrow spelling.")
-				(bool.or (u8.eq (local mode) (call c_storage_mut_mode)) (call is_c_storage_init_mode (local mode)))
+				(:doc "Native initialization and mutation require the exclusive borrow spelling.")
+				(call is_c_exclusive_owner_mode (local mode))
 				(then (set (local keyword) 39u32)))
 			(let loan (call read_borrow_source (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local keyword)))

@@ -943,6 +943,13 @@ signature `void (void *)` or `void (char *)`. Both forms require
 `(returns (optional (owned-array u8)))`. C null stays absent and an empty C
 string produces a present zero-length owner.
 
+For a returned native record pointer, `(:pragma (c_snapshot cstr (field name)))`
+copies an inline `char` array into the same optional owner. The C compiler
+checks the selected field's type and complete bound. Wove evaluates the native
+call once, preserves null and `errno`, and traps at the call site if the
+declared field extent contains no NUL. The bundled `readdir` uses this form
+for `d_name` and takes an exclusive borrow of the directory handle.
+
 Use `(:pragma (c_cstrs arguments environment))` on shared views of owned
 byte rows. Each argument supplies a detached `char *const *` table with a
 null terminator and a separate terminated string per row. An empty vector
