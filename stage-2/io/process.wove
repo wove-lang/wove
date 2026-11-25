@@ -10,52 +10,205 @@
 	The caller owns the output view. Only its populated prefix changes.
 	Stderr and stdin are inherited, and the tool is reaped before return.`)
 
-	(use wove-file "../hashing/bits.wove" (only shift_word))
-	(use c-header "./process.h" (only wove_process_capture))
-
-	(bridge c-header "./process.h"
-		(fn wove_process_capture
-			(:doc `Write stdout directly into caller storage and return length and overflow in five result bytes.`)
-			(:pragma (c_bytes program program_length) (c_bytes arguments arguments_length)
-				(c_bytes output capacity) (c_bytes result result_length))
-			(params (program (shared-slice u8)) (program_length i32)
-				(arguments (shared-slice u8)) (arguments_length i32)
-				(output (mut-slice u8)) (capacity i32) (result (mut-slice u8)) (result_length i32))
-			(returns i32)))
+	(use wove-file "./capture/descriptors.wove" (only open_capture_descriptors))
+	(use wove-file "./capture/child.wove" (only spawn_capture_child reap_capture_child))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use c-header "<errno.h>" (only errno EINTR))
+	(use c-header "<unistd.h>" (only read close (type Size)))
 
 	(struct
 		(:doc `The status is the exit code, 128 plus the terminating signal, or -1 on host failure.`)
 		ProcessCapture
 		(fields (status i32) (length i32) (overflow bool)))
 
-	(fn decode_capture
-		(:doc `Decode the bridge's little-endian prefix length, which fits the signed view length.`)
-		(params (status i32) (result (shared-slice u8)))
+	(struct CaptureDrain (fields (ok bool) (length i32) (overflow bool)))
+
+	(fn capture_failure
+		(:doc `Report a failure before a child or captured prefix exists.`)
+		(params) (returns ProcessCapture)
+		(body (return (record.make ProcessCapture (status -1i32) (length 0i32) (overflow (bool false))))))
+
+	(fn valid_program
+		(:doc `Reject empty program names and embedded NUL bytes before calling C.`)
+		(params (program (shared-slice u8))) (returns bool)
+		(body
+			(let length (slice.len (local program)))
+			(let-mut index 0i32)
+			(while
+				(:doc "An embedded NUL would change the executable name seen by C.")
+				(i32.lt (local index) (local length))
+				(body
+					(if
+						(:doc "Reject the invalid program with a host failure status instead of a bridge trap.")
+						(u8.eq (slice.load (local program) (local index)) 0u8)
+						(then (return (bool false))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (i32.lt 0i32 (local length)))))
+
+	(fn count_arguments
+		(:doc `Count argv[0] and each terminated user argument, including each empty row.`)
+		(params (packed (shared-slice u8))) (returns i32)
+		(body
+			(let length (slice.len (local packed)))
+			(if
+				(:doc "An empty packed view represents no user arguments.")
+				(i32.eq (local length) 0i32)
+				(then (return 1i32)))
+			(if
+				(:doc "Every nonempty packed view must end with its final argument's terminator.")
+				(bool.not (u8.eq (slice.load (local packed) (i32.sub.wrapping (local length) 1i32)) 0u8))
+				(then (return -1i32)))
+			(let-mut index 0i32)
+			(let-mut count 1i32)
+			(while
+				(:doc "Count separators without changing any embedded UTF-8 or raw argument bytes.")
+				(i32.lt (local index) (local length))
+				(body
+					(if
+						(:doc "Each NUL ends a row, including when consecutive NUL bytes occur.")
+						(u8.eq (slice.load (local packed) (local index)) 0u8)
+						(then
+							(if
+								(:doc "The argument owners must fit in a signed-length Wove array.")
+								(i32.eq (local count) 2147483647i32)
+								(then (return -1i32)))
+							(set (local count) (i32.add.wrapping (local count) 1i32))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (local count))))
+
+	(fn copy_argument
+		(:doc `Give each argument a distinct byte owner, including empty arguments.`)
+		(params (value (shared-slice u8))) (returns (owned-array u8))
+		(body
+			(let-mut owned (array.alloc u8 (slice.len (local value))))
+			(let end (call append_bytes (borrow-shared (local value)) (borrow-mut (local owned)) 0i32))
+			(return (move (local owned)))))
+
+	(fn argument_vector
+		(:doc `Split the validated packed view into the owner rows expected by c_cstrs.`)
+		(params (program (shared-slice u8)) (packed (shared-slice u8)) (count i32))
+		(returns (owned-array (owned-array u8)))
+		(body
+			(let-mut rows (array.alloc (owned-array u8) (local count)))
+			(slice.store (local rows) 0i32 (call copy_argument (borrow-shared (local program))))
+			(let-mut begin 0i32)
+			(let-mut index 0i32)
+			(let-mut row 1i32)
+			(while
+				(:doc "Preserve argument boundaries as separate owners without copying the delimiters.")
+				(i32.lt (local index) (slice.len (local packed)))
+				(body
+					(if
+						(:doc "At each terminator the complete row occupies the checked output slot.")
+						(u8.eq (slice.load (local packed) (local index)) 0u8)
+						(then
+							(slice.store (local rows) (local row) (call copy_argument
+								(borrow-shared (slice.range (local packed) (local begin) (local index)))))
+							(set (local row) (i32.add.wrapping (local row) 1i32))
+							(set (local begin) (i32.add.wrapping (local index) 1i32))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (move (local rows)))))
+
+	(fn drain_capture
+		(:doc `Drain stdout to EOF while copying only the prefix that fits the output view.`)
+		(params (reader i32) (output (mut-slice u8)) (scratch (mut-slice u8)))
+		(returns CaptureDrain)
+		(body
+			(let capacity (slice.len (local output)))
+			(let width (int.convert Size (slice.len (local scratch))))
+			(let-mut written 0i32)
+			(let-mut overflow (bool false))
+			(while
+				(:doc "Keep reading after filling the prefix so the child can always finish writing.")
+				(bool true)
+				(body
+					(let count (int.convert i32 (call read (local reader) (borrow-mut (local scratch)) (local width))))
+					(if
+						(:doc "An interrupted read leaves the prefix unchanged and can be retried.")
+						(i32.lt (local count) 0i32)
+						(then
+							(if
+								(:doc "Keep an already captured prefix when the native read reports a different failure.")
+								(bool.not (i32.eq (local errno) (local EINTR)))
+								(then (return (record.make CaptureDrain (ok (bool false)) (length (local written)) (overflow (local overflow)))))))
+						(else
+							(if
+								(:doc "EOF completes the capture, including an exactly full prefix without overflow.")
+								(i32.eq (local count) 0i32)
+								(then (return (record.make CaptureDrain (ok (bool true)) (length (local written)) (overflow (local overflow))))))
+							(let room (i32.sub.wrapping (local capacity) (local written)))
+							(let-mut keep (local count))
+							(if
+								(:doc "Discard only the part of this read that exceeds the remaining capacity.")
+								(i32.lt (local room) (local count))
+								(then
+									(set (local keep) (local room))
+									(set (local overflow) (bool true))))
+							(let-mut index 0i32)
+							(while
+								(:doc "Copy the part of this read that fits, advancing the output cursor once per byte.")
+								(i32.lt (local index) (local keep))
+								(body
+									(slice.store (local output) (local written) (slice.load (local scratch) (local index)))
+									(set (local written) (i32.add.wrapping (local written) 1i32))
+									(set (local index) (i32.add.wrapping (local index) 1i32))))))))
+			(return (record.make CaptureDrain (ok (bool false)) (length (local written)) (overflow (local overflow))))))
+
+	(fn finish_capture
+		(:doc `Close the parent reader and reap the child even if an earlier capture operation failed.`)
+		(params (child i32) (reader i32) (writer_closed bool) (output (mut-slice u8)) (scratch (mut-slice u8)))
 		(returns ProcessCapture)
 		(body
-			(let-mut length 0u32)
-			(let-mut index 3i32)
-			(while
-				(:doc `Append one byte at a time, starting with the most significant byte.`)
-				(bool.not (i32.lt (local index) 0i32))
-				(body
-					(set (local length) (u32.add.wrapping (call shift_word (local length) 8i32)
-						(int.convert u32 (slice.load (local result) (local index)))))
-					(set (local index) (i32.sub.wrapping (local index) 1i32))))
-			(return (record.make ProcessCapture
-				(status (local status))
-				(length (int.convert i32 (local length)))
-				(overflow (u8.eq (slice.load (local result) 4i32) 1u8))))))
+			(if
+				(:doc "A failed writer close can leave the parent unable to observe EOF.")
+				(bool.not (local writer_closed))
+				(then
+					(let closed (call close (local reader)))
+					(let status (call reap_capture_child (local child)))
+					(return (call capture_failure))))
+			(let result (call drain_capture (local reader) (borrow-mut (local output)) (borrow-mut (local scratch))))
+			(let closed (call close (local reader)))
+			(let-mut status (call reap_capture_child (local child)))
+			(if
+				(:doc "A host I/O failure takes precedence over the child's status and keeps the captured prefix.")
+				(bool.not (bool.and (record.get (local result) ok) (i32.eq (local closed) 0i32)))
+				(then (set (local status) -1i32)))
+			(return (record.make ProcessCapture (status (local status))
+				(length (record.get (local result) length)) (overflow (record.get (local result) overflow))))))
 
 	(fn run_process_capture
-		(:doc `Capture at most output.len bytes, setting overflow when any further bytes were drained.`)
-		(:expect (issues "gh:wove-lang/wove:175"))
+		(:doc `Capture at most output.len bytes, setting overflow when any further bytes were drained.
+
+		Allocate the drain buffer before launch so every started child reaches the wait.`)
+		(:expect (tests "stage-2/process/cases.tsv") (issues "gh:wove-lang/wove:175" "gh:wove-lang/wove:283"))
 		(params (program (shared-slice u8)) (arguments (shared-slice u8)) (output (mut-slice u8)))
 		(returns ProcessCapture)
 		(body
-			(let capacity (slice.len (local output)))
-			(let-mut result (array.alloc u8 5i32))
-			(let status (call wove_process_capture (borrow-shared (local program)) (slice.len (local program))
-				(borrow-shared (local arguments)) (slice.len (local arguments))
-				(borrow-mut (local output)) (local capacity) (borrow-mut (local result)) 5i32))
-			(return (call decode_capture (local status) (borrow-shared (local result)))))))
+			(if
+				(:doc "An invalid program returns before allocating process resources.")
+				(bool.not (call valid_program (borrow-shared (local program))))
+				(then (return (call capture_failure))))
+			(let count (call count_arguments (borrow-shared (local arguments))))
+			(if
+				(:doc "Reject a truncated or oversized packed argument list before opening descriptors.")
+				(i32.lt (local count) 0i32)
+				(then (return (call capture_failure))))
+			(let vector (call argument_vector (borrow-shared (local program)) (borrow-shared (local arguments)) (local count)))
+			(let-mut scratch (array.alloc u8 4096i32))
+			(let ends (call open_capture_descriptors))
+			(let reader (record.get (local ends) reader))
+			(if
+				(:doc "A failed descriptor setup owns neither endpoint and leaves no child.")
+				(i32.lt (local reader) 0i32)
+				(then (return (call capture_failure))))
+			(let child (call spawn_capture_child (borrow-shared (local program)) (borrow-shared (local vector)) (local ends)))
+			(let writer_status (call close (record.get (local ends) writer)))
+			(if
+				(:doc "If spawn failed, release the reader without waiting for a child.")
+				(i32.lt (local child) 0i32)
+				(then
+					(let closed (call close (local reader)))
+					(return (call capture_failure))))
+			(return (call finish_capture (local child) (local reader)
+				(i32.eq (local writer_status) 0i32) (borrow-mut (local output)) (borrow-mut (local scratch))))))
+)

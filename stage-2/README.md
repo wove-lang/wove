@@ -980,14 +980,15 @@ NUL-terminated user arguments. An empty view supplies no user arguments.
 Consecutive NULs preserve empty arguments. The executable name or path
 becomes `argv[0]` and a bare name uses `PATH`.
 
-The view length is the capture limit. The host bridge writes only the
-captured prefix, drains any excess stdout, and reaps the child. A zero-length
-view can still report overflow. On hosts without `pipe2`, the bridge opens
-a private FIFO under `TMPDIR` or `/tmp` and removes it before launch. Stdin
-and stderr are inherited. The status is the normal exit code, 128 plus the
-terminating signal, or -1 on host failure. Consumers link
-[the POSIX bridge](io/process.c) and make its header available to the
-generated C translation unit.
+The view length is the capture limit. Wove writes only the captured prefix,
+drains any excess stdout, and reaps the child. A zero-length view can still
+report overflow. The launcher uses close-on-exec descriptors and opens
+a private FIFO under `TMPDIR` or `/tmp` when `pipe2` is unavailable. It
+removes the FIFO and its directory before launch. Stdin and stderr are
+inherited. The status is the normal exit code, 128 plus the terminating
+signal, or -1 on host failure. Compile the Wove source with the checked-in
+POSIX bridge providers and link the generated C with the Wove runtime.
+Enable the GNU declarations when compiling the Linux translation unit.
 
 ## Compiler version
 

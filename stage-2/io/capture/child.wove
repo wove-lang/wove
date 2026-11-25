@@ -1,0 +1,88 @@
+(module process_capture_child
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Launch and reap the child at the POSIX boundary.
+
+	File actions duplicate the capture writer onto stdout and close both
+	original endpoints in the child. Wove owns the spawn objects until
+	the call returns. The parent keeps responsibility for its descriptors.`)
+
+	(use wove-file "./descriptors.wove" (only (type CaptureDescriptors)))
+	(use c-header "<errno.h>" (only errno EINTR))
+	(use c-header "<unistd.h>" (only environ STDOUT_FILENO))
+	(use c-header "<spawn.h>" (only (type Pid) (type Actions) (type Attributes)
+		posix_spawn_file_actions_init posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addclose
+		posix_spawnattr_init posix_spawnp))
+	(use c-header "<sys/wait.h>" (only (type (as Pid WaitPid)) waitpid WIFEXITED WEXITSTATUS WIFSIGNALED WTERMSIG))
+
+	(fn spawn_capture_child
+		(:doc `Start one executable through PATH and return its process ID, or -1 on host failure.`)
+		(params (program (shared-slice u8)) (arguments (shared-slice (owned-array u8))) (ends CaptureDescriptors))
+		(returns i32)
+		(body
+			(let-mut actions (native.alloc Actions))
+			(if
+				(:doc "The destructor only becomes active after successful initialization.")
+				(bool.not (i32.eq (call posix_spawn_file_actions_init (borrow-mut (local actions))) 0i32))
+				(then (return -1i32)))
+			(let reader (record.get (local ends) reader))
+			(let writer (record.get (local ends) writer))
+			(if
+				(:doc "Duplicate stdout first. Neither original endpoint occupies a standard descriptor.")
+				(bool.not (bool.and
+					(i32.eq (call posix_spawn_file_actions_adddup2 (borrow-mut (local actions)) (local writer) (local STDOUT_FILENO)) 0i32)
+					(bool.and
+						(i32.eq (call posix_spawn_file_actions_addclose (borrow-mut (local actions)) (local reader)) 0i32)
+						(i32.eq (call posix_spawn_file_actions_addclose (borrow-mut (local actions)) (local writer)) 0i32))))
+				(then (return -1i32)))
+			(let-mut attributes (native.alloc Attributes))
+			(if
+				(:doc "An initialized attribute object with no changes applies the POSIX defaults.")
+				(bool.not (i32.eq (call posix_spawnattr_init (borrow-mut (local attributes))) 0i32))
+				(then (return -1i32)))
+			(let environment (local environ))
+			(let-mut child (int.convert Pid 0i32))
+			(let result (call posix_spawnp (borrow-mut (local child)) (borrow-shared (local program))
+				(borrow-shared (local actions)) (borrow-shared (local attributes))
+				(borrow-shared (local arguments)) (borrow-shared (local environment))))
+			(if
+				(:doc "Only a successful spawn gives the caller a child to reap.")
+				(bool.not (i32.eq (local result) 0i32))
+				(then (return -1i32)))
+			(return (int.convert i32 (local child)))))
+
+	(fn decode_child_status
+		(:doc `Use the target header's status macros and the archived capture status convention.`)
+		(params (status i32)) (returns i32)
+		(body
+			(if
+				(:doc "A normal exit reports the child's code.")
+				(call WIFEXITED (local status))
+				(then (return (call WEXITSTATUS (local status)))))
+			(if
+				(:doc "A signal occupies the status range above 128.")
+				(call WIFSIGNALED (local status))
+				(then (return (i32.add.wrapping 128i32 (call WTERMSIG (local status))))))
+			(return -1i32)))
+
+	(fn reap_capture_child
+		(:doc `Wait for the selected child across interruptions and return its decoded status.`)
+		(params (pid i32)) (returns i32)
+		(body
+			(let target (int.convert WaitPid (local pid)))
+			(let-mut status 0i32)
+			(while
+				(:doc "A signal can interrupt waitpid before it collects the child.")
+				(bool true)
+				(body
+					(let result (int.convert i32 (call waitpid (local target) (borrow-mut (local status)) 0i32)))
+					(if
+						(:doc "Without WNOHANG a positive result reaps this child.")
+						(i32.eq (local result) (local pid))
+						(then (return (call decode_child_status (local status)))))
+					(if
+						(:doc "Only an interrupted system call is retried.")
+						(bool.not (bool.and (i32.lt (local result) 0i32) (i32.eq (local errno) (local EINTR))))
+						(then (return -1i32)))))
+			(return -1i32)))
+)
