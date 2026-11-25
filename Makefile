@@ -83,6 +83,13 @@ PROCESS_FIXTURES := tests/stage-2/process
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
 PROCESS_DESCRIPTOR_CASES := $(PROCESS_FIXTURES)/descriptors.tsv
 PROCESS_INHERITANCE_CASES := $(PROCESS_FIXTURES)/inheritance.tsv
+PROCESS_LAUNCHER_SOURCES := $(PROCESS_MODULES) stage-2/text/copy.wove \
+	$(addprefix stage-2/c-stdlib/,errno.wove fcntl.wove spawn.wove stdlib.wove sys_stat.wove sys_wait.wove unistd.wove)
+TEST_RUNNER_ROOT := stage-2/test/runner.wove
+TEST_RUNNER_SOURCES := $(sort $(PROCESS_LAUNCHER_SOURCES) $(NATIVE_STDIO) $(DECIMAL_WRITER) \
+	$(BYTE_TEXT_MODULE) stage-2/c-stdlib/stdio.wove)
+TEST_RUNNER := $(STAGE2)/test/runner
+TEST_RUNTIME := $(STAGE2)/test/libwove_test.a
 CLANG_FIXTURES := tests/stage-2/clang
 CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
@@ -109,6 +116,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 
 .PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
 .PHONY: test-stage-2-gcc test-stage-2-gcc-live test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version force-build-info
+.PHONY: test-stage-2-inventory
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -123,7 +131,7 @@ test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version
+test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version test-stage-2-inventory
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -137,7 +145,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stag
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
-		tests/stage-2/test_execution.tsv tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \
+		tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \
 		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_arrays/cases.tsv \
 		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_rows/cases.tsv tests/stage-2/native_vectors/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
 		tests/stage-2/graph/targets/cases.tsv
@@ -175,6 +183,29 @@ test-stage-2-version: $(NATIVE_COMPILER) $(BUILD_VERSION)
 # Exercise the project loader with the checked-in config and standalone cases.
 test-stage-2-config: $(CONFIG_PROGRAM)
 	$(PYTHON) "$(CONFIG_FIXTURES)/check.py" "$(CONFIG_PROGRAM)" "$(CONFIG_FIXTURES)/cases.tsv"
+
+# Run the generated inline-test entry against the separate Wove runner archive.
+test-stage-2-inventory: export WOVE_TEST_CLANG = $(CLANG)
+test-stage-2-inventory: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2-inventory: export WOVE_TEST_RUNTIME = $(TEST_RUNTIME)
+test-stage-2-inventory: $(SOURCE_SCAN) $(TEST_RUNTIME)
+	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/test_execution.tsv
+
+# Keep generated runner helpers local to their translation unit.
+$(TEST_RUNNER).c: $(TEST_RUNNER_ROOT) $(TEST_RUNNER_SOURCES) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
+	mkdir -p "$(@D)"
+	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" --private-helpers $(filter %.wove,$^)
+
+# Expose only the host argument entry under the test-specific C name.
+$(TEST_RUNNER).o: $(TEST_RUNNER).c $(RUNTIME_HEADER)
+	$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -Dmain=wvrt_test_parent -I runtime -c "$<" -o "$@"
+
+$(STAGE2)/test/wove_test.o: stage-2/test/wove_test.c stage-2/test/wove_test.h
+	mkdir -p "$(@D)"
+	$(CLANG) -std=c11 $(CFLAGS) -c "$<" -o "$@"
+
+$(TEST_RUNTIME): $(STAGE2)/test/wove_test.o $(TEST_RUNNER).o $(STAGE1)/runtime.o
+	$(AR) rcs "$@" $^
 
 # Run the Wove launcher and interleave unrelated launches during descriptor creation.
 test-stage-2-process: export WOVE_TEST_CLANG = $(CLANG)

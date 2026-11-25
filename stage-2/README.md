@@ -939,11 +939,11 @@ to emit a test executable from the same supplied graph. The generated
 entry uses the discovery order and keeps the ordinary Wove `main` as
 an internal function. An empty inventory is valid.
 
-Link the emitted C with the Wove runtime and test runner.
+Build the test runtime archive and link it with the emitted C.
 
 ```sh
-clang -std=c11 -I runtime -I stage-2/test emitted.c runtime/wove_runtime.c \
-	stage-2/test/wove_test.c stage-2/io/process.c -o ./wove-tests
+make build/stage-2/test/libwove_test.a
+clang -std=c11 -I runtime -I stage-2/test emitted.c build/stage-2/test/libwove_test.a -o ./wove-tests
 ./wove-tests
 ```
 
@@ -953,8 +953,10 @@ tab-separated rows. On macOS and Linux, child launches use the running
 executable even when the invocation supplies a separate display name.
 A failed test leaves later tests runnable and makes
 the overall status nonzero. Child stdout is drained and stderr is
-inherited. Pass one zero-based decimal test index to run that test
-directly, with status 2 for an invalid selection.
+inherited. The Wove runner obtains the ordered labels from the generated
+entry's `--list` command, which writes an escaped file and name pair per
+line. Pass one zero-based decimal test index to run that test directly,
+with status 2 for an invalid selection.
 
 ## Compile-time file embeds
 

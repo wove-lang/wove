@@ -12,7 +12,7 @@ typedef struct {
 	void (*run)(void);
 } wove_test_case;
 
-// Execute a numeric selection or launch the whole inventory through this executable.
+// List the inventory, dispatch one numeric selection, or enter the Wove runner.
 int wove_test_entry(int argc, char **argv, const wove_test_case *tests, size_t count);
 
 // Open main and its local table, keeping its names out of the file's C namespace.
