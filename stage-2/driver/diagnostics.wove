@@ -1,11 +1,12 @@
 (module native_cli_diagnostics
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Map native command failures to the shared JSON diagnostic format and write one stderr record.`)
+	(:doc `Write native command failures using one structured diagnostic record and the selected renderer.`)
 
 	(use wove-file "../source/enum_forms.wove" (only (value non_exhaustive_match)))
 	(use wove-file "../diagnostics/record.wove" (only diagnostic_argv diagnostic_source (type Diagnostic)))
 	(use wove-file "../diagnostics/json.wove" (only write_diagnostic_json))
+	(use wove-file "../diagnostics/human.wove" (only render_diagnostic_human))
 	(use wove-file "../io/stdio.wove" (only write_stderr_line))
 
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -22,11 +23,32 @@
 	(let invalid_target "invalid output target")
 	(let unreadable_asset "could not read embedded asset")
 
-	(fn report_diagnostic
-		(:doc `Size the output for worst-case JSON escaping and print only the serialized prefix.`)
-		(params (diagnostic Diagnostic) (message (shared-array u8)) (file (shared-array u8)))
-		(returns i32)
+	(fn write_report
+		(:doc "Keep the diagnostic failure status and distinguish a failed stderr write.")
+		(params (bytes (shared-array u8))) (returns i32)
 		(body
+			(if
+				(:doc "The renderer returns an empty result when its capacity cannot be represented.")
+				(i32.eq (array.len (local bytes)) 0i32)
+				(then (return 1i32)))
+			(if
+				(:doc "A stream error has its own command exit status.")
+				(bool.not (call write_stderr_line (borrow-shared (local bytes))))
+				(then (return 2i32)))
+			(return 1i32)))
+
+	(fn report_diagnostic
+		(:doc "Render the same structured record in the selected format and write a complete stderr message.")
+		(params (diagnostic Diagnostic) (message (shared-array u8)) (file (shared-array u8))
+			(source (shared-array u8)) (available bool) (human bool)) (returns i32)
+		(body
+			(if
+				(:doc "The human renderer interprets the original source span in the existing bytes.")
+				(local human)
+				(then
+					(let output (call render_diagnostic_human (local diagnostic) (borrow-shared (local message))
+						(borrow-shared (local file)) (borrow-shared (local source)) (local available)))
+					(return (call write_report (borrow-shared (local output))))))
 			(let width (u64.add.wrapping (int.convert u64 (array.len (local file)))
 				(int.convert u64 (array.len (local message)))))
 			(let twice (u64.add.wrapping (local width) (local width)))
@@ -44,39 +66,53 @@
 			(if
 				(:doc "Write a diagnostic only after the JSON writer completes it.")
 				(u32.eq (struct.get (local result) error) 0u32)
-				(then
-					(let written (struct.get (local result) written))
-					(if
-						(:doc "A stream error has its own command exit status.")
-						(bool.not (call write_stderr_line (borrow-shared (array.range (local output) 0i32 (local written)))))
-						(then (return 2i32)))))
+				(then (return (call write_report (borrow-shared (array.range (local output) 0i32 (struct.get (local result) written)))))))
 			(return 1i32)))
 
 	(fn report_argv
 		(:doc `Report an argv failure at the resolver's zero-based position.`)
-		(params (code u32) (index i32) (message (shared-array u8)))
+		(params (code u32) (index i32) (message (shared-array u8)) (human bool))
 		(returns i32)
 		(body
 			(let no_file (array.alloc u8 0i32))
 			(return (call report_diagnostic (call diagnostic_argv (local code) (local index))
-				(borrow-shared (local message)) (borrow-shared (local no_file))))))
+				(borrow-shared (local message)) (borrow-shared (local no_file))
+				(borrow-shared (local no_file)) (bool false) (local human)))))
 
-	(fn report_source
-		(:doc `Report a source failure with its path and original byte span.`)
-		(params (file (shared-array u8)) (code u32) (start i32) (end i32) (message (shared-array u8)))
-		(returns i32)
+	(fn report_located
+		(:doc "Report the original half-open byte span and use available source bytes in the human view.")
+		(params (file (shared-array u8)) (code u32) (start i32) (end i32) (message (shared-array u8))
+			(source (shared-array u8)) (available bool) (human bool)) (returns i32)
 		(body
 			(let diagnostic (call diagnostic_source (local code) (local start) (local end)))
 			(if
 				(:doc "Every source path uses the same message for incomplete enum coverage.")
 				(u32.eq (local code) (local non_exhaustive_match))
 				(then (return (call report_diagnostic (local diagnostic)
-					(borrow-shared (local incomplete_match)) (borrow-shared (local file))))))
-			(return (call report_diagnostic (local diagnostic) (borrow-shared (local message)) (borrow-shared (local file))))))
+					(borrow-shared (local incomplete_match)) (borrow-shared (local file))
+					(borrow-shared (local source)) (local available) (local human)))))
+			(return (call report_diagnostic (local diagnostic) (borrow-shared (local message)) (borrow-shared (local file))
+				(borrow-shared (local source)) (local available) (local human)))))
+
+	(fn report_source
+		(:doc "Report a source failure against the exact bytes already checked by the driver.")
+		(params (file (shared-array u8)) (code u32) (start i32) (end i32) (message (shared-array u8))
+			(source (shared-array u8)) (human bool)) (returns i32)
+		(body (return (call report_located (borrow-shared (local file)) (local code) (local start) (local end)
+			(borrow-shared (local message)) (borrow-shared (local source)) (bool true) (local human)))))
+
+	(fn report_file
+		(:doc "Keep the file location when source bytes are unavailable or the message refers to the whole path.")
+		(params (file (shared-array u8)) (code u32) (start i32) (end i32) (message (shared-array u8)) (human bool)) (returns i32)
+		(body
+			(let absent (array.alloc u8 0i32))
+			(return (call report_located (borrow-shared (local file)) (local code) (local start) (local end)
+				(borrow-shared (local message)) (borrow-shared (local absent)) (bool false) (local human)))))
 
 	(fn report_path_location
 		(:doc `Display paths under the current directory relative to it when the entry was relative.`)
-		(params (provider (shared-array u8)) (cwd (shared-array u8)) (error u32) (start i32) (end i32) (message (shared-array u8)))
+		(params (provider (shared-array u8)) (cwd (shared-array u8)) (error u32) (start i32) (end i32) (message (shared-array u8))
+			(source (shared-array u8)) (available bool) (human bool))
 		(returns i32)
 		(body
 			(let width (array.len (local cwd)))
@@ -92,13 +128,9 @@
 						(:doc "Skip the separating slash unless the directory is already the filesystem root.")
 						(i32.lt 1i32 (local width))
 						(then (set (local relative) (i32.add.wrapping (local width) 1i32))))
-					(return (call report_source (borrow-shared (array.range (local provider) (local relative) (array.len (local provider))))
-						(local error) (local start) (local end) (borrow-shared (local message))))))
-			(return (call report_source (borrow-shared (local provider)) (local error) (local start) (local end) (borrow-shared (local message))))))
-
-	(fn report_project
-		(:doc `Report a JSONC or file error against the current project configuration name.`)
-		(params (code u32) (start i32) (end i32) (message (shared-array u8)))
-		(returns i32)
-		(body (return (call report_source (borrow-shared (local project_file))
-			(local code) (local start) (local end) (borrow-shared (local message)))))))
+					(return (call report_located (borrow-shared (array.range (local provider) (local relative) (array.len (local provider))))
+						(local error) (local start) (local end) (borrow-shared (local message))
+						(borrow-shared (local source)) (local available) (local human)))))
+			(return (call report_located (borrow-shared (local provider)) (local error) (local start) (local end) (borrow-shared (local message))
+				(borrow-shared (local source)) (local available) (local human)))))
+)

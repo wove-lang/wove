@@ -1181,7 +1181,10 @@ To compile retained C manually when it uses runtime operations, use
 `-I runtime` and link `runtime/wove_runtime.c`. The driver reads `wovec.jsonc` from its
 working directory for profile selection. `--profile NAME` selects that
 profile and uses its name in the retained path. Diagnostics go to stderr
-as one JSON object per line.
+as one JSON object per line by default. Use `--human` or set `human` in
+the selected profile to show the path, one-based line and column, and a
+caret for the primary source span. `--no-human` selects JSON Lines even
+when the profile enables the human view.
 
 The entry can select names from other files with `use wove-file`. The
 resolver opens only active edges under the native selection context.
