@@ -18,7 +18,7 @@
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../source/c_headers.wove" (only read_c_native_parameter))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
-	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode))
+	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode c_null_argument_kind))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
 	(use wove-file "../source/types.wove" (only void_type is_builtin_integer reference_mode))
 	(use wove-file "./records.wove"
@@ -28,7 +28,8 @@
 			is_native_record native_field_type is_record_reference is_mutable_record_reference record_reference_type record_reference_target record_receiver_type record_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
 	(use wove-file "./signatures.wove" (only read_signature_head is_owned_byte_result complete_signature (type ScalarSignature)))
-	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind native_handle_is_null_kind native_handle_consume_kind))
+	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
+			is_optional_byte_owner_type optional_unwrap_kind))
 	(use wove-file "./loans.wove" (only has_conflicting_loan field_place_root (type ScalarExpression)))
 	(use wove-file "./flow.wove" (only block_statement moved_owner after_block c_transfer_reaches is_c_value_binding (type ScalarStatement)
 			(value c_writable_binding) (value c_value_expression) (value c_value_assignment) (value c_handle_reference)
@@ -45,7 +46,7 @@
 		A positive c_variadic counts the fixed formals before a named C tail.`)
 		ScalarFunction
 		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
-			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_bytes i32) (c_macro bool) (c_variadic i32)
+			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_bytes i32) (c_macro bool) (c_variadic i32) (c_nulls i32) (c_snapshot_drop i32)
 			(file i32) (tree_base i32) (tree_limit i32) (source_base i32) (body i32)))
 	(struct ScalarParameter
 		(fields (name i32) (type u32) (position i32) (c_mode u8) (c_size i32) (c_count i32)))
@@ -315,7 +316,7 @@
 					(params (local next_param)) (arity (local arity))
 					(result (record.get (local signature) result)) (first_statement (record.get (local signature) first_statement))
 					(body (record.get (local signature) body))
-					(identity (local identity)) (entry (local entry)) (c_strings (i32 0)) (c_bytes (i32 0)) (c_macro (bool false)) (c_variadic (i32 0))
+					(identity (local identity)) (entry (local entry)) (c_strings (i32 0)) (c_bytes (i32 0)) (c_macro (bool false)) (c_variadic (i32 0)) (c_nulls (i32 0)) (c_snapshot_drop (i32 -1))
 					(file (record.get (local scope) file)) (tree_base (record.get (local scope) tree_base))
 					(tree_limit (record.get (local scope) tree_limit)) (source_base (record.get (local scope) source_base))))
 			(return (call entry_at (local node) (local limit) (u32 0)))))
@@ -1024,6 +1025,8 @@
 			(return (call find_function (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local source)) (local start) (local end)))))
 
+	(let null_literal "null")
+
 	(fn plan_call
 		(:doc `Resolve a direct call and seed each argument from its formal type.
 
@@ -1053,7 +1056,8 @@
 				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
 			(let callee (slice.load (local functions) (local target)))
 			(let actual (record.get (local callee) result))
-			(let owning_initializer (bool.and (u32.eq (local expected) (u32 42)) (call is_array_owner (local actual))))
+			(let owning_initializer (bool.and (u32.eq (local expected) (u32 42))
+				(bool.or (call is_array_owner (local actual)) (call is_optional_byte_owner_type (local actual)))))
 			(if
 				(:doc "A call can introduce a fresh local owner or satisfy its exact expected result.")
 				(bool.not (bool.or (local owning_initializer) (call value_matches_type (local expected) (local actual))))
@@ -1067,20 +1071,34 @@
 				(bool.and (i32.lt (local formal) (local limit)) (bool.not (i32.lt (local argument) (i32 0))))
 				(body
 					(let param (slice.load (local parameters) (local formal)))
-					(let-mut argument_type (record.get (local param) type))
-					(let-mut consuming_formal (i32 -1))
+					(let operand (slice.load (local nodes) (local argument)))
 					(if
-						(:doc "Keep the checked consuming parameter on the unvisited argument row.")
-						(u8.eq (record.get (local param) c_mode) (call c_consume_mode))
-						(then (set (local consuming_formal) (local formal))))
-					(if
-						(:doc "Byte slice arguments use their reborrow keyword code. Typed slices keep the exact formal type.")
-						(call is_byte_view_type (local argument_type))
-						(then (set (local argument_type) (u32.add.wrapping (local argument_type) (u32 1)))))
-					(slice.store (local expressions) (local argument)
-						(call expression_row (u32 0) (local argument_type)
-							(local consuming_formal) (i32 -1) (i32 0) (i32 0) (bool false)))
-					(set (local argument) (record.get (slice.load (local nodes) (local argument)) next_sibling))
+						(:doc "A null-only formal accepts the bare literal and needs no evaluated operand.")
+						(call is_c_null_mode (record.get (local param) c_mode))
+						(then
+							(if
+								(:doc "Report caller-provided storage at the original argument span.")
+								(bool.not (bool.and (u32.eq (record.get (local operand) kind) (u32 1))
+									(call same_bytes (borrow-shared (local source)) (record.get (local operand) start) (record.get (local operand) end)
+										(borrow-shared (local null_literal)) (i32 0) (slice.len (local null_literal)))))
+								(then (return (call entry_at (local operand) (i32 -1) (u32 24)))))
+							(slice.store (local expressions) (local argument)
+								(call expression_row (call c_null_argument_kind) (u32 0) (i32 -1) (i32 -1) (i32 0) (i32 0) (bool false))))
+						(else
+							(let-mut argument_type (record.get (local param) type))
+							(let-mut consuming_formal (i32 -1))
+							(if
+								(:doc "Keep the checked consuming parameter on the unvisited argument row.")
+								(u8.eq (record.get (local param) c_mode) (call c_consume_mode))
+								(then (set (local consuming_formal) (local formal))))
+							(if
+								(:doc "Byte slice arguments use their reborrow keyword code. Typed slices keep the exact formal type.")
+								(call is_byte_view_type (local argument_type))
+								(then (set (local argument_type) (u32.add.wrapping (local argument_type) (u32 1)))))
+							(slice.store (local expressions) (local argument)
+								(call expression_row (u32 0) (local argument_type)
+									(local consuming_formal) (i32 -1) (i32 0) (i32 0) (bool false)))))
+					(set (local argument) (record.get (local operand) next_sibling))
 					(set (local formal) (i32.add.wrapping (local formal) (i32 1)))))
 			(if
 				(:doc "The number of actual arguments must exactly match the signature.")
@@ -1444,7 +1462,7 @@
 		(returns EntryRead)
 		(body
 			(let consume (call is_native_owner (local expected)))
-			(let-mut tag (call native_handle_is_null_kind))
+			(let-mut tag (call owner_is_null_kind))
 			(if (local consume) (then (set (local tag) (u32 43))))
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) (u32 24)))
 			(if (u32.lt (u32 0) (record.get (local form) error)) (then (return (local form))))
@@ -1469,14 +1487,16 @@
 			(let target (record.get (local pointer) target))
 			(if
 				(:doc "Only a local native owner can participate in these operations.")
-				(bool.not (bool.and (call is_native_owner (local actual)) (u32.eq (record.get (local pointer) kind) (u32 6))))
+				(bool.not (bool.and (u32.eq (record.get (local pointer) kind) (u32 6))
+					(bool.or (call is_native_owner (local actual))
+						(bool.and (bool.not (local consume)) (call is_optional_byte_owner_type (local actual))))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(if
 				(:doc "A null test reads only the owner's pointer and returns a bool.")
 				(bool.not (local consume))
 				(then
 					(slice.store (local expressions) (local index)
-						(call expression_row (call native_handle_is_null_kind) (u32 12) (local target) (i32 -1) (i32 0) (i32 0) (bool false)))
+						(call expression_row (call owner_is_null_kind) (u32 12) (local target) (i32 -1) (i32 0) (i32 0) (bool false)))
 					(return (call entry_at (local node) (local index) (u32 0)))))
 			(if
 				(:doc "The consuming formal must name the exact owner and cannot overlap a loan.")
@@ -2249,8 +2269,8 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
 			(if
-				(:doc "A native owner null predicate is a bool expression.")
-				(u32.eq (local tag) (call native_handle_is_null_kind))
+				(:doc "The null predicate reads the presence of a native handle or an optional owner.")
+				(u32.eq (local tag) (call owner_is_null_kind))
 				(then
 					(if
 						(:doc "Check the expected boolean type before resolving the referenced owner.")
@@ -2451,7 +2471,7 @@
 		A return transfers only on that exit, so other paths keep the source.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
 			(root i32) (statement i32) (expected u32) (parameters (shared-slice ScalarParameter))
-			(statements (mut-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)) (site_count i32))
+			(statements (mut-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)) (site_count i32) (view_start i32))
 		(returns BodyPlan)
 		(body
 			(let move (slice.load (local nodes) (local root)))
@@ -2467,7 +2487,31 @@
 				(bool.or (i32.lt (local operand) (i32 0))
 					(bool.not (i32.lt (record.get (slice.load (local nodes) (local operand)) next_sibling) (i32 0))))
 				(then (return (call body_error (local caller) (record.get (local move) start) (record.get (local move) end) (u32 24)))))
-			(let reference (slice.load (local nodes) (local operand)))
+			(let candidate (slice.load (local nodes) (local operand)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local candidate)))
+			(let unwrap (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local parts) head)) (call optional_unwrap_kind)))
+			(let-mut reference_index (local operand))
+			(let-mut capture (local root))
+			(if
+				(:doc "An optional unwrap must be the sole move operand and name one original local.")
+				(local unwrap)
+				(then
+					(let checked (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local candidate) (call optional_unwrap_kind) (u32 24)))
+					(if
+						(:doc "Preserve malformed unwrap metadata or syntax at the originating form.")
+						(u32.lt (u32 0) (record.get (local checked) error))
+						(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))
+					(set (local reference_index) (record.get (local checked) operand))
+					(if
+						(:doc "An unwrap cannot omit or repeat the source local.")
+						(bool.or (i32.lt (local reference_index) (i32 0))
+							(i32.lt (i32 -1) (record.get (slice.load (local nodes) (local reference_index)) next_sibling)))
+						(then (return (call body_error (local caller) (record.get (local candidate) start)
+							(record.get (local candidate) end) (u32 24)))))
+					(set (local capture) (local operand))))
+			(let reference (slice.load (local nodes) (local reference_index)))
 			(let local_form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) (u32 8) (u32 24)))
 			(if
 				(:doc "Only a local reference can name the source of a transfer.")
@@ -2475,13 +2519,24 @@
 				(then (return (call body_error (local caller) (record.get (local local_form) start) (record.get (local local_form) end)
 					(record.get (local local_form) error)))))
 			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local reference) (record.get (local local_form) operand) (u32 57) (local root) (local caller) (local statement)
+				(local reference) (record.get (local local_form) operand) (u32 57) (local capture) (local caller) (local statement)
 				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
 			(if
 				(:doc "A repeated transfer points at the attempted move and the move that consumed its source.")
 				(u32.lt (u32 0) (record.get (local checked) error))
 				(then (return (call expression_error (local caller) (borrow-shared (local nodes))
 					(call at_owner_use (local checked) (local move))))))
+			(if
+				(:doc "An unwrap checks presence at runtime and transfers the original array pointer.")
+				(local unwrap)
+				(then
+					(if
+						(:doc "An ordinary owner or native handle is not an optional byte array.")
+						(bool.not (call is_optional_byte_owner_type (record.get (slice.load (local expressions) (local capture)) type)))
+						(then (return (call body_error (local caller) (record.get (local candidate) start)
+							(record.get (local candidate) end) (u32 24)))))
+					(slice.store (local expressions) (local root)
+						(call runtime_expression (call optional_unwrap_kind) (u32 41) (local candidate) (local capture) (local caller) (local view_start)))))
 			(if
 				(:doc "An owned result keeps the same pointer and requires the exact returned array type.")
 				(call is_array_owner (local expected))
@@ -2539,7 +2594,7 @@
 						(u32.eq (local tag) (u32 43))
 						(then (return (call plan_move (borrow-shared (local source)) (borrow-shared (local nodes))
 							(local caller) (local root) (local statement) (local expected) (borrow-shared (local parameters))
-							(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start)))))
+							(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start) (local view_start)))))
 					(if
 						(:doc "Return either an explicitly moved local or a fresh owner from a call.")
 						(bool.and (local returning_owner) (bool.not (u32.eq (local tag) (u32 9))))

@@ -103,6 +103,12 @@ wvrt_array *wvrt_array_new_at_span(int32_t wvrt_length, size_t wvrt_element_size
 wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrt_length, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrt_bytes, int32_t wvrt_length,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_snapshot_cstr_at_span(char *wvrt_text, void (*wvrt_release)(void *),
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_snapshot_chars_at_span(char *wvrt_text, void (*wvrt_release)(char *),
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrt_value, int32_t wvrt_file,
+	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
 wvrt_slice wvrt_slice_range_u8(const void *wvrt_items, int32_t wvrt_length,
 	int32_t wvrt_start, int32_t wvrt_end, wvrt_location wvrt_site);

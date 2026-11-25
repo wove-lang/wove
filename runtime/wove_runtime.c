@@ -231,6 +231,45 @@ wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrtbytes, int32_t wvrtlength
 	return wvrt_result;
 }
 
+// Copy the native text before invoking its release, including on copy failure.
+static wvrt_array *wvrt_snapshot_cstr(char *wvrttext, void (*wvrtrelease)(void *),
+	void (*wvrtchars_release)(char *), int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	if (wvrttext == NULL) { return NULL; }
+	int wvrt_saved_errno = errno;
+	size_t wvrt_length = strlen(wvrttext);
+	wvrt_array *wvrt_result = NULL;
+	// A present empty string still receives its own non-null Wove owner.
+	if (wvrt_length <= INT32_MAX) {
+		wvrt_result = wvrt_array_try_new((int32_t)wvrt_length, sizeof(uint8_t), _Alignof(uint8_t));
+		if (wvrt_result != NULL && wvrt_length != 0) { memcpy(wvrt_result->wvrt_items, wvrttext, wvrt_length); }
+	}
+	// The checked bridge selects the matching release signature without a cast.
+	if (wvrtrelease != NULL) { wvrtrelease(wvrttext); }
+	else { wvrtchars_release(wvrttext); }
+	if (wvrt_result == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not snapshot C string"); }
+	errno = wvrt_saved_errno;
+	return wvrt_result;
+}
+
+// Accept the standard free signature for an allocating C string.
+wvrt_array *wvrt_snapshot_cstr_at_span(char *wvrttext, void (*wvrtrelease)(void *),
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_snapshot_cstr(wvrttext, wvrtrelease, NULL, wvrtfile, wvrtstart, wvrtend);
+}
+
+// Accept a release function that takes the exact mutable character pointer.
+wvrt_array *wvrt_snapshot_chars_at_span(char *wvrttext, void (*wvrtrelease)(char *),
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_snapshot_cstr(wvrttext, NULL, wvrtrelease, wvrtfile, wvrtstart, wvrtend);
+}
+
+// Extract the same Wove allocation after checking a snapshot's presence.
+wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrtvalue, int32_t wvrtfile,
+	int32_t wvrtstart, int32_t wvrtend) {
+	if (wvrtvalue == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "missing optional array"); }
+	return wvrtvalue;
+}
+
 // Retire exactly the active owners in an element range.
 static void wvrt_array_drop_range(wvrt_array *wvrtbuffer, int32_t wvrtstart, int32_t wvrtend) {
 	if (wvrtbuffer->wvrt_drop_element == NULL) { return; }
