@@ -5,6 +5,7 @@
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -15,18 +16,33 @@ from tempfile import TemporaryDirectory
 
 # Exercise one invocation with the project and files specified by its fixture row.
 def check_case(compiler, clang, runtime, fixtures, row):
-	label, inputs, argv, status, target, retained, value, diagnostic = row
+	label, inputs, argv, status, target, retained, value, diagnostic, *options = row
+	patterns, = options or ["{}"]
 	with TemporaryDirectory(prefix="native-cli-", dir=compiler.parent) as workspace:
 		root = Path(workspace)
+		entries = json.loads(inputs)
 		# Map fixture files to their supplied names in the command's working directory.
-		for destination, source in json.loads(inputs).items():
+		for destination, source in entries.items():
 			path = root / destination
 			path.parent.mkdir(parents=True, exist_ok=True)
-			# A hex value supplies exact raw input bytes without a checked-in binary.
+			# A hex fixture supplies exact raw bytes. Links are created after the regular files.
 			if isinstance(source, dict):
-				path.write_bytes(bytes.fromhex(source["hex"]))
+				# Stage raw bytes now and validate deferred link descriptors.
+				if "hex" in source:
+					path.write_bytes(bytes.fromhex(source["hex"]))
+				elif not {"hardlink", "symlink"} & source.keys():
+					raise ValueError(f"unknown native fixture data for {destination}")
 			else:
 				shutil.copyfile(fixtures / source, path)
+		# Link fixtures use workspace-relative targets, independent of checkout location.
+		for destination, source in entries.items():
+			# Preserve either shared inode identity or a distinct symbolic spelling.
+			if isinstance(source, dict) and "hardlink" in source:
+				os.link(root / source["hardlink"], root / destination)
+			elif isinstance(source, dict) and "symlink" in source:
+				(root / destination).symlink_to(source["symlink"])
+		# Existing C paths can also be Wove inputs. A failed command must preserve their bytes.
+		existing_c = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.c")}
 		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
 			for argument in json.loads(argv)]
 		result = subprocess.run([compiler, *arguments], cwd=root, capture_output=True, timeout=30)
@@ -36,12 +52,17 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		artifacts = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.c"))
 		if retained != "-":
 			assert not result.stderr and artifacts == [retained], (label, result.stderr, artifacts)
+			generated = (root / retained).read_text()
+			# The case can count defining symbols without pinning installation-dependent hashes.
+			for pattern, count in json.loads(patterns).items():
+				assert len(re.findall(pattern, generated)) == count, (label, pattern)
 			program = root / "result"
 			subprocess.run([*clang, "-I", "runtime", str(root / retained), runtime, "-o", str(program)], check=True, timeout=30)
 			built = subprocess.run([program], stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
 			assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), (label, built)
 		else:
-			assert not artifacts and result.stderr.count(b"\n") == 1, (label, artifacts, result.stderr)
+			assert artifacts == sorted(existing_c) and result.stderr.count(b"\n") == 1, (label, artifacts, result.stderr)
+			assert all((root / path).read_bytes() == data for path, data in existing_c.items()), label
 			assert json.loads(result.stderr) == json.loads(diagnostic), (label, result.stderr)
 
 

@@ -915,12 +915,12 @@ without Git metadata. Identical content keeps the asset's modification time.
 The compiler embeds the generated line and reads its compiled bytes when
 printing the version.
 
-## Native single-source compilation
+## Native source graph compilation
 
 Run `make stage-2` to build `build/stage-2/wovec`. The seed-built Stage 2
 emitter compiles the native entry and its Wove dependencies. The linked
 executable reads host arguments, resolves command and project settings, and
-uses its C bridges for file I/O.
+reads source files through explicit checked-in POSIX C-header imports.
 
 ```sh
 build/stage-2/wovec cc input.wove -o build/input
@@ -934,8 +934,16 @@ For output that uses Wove runtime operations, compile with `-I runtime`
 and link `runtime/wove_runtime.c`. The command reads `wovec.jsonc` from its
 working directory for profile selection. `--profile NAME` selects that
 profile and uses its name in the retained path. Argument and source
-failures print one JSON diagnostic to stderr. On-disk source graph loading
-is tracked in [#188](https://github.com/wove-lang/wove/issues/188).
+failures print one JSON diagnostic to stderr.
+
+The entry can select names from other files with `use wove-file`. The
+resolver opens only active edges under the native selection context.
+Relative paths resolve from the canonical importing file's directory.
+The loader reads a regular file once per device and inode, so diamond,
+symlink, and hard-link paths share the same defining source and emitted
+functions. An unavailable provider reports the original importing use.
+Selected embeds use their defining module's directory. The complete
+graph emits as one retained C translation unit.
 
 ## Structured JSON diagnostics
 

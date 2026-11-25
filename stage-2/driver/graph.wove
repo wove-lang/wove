@@ -1,25 +1,28 @@
 (module native_cli_graph
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Resolve native C-header imports from the entry and the built-in provider sources.")
+	(:doc "Resolve native graphs with the bundled providers and emit one retained C unit.")
 
-	(use wove-file "./assets.wove" (only copy_source_prefix load_input_assets))
+	(use wove-file "./assets.wove" (only copy_source_prefix load_graph_assets))
 	(use wove-file "./bundled.wove" (only bundled_path_width write_bundled_sources))
 	(use wove-file "./diagnostics.wove" (only report_source))
 	(use wove-file "./output.wove" (only publish_input))
+	(use wove-file "./files.wove" (only canonical_path))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "./platform.wove" (only native_selection))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile) normalize_path))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)
-		(type GraphUse) (type GraphSelector) (type GraphResult) resolve_graph))
+		(type GraphUse) (type GraphSelector) (type GraphResult) resolve_graph_for_target))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only (type SelectedDeclaration) form_parts))
 	(use wove-file "../source/imports.wove" (only import_keyword))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset) (type EmbedCheck)))
 	(use wove-file "../emit/graph.wove" (only run_entry_graph))
 
-	(fn has_c_header_use
-		(:doc "Find an active C-header use in the entry's selected declaration list.")
+	(fn has_active_use
+		(:doc "Find an active use of the requested provider kind.")
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(declarations (shared-slice SelectedDeclaration)) (count i32))
+			(declarations (shared-slice SelectedDeclaration)) (count i32) (kind u32))
 		(returns bool)
 		(body
 			(let-mut index (i32 0))
@@ -37,26 +40,65 @@
 						(bool.and (u32.eq (call import_keyword (borrow-shared (local source)) (local head)) (u32 2))
 							(bool.and (i32.lt (i32 -1) (local provider))
 								(u32.eq (call import_keyword (borrow-shared (local source))
-									(slice.load (local nodes) (local provider))) (u32 8))))
+									(slice.load (local nodes) (local provider))) (local kind))))
 						(then (return (bool true))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(return (bool false))))
 
-	(fn report_graph_source
-		(:doc "Report the entry with its argv spelling and a provider with its stable virtual path.")
+	(let current_directory ".")
+
+	(fn report_provider_source
+		(:doc `Display paths under the current directory relative to it when the entry was relative.`)
+		(params (provider (shared-slice u8)) (cwd (shared-slice u8)) (error u32) (start i32) (end i32) (message u32))
+		(returns i32)
+		(body
+			(let width (slice.len (local cwd)))
+			(if
+				(:doc "Trim only a complete directory prefix and keep unrelated or bundled paths unchanged.")
+				(bool.and (bool.and (i32.lt (i32 0) (local width)) (i32.lt (local width) (slice.len (local provider))))
+					(bool.and (call same_bytes (borrow-shared (local provider)) (i32 0) (local width)
+						(borrow-shared (local cwd)) (i32 0) (local width))
+						(bool.or (i32.eq (local width) (i32 1)) (u8.eq (slice.load (local provider) (local width)) (u8 47)))))
+				(then
+					(let-mut relative (local width))
+					(if
+						(:doc "Skip the separating slash unless the directory is already the filesystem root.")
+						(i32.lt (i32 1) (local width))
+						(then (set (local relative) (i32.add.wrapping (local width) (i32 1)))))
+					(return (call report_source (borrow-shared (slice.range (local provider) (local relative) (slice.len (local provider))))
+						(local error) (local start) (local end) (local message)))))
+			(return (call report_source (borrow-shared (local provider)) (local error) (local start) (local end) (local message)))))
+
+	(fn report_graph_location
+		(:doc `Use the entry's argv spelling or the identity of the provider where a diagnostic originated.`)
 		(params (path (shared-slice u8)) (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
-			(file i32) (error u32) (start i32) (end i32))
+			(file i32) (error u32) (start i32) (end i32) (message u32))
 		(returns i32)
 		(body
 			(if
-				(:doc "A positive file identity names one of the embedded providers.")
+				(:doc "A provider has its own path and byte coordinates.")
 				(bool.and (i32.lt (i32 0) (local file)) (i32.lt (local file) (slice.len (local files))))
 				(then
 					(let provider (slice.load (local files) (local file)))
-					(return (call report_source
-						(borrow-shared (slice.range (local arena) (record.get (local provider) path_start)
-							(record.get (local provider) path_end))) (local error) (local start) (local end) (u32 3)))))
-			(return (call report_source (borrow-shared (local path)) (local error) (local start) (local end) (u32 3)))))
+					(let first (record.get (local provider) path_start))
+					(let last (record.get (local provider) path_end))
+					(if
+						(:doc "Preserve absolute output when the entry was supplied as an absolute path.")
+						(bool.and (i32.lt (i32 0) (slice.len (local path))) (u8.eq (slice.load (local path) (i32 0)) (u8 47)))
+						(then (return (call report_source (borrow-shared (slice.range (local arena) (local first) (local last)))
+							(local error) (local start) (local end) (local message)))))
+					(let cwd (call canonical_path (borrow-shared (local current_directory))))
+					(return (call report_provider_source (borrow-shared (slice.range (local arena) (local first) (local last)))
+						(borrow-shared (local cwd)) (local error) (local start) (local end) (local message)))))
+			(return (call report_source (borrow-shared (local path)) (local error) (local start) (local end) (local message)))))
+
+	(fn report_graph_source
+		(:doc `Report a resolver or emitter source diagnostic in its original file.`)
+		(params (path (shared-slice u8)) (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
+			(file i32) (error u32) (start i32) (end i32))
+		(returns i32)
+		(body (return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena))
+			(borrow-shared (local files)) (local file) (local error) (local start) (local end) (u32 3)))))
 
 	(fn copy_graph_bindings
 		(:doc "Seal the initialized binding prefix in the exact view consumed by the scalar graph.")
@@ -104,18 +146,20 @@
 					(set (local capacity) (i32.add.wrapping (local capacity) (local capacity)))))
 			(return (i32 1))))
 
-	(fn report_entry_asset
-		(:doc "Translate an asset read error from the graph arena into the entry's original view.")
-		(params (path (shared-slice u8)) (files (shared-slice SuppliedFile)) (result EmbedCheck))
+	(fn report_graph_asset
+		(:doc `Translate a failed asset request from arena offsets to the defining source view.`)
+		(params (path (shared-slice u8)) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (result EmbedCheck))
 		(returns i32)
 		(body
-			(let base (record.get (slice.load (local files) (i32 0)) source_start))
-			(return (call report_source (borrow-shared (local path)) (record.get (local result) error)
+			(let file (record.get (local result) file))
+			(let base (record.get (slice.load (local files) (local file)) source_start))
+			(return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files))
+				(local file) (record.get (local result) error)
 				(i32.sub.wrapping (record.get (local result) start) (local base))
 				(i32.sub.wrapping (record.get (local result) end) (local base)) (u32 9)))))
 
 	(fn compile_graph_assets
-		(:doc "Load checked entry embeds with the native asset loader before graph emission.")
+		(:doc "Load checked embeds relative to their defining source before graph emission.")
 		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
 			(target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
 			(modules (shared-slice GraphModule)) (bindings (shared-slice GraphBinding)) (resolved GraphResult)
@@ -133,30 +177,45 @@
 					(borrow-shared (local files)) (record.get (local checked) file) (record.get (local checked) error)
 					(record.get (local checked) start) (record.get (local checked) end)))))
 			(if
-				(:doc "A graph with no entry embeds already has a complete arena.")
+				(:doc "A graph with no embeds already has a complete arena.")
 				(i32.eq (record.get (local checked) count) (i32 0))
 				(then (return (call emit_c_graph (borrow-shared (local path)) (borrow-shared (local target))
 					(borrow-shared (local profile)) (local mode) (local target_index)
 					(borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local modules))
 					(borrow-shared (local bindings)) (local resolved) (borrow-mut (local requests))))))
-			(let measured (call load_input_assets (borrow-shared (local path)) (borrow-shared (local arena))
+			(let measured (call load_graph_assets (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-mut (local requests)) (borrow-mut (local none)) (bool false)))
 			(if
-				(:doc "A missing or invalid asset keeps its original entry-relative operand span.")
+				(:doc "A missing or invalid asset keeps its original file-relative operand span.")
 				(u32.lt (u32 0) (record.get (local measured) error))
-				(then (return (call report_entry_asset (borrow-shared (local path)) (borrow-shared (local files)) (local measured)))))
+				(then (return (call report_graph_asset (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files)) (local measured)))))
 			(let-mut extended (array.alloc u8 (record.get (local measured) count)))
 			(call copy_source_prefix (borrow-shared (local arena)) (borrow-mut (local extended)))
-			(let loaded (call load_input_assets (borrow-shared (local path)) (borrow-shared (local arena))
+			(let loaded (call load_graph_assets (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-mut (local requests)) (borrow-mut (local extended)) (bool true)))
 			(if
 				(:doc "A file that disappears or changes size cannot leave partially emitted C.")
 				(u32.lt (u32 0) (record.get (local loaded) error))
-				(then (return (call report_entry_asset (borrow-shared (local path)) (borrow-shared (local files)) (local loaded)))))
+				(then (return (call report_graph_asset (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files)) (local loaded)))))
 			(return (call emit_c_graph (borrow-shared (local path)) (borrow-shared (local target))
 				(borrow-shared (local profile)) (local mode) (local target_index)
 				(borrow-shared (local extended)) (borrow-shared (local files)) (borrow-shared (local modules))
 				(borrow-shared (local bindings)) (local resolved) (borrow-mut (local requests))))))
+
+	(fn compile_resolved_graph
+		(:doc `Pass the exact checked binding prefix and source rows to the graph emitter.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
+			(target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
+			(scratch (shared-slice GraphBinding)) (resolved GraphResult) (rows i32) (length i32)) (returns i32)
+		(body
+			(let-mut bindings (array.alloc GraphBinding (record.get (local resolved) bindings)))
+			(call copy_graph_bindings (borrow-shared (local scratch)) (borrow-mut (local bindings)))
+			(let-mut requests (array.alloc EmbedAsset (local rows)))
+			(return (call compile_graph_assets (borrow-shared (local path)) (borrow-shared (local target))
+				(borrow-shared (local profile)) (local mode) (local target_index)
+				(borrow-shared (slice.range (local arena) (i32 0) (local length)))
+				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings))
+				(local resolved) (borrow-mut (local requests))))))
 
 	(fn resolve_c_input
 		(:doc "Bind the entry's selections against the three registered sources.")
@@ -168,7 +227,7 @@
 			(let-mut scratch (array.alloc GraphBinding (local rows)))
 			(let-mut uses (array.alloc GraphUse (local rows)))
 			(let-mut selectors (array.alloc GraphSelector (local rows)))
-			(let resolved (call resolve_graph (borrow-shared (local arena)) (borrow-shared (local files)) (i32 0) (u32 0)
+			(let resolved (call resolve_graph_for_target (borrow-shared (local arena)) (borrow-shared (local files)) (i32 0) (call native_selection)
 				(borrow-mut (local modules)) (borrow-mut (local scratch)) (borrow-mut (local uses)) (borrow-mut (local selectors))))
 			(if
 				(:doc "Failed selections retain their original file identity and byte span.")
@@ -176,13 +235,9 @@
 				(then (return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
 					(borrow-shared (local files)) (record.get (local resolved) file) (record.get (local resolved) error)
 					(record.get (local resolved) start) (record.get (local resolved) end)))))
-			(let-mut bindings (array.alloc GraphBinding (record.get (local resolved) bindings)))
-			(call copy_graph_bindings (borrow-shared (local scratch)) (borrow-mut (local bindings)))
-			(let-mut requests (array.alloc EmbedAsset (local rows)))
-			(return (call compile_graph_assets (borrow-shared (local path)) (borrow-shared (local target))
+			(return (call compile_resolved_graph (borrow-shared (local path)) (borrow-shared (local target))
 				(borrow-shared (local profile)) (local mode) (local target_index) (borrow-shared (local arena))
-				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings))
-				(local resolved) (borrow-mut (local requests))))))
+				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local scratch)) (local resolved) (local rows) (slice.len (local arena))))))
 
 	(fn prepare_bundled_input
 		(:doc "Allocate the source and path arena before registering the embedded modules.")

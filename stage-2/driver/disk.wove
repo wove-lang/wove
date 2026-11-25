@@ -1,0 +1,239 @@
+(module native_cli_disk
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve and emit a native source graph from one entry.
+
+	Let the shared resolver choose the next active Wove edge. Cache each
+	loaded source and edge across retries, and use the existing graph emitter
+	once the last edge is resolved.`)
+
+	(use wove-file "./bundled.wove" (only bundled_path_width write_bundled_sources))
+	(use wove-file "./diagnostics.wove" (only report_source report_argv))
+	(use wove-file "./disk_files.wove" (only load_disk_edge find_disk_file disk_space (type DiskFile) (type DiskSpace)))
+	(use wove-file "./files.wove" (only invalid_file_stamp file_stamp (type FileStamp)))
+	(use wove-file "./output.wove" (only retained_c_path))
+	(use wove-file "./platform.wove" (only native_selection))
+	(use wove-file "./graph.wove" (only report_graph_source report_graph_location compile_resolved_graph))
+	(use wove-file "../source/target.wove" (only (type SelectionContext)))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../source/graph.wove" (only resolve_disk_graph (type GraphModule) (type GraphUse)
+		(type GraphSelector) (type GraphBinding) (type GraphResult) (type DiskEdge)))
+	(use wove-file "../text/bytes.wove" (only append_bytes))
+
+	(fn grow_capacity
+		(:doc `Choose a geometric capacity covering the complete requested prefix without signed overflow.`)
+		(params (current i32) (needed i32)) (returns i32)
+		(body
+			(let-mut size (local current))
+			(while
+				(:doc "Use the exact requirement once another doubling would overflow.")
+				(i32.lt (local size) (local needed))
+				(body
+					(if (i32.lt (i32 1073741823) (local size)) (then (return (local needed))))
+					(set (local size) (i32.add.wrapping (local size) (local size)))))
+			(return (local size))))
+
+	(fn copy_disk_paths
+		(:doc `Seal just the initialized source rows for the ordinary resolver and emitter.`)
+		(params (staged (shared-slice DiskFile)) (files (mut-slice SuppliedFile))) (returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "The exact destination length is the published prefix.")
+				(i32.lt (local index) (slice.len (local files)))
+				(body
+					(slice.store (local files) (local index) (record.get (slice.load (local staged) (local index)) source))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn copy_disk_rows
+		(:doc `Keep file identity and byte ranges intact during workspace growth.`)
+		(params (staged (shared-slice DiskFile)) (files (mut-slice DiskFile)) (count i32)) (returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Uninitialized capacity is never copied or opened.")
+				(i32.lt (local index) (local count))
+				(body
+					(slice.store (local files) (local index) (slice.load (local staged) (local index)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn copy_disk_edges
+		(:doc `Keep the completed edge prefix across resolver retries and capacity growth.`)
+		(params (source (shared-slice DiskEdge)) (output (mut-slice DiskEdge)) (count i32)) (returns void)
+		(body
+			(let-mut index (i32 0))
+			(while
+				(:doc "Unresolved edges have no published row.")
+				(i32.lt (local index) (local count))
+				(body
+					(slice.store (local output) (local index) (slice.load (local source) (local index)))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn grow_disk
+		(:doc `Retain the published snapshots while growing the byte and row storage on demand.
+
+		Recursion is limited to geometric growth. The old owners stay valid
+		while their prefixes are copied, then unwind after compilation.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
+			(target_index i32) (arena (shared-slice u8)) (staged (shared-slice DiskFile)) (edges (shared-slice DiskEdge))
+			(used DiskSpace) (needed DiskSpace) (scratch i32)) (returns i32)
+		(body
+			(let-mut bytes (array.alloc u8 (call grow_capacity (slice.len (local arena)) (record.get (local needed) bytes))))
+			(let-mut files (array.alloc DiskFile (call grow_capacity (slice.len (local staged)) (record.get (local needed) files))))
+			(let-mut next_edges (array.alloc DiskEdge (call grow_capacity (slice.len (local edges)) (record.get (local needed) edges))))
+			(let copied (call append_bytes (borrow-shared (slice.range (local arena) (i32 0) (record.get (local used) bytes)))
+				(borrow-mut (local bytes)) (i32 0)))
+			(call copy_disk_rows (borrow-shared (local staged)) (borrow-mut (local files)) (record.get (local used) files))
+			(call copy_disk_edges (borrow-shared (local edges)) (borrow-mut (local next_edges)) (record.get (local used) edges))
+			(return (call walk_disk (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+				(local mode) (local target_index) (borrow-mut (local bytes)) (borrow-mut (local files))
+				(borrow-mut (local next_edges)) (local used) (local scratch)))))
+
+	(fn resolve_loaded_edges
+		(:doc `Reborrow the arena as shared before exposing its initialized byte prefix to the resolver.`)
+		(params (arena (shared-slice u8)) (length i32) (files (shared-slice SuppliedFile)) (context SelectionContext)
+			(modules (mut-slice GraphModule)) (bindings (mut-slice GraphBinding)) (uses (mut-slice GraphUse))
+			(selectors (mut-slice GraphSelector)) (targets (shared-slice DiskEdge))) (returns GraphResult)
+		(body
+			(return (call resolve_disk_graph (borrow-shared (slice.range (local arena) (i32 0) (local length)))
+				(borrow-shared (local files)) (i32 0) (local context) (borrow-mut (local modules))
+				(borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))
+				(borrow-shared (local targets))))))
+
+	(fn walk_disk
+		(:doc `Drive the target-aware resolver until emission, a native read error, or a source error.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32) (target_index i32)
+			(arena (mut-slice u8)) (staged (mut-slice DiskFile)) (edges (mut-slice DiskEdge)) (initial DiskSpace) (capacity i32))
+		(returns i32)
+		(body
+			(let-mut length (record.get (local initial) bytes))
+			(let-mut file_count (record.get (local initial) files))
+			(let-mut edge_count (record.get (local initial) edges))
+			(let-mut scratch (local capacity))
+			(let context (call native_selection))
+			(while
+				(:doc "Each pass completes, grows capacity, or publishes one more active edge.")
+				(bool true)
+				(body
+					(let-mut files (array.alloc SuppliedFile (local file_count)))
+					(call copy_disk_paths (borrow-shared (local staged)) (borrow-mut (local files)))
+					(let-mut targets (array.alloc DiskEdge (local edge_count)))
+					(call copy_disk_edges (borrow-shared (local edges)) (borrow-mut (local targets)) (local edge_count))
+					(let-mut modules (array.alloc GraphModule (local file_count)))
+					(let-mut bindings (array.alloc GraphBinding (local scratch)))
+					(let-mut uses (array.alloc GraphUse (local scratch)))
+					(let-mut selectors (array.alloc GraphSelector (local scratch)))
+					(let resolved (call resolve_loaded_edges (borrow-shared (local arena)) (local length)
+						(borrow-shared (local files)) (local context) (borrow-mut (local modules))
+						(borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))
+						(borrow-shared (local targets))))
+					(let error (record.get (local resolved) error))
+					(if
+						(:doc "One successful graph feeds one retained C translation unit.")
+						(u32.eq (local error) (u32 0))
+						(then
+							(let destination (call retained_c_path (borrow-shared (local target)) (borrow-shared (local profile)) (local mode)))
+							(let stamp (call file_stamp (borrow-shared (local destination))))
+							(if
+								(:doc "Reject a retained output that names any loaded source, including an alias.")
+								(i32.lt (i32 -1) (call find_disk_file (borrow-shared (local staged)) (local file_count) (local stamp)))
+								(then (return (call report_argv (u32 65) (local target_index) (u32 5)))))
+							(return (call compile_resolved_graph (borrow-shared (local path)) (borrow-shared (local target))
+							(borrow-shared (local profile)) (local mode) (local target_index)
+							(borrow-shared (local arena))
+							(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings))
+							(local resolved) (local length) (local length)))))
+					(let file (record.get (local resolved) file))
+					(if
+						(:doc "Only the first unresolved active Wove edge may touch disk.")
+						(i32.lt (i32 -1) (record.get (local resolved) path_start))
+						(then
+							(let used (call disk_space (local length) (local file_count) (local edge_count)))
+							(let read (call load_disk_edge (local used) (local resolved) (borrow-mut (local arena))
+								(borrow-mut (local staged)) (borrow-mut (local edges))))
+							(let next (record.get (local read) space))
+							(if
+								(:doc "Report the original importing span and avoid publishing a partial unit.")
+								(u32.lt (u32 0) (record.get (local read) error))
+								(then
+									(let-mut message (u32 3))
+									(if
+										(:doc "An unavailable provider is a file read error at the importing use.")
+										(u32.eq (record.get (local read) error) (u32 27))
+										(then (set (local message) (u32 4))))
+									(return (call report_graph_location (borrow-shared (local path))
+										(borrow-shared (local arena)) (borrow-shared (local files)) (local file)
+										(record.get (local read) error) (record.get (local read) start) (record.get (local read) end) (local message)))))
+							(if
+								(:doc "Reserve storage before opening the same read request again.")
+								(record.get (local read) grow)
+								(then (return (call grow_disk (borrow-shared (local path)) (borrow-shared (local target))
+									(borrow-shared (local profile)) (local mode) (local target_index) (borrow-shared (local arena))
+									(borrow-shared (local staged)) (borrow-shared (local edges)) (local used) (local next) (local scratch)))))
+							(set (local length) (record.get (local next) bytes))
+							(set (local file_count) (record.get (local next) files))
+							(set (local edge_count) (record.get (local next) edges)))
+						(else
+							(if
+								(:doc "Retry short resolver tables until the signed capacity limit.")
+								(bool.and (u32.eq (local error) (u32 16)) (i32.lt (local scratch) (i32 1073741824)))
+								(then (set (local scratch) (i32.add.wrapping (local scratch) (local scratch))))
+								(else (return (call report_graph_source (borrow-shared (local path))
+									(borrow-shared (local arena)) (borrow-shared (local files)) (local file) (local error)
+									(record.get (local resolved) start) (record.get (local resolved) end)))))))))
+			(return (i32 1))))
+
+	(fn start_disk
+		(:doc `Register the entry and the existing bundled providers before following selected Wove uses.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32) (target_index i32)
+			(canonical (shared-slice u8)) (source (shared-slice u8)) (stamp FileStamp)
+			(stdlib (shared-slice u8)) (stdio (shared-slice u8))) (returns i32)
+		(body
+			(let providers (i32.add.wrapping (call bundled_path_width)
+				(i32.add.wrapping (slice.len (local stdlib)) (slice.len (local stdio)))))
+			(let overhead (i32.add.wrapping (local providers) (slice.len (local canonical))))
+			(if
+				(:doc "No initialized arena range may overflow the signed source ABI.")
+				(bool.or (i32.lt (local overhead) (i32 0))
+					(i32.lt (i32.sub.wrapping (i32 2147483647) (local overhead)) (slice.len (local source))))
+				(then (return (call report_source (borrow-shared (local path)) (u32 16) (i32 0) (i32 0) (u32 3)))))
+			(let total (i32.add.wrapping (local overhead) (slice.len (local source))))
+			(let-mut arena (array.alloc u8 (call grow_capacity (i32 4096) (local total))))
+			(let-mut bundled (array.alloc SuppliedFile (i32 3)))
+			(let written (call write_bundled_sources (borrow-shared (local canonical)) (borrow-shared (local source))
+				(borrow-shared (local stdlib)) (borrow-shared (local stdio)) (borrow-mut (local arena)) (borrow-mut (local bundled))))
+			(let-mut staged (array.alloc DiskFile (i32 8)))
+			(call seed_disk_rows (borrow-shared (local bundled)) (local stamp) (borrow-mut (local staged)))
+			(let-mut edges (array.alloc DiskEdge (i32 8)))
+			(return (call walk_disk (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+				(local mode) (local target_index) (borrow-mut (local arena)) (borrow-mut (local staged)) (borrow-mut (local edges))
+				(call disk_space (local written) (i32 3) (i32 0)) (i32 64)))))
+
+	(fn seed_disk_rows
+		(:doc `Store the entry's real identity and mark bundled rows as independent of the filesystem.`)
+		(params (bundled (shared-slice SuppliedFile)) (entry FileStamp) (staged (mut-slice DiskFile))) (returns void)
+		(body
+			(slice.store (local staged) (i32 0)
+				(record.make DiskFile (source (slice.load (local bundled) (i32 0))) (stamp (local entry))))
+			(let-mut index (i32 1))
+			(while
+				(:doc "Bundle sources are already present in the same arena.")
+				(i32.lt (local index) (slice.len (local bundled)))
+				(body
+					(slice.store (local staged) (local index)
+						(record.make DiskFile (source (slice.load (local bundled) (local index)))
+							(stamp (call invalid_file_stamp))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))))
+
+	(fn compile_disk_graph
+		(:doc `Supply one explicit native entry, then open only its selected transitive Wove imports.`)
+		(:expect (tests "stage-2/cli/native/cases.tsv") (issues "gh:wove-lang/wove:188"))
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32) (target_index i32)
+			(canonical (shared-slice u8)) (source (shared-slice u8)) (stamp FileStamp)) (returns i32)
+		(body
+			(let stdlib (embed "../c-stdlib/stdlib.wove"))
+			(let stdio (embed "../c-stdlib/stdio.wove"))
+			(return (call start_disk (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+				(local mode) (local target_index) (borrow-shared (local canonical)) (borrow-shared (local source)) (local stamp)
+				(borrow-shared (local stdlib)) (borrow-shared (local stdio))))))
+)

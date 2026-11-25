@@ -1,21 +1,24 @@
 (module native_cli_source
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Read, check, and emit one explicit source through the native file bridges.
+	(:doc `Read one explicit source and choose single-file or graph emission.
 
-	Build the source tree and select native declarations once. Measure
+	Check the entry and use its active selections to choose the emitter. Measure
 	and write C with the shared emitter, keeping the file's original spans
 	on failure. Publish only a complete emitted translation unit.`)
 
 	(use wove-file "./diagnostics.wove" (only report_argv report_source))
 	(use wove-file "./output.wove" (only publish_input))
-	(use wove-file "./graph.wove" (only has_c_header_use compile_bundled_input))
+	(use wove-file "./disk.wove" (only compile_disk_graph))
+	(use wove-file "./files.wove" (only canonical_path file_stamp read_source_file))
+	(use wove-file "./platform.wove" (only native_selection))
+	(use wove-file "./graph.wove" (only has_active_use compile_bundled_input))
 	(use wove-file "./assets.wove" (only copy_source_prefix load_input_assets))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset)))
 	(use wove-file "../source/scan.wove" (only admit_source check_source_form build_source_tree check_source_metadata (type SourceNode)))
-	(use wove-file "../source/module.wove" (only read_module (type ModuleRead) (type SelectedDeclaration)))
+	(use wove-file "../source/module.wove" (only read_module_for_target (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../emit/c.wove" (only emit_module))
-	(use c-header "./host.h" (only wove_cli_input_size wove_cli_read_input wove_cli_valid_target))
+	(use c-header "./host.h" (only wove_cli_valid_target))
 
 	(fn emit_input
 		(:doc `Retry a short emitter destination, retaining only the first complete unit.`)
@@ -106,16 +109,18 @@
 				(:doc "Reject a malformed output operand before opening the source.")
 				(bool.not (call wove_cli_valid_target (borrow-shared (local target))))
 				(then (return (call report_argv (u32 3) (local target_index) (u32 8)))))
-			(let length (call wove_cli_input_size (borrow-shared (local path))))
+			(let canonical (call canonical_path (borrow-shared (local path))))
+			(let stamp (call file_stamp (borrow-shared (local canonical))))
+			(let length (record.get (local stamp) length))
 			(if
 				(:doc "A missing or unreadable file has no source bytes yet.")
 				(i32.lt (local length) (i32 0))
 				(then (return (call report_source (borrow-shared (local path)) (u32 64) (i32 0) (i32 0) (u32 4)))))
 			(let-mut source (array.alloc u8 (local length)))
-			(let read (call wove_cli_read_input (borrow-shared (local path)) (borrow-mut (local source)) (local length)))
+			(let read (call read_source_file (borrow-shared (local canonical)) (local stamp) (borrow-mut (local source))))
 			(if
 				(:doc "Keep a failed read at the input path.")
-				(i32.lt (local read) (i32 0))
+				(bool.not (local read))
 				(then (return (call report_source (borrow-shared (local path)) (u32 64) (i32 0) (i32 0) (u32 4)))))
 			(let checked (call check_source_form (borrow-shared (local source))))
 			(if
@@ -128,13 +133,21 @@
 			(let built (call build_source_tree (borrow-shared (local source)) (local checked) (borrow-mut (local nodes))))
 			(let metadata (call check_source_metadata (borrow-shared (local source)) (local built) (borrow-shared (local nodes))))
 			(let-mut declarations (array.alloc SelectedDeclaration (local rows)))
-			(let module (call read_module (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local metadata) (u32 0) (borrow-mut (local declarations))))
+			(let module (call read_module_for_target (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local metadata) (call native_selection) (borrow-mut (local declarations))))
+			(if
+				(:doc "Start disk loading only when the selected entry has a Wove-file edge.")
+				(bool.and (u32.eq (record.get (local module) error) (u32 0))
+					(call has_active_use (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local declarations)) (record.get (local module) count) (u32 3)))
+				(then (return (call compile_disk_graph (borrow-shared (local path)) (borrow-shared (local target))
+					(borrow-shared (local profile)) (local mode) (local target_index) (borrow-shared (local canonical))
+					(borrow-shared (local source)) (local stamp)))))
 			(if
 				(:doc "C-header imports use the supplied-source graph with the embedded providers.")
 				(bool.and (u32.eq (record.get (local module) error) (u32 0))
-					(call has_c_header_use (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local declarations)) (record.get (local module) count)))
+					(call has_active_use (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local declarations)) (record.get (local module) count) (u32 8)))
 				(then (return (call compile_bundled_input (borrow-shared (local path)) (borrow-shared (local target))
 					(borrow-shared (local profile)) (local mode) (local target_index) (borrow-shared (local source)) (local rows)))))
 			(return (call compile_assets (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))

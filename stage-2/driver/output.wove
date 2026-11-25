@@ -4,7 +4,85 @@
 	(:doc "Publish a complete retained C unit for a native command.")
 
 	(use wove-file "./diagnostics.wove" (only report_argv))
+	(use wove-file "../text/bytes.wove" (only append_bytes same_bytes))
 	(use c-header "./host.h" (only wove_cli_publish))
+
+	(let cwd_path ".")
+	(let cache_directory "/.wovec-cache/")
+	(let source_suffix "/bin/main.c")
+	(let default_profile "default")
+	(let debug_profile "debug")
+	(let release_profile "release")
+
+	(fn make_retained_path
+		(:doc `Join the validated target components in the retained publication layout.`)
+		(params (parent (shared-slice u8)) (name (shared-slice u8)) (profile (shared-slice u8)))
+		(returns (owned-array u8))
+		(body
+			(let width (u64.add.wrapping (int.convert u64 (slice.len (local parent)))
+				(u64.add.wrapping (int.convert u64 (slice.len (local name)))
+					(u64.add.wrapping (int.convert u64 (slice.len (local profile)))
+						(int.convert u64 (i32.add.wrapping (i32 1)
+							(i32.add.wrapping (slice.len (local cache_directory)) (slice.len (local source_suffix)))))))))
+			(if
+				(:doc "Keep the inspection path representable by the native byte ABI.")
+				(u64.lt (u64 2147483647) (local width))
+				(then
+					(let empty (array.alloc u8 (i32 0)))
+					(return (move (local empty)))))
+			(let-mut path (array.alloc u8 (int.convert i32 (local width))))
+			(let prefix (call append_bytes (borrow-shared (local parent)) (borrow-mut (local path)) (i32 0)))
+			(let cache (call append_bytes (borrow-shared (local cache_directory)) (borrow-mut (local path)) (local prefix)))
+			(let base (call append_bytes (borrow-shared (local profile)) (borrow-mut (local path)) (local cache)))
+			(slice.store (local path) (local base) (u8 47))
+			(let suffix (call append_bytes (borrow-shared (local name)) (borrow-mut (local path))
+				(i32.add.wrapping (local base) (i32 1))))
+			(let done (call append_bytes (borrow-shared (local source_suffix)) (borrow-mut (local path)) (local suffix)))
+			(return (move (local path)))))
+
+	(fn retained_path_for_profile
+		(:doc `Apply the same mode fallback used when publishing retained C.`)
+		(params (parent (shared-slice u8)) (name (shared-slice u8)) (profile (shared-slice u8)) (mode u32))
+		(returns (owned-array u8))
+		(body
+			(if
+				(:doc "A non-default named profile supplies its own directory.")
+				(bool.and (i32.lt (i32 0) (slice.len (local profile)))
+					(bool.not (call same_bytes (borrow-shared (local profile)) (i32 0) (slice.len (local profile))
+						(borrow-shared (local default_profile)) (i32 0) (slice.len (local default_profile)))))
+				(then (return (call make_retained_path (borrow-shared (local parent)) (borrow-shared (local name))
+					(borrow-shared (local profile))))))
+			(if
+				(:doc "Debug and release are separate built-in cache trees.")
+				(u32.eq (local mode) (u32 1))
+				(then (return (call make_retained_path (borrow-shared (local parent)) (borrow-shared (local name))
+					(borrow-shared (local debug_profile))))))
+			(if
+				(:doc "The release mode uses its matching cache directory.")
+				(u32.eq (local mode) (u32 2))
+				(then (return (call make_retained_path (borrow-shared (local parent)) (borrow-shared (local name))
+					(borrow-shared (local release_profile))))))
+			(return (call make_retained_path (borrow-shared (local parent)) (borrow-shared (local name))
+				(borrow-shared (local default_profile))))))
+
+	(fn retained_c_path
+		(:doc `Compute the existing retained path so the graph can protect every loaded source from replacement.`)
+		(params (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)) (returns (owned-array u8))
+		(body
+			(let-mut slash (i32.sub.wrapping (slice.len (local target)) (i32 1)))
+			(while
+				(:doc "Find the separator before the validated final output component.")
+				(bool.and (i32.lt (i32 -1) (local slash))
+					(bool.not (u8.eq (slice.load (local target) (local slash)) (u8 47))))
+				(body (set (local slash) (i32.sub.wrapping (local slash) (i32 1)))))
+			(if
+				(:doc "A bare output name places its cache under the current directory.")
+				(i32.lt (local slash) (i32 0))
+				(then (return (call retained_path_for_profile (borrow-shared (local cwd_path))
+					(borrow-shared (local target)) (borrow-shared (local profile)) (local mode)))))
+			(return (call retained_path_for_profile (borrow-shared (slice.range (local target) (i32 0) (local slash)))
+				(borrow-shared (slice.range (local target) (i32.add.wrapping (local slash) (i32 1)) (slice.len (local target))))
+				(borrow-shared (local profile)) (local mode)))))
 
 	(fn publish_input
 		(:doc "Publish the completed unit and attach any write failure to the output operand.")

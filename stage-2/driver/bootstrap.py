@@ -3,17 +3,26 @@
 
 """Supply the native compiler's build-time graph to the seed-built Stage 2 emitter."""
 
+import platform
 import subprocess
 import sys
 from pathlib import Path
 
 
-# The Makefile supplies all source paths before the native disk loader exists.
+# Select the fixed POSIX record view and cfg branches for the compiler's build host.
+def native_target():
+	os_name = "macos" if sys.platform == "darwin" else sys.platform
+	machine = platform.machine()
+	arch = {"arm64": "aarch64", "amd64": "x86_64"}.get(machine, machine)
+	return os_name, arch, "-"
+
+
+# Supply the compiler's full build graph to the seed-built emitter.
 def emit_native(probe, destination, version, paths, providers):
 	files = [(index, "/" + name, name) for index, name in enumerate(dict.fromkeys(paths))]
 	rows = [str(field) for entry in files for field in entry]
 	# The virtual path is relative to the Wove module even with a custom BUILD_DIR.
-	invocation = [probe, "--mode", "native", "--emit-graph", "0", "8192", "4194304", *rows,
+	invocation = [probe, "--mode", "native", "--target", *native_target(), "--emit-graph", "0", "8192", "4194304", *rows,
 		"--asset", "/build/version.txt", version]
 	# Give bundled source assets the paths their Wove embeds resolve against.
 	for provider in providers:
