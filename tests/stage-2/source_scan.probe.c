@@ -20,10 +20,10 @@
 #define source_position wv_seed_fn_16
 #define check_source_form wv_seed_fn_19
 #define build_source_tree wv_seed_fn_24
-#define check_source_metadata wv_seed_fn_43
-#define render_source_tree wv_seed_fn_45
-#define decode_string wv_seed_fn_73
-#define form_parts wv_seed_fn_74
+#define check_source_metadata wv_seed_fn_42
+#define render_source_tree wv_seed_fn_44
+#define decode_string wv_seed_fn_74
+#define form_parts wv_seed_fn_75
 #define read_module wv_seed_fn_85
 #define emit_module wv_seed_fn_115
 #define resolve_graph wv_seed_fn_132

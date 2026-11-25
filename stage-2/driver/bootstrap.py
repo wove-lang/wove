@@ -9,10 +9,12 @@ from pathlib import Path
 
 
 # The Makefile supplies all source paths before the native disk loader exists.
-def emit_native(probe, destination, paths):
+def emit_native(probe, destination, version, paths):
 	files = [(index, "/" + name, name) for index, name in enumerate(dict.fromkeys(paths))]
 	rows = [str(field) for entry in files for field in entry]
-	invocation = [probe, "--mode", "native", "--emit-graph", "0", "8192", "4194304", *rows]
+	# The virtual path is relative to the Wove module even with a custom BUILD_DIR.
+	invocation = [probe, "--mode", "native", "--emit-graph", "0", "8192", "4194304", *rows,
+		"--asset", "/build/version.txt", version]
 	result = subprocess.run(invocation, capture_output=True)
 	header, separator, source = result.stdout.partition(b"\n")
 	# Keep a bootstrap failure at its repository-relative source path.
@@ -32,5 +34,5 @@ def emit_native(probe, destination, paths):
 
 
 if __name__ == "__main__":
-	probe, destination, *paths = sys.argv[1:]
-	sys.exit(emit_native(probe, destination, paths))
+	probe, destination, version, *paths = sys.argv[1:]
+	sys.exit(emit_native(probe, destination, version, paths))
