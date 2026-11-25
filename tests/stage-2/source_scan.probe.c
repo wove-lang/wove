@@ -26,13 +26,13 @@
 #define form_parts wv_seed_fn_78
 #define read_module_for_target wv_seed_fn_93
 #define emit_module wv_seed_fn_134
-#define resolve_graph_for_target wv_seed_fn_156
+#define resolve_graph_for_target wv_seed_fn_162
 #define default_selection wv_seed_fn_94
 #define target_os wv_seed_fn_95
 #define target_arch wv_seed_fn_96
-#define inspect_callers wv_seed_fn_589
-#define run_scalar_graph wv_seed_fn_622
-#define discover_graph_tests wv_seed_fn_630
+#define inspect_callers wv_seed_fn_606
+#define run_scalar_graph wv_seed_fn_619
+#define discover_graph_tests wv_seed_fn_627
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
@@ -44,18 +44,18 @@ typedef wv_seed_record_13 SelectedDeclaration;
 typedef wv_seed_record_14 ModuleRead;
 typedef wv_seed_record_16 SelectionContext;
 typedef wv_seed_record_18 EmitResult;
-typedef wv_seed_record_61 EmbedAsset;
+typedef wv_seed_record_62 EmbedAsset;
 typedef wv_seed_record_19 GraphModule;
 typedef wv_seed_record_20 GraphBinding;
 typedef wv_seed_record_21 GraphUse;
 typedef wv_seed_record_22 GraphSelector;
 typedef wv_seed_record_23 GraphResult;
-typedef wv_seed_record_54 CallSite;
+typedef wv_seed_record_55 CallSite;
 typedef wv_seed_record_27 SuppliedFile;
-typedef wv_seed_record_64 CallerInspection;
-typedef wv_seed_record_68 GraphOutput;
-typedef wv_seed_record_69 DiscoveredTest;
-typedef wv_seed_record_70 TestDiscovery;
+typedef wv_seed_record_65 CallerInspection;
+typedef wv_seed_record_67 GraphOutput;
+typedef wv_seed_record_68 DiscoveredTest;
+typedef wv_seed_record_69 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
@@ -804,7 +804,7 @@ static bool read_graph_files(char **args, SuppliedFile *files, int32_t count, ui
 				return false;
 			}
 		}
-		files[i] = (SuppliedFile){identity, path_start, source_start, source_start, *length};
+		files[i] = (SuppliedFile){identity, path_start, source_start, source_start, *length, false};
 	}
 	// Every path points directly to its canonical file row.
 	for (int32_t i = 0; i < count; ++i) {
@@ -833,7 +833,7 @@ static bool read_graph_assets(char **args, SuppliedFile *assets, int32_t count, 
 		const bool added = bytes != NULL && append_graph_bytes(arena, length, bytes, (size_t)width);
 		free(bytes);
 		if (!added) { return false; }
-		assets[i] = (SuppliedFile){i, start, payload, payload, *length};
+		assets[i] = (SuppliedFile){i, start, payload, payload, *length, false};
 	}
 	return true;
 }

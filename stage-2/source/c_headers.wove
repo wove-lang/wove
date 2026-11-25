@@ -15,6 +15,7 @@
 	(use wove-file "./paths.wove" (only (type SuppliedFile)))
 	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "./types.wove" (only source_builtin_type is_builtin_integer reference_mode))
+	(use wove-file "./c_scope.wove" (only read_bridge_policy project_bridge))
 	(use wove-file "./c_names.wove" (only c_function_opening native_symbol_start native_symbol_end))
 	(use wove-file "./c_owners.wove" (only is_native_name check_c_type))
 	(use wove-file "./c_records.wove" (only is_c_record read_c_record))
@@ -24,7 +25,8 @@
 
 	(use wove-file "./target.wove" (only (type SelectionContext)))
 
-	(struct HeaderMatch (fields (file i32) (node i32) (start i32) (end i32) (error u32)))
+	(struct HeaderMatch (fields (file i32) (node i32) (start i32) (end i32) (error u32)
+		(default_file i32) (default_node i32) (replace bool)))
 	(struct CMemberRead
 		(fields (declaration i32) (native_start i32) (native_end i32) (signature_start i32) (signature_end i32)
 			(start i32) (end i32) (error u32) (native_type i32) (drop_start i32) (drop_end i32)
@@ -37,7 +39,8 @@
 		(returns HeaderMatch)
 		(body
 			(return (record.make HeaderMatch (file (local file)) (node (local node))
-				(start (local start)) (end (local end)) (error (local error))))))
+				(start (local start)) (end (local end)) (error (local error))
+				(default_file -1i32) (default_node -1i32) (replace (bool false))))))
 
 	(fn matches_header
 		(:doc `Compare a checked quoted header spelling with its decoded import key.`)
@@ -119,7 +122,12 @@
 			(declarations (shared-slice SelectedDeclaration)) (count i32) (file i32) (key (shared-slice u8)))
 		(returns HeaderMatch)
 		(body
+			(let width (slice.len (local key)))
+			(let system (bool.and (i32.lt 1i32 (local width))
+				(bool.and (u8.eq (slice.load (local key) 0i32) 60u8)
+					(u8.eq (slice.load (local key) (i32.sub.wrapping (local width) 1i32)) 62u8))))
 			(let-mut found -1i32)
+			(let-mut replace (bool false))
 			(let-mut start 0i32)
 			(let-mut end 0i32)
 			(let-mut index 0i32)
@@ -143,9 +151,20 @@
 								(:doc "Two active bridges in one file cannot supply the same key.")
 								(i32.lt -1i32 (local found))
 								(then (return (call header_match (local file) -1i32 (local start) (local end) 30u32))))
+							(let policy (call read_bridge_policy (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts) (local system)))
+							(let site (record.get (local policy) site))
+							(if
+								(:doc "A malformed replacement marker belongs to its defining bridge.")
+								(i32.lt -1i32 (local site))
+								(then
+									(let directive (slice.load (local nodes) (local site)))
+									(return (call header_match (local file) -1i32 (record.get (local directive) start)
+										(record.get (local directive) end) 23u32))))
+							(set (local replace) (record.get (local policy) replace))
 							(set (local found) (local row))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
-			(return (call header_match (local file) (local found) (local start) (local end) 0u32))))
+			(return (record.make HeaderMatch (file (local file)) (node (local found)) (start (local start)) (end (local end))
+				(error 0u32) (default_file -1i32) (default_node -1i32) (replace (local replace))))))
 
 	(fn read_file_header
 		(:doc `Locate a candidate provider, validate the whole module, and resolve the selected header.`)
@@ -182,46 +201,73 @@
 			(return (call find_selected_header (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local selected)) (record.get (local module) count) (local file) (borrow-shared (local key))))))
 
-	(fn find_c_header
-		(:doc `Resolve a decoded key across canonical supplied sources without following their Wove import edges.`)
-		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (key (shared-slice u8)) (context SelectionContext))
-		(returns HeaderMatch)
+	(fn find_header_kind
+		(:doc "Find one active provider of the requested provenance and diagnose a later active block.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (key (shared-slice u8))
+			(context SelectionContext) (bundled bool)) (returns HeaderMatch)
 		(body
 			(let-mut file 0i32)
-			(let-mut defining_file -1i32)
+			(let-mut found -1i32)
 			(let-mut node -1i32)
 			(let-mut start 0i32)
 			(let-mut end 0i32)
+			(let-mut replace (bool false))
 			(while
-				(:doc "Alternate virtual paths do not contribute extra bridge declarations.")
+				(:doc "Inspect each canonical supplied source of this provenance once.")
 				(i32.lt (local file) (slice.len (local files)))
 				(body
 					(let input (slice.load (local files) (local file)))
 					(if
-						(:doc "Inspect each supplied canonical source at most once per key lookup.")
-						(i32.eq (record.get (local input) identity) (local file))
+						(:doc "The driver explicitly marks bundled sources independently of paths and row order.")
+						(bool.and (i32.eq (record.get (local input) identity) (local file))
+							(bool.or (bool.and (local bundled) (record.get (local input) bundled))
+								(bool.and (bool.not (local bundled)) (bool.not (record.get (local input) bundled)))))
 						(then
 							(let match (call read_file_header
 								(borrow-shared (slice.range (local arena) (record.get (local input) source_start) (record.get (local input) source_end)))
 								(local file) (borrow-shared (local key)) (local context)))
 							(if
-								(:doc "Keep an error from a matching source at its original span.")
+								(:doc "Keep provider validation errors in their original file.")
 								(u32.lt 0u32 (record.get (local match) error))
 								(then (return (local match))))
 							(if
-								(:doc "Track the single definition of the requested header key.")
-								(bool.not (i32.lt (record.get (local match) node) 0i32))
+								(:doc "Only active definitions participate in duplicate checks.")
+								(i32.lt -1i32 (record.get (local match) node))
 								(then
+									(if
+										(:doc "Two active blocks of the same provenance are ambiguous.")
+										(i32.lt -1i32 (local node))
+										(then (return (call header_match (local file) -1i32
+											(record.get (local match) start) (record.get (local match) end) 30u32))))
+									(set (local found) (local file))
+									(set (local node) (record.get (local match) node))
 									(set (local start) (record.get (local match) start))
 									(set (local end) (record.get (local match) end))
-									(if
-										(:doc "Two active declarations of this key cannot select one provider.")
-										(bool.not (i32.lt (local defining_file) 0i32))
-										(then (return (call header_match (local file) -1i32 (local start) (local end) 30u32))))
-									(set (local defining_file) (local file))
-									(set (local node) (record.get (local match) node))))))
+									(set (local replace) (record.get (local match) replace))))))
 					(set (local file) (i32.add.wrapping (local file) 1i32))))
-			(return (call header_match (local defining_file) (local node) (local start) (local end) 0u32))))
+			(return (record.make HeaderMatch (file (local found)) (node (local node)) (start (local start)) (end (local end))
+				(error 0u32) (default_file -1i32) (default_node -1i32) (replace (local replace))))))
+
+	(fn find_c_header
+		(:doc "Resolve the project header first, optionally inheriting one active bundled bridge.")
+		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (key (shared-slice u8)) (context SelectionContext))
+		(returns HeaderMatch)
+		(body
+			(let project (call find_header_kind (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local key)) (local context) (bool false)))
+			(if
+				(:doc "A whole replacement has no dependency on the bundled definition.")
+				(bool.or (u32.lt 0u32 (record.get (local project) error)) (record.get (local project) replace))
+				(then (return (local project))))
+			(let bundled (call find_header_kind (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local key)) (local context) (bool true)))
+			(if
+				(:doc "A bundled-only header is the primary scope when no project block is active.")
+				(bool.or (i32.lt (record.get (local project) node) 0i32) (u32.lt 0u32 (record.get (local bundled) error)))
+				(then (return (local bundled))))
+			(return (record.make HeaderMatch (file (record.get (local project) file)) (node (record.get (local project) node))
+				(start (record.get (local project) start)) (end (record.get (local project) end)) (error 0u32)
+				(default_file (record.get (local bundled) file)) (default_node (record.get (local bundled) node)) (replace (bool false))))))
 
 	(fn c_member_error
 		(:doc `Package an unavailable or rejected declaration without publishing signature spans.`)
@@ -640,7 +686,7 @@
 			(return (bool.or (u32.eq (local member) (local requested))
 				(bool.and (u32.eq (local member) 7u32) (u32.eq (local requested) 6u32))))))
 
-	(fn find_c_member
+	(fn find_bridge_member
 		(:doc `Find an active member in the requested namespace under the defining bridge.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (bridge_row i32) (tag u32)
 			(spelling (shared-slice u8)) (start i32) (end i32) (context SelectionContext))
@@ -657,29 +703,24 @@
 					(let item (slice.load (local nodes) (local member)))
 					(let form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
 					(let head (record.get (local form) head))
-					(let-mut next (record.get (local item) next_sibling))
+					(let-mut next (call next_declaration (borrow-shared (local nodes)) (local item) (local bridge_row)))
 					(if
-						(:doc "Target-guarded groups contribute to the value namespace.")
-						(u32.eq (local tag) 13u32)
+						(:doc "Active declaration groups contribute members in every C namespace.")
+						(call is_declaration_group (borrow-shared (local source)) (borrow-shared (local nodes)) (local form))
 						(then
-							(set (local next) (call next_declaration (borrow-shared (local nodes)) (local item) (local bridge_row)))
+							(let choice (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local item) (local form) (bool true) (local context)))
 							(if
-								(:doc "Traverse an active group in source order and keep malformed guards in the provider.")
-								(call is_declaration_group (borrow-shared (local source)) (borrow-shared (local nodes)) (local form))
-								(then
-									(let choice (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
-										(local item) (local form) (bool true) (local context)))
-									(if
-										(:doc "A malformed group guard keeps its source span.")
-										(u32.lt 0u32 (record.get (local choice) error))
-										(then (return (record.make CMemberLookup (declaration -1i32)
-											(start (record.get (local choice) start)) (end (record.get (local choice) end))
-											(error (record.get (local choice) error))))))
-									(let first (record.get (local form) operands))
-									(if
-										(:doc "Only active nonempty groups contribute their children.")
-										(bool.and (record.get (local choice) active) (i32.lt -1i32 (local first)))
-										(then (set (local next) (local first))))))))
+								(:doc "A malformed group guard keeps its source span.")
+								(u32.lt 0u32 (record.get (local choice) error))
+								(then (return (record.make CMemberLookup (declaration -1i32)
+									(start (record.get (local choice) start)) (end (record.get (local choice) end))
+									(error (record.get (local choice) error))))))
+							(let first (record.get (local form) operands))
+							(if
+								(:doc "Only active nonempty groups contribute their children.")
+								(bool.and (record.get (local choice) active) (i32.lt -1i32 (local first)))
+								(then (set (local next) (local first))))))
 					(let-mut name (record.get (local form) name))
 					(if
 						(:doc "Types and values use their first ordinary operand for the name.")
@@ -720,6 +761,24 @@
 											(set (local found) (local member))))))))
 					(set (local member) (local next))))
 			(return (record.make CMemberLookup (declaration (local found)) (start 0i32) (end 0i32) (error 0u32)))))
+
+	(fn find_c_member
+		(:doc "Resolve an active project member first, then look for the same namespace and spelling in the bundle.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (bridge_row i32) (tag u32)
+			(spelling (shared-slice u8)) (start i32) (end i32) (context SelectionContext))
+		(returns CMemberLookup)
+		(body
+			(let project (call project_bridge (borrow-shared (local nodes)) (local bridge_row)))
+			(let found (call find_bridge_member (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local project) (local tag) (borrow-shared (local spelling)) (local start) (local end) (local context)))
+			(let bundled (record.get (slice.load (local nodes) (local project)) bridge_default))
+			(if
+				(:doc "A project declaration or its diagnostic takes precedence over the same bundled spelling.")
+				(bool.or (i32.lt (local bundled) 0i32)
+					(bool.or (i32.lt -1i32 (record.get (local found) declaration)) (u32.lt 0u32 (record.get (local found) error))))
+				(then (return (local found))))
+			(return (call find_bridge_member (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local bundled) (local tag) (borrow-shared (local spelling)) (local start) (local end) (local context)))))
 
 	(fn find_c_type
 		(:doc `Resolve a selected native alias, pointer owner, or record with its original representation.`)
@@ -778,11 +837,10 @@
 
 	(fn find_c_declaration
 		(:doc `Resolve and check a C header's selected function, type, or value.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (header HeaderMatch)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (bridge i32)
 			(spelling (shared-slice u8)) (start i32) (end i32) (namespace u32) (context SelectionContext))
 		(returns CMemberRead)
 		(body
-			(let bridge (record.get (local header) node))
 			(if
 				(:doc "Each namespace selects only declarations of its own kind.")
 				(u32.eq (local namespace) 1u32)
@@ -801,7 +859,7 @@
 				(bool.and (u32.eq (local namespace) 0u32)
 					(bool.and (i32.lt (local index) 0i32) (u32.eq (record.get (local found) error) 0u32)))
 				(then (return (call find_c_declaration (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local header) (borrow-shared (local spelling)) (local start) (local end) 2u32 (local context)))))
+					(local bridge) (borrow-shared (local spelling)) (local start) (local end) 2u32 (local context)))))
 			(if
 				(:doc "An unavailable declaration is diagnosed by the importer at the requested name.")
 				(i32.lt (local index) 0i32)

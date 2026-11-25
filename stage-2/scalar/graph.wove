@@ -14,13 +14,16 @@
 	(use wove-file "../source/target.wove" (only (type SelectionContext)))
 	(use wove-file "../source/imports.wove" (only import_keyword))
 	(use wove-file "../source/c_snapshots.wove" (only read_c_snapshot))
+	(use wove-file "../source/tree_copy.wove" (only copy_tree))
+	(use wove-file "../source/c_scope.wove" (only connect_bridge_overlay declaring_c_bridge))
+	(use wove-file "./trees.wove" (only source_span_owner (type ScalarTree)))
 	(use wove-file "../source/c_names.wove" (only c_function_opening))
 	(use wove-file "../source/c_arguments.wove" (only read_c_arguments mark_c_argument_type (type CArgument)))
 	(use wove-file "../c/arguments.wove" (only is_c_value_mode))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity hash_spelling))
-	(use wove-file "./records.wove" (only register_module_records order_record_layouts declaration_kind find_native_definition native_integer_type is_native_integer is_native_record is_record_type is_mutable_place_reference place_reference_target (type ScalarRecord)))
+	(use wove-file "./records.wove" (only register_module_records order_record_layouts declaration_kind find_native_node native_integer_type is_native_integer is_native_record is_record_type is_mutable_place_reference place_reference_target (type ScalarRecord)))
 	(use wove-file "./owners.wove" (only native_owner_type optional_byte_owner_type))
 	(use wove-file "./c_types.wove" (only remember_native_type register_parameter_native_types register_record_dependencies))
 	(use wove-file "./loans.wove" (only (type ScalarExpression)))
@@ -31,7 +34,6 @@
 			(value c_constant_binding) (value c_readonly_binding) (value c_writable_binding)))
 	(use wove-file "./syntax.wove" (only scalar_type entry_at (type EntryRead)))
 
-	(struct ScalarTree (fields (base i32) (rows i32) (start i32) (end i32)))
 	(struct TreeLayout (fields (rows i32) (file i32) (start i32) (end i32) (error u32)))
 	(struct GraphSignatures
 		(fields (functions i32) (params i32) (records i32) (entry i32) (file i32) (start i32) (end i32) (error u32)))
@@ -51,8 +53,15 @@
 					(if
 						(:doc "A C provider can participate in signature checking through a bridge alone.")
 						(u32.eq (record.get (local selected) provider) 8u32)
-						(then (slice.store (local trees) (record.get (local selected) file)
-							(record.make ScalarTree (base 0i32) (rows -1i32) (start 0i32) (end 0i32)))))
+						(then
+							(let primary (record.get (local selected) header_file))
+							(let bundled (record.get (local selected) default_file))
+							(let pending (record.make ScalarTree (base 0i32) (rows -1i32) (start 0i32) (end 0i32)))
+							(slice.store (local trees) (local primary) (local pending))
+							(if
+								(:doc "An inherited parameter or field can need the bundled tree even without an explicit selection.")
+								(i32.lt -1i32 (local bundled))
+								(then (slice.store (local trees) (local bundled) (local pending))))))
 					(set (local binding) (i32.add.wrapping (local binding) 1i32))))
 			(let-mut file 0i32)
 			(let-mut total 0i32)
@@ -143,37 +152,6 @@
 						(then (set (local count) (i32.add.wrapping (local count) 1i32))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return (local count))))
-
-	(fn rebase_link
-		(:doc `Rebase a present tree link while retaining the missing-link sentinel.`)
-		(params (index i32) (base i32))
-		(returns i32)
-		(body
-			(if
-				(:doc "A missing local link remains missing in the flat table.")
-				(i32.lt (local index) 0i32)
-				(then (return (local index))))
-			(return (i32.add.wrapping (local base) (local index)))))
-
-	(fn copy_tree
-		(:doc `Copy the checked file's tree into its reserved range with arena-relative spans.`)
-		(params (nodes (shared-slice SourceNode)) (flat (mut-slice SourceNode)) (base i32) (source_base i32))
-		(returns void)
-		(body
-			(let-mut index 0i32)
-			(while
-				(:doc "Translate the file's own links and copy the available source span.")
-				(i32.lt (local index) (slice.len (local nodes)))
-				(body
-					(let node (slice.load (local nodes) (local index)))
-					(slice.store (local flat) (i32.add.wrapping (local base) (local index))
-						(record.make SourceNode (kind (record.get (local node) kind))
-							(start (i32.add.wrapping (local source_base) (record.get (local node) start)))
-							(end (i32.add.wrapping (local source_base) (record.get (local node) end)))
-							(parent (call rebase_link (record.get (local node) parent) (local base)))
-							(first_child (call rebase_link (record.get (local node) first_child) (local base)))
-							(next_sibling (call rebase_link (record.get (local node) next_sibling) (local base)))))
-					(set (local index) (i32.add.wrapping (local index) 1i32))))))
 
 	(fn signatures_result
 		(:doc `Keep checked table cursors, the selected entry row, and an original source diagnostic.`)
@@ -344,6 +322,29 @@
 			(return (call signatures_result 0i32 0i32 (record.get (local layouts) operand) -1i32 -1i32
 				0i32 0i32 0u32))))
 
+	(fn install_bridge_overlays
+		(:doc "Restore each resolved bridge pair in the shared graph tree before checking type dependencies.")
+		(params (trees (shared-slice ScalarTree)) (bindings (shared-slice GraphBinding)) (nodes (mut-slice SourceNode)))
+		(returns void)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "All aliases for one header repeat the same resolved pair.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(let binding (slice.load (local bindings) (local index)))
+					(let defaults (record.get (local binding) default_file))
+					(if
+						(:doc "Standalone and complete replacement scopes have no peer.")
+						(bool.and (u32.eq (record.get (local binding) provider) 8u32) (i32.lt -1i32 (local defaults)))
+						(then
+							(let primary_base (record.get (slice.load (local trees) (record.get (local binding) header_file)) base))
+							(let default_base (record.get (slice.load (local trees) (local defaults)) base))
+							(call connect_bridge_overlay (borrow-mut (local nodes))
+								(i32.add.wrapping (local primary_base) (record.get (local binding) bridge_node))
+								(i32.add.wrapping (local default_base) (record.get (local binding) default_node)))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))))
+
 	(fn register_graph_native_types
 		(:doc `Collect the native value types required by direct selections and C signatures.`)
 		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (trees (shared-slice ScalarTree))
@@ -367,15 +368,18 @@
 							(if
 								(:doc "A native type without a destructor names a copyable alias or record.")
 								(bool.and (i32.lt 0i32 (local alias)) (i32.lt (record.get (local binding) drop_start) 0i32))
-								(then (set (local next) (call remember_native_type (borrow-shared (local arena))
-									(borrow-shared (local nodes)) (local file) (local base)
-									(i32.add.wrapping (local base) (local alias)) (borrow-mut (local records)) (local next)))))
+								(then
+									(let owner (record.get (local binding) native_file))
+									(let type_base (record.get (slice.load (local trees) (local owner)) base))
+									(set (local next) (call remember_native_type (borrow-shared (local arena))
+										(borrow-shared (local nodes)) (local owner) (local type_base)
+										(i32.add.wrapping (local type_base) (local alias)) (borrow-mut (local records)) (local next)))))
 							(if
 								(:doc "Inspect each C function's parameter types just once per defining declaration.")
 								(call first_bridge_binding (borrow-shared (local bindings)) (local index) (local binding))
 								(then (set (local next) (call register_parameter_native_types (borrow-shared (local arena))
 									(borrow-shared (local nodes)) (i32.add.wrapping (local base) (record.get (local binding) declaration))
-									(local file) (local base) (local context) (borrow-mut (local records)) (local next)))))))
+									(borrow-shared (local trees)) (local context) (borrow-mut (local records)) (local next)))))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return (local next))))
 
@@ -399,13 +403,14 @@
 							(let file (record.get (local row) file))
 							(let base (record.get (slice.load (local trees) (local file)) base))
 							(let checked (call register_record_dependencies (borrow-shared (local arena)) (borrow-shared (local nodes))
-								(local row) (local base) (local context) (borrow-mut (local records)) (local next)))
+								(local row) (local base) (borrow-shared (local trees)) (local context) (borrow-mut (local records)) (local next)))
 							(if
 								(:doc "Report offsets relative to the provider that defines the field.")
 								(u32.lt 0u32 (record.get (local checked) error))
 								(then
-									(let source_base (record.get (slice.load (local files) (local file)) source_start))
-									(return (call signatures_result 0i32 0i32 (local next) -1i32 (local file)
+									(let origin (call source_span_owner (borrow-shared (local files)) (record.get (local checked) start) (local file)))
+									(let source_base (record.get (slice.load (local files) (local origin)) source_start))
+									(return (call signatures_result 0i32 0i32 (local next) -1i32 (local origin)
 										(i32.sub.wrapping (record.get (local checked) start) (local source_base))
 										(i32.sub.wrapping (record.get (local checked) end) (local source_base))
 										(record.get (local checked) error)))))
@@ -493,7 +498,7 @@
 			(let first (record.get (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local list)) operands))
 			(let checked (call read_parameters (borrow-shared (local arena)) (borrow-shared (local nodes)) (local first)
 				(borrow-mut (local parameters)) (local next_param) (borrow-shared (local records))
-				(borrow-shared (local bindings)) (local scope) (record.get (local node) parent) (local context)))
+				(borrow-shared (local bindings)) (local scope) (call declaring_c_bridge (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node)) (local context)))
 			(if
 				(:doc "Retain the original span if shared parameter validation fails.")
 				(u32.lt 0u32 (record.get (local checked) error))
@@ -544,12 +549,13 @@
 						(:doc "Copyable aliases use their type-table row instead of an owner encoding.")
 						(local copy_result)
 						(then
-							(let row (call find_native_definition (borrow-shared (local records)) (record.get (local scope) file) (local resource)))
+							(let target (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(slice.load (local nodes) (local resource))))
+							(let row (call find_native_node (borrow-shared (local records)) (record.get (local target) operands)))
 							(if (i32.lt (local row) 0i32)
 								(then (return (call entry_at (slice.load (local nodes) (local result)) -1i32 23u32))))
 							(set (local result_type) (call native_integer_type (local row))))
-						(else (set (local result_type) (call native_owner_type
-							(i32.add.wrapping (record.get (local scope) tree_base) (local resource))))))))
+						(else (set (local result_type) (call native_owner_type (local resource)))))))
 			(slice.store (local functions) (local index)
 				(record.make ScalarFunction (declaration (local declaration)) (name (local name))
 					(params (local next_param)) (arity (local arity))
@@ -591,9 +597,16 @@
 								(tree_limit (i32.add.wrapping (local base) (record.get (local tree) rows)))
 								(source_base (local source_base)) (module_id 0u32) (entry_module (bool false))
 								(mode (record.get (local context) mode))))
+							(let-mut native -1i32)
+							(if
+								(:doc "A native result type may come from the other provider.")
+								(i32.lt 0i32 (record.get (local binding) native_type))
+								(then
+									(let type_base (record.get (slice.load (local trees) (record.get (local binding) native_file)) base))
+									(set (local native) (i32.add.wrapping (local type_base) (record.get (local binding) native_type)))))
 							(let checked (call register_bridge_signature (borrow-shared (local arena)) (borrow-shared (local nodes))
 								(i32.add.wrapping (local base) (record.get (local binding) declaration))
-								(record.get (local binding) native_type) (i32.lt (record.get (local binding) drop_start) 0i32) (local scope) (local context)
+								(local native) (i32.lt (record.get (local binding) drop_start) 0i32) (local scope) (local context)
 								(borrow-mut (local functions)) (local next_function)
 								(borrow-mut (local parameters)) (local next_param)
 								(borrow-shared (local records)) (borrow-shared (local bindings))))
@@ -614,7 +627,7 @@
 	(fn native_value_binding
 		(:doc `Build the shared checked definition of a selected constant or foreign binding.`)
 		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
-			(binding GraphBinding) (base i32) (definition i32))
+			(binding GraphBinding) (trees (shared-slice ScalarTree)) (definition i32))
 		(returns ScalarStatement)
 		(body
 			(let parts (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes))
@@ -628,12 +641,15 @@
 				(:doc "Keep native integers and shared resources tied to their defining declarations.")
 				(i32.lt 0i32 (local native))
 				(then
+					(let type_base (record.get (slice.load (local trees) (record.get (local binding) native_file)) base))
+					(let declaration (i32.add.wrapping (local type_base) (local native)))
 					(if
 						(:doc "Only borrowed pointer resources refer to a type with a destructor.")
 						(i32.lt -1i32 (record.get (local binding) drop_start))
-						(then (set (local type) (call native_owner_type (i32.add.wrapping (local base) (local native)))))
+						(then (set (local type) (call native_owner_type (local declaration))))
 						(else
-							(let row (call find_native_definition (borrow-shared (local records)) (record.get (local binding) file) (local native)))
+							(let target (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (slice.load (local nodes) (local declaration))))
+							(let row (call find_native_node (borrow-shared (local records)) (record.get (local target) operands)))
 							(set (local type) (call native_integer_type (local row)))))))
 			(let-mut kind (local c_readonly_binding))
 			(if (u32.eq (local tag) 14u32) (then (set (local kind) (local c_constant_binding))))
@@ -675,7 +691,7 @@
 								(local native)
 								(then (slice.store (local statements) (local definition)
 									(call native_value_binding (borrow-shared (local arena)) (borrow-shared (local nodes))
-										(borrow-shared (local records)) (local binding) (local definition_base) (local definition)))))
+										(borrow-shared (local records)) (local binding) (borrow-shared (local trees)) (local definition)))))
 							(let first (record.get (slice.load (local statements) (local base)) first))
 							(slice.store (local statements) (local name)
 								(record.make ScalarStatement (kind 63u32) (target (local name)) (value (local definition))
@@ -719,6 +735,7 @@
 								(then (return (local checked))))
 							(set (local next_record) (record.get (local checked) records))))
 					(set (local file) (i32.add.wrapping (local file) 1i32))))
+			(call install_bridge_overlays (borrow-shared (local trees)) (borrow-shared (local bindings)) (borrow-mut (local nodes)))
 			(let native_count (call register_graph_native_types (borrow-shared (local arena))
 				(borrow-shared (local nodes)) (borrow-shared (local trees)) (borrow-shared (local bindings))
 				(borrow-mut (local records)) (local next_record) (local context)))

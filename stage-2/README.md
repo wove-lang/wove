@@ -661,6 +661,13 @@ A C bridge begins with its provider and quoted header. Its contiguous
 metadata prefix follows the header. Bridge-level cfg applies to the whole
 bridge, and each member may carry its own metadata.
 
+A project bridge for a bundled system header adds members to the header's
+namespace. A project member replaces the bundled member with the same Wove
+name in its namespace. Both sets of signatures can resolve types in the
+combined header. Put `(:pragma (bridge_replace))` after the header to use
+only the project declarations. Target cfg selects the active bridges before
+duplicate project keys are diagnosed.
+
 A pointer-backed resource declaration pairs a native C type literal with its
 destructor contract.
 

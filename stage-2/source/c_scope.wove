@@ -1,0 +1,102 @@
+(module source_c_scope
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Link C bridge overlays in a compilation tree while preserving the original declarations and source spans.")
+
+	(use wove-file "./scan.wove" (only (type SourceNode)))
+	(use wove-file "./module.wove" (only form_parts source_keyword (type FormParts)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct BridgePolicy (fields (replace bool) (site i32)))
+	(let replace_name "bridge_replace")
+
+	(fn with_bridge_peer
+		(:doc "Keep the original tree links and store the resolved pair on a bridge form.")
+		(params (node SourceNode) (project i32) (bundled i32)) (returns SourceNode)
+		(body (return (record.make SourceNode (kind (record.get (local node) kind))
+			(start (record.get (local node) start)) (end (record.get (local node) end))
+			(parent (record.get (local node) parent)) (first_child (record.get (local node) first_child))
+			(next_sibling (record.get (local node) next_sibling)) (bridge_project (local project)) (bridge_default (local bundled))))))
+
+	(fn connect_bridge_overlay
+		(:doc "Both original bridge forms resolve names through the same project-first pair.")
+		(params (nodes (mut-slice SourceNode)) (project i32) (bundled i32)) (returns void)
+		(body
+			(let primary (slice.load (local nodes) (local project)))
+			(let inherited (slice.load (local nodes) (local bundled)))
+			(slice.store (local nodes) (local project) (call with_bridge_peer (local primary) (local project) (local bundled)))
+			(slice.store (local nodes) (local bundled) (call with_bridge_peer (local inherited) (local project) (local bundled)))))
+
+	(fn project_bridge
+		(:doc "Use the original bridge row as the namespace unless it belongs to a connected overlay.")
+		(params (nodes (shared-slice SourceNode)) (bridge i32)) (returns i32)
+		(body
+			(let project (record.get (slice.load (local nodes) (local bridge)) bridge_project))
+			(if (i32.lt -1i32 (local project)) (then (return (local project))))
+			(return (local bridge))))
+
+	(fn declaring_c_bridge
+		(:doc "Find the bridge owning a direct member or a member inside a declaration group.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (member SourceNode)) (returns i32)
+		(body
+			(let-mut row (record.get (local member) parent))
+			(while
+				(:doc "Source parents remain in the defining file even when the namespace spans two files.")
+				(i32.lt -1i32 (local row))
+				(body
+					(let node (slice.load (local nodes) (local row)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(if (i32.lt -1i32 (record.get (local parts) header)) (then (return (local row))))
+					(set (local row) (record.get (local node) parent))))
+			(return -1i32)))
+
+	(fn is_bridge_replace
+		(:doc "Match the exact operand-form tag for a whole-header replacement.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parts FormParts)) (returns bool)
+		(body
+			(let head (record.get (local parts) head))
+			(if (i32.lt (local head) 0i32) (then (return (bool false))))
+			(let name (slice.load (local nodes) (local head)))
+			(return (call same_bytes (borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end)
+				(borrow-shared (local replace_name)) 0i32 (slice.len (local replace_name))))))
+
+	(fn read_bridge_policy
+		(:doc "Require a single argument-free bridge_replace on a system header and retain a malformed directive row.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (bridge FormParts) (system bool))
+		(returns BridgePolicy)
+		(body
+			(let-mut seen (bool false))
+			(let-mut index (record.get (local bridge) metadata))
+			(let end (record.get (local bridge) operands))
+			(while
+				(:doc "Only the metadata prefix on this active bridge affects its policy.")
+				(bool.and (i32.lt -1i32 (local index)) (bool.not (i32.eq (local index) (local end))))
+				(body
+					(let entry (slice.load (local nodes) (local index)))
+					(let head (slice.load (local nodes) (record.get (local entry) first_child)))
+					(if
+						(:doc "Only pragma entries contain bridge directives.")
+						(u32.eq (call source_keyword (borrow-shared (local source)) (local head)) 3u32)
+						(then
+							(let pragma (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local entry)))
+							(let-mut directive (record.get (local pragma) operands))
+							(while
+								(:doc "Other directives keep their own selection or ABI behavior.")
+								(i32.lt -1i32 (local directive))
+								(body
+									(let item (slice.load (local nodes) (local directive)))
+									(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
+									(if
+										(:doc "A replacement needs only the marker and has no meaning on project-local headers.")
+										(call is_bridge_replace (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts))
+										(then
+											(if
+												(:doc "Point at the malformed or repeated marker.")
+												(bool.or (bool.or (local seen) (bool.not (local system)))
+													(i32.lt -1i32 (record.get (local parts) operands)))
+												(then (return (record.make BridgePolicy (replace (bool false)) (site (local directive))))))
+											(set (local seen) (bool true))))
+									(set (local directive) (record.get (local item) next_sibling))))))
+					(set (local index) (record.get (local entry) next_sibling))))
+			(return (record.make BridgePolicy (replace (local seen)) (site -1i32)))))
+)
