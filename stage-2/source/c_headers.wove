@@ -8,7 +8,9 @@
 
 	(use wove-file "./scan.wove"
 		(only (type SourceNode) (type Token) check_source_form build_source_tree check_source_metadata))
-	(use wove-file "./module.wove" (only (type SelectedDeclaration) form_parts read_module_for_target select_form skip_disabled_siblings validate_form_metadata))
+	(use wove-file "./module.wove"
+		(only form_parts source_keyword select_module_root select_form next_declaration skip_disabled_siblings
+			validate_form_metadata (type FormParts)))
 	(use wove-file "./imports.wove" (only import_keyword import_form))
 	(use wove-file "./paths.wove" (only (type SuppliedFile)))
 	(use wove-file "./strings.wove" (only decode_string))
@@ -51,11 +53,10 @@
 					(borrow-shared (local key)) (i32 0) (slice.len (local key)))))))
 
 	(fn matching_bridge_header
-		(:doc `Read the header token of an active c-header bridge when it matches the requested key.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (item SourceNode) (key (shared-slice u8)))
+		(:doc `Read the header token of a c-header bridge when it matches the requested key.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parts FormParts) (key (shared-slice u8)))
 		(returns i32)
 		(body
-			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
 			(let head (record.get (local parts) head))
 			(let provider (record.get (local parts) operands))
 			(if
@@ -80,36 +81,99 @@
 			(return (i32 -1))))
 
 	(fn find_file_header
-		(:doc `Look for one key among the selected declarations in a checked source tree.`)
+		(:doc `Find the requested header among the module's potentially active declarations.
+
+		When selection fails on a declaration group, retain its first error
+		through the group's source span. Report it only if an enclosed bridge
+		has the requested key. A valid exclusion skips the entire subtree.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(declarations (shared-slice SelectedDeclaration)) (count i32) (file i32) (key (shared-slice u8)))
+			(file i32) (key (shared-slice u8)) (context SelectionContext))
 		(returns HeaderMatch)
 		(body
+			(let module_row (record.get (slice.load (local nodes) (i32 0)) first_child))
+			(let node (slice.load (local nodes) (local module_row)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let module (call select_module_root (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local parts) (local context)))
+			(if
+				(:doc "Only a valid module root with an active or malformed guard can contain the requested provider.")
+				(bool.not (bool.or (record.get (local module) active) (u32.eq (record.get (local module) error) (u32 21))))
+				(then (return (call header_match (local file) (i32 -1) (i32 0) (i32 0) (u32 0)))))
 			(let-mut found (i32 -1))
-			(let-mut start (i32 0))
-			(let-mut end (i32 0))
-			(let-mut index (i32 0))
+			(let-mut found_start (i32 0))
+			(let-mut found_end (i32 0))
+			(let-mut failure (record.get (local module) error))
+			(let-mut failure_start (record.get (local module) start))
+			(let-mut failure_end (record.get (local module) end))
+			(let-mut failure_scope_end (record.get (local node) end))
+			(let-mut index (record.get (local parts) operands))
 			(while
-				(:doc "Only selected declarations in this module can provide a header.")
-				(i32.lt (local index) (local count))
+				(:doc "Walk the module's declaration groups with the same sibling and parent links as normal selection.")
+				(i32.lt (i32 -1) (local index))
 				(body
-					(let row (record.get (slice.load (local declarations) (local index)) node))
-					(let header (call matching_bridge_header (borrow-shared (local source)) (borrow-shared (local nodes))
-						(slice.load (local nodes) (local row)) (borrow-shared (local key))))
+					(let item (slice.load (local nodes) (local index)))
 					(if
-						(:doc "A second declaration of the same header key is ambiguous.")
-						(bool.not (i32.lt (local header) (i32 0)))
+						(:doc "A malformed group cannot affect another declaration after its closing boundary.")
+						(bool.not (i32.lt (record.get (local item) start) (local failure_scope_end)))
+						(then (set (local failure) (u32 0))))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
+					(let head (record.get (local parts) head))
+					(let group (bool.and (i32.lt (i32 -1) (local head))
+						(u32.eq (call source_keyword (borrow-shared (local source)) (slice.load (local nodes) (local head))) (u32 2))))
+					(let literal (call matching_bridge_header (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local parts) (borrow-shared (local key))))
+					(let-mut next (i32 -1))
+					(if
+						(:doc "Only declaration groups and exact header matches need their selection metadata checked.")
+						(bool.or (local group) (i32.lt (i32 -1) (local literal)))
 						(then
-							(let literal (slice.load (local nodes) (local header)))
-							(set (local start) (record.get (local literal) start))
-							(set (local end) (record.get (local literal) end))
+							(let-mut active (bool true))
 							(if
-								(:doc "Report an ambiguous provider at its later header literal.")
-								(bool.not (i32.lt (local found) (i32 0)))
-								(then (return (call header_match (local file) (i32 -1) (local start) (local end) (u32 30)))))
-							(set (local found) (local row))))
-					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
-			(return (call header_match (local file) (local found) (local start) (local end) (u32 0)))))
+								(:doc "An already malformed ancestor owns the first failure for this subtree.")
+								(u32.eq (local failure) (u32 0))
+								(then
+									(let choice (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local item) (local parts) (bool true) (local context)))
+									(let error (record.get (local choice) error))
+									(set (local active) (bool.or (record.get (local choice) active) (u32.lt (u32 0) (local error))))
+									(if
+										(:doc "Keep the original diagnostic span separately from the boundary of the declaration it governs.")
+										(u32.lt (u32 0) (local error))
+										(then
+											(set (local failure) (local error))
+											(set (local failure_start) (record.get (local choice) start))
+											(set (local failure_end) (record.get (local choice) end))
+											(set (local failure_scope_end) (record.get (local item) end))))))
+							(if
+								(:doc "Inactive groups and bridges contribute no header candidates.")
+								(local active)
+								(then
+									(if
+										(:doc "Only a decls group may contain a bridge at this level.")
+										(local group)
+										(then (set (local next) (record.get (local parts) operands)))
+										(else
+											(if
+												(:doc "A matching bridge identifies the provider whose guard failed.")
+												(u32.lt (u32 0) (local failure))
+												(then (return (call header_match (local file) (i32 -1)
+													(local failure_start) (local failure_end) (local failure)))))
+											(let token (slice.load (local nodes) (local literal)))
+											(let start (record.get (local token) start))
+											(let end (record.get (local token) end))
+											(if
+												(:doc "Report the later literal when two active bridges match the key.")
+												(i32.lt (i32 -1) (local found))
+												(then (return (call header_match (local file) (i32 -1) (local start) (local end) (u32 30)))))
+											(set (local found) (local index))
+											(set (local found_start) (local start))
+											(set (local found_end) (local end))))))))
+					(if
+						(:doc "When no group was entered, advance to the next declaration at the same or an enclosing level.")
+						(i32.lt (local next) (i32 0))
+						(then (set (local next) (call next_declaration (borrow-shared (local nodes)) (local item) (local module_row)))))
+					(set (local index) (local next))))
+			(return (call header_match (local file) (local found) (local found_start) (local found_end) (u32 0)))))
 
 	(fn read_file_header
 		(:doc `Find a matching active header before reporting structural errors in its provider.
@@ -127,17 +191,10 @@
 			(let count (int.convert i32 (record.get (local checked) rows)))
 			(let-mut nodes (array.alloc SourceNode (local count)))
 			(let built (call build_source_tree (borrow-shared (local source)) (local checked) (borrow-mut (local nodes))))
-			(let-mut selected (array.alloc SelectedDeclaration (local count)))
-			(let module (call read_module_for_target (borrow-shared (local source)) (borrow-shared (local nodes)) (local built) (local context)
-				(borrow-mut (local selected))))
-			(if
-				(:doc "A module must provide a selected declaration before it can match the key.")
-				(bool.or (bool.not (record.get (local module) active)) (u32.lt (u32 0) (record.get (local module) error)))
-				(then (return (call header_match (local file) (i32 -1) (i32 0) (i32 0) (u32 0)))))
 			(let match (call find_file_header (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local selected)) (record.get (local module) count) (local file) (borrow-shared (local key))))
+				(local file) (borrow-shared (local key)) (local context)))
 			(if
-				(:doc "A file with no matching key supplies no diagnostic to this import.")
+				(:doc "Only a matching candidate can carry a structural diagnostic from this provider.")
 				(bool.and (i32.lt (record.get (local match) node) (i32 0)) (u32.eq (record.get (local match) error) (u32 0)))
 				(then (return (local match))))
 			(let metadata (call check_source_metadata (borrow-shared (local source)) (local built) (borrow-shared (local nodes))))
