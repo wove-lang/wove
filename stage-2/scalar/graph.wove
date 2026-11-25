@@ -11,16 +11,18 @@
 	(use wove-file "../source/scan.wove" (only check_source_form build_source_tree (type FormCheck) (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts read_module (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../source/imports.wove" (only import_keyword))
+	(use wove-file "../source/c_headers.wove" (only read_c_integer_parameter))
+	(use wove-file "../source/c_owners.wove" (only read_c_type_literal))
 	(use wove-file "../source/c_arguments.wove" (only read_c_arguments (type CArgument)))
 	(use wove-file "../c/arguments.wove" (only is_c_value_mode))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity hash_spelling))
-	(use wove-file "./records.wove" (only register_module_records (type ScalarRecord)))
+	(use wove-file "./records.wove" (only register_module_records find_native_integer native_integer_type (type ScalarRecord)))
 	(use wove-file "./owners.wove" (only native_owner_type))
 	(use wove-file "./plan.wove"
 		(only register_function read_parameters (type ScalarFunction) (type ScalarParameter) (type FunctionScope)))
-	(use wove-file "./syntax.wove" (only scalar_type (type EntryRead)))
+	(use wove-file "./syntax.wove" (only scalar_type entry_at (type EntryRead)))
 
 	(struct ScalarTree (fields (base i32) (rows i32) (start i32) (end i32)))
 	(struct TreeLayout (fields (rows i32) (file i32) (start i32) (end i32) (error u32)))
@@ -324,6 +326,94 @@
 			(return (call signatures_result (i32 0) (i32 0) (record.get (local layouts) operand) (i32 -1) (i32 -1)
 				(i32 0) (i32 0) (u32 0)))))
 
+	(fn remember_native_integer
+		(:doc `Register one already validated C alias in the same defining type table as Wove records.`)
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (file i32) (base i32)
+			(declaration i32) (records (mut-slice ScalarRecord)) (next i32))
+		(returns i32)
+		(body
+			(let relative (i32.sub.wrapping (local declaration) (local base)))
+			(if
+				(:doc "All local spellings share the same canonical type row.")
+				(i32.lt (i32 -1) (call find_native_integer (borrow-shared (local records)) (local file) (local relative)))
+				(then (return (local next))))
+			(let node (slice.load (local nodes) (local declaration)))
+			(let name (record.get (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node)) operands))
+			(let native (call read_c_type_literal (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node)))
+			(slice.store (local records) (local next)
+				(record.make ScalarRecord (name (local name)) (file (local file)) (identity (u32 0))
+					(first (record.get (local native) native)) (count (i32 -1)) (declaration (local relative))))
+			(return (i32.add.wrapping (local next) (i32 1)))))
+
+	(fn register_parameter_aliases
+		(:doc `Register native aliases used by a selected C signature, including aliases not imported as names.`)
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32)
+			(file i32) (base i32) (mode u32) (records (mut-slice ScalarRecord)) (start i32))
+		(returns i32)
+		(body
+			(let node (slice.load (local nodes) (local declaration)))
+			(let parts (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node)))
+			(let params (slice.load (local nodes) (record.get (local parts) operands)))
+			(let-mut cursor (record.get (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local params)) operands))
+			(let-mut next (local start))
+			(while
+				(:doc "Only the bare type of a selected parameter can be a native value alias.")
+				(i32.lt (i32 -1) (local cursor))
+				(body
+					(let item (slice.load (local nodes) (local cursor)))
+					(let type (record.get (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local item)) operands))
+					(let spelling (slice.load (local nodes) (local type)))
+					(if
+						(:doc "Built-in types and borrowed views need no native alias row.")
+						(bool.and (u32.eq (record.get (local spelling) kind) (u32 1))
+							(u32.eq (call scalar_type (borrow-shared (local arena)) (borrow-shared (local nodes)) (local type)) (u32 0)))
+						(then
+							(let found (call read_c_integer_parameter (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(local spelling) (record.get (local node) parent) (local mode)))
+							(if
+								(:doc "The graph already validated these signatures against their native type declarations.")
+								(u32.eq (record.get (local found) error) (u32 0))
+								(then (set (local next)
+									(call remember_native_integer (borrow-shared (local arena)) (borrow-shared (local nodes))
+										(local file) (local base) (record.get (local found) declaration) (borrow-mut (local records)) (local next)))))))
+					(set (local cursor) (record.get (local item) next_sibling))))
+			(return (local next))))
+
+	(fn register_graph_aliases
+		(:doc `Collect exactly the aliases required by graph bindings before checking either kind of function.`)
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (trees (shared-slice ScalarTree))
+			(bindings (shared-slice GraphBinding)) (records (mut-slice ScalarRecord)) (start i32) (mode u32))
+		(returns i32)
+		(body
+			(let-mut index (i32 0))
+			(let-mut next (local start))
+			(while
+				(:doc "A C binding can refer to a directly selected native type or a function signature.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(let binding (slice.load (local bindings) (local index)))
+					(if
+						(:doc "Ordinary Wove records already occupy their registered layout rows.")
+						(u32.eq (record.get (local binding) provider) (u32 8))
+						(then
+							(let file (record.get (local binding) file))
+							(let base (record.get (slice.load (local trees) (local file)) base))
+							(let alias (record.get (local binding) native_type))
+							(if
+								(:doc "A native result or type without a destructor names a copyable integer.")
+								(bool.and (i32.lt (i32 0) (local alias)) (i32.lt (record.get (local binding) drop_start) (i32 0)))
+								(then (set (local next) (call remember_native_integer (borrow-shared (local arena))
+									(borrow-shared (local nodes)) (local file) (local base)
+									(i32.add.wrapping (local base) (local alias)) (borrow-mut (local records)) (local next)))))
+							(if
+								(:doc "Inspect each C function's parameter types just once per defining declaration.")
+								(call first_bridge_binding (borrow-shared (local bindings)) (local index) (local binding))
+								(then (set (local next) (call register_parameter_aliases (borrow-shared (local arena))
+									(borrow-shared (local nodes)) (i32.add.wrapping (local base) (record.get (local binding) declaration))
+									(local file) (local base) (local mode) (borrow-mut (local records)) (local next)))))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (local next))))
+
 	(fn register_graph_signatures
 		(:doc `Check the reached signatures in their original declaration order.`)
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
@@ -389,7 +479,7 @@
 
 	(fn register_bridge_signature
 		(:doc `Register a checked C bridge signature using the same parameter rows as Wove functions.`)
-		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32) (resource i32) (scope FunctionScope)
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration i32) (resource i32) (copy_result bool) (scope FunctionScope)
 			(functions (mut-slice ScalarFunction)) (index i32) (parameters (mut-slice ScalarParameter)) (next_param i32)
 			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)))
 		(returns EntryRead)
@@ -427,10 +517,19 @@
 				(then (call attach_c_arguments (borrow-shared (local arguments)) (borrow-mut (local parameters)) (local next_param))))
 			(let-mut result_type (call scalar_type (borrow-shared (local arena)) (borrow-shared (local nodes)) (local result)))
 			(if
-				(:doc "Use the resource's defining tree row for the native owner's exact type.")
+				(:doc "Use the defining native type for each selected result.")
 				(i32.lt (i32 0) (local resource))
-				(then (set (local result_type) (call native_owner_type
-					(i32.add.wrapping (record.get (local scope) tree_base) (local resource))))))
+				(then
+					(if
+						(:doc "Copyable aliases use their type-table row instead of an owner encoding.")
+						(local copy_result)
+						(then
+							(let row (call find_native_integer (borrow-shared (local records)) (record.get (local scope) file) (local resource)))
+							(if (i32.lt (local row) (i32 0))
+								(then (return (call entry_at (slice.load (local nodes) (local result)) (i32 -1) (u32 23)))))
+							(set (local result_type) (call native_integer_type (local row))))
+						(else (set (local result_type) (call native_owner_type
+							(i32.add.wrapping (record.get (local scope) tree_base) (local resource))))))))
 			(slice.store (local functions) (local index)
 				(record.make ScalarFunction (declaration (local declaration)) (name (local name))
 					(params (local next_param)) (arity (local arity))
@@ -471,7 +570,7 @@
 								(source_base (local source_base)) (module_id (u32 0)) (entry_module (bool false)) (mode (local mode))))
 							(let checked (call register_bridge_signature (borrow-shared (local arena)) (borrow-shared (local nodes))
 								(i32.add.wrapping (local base) (record.get (local binding) declaration))
-								(record.get (local binding) owner_type) (local scope)
+								(record.get (local binding) native_type) (i32.lt (record.get (local binding) drop_start) (i32 0)) (local scope)
 								(borrow-mut (local functions)) (local next_function)
 								(borrow-mut (local parameters)) (local next_param)
 								(borrow-shared (local records)) (borrow-shared (local bindings))))
@@ -522,6 +621,9 @@
 								(then (return (local checked))))
 							(set (local next_record) (record.get (local checked) records))))
 					(set (local file) (i32.add.wrapping (local file) (i32 1)))))
+			(set (local next_record) (call register_graph_aliases (borrow-shared (local arena))
+				(borrow-shared (local nodes)) (borrow-shared (local trees)) (borrow-shared (local bindings))
+				(borrow-mut (local records)) (local next_record) (local mode)))
 			(let wove (call register_graph_signatures (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings)) (local root)
 				(borrow-shared (local nodes)) (borrow-shared (local selected)) (borrow-shared (local views))

@@ -126,13 +126,13 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
-		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) stage-2/hashing/base16.wove $(BLAKE2B_SOURCES) \
+		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove stage-2/c-stdlib/*.wove $(HASHING_SOURCES) stage-2/hashing/base16.wove $(BLAKE2B_SOURCES) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(PROCESS_MODULE) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv $(PROCESS_CASES) tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
-		tests/stage-2/test_execution.tsv
+		tests/stage-2/test_execution.tsv tests/stage-2/native_alias/cases.tsv
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/hashing" "$(HASHING_CASES)"
 
 # Run the standalone JSON utilities with the same manifest runner as the seed.
