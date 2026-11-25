@@ -21,6 +21,7 @@ BOOL = "bool"
 VOID = "void"
 RUNTIME_INCLUDE = '"wove_runtime.h"'
 HEADER_PATH = re.compile(r"[A-Za-z0-9_./-]+")
+DECIMAL_SUFFIX = re.compile(r"(-?[0-9]+)([iu][0-9]+)")
 SCALAR_LIMITS = {
 	I8: (-128, 127),
 	I32: (-(2**31), 2**31 - 1),
@@ -140,6 +141,17 @@ def c_type(kind: Type) -> str:
 	return kind.c_name if isinstance(kind, Record) else C_TYPE[kind]
 
 
+# Normalize a typed decimal atom only when consuming an expression.
+def value_form(node: Node) -> Form:
+	# Quoted strings and other atoms retain the ordinary form check.
+	if isinstance(node, Atom) and not node.quoted:
+		literal = DECIMAL_SUFFIX.fullmatch(node.text)
+		# Reuse the typed form's range check and C emission.
+		if literal is not None and literal[2] in SCALAR_LIMITS:
+			return Form(literal[2], (Atom(literal[1], node.line),), node.line)
+	return checked_form(node)
+
+
 # Validate a typed decimal literal before emitting its C spelling.
 def read_integer_literal(node: Form) -> Value:
 	literal, = form(node, arity=1).operands
@@ -175,7 +187,7 @@ def read_module_value(node: Form, index: int) -> tuple[str, ModuleValue]:
 		if len(data) > SCALAR_LIMITS[I32][1]:
 			raise SourceError(initializer.line)
 		return name, ModuleValue(Binding(Value(BufferType(SHARED, U8), c_name)), data)
-	literal = checked_form(initializer)
+	literal = value_form(initializer)
 	# Only the supported integer literals can initialize a module scalar.
 	if literal.tag not in SCALAR_LIMITS:
 		raise SourceError(initializer.line)
@@ -527,7 +539,7 @@ class FunctionEmitter:
 
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
-		expr = node = checked_form(node)
+		expr = node = value_form(node)
 		# A boolean literal carries the same type as a comparison result.
 		if expr.tag == BOOL:
 			literal, = form(expr, arity=1).operands

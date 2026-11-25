@@ -13,8 +13,9 @@ type returns a value. A `void` function can return without a value or complete
 at the end of its body.
 A source rejection prints the filename and line.
 
-Write `i8`, `u8`, `i32`, and `u32` literals as typed decimal nodes such as
-`(i8 -128)` or `(u32 4294967295)`. The seed checks the range of each
+Write `i8`, `u8`, `i32`, and `u32` literals as suffixed decimal atoms such as
+`-128i8` or `4294967295u32`. The typed lists `(i8 -128)` and
+`(u32 4294967295)` are equivalent. The seed checks the range of each
 literal and preserves its exact type through bindings, parameters, calls,
 and returns. Use
 `(int.convert i32 (local byte))` to explicitly convert between seed integers.
