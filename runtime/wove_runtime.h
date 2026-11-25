@@ -31,6 +31,14 @@ typedef struct { void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size
 int wvrt_run_host_entry(int argc, char **argv, size_t span_size,
 	void (*write_span)(void *, int32_t, int32_t, int32_t), int32_t (*entry)(wvrt_slice, wvrt_slice));
 
+// Bootstrap-only file and stream operations implemented outside the shipped runtime.
+int32_t wvrt_bootstrap_canonical_path(wvrt_slice path, wvrt_mut_slice out);
+int32_t wvrt_bootstrap_file(wvrt_slice path, wvrt_mut_slice out);
+bool wvrt_bootstrap_same_file(wvrt_slice left, wvrt_slice right);
+bool wvrt_bootstrap_write(wvrt_slice bytes, bool diagnostic);
+uint8_t wvrt_bootstrap_os(void);
+uint8_t wvrt_bootstrap_arch(void);
+
 // Store each row as the generated Wove type before exposing the two borrowed views.
 #define WVRT_HOST_ENTRY(entry, span) \
 	static void entry ## _arg_span(void *items, int32_t index, int32_t start, int32_t end) { \

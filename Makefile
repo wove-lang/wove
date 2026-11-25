@@ -70,7 +70,7 @@ CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove projec
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove graph.wove output.wove publication.wove platform.wove files.wove paths.wove disk.wove disk_files.wove bin/arguments.wove bin/build.wove)
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove output.wove publication.wove platform.wove files.wove paths.wove disk.wove disk_files.wove bin/arguments.wove bin/build.wove)
 BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove unistd.wove spawn.wove fcntl.wove errno.wove sys_stat.wove sys_wait.wove)
 NATIVE_BUILD_ASSETS := runtime/wove_runtime.c runtime/wove_runtime.h
 NATIVE_STDIO := stage-2/io/stdio.wove
@@ -106,6 +106,9 @@ SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
 BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
+BOOTSTRAP_DRIVER_SOURCES := $(addprefix $(NATIVE_DRIVER)/,bootstrap/entry.wove bootstrap/graph.wove bootstrap/emit.wove bootstrap/files.wove assets.wove paths.wove bundled_paths.wove) \
+	stage-2/text/copy.wove
+BOOTSTRAP_RUNTIME := runtime/wove_bootstrap.c
 GRAPH_COMPILER_SOURCES := $(BOOTSTRAP_WOVE_SOURCES) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(TEST_DISCOVERY_MODULE) $(C_EMITTER_SOURCES) stage-2/emit/tests.wove $(HASHING_SOURCES)
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
@@ -253,7 +256,7 @@ test: stage-1 test-stage-2 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/
 	sh "$(OWNERSHIP_TESTS)/check_includes.sh" "$(STAGE1)/imports.c_headers.c" "$(OWNERSHIP_TESTS)/imports/c_headers/includes.txt"
 
 # Track the imports active in each seed root.
-$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(BOOTSTRAP_WOVE_SOURCES) $(SEED)
+$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(BOOTSTRAP_DRIVER_SOURCES) $(GRAPH_COMPILER_SOURCES) $(CLI_SOURCES) $(SEED)
 $(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(GRAPH_COMPILER_SOURCES) $(SEED)
 
 # Replace the generated C only after the seed succeeds.
@@ -265,9 +268,10 @@ $(STAGE1)/wovec.c $(SOURCE_PROBE_C):
 	$(PYTHON) stage-1/wovec.py "$<" > "$$c_output"; \
 	mv "$$c_output" "$@"
 
-# Link the seed-built compiler entry with the shared runtime.
-$(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(STAGE1)/runtime.o
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime $^ -o "$@"
+# Build the seed-selected entry and its fixed bootstrap runtime in one C translation unit.
+$(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(RUNTIME) $(RUNTIME_HEADER) $(BOOTSTRAP_RUNTIME)
+	$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime \
+		-include "$(RUNTIME)" -include "$(BOOTSTRAP_RUNTIME)" "$<" -o "$@"
 
 # Compile the C harness with its generated fixture and the shared runtime.
 $(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(SOURCE_PROBE_C) $(STAGE1)/runtime.o
@@ -405,7 +409,7 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
-REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) \
+REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) $(BOOTSTRAP_DRIVER_SOURCES) $(BOOTSTRAP_RUNTIME) \
 	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
 	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \
