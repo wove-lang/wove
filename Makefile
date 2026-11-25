@@ -72,10 +72,11 @@ COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
 NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,host.wove command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove graph.wove output.wove platform.wove files.wove disk.wove disk_files.wove)
 BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove unistd.wove)
-DRIVER_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove sys_stat.wove fcntl.wove unistd.wove errno.wove)
+NATIVE_STDIO := stage-2/io/stdio.wove
+DRIVER_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove sys_stat.wove fcntl.wove unistd.wove errno.wove)
 NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
-	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) stage-2/text/copy.wove $(DRIVER_C_PROVIDERS))
+	$(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) stage-2/text/copy.wove $(DRIVER_C_PROVIDERS))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
 PROCESS_MODULE := stage-2/io/process.wove
 PROCESS_FIXTURES := tests/stage-2/process
@@ -131,7 +132,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stag
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove stage-2/c-stdlib/*.wove $(HASHING_SOURCES) $(BLAKE2B_SOURCE) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
-		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(PROCESS_MODULE) \
+		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) $(PROCESS_MODULE) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv $(PROCESS_CASES) tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
@@ -201,7 +202,8 @@ test-stage-2-gcc-live: $(AST_PROBE) $(CLANG_TEMPLATE)
 test-stage-2-blake2b: $(BLAKE2B_PROBE)
 	sh "$(BLAKE2B_FIXTURES)/check.sh" "$(BLAKE2B_PROBE)" "$(BLAKE2B_FIXTURES)/cases.tsv"
 
-test: stage-1 test-stage-2 $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
+test: stage-1 test-stage-2 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
+	"$(STAGE1)/runtime.cstr_cleanup"
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 	sh "$(OWNERSHIP_TESTS)/check_includes.sh" "$(STAGE1)/imports.c_headers.c" "$(OWNERSHIP_TESTS)/imports/c_headers/includes.txt"
@@ -385,6 +387,10 @@ $(STAGE1)/runtime.tracked.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -Dmalloc=tracked_malloc -Dcalloc=tracked_calloc \
 		-Dfree=tracked_free -c "$<" -o "$@"
+
+# Simulate an allocator that clobbers errno when native call scratch is released.
+$(STAGE1)/runtime.cstr_cleanup: tests/support/cstr_cleanup.c $(STAGE1)/runtime.tracked.o $(RUNTIME_HEADER)
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime $(filter-out %.h,$^) -o "$@"
 
 $(STAGE1)/%.tracked.o: $(STAGE1)/%.c $(RUNTIME_HEADER)
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -Dmain=wove_test_main -c "$<" -o "$@"

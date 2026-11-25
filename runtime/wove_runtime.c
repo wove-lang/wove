@@ -111,9 +111,11 @@ char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrtarguments, size_t wvrtcount) {
 	return wvrt_storage;
 }
 
-// Release only the temporary storage owned by a completed native call.
+// Release the call's temporary storage while retaining the native call's errno.
 void wvrt_cstr_drop(char *wvrtstorage) {
+	const int wvrt_saved_errno = errno;
 	free(wvrtstorage);
+	errno = wvrt_saved_errno;
 }
 
 // Report a host argument conversion failure before calling the Wove entry.

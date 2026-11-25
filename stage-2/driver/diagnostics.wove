@@ -5,62 +5,68 @@
 
 	(use wove-file "../diagnostics/record.wove" (only diagnostic_argv diagnostic_source (type Diagnostic)))
 	(use wove-file "../diagnostics/json.wove" (only write_diagnostic_json))
-	(use c-header "./host.h" (only wove_cli_text wove_cli_stderr))
+	(use wove-file "../io/stdio.wove" (only write_stderr_line))
+
+	(let project_file "wovec.jsonc")
+	(let invalid_arguments "invalid command arguments")
+	(let invalid_config "invalid project configuration")
+	(let invalid_source "invalid Wove source")
+	(let unreadable_file "could not read file")
+	(let publish_failure "could not publish retained C")
+	(let explicit_target_required "cc requires one explicit source and an explicit output target")
+	(let non_utf8_source "source operand must be UTF-8")
+	(let invalid_target "invalid output target")
+	(let unreadable_asset "could not read embedded asset")
 
 	(fn report_diagnostic
 		(:doc `Size the output for worst-case JSON escaping and print only the serialized prefix.`)
-		(params (diagnostic Diagnostic) (text u32) (file (shared-slice u8)))
+		(params (diagnostic Diagnostic) (message (shared-slice u8)) (file (shared-slice u8)))
 		(returns i32)
 		(body
-			(let width (slice.len (local file)))
-			(let twice (i32.add.wrapping (local width) (local width)))
-			(let six (i32.add.wrapping (i32.add.wrapping (local twice) (local twice)) (local twice)))
-			(let-mut output (array.alloc u8 (i32.add.wrapping (local six) (i32 512))))
-			(let-mut message (array.alloc u8 (i32 64)))
-			(let-mut stack (array.alloc u8 (i32 2)))
-			(let count (call wove_cli_text (local text) (borrow-mut (local message)) (i32 64)))
+			(let width (u64.add.wrapping (int.convert u64 (slice.len (local file)))
+				(int.convert u64 (slice.len (local message)))))
+			(let twice (u64.add.wrapping (local width) (local width)))
+			(let capacity (u64.add.wrapping (u64 128)
+				(u64.add.wrapping (u64.add.wrapping (local twice) (local twice)) (local twice))))
 			(if
-				(:doc "A missing fixed message leaves no bytes to serialize.")
-				(i32.lt (local count) (i32 0))
+				(:doc "The escaped path and message plus JSON structure must fit the output slice.")
+				(u64.lt (u64 2147483647) (local capacity))
 				(then (return (i32 1))))
+			(let-mut output (array.alloc u8 (int.convert i32 (local capacity))))
+			(let-mut stack (array.alloc u8 (i32 2)))
 			(let result (call write_diagnostic_json (local diagnostic)
-				(borrow-shared (slice.range (local message) (i32 0) (local count))) (borrow-shared (local file))
+				(borrow-shared (local message)) (borrow-shared (local file))
 				(borrow-mut (local output)) (borrow-mut (local stack))))
 			(if
 				(:doc "Write a diagnostic only after the JSON writer completes it.")
 				(u32.eq (record.get (local result) error) (u32 0))
 				(then
 					(let written (record.get (local result) written))
-					(let status (call wove_cli_stderr (borrow-shared (slice.range (local output) (i32 0) (local written))) (local written)))
-					(if (i32.lt (local status) (i32 0)) (then (return (i32 2))))))
+					(if
+						(:doc "A stream error has its own command exit status.")
+						(bool.not (call write_stderr_line (borrow-shared (slice.range (local output) (i32 0) (local written)))))
+						(then (return (i32 2))))))
 			(return (i32 1))))
 
 	(fn report_argv
 		(:doc `Report an argv failure at the resolver's zero-based position.`)
-		(params (code u32) (index i32) (text u32))
+		(params (code u32) (index i32) (message (shared-slice u8)))
 		(returns i32)
 		(body
 			(let no_file (array.alloc u8 (i32 0)))
 			(return (call report_diagnostic (call diagnostic_argv (local code) (local index))
-				(local text) (borrow-shared (local no_file))))))
+				(borrow-shared (local message)) (borrow-shared (local no_file))))))
 
 	(fn report_source
 		(:doc `Report a source failure with its path and original byte span.`)
-		(params (file (shared-slice u8)) (code u32) (start i32) (end i32) (text u32))
+		(params (file (shared-slice u8)) (code u32) (start i32) (end i32) (message (shared-slice u8)))
 		(returns i32)
 		(body (return (call report_diagnostic (call diagnostic_source (local code) (local start) (local end))
-			(local text) (borrow-shared (local file))))))
+			(borrow-shared (local message)) (borrow-shared (local file))))))
 
 	(fn report_project
 		(:doc `Report a JSONC or file error against the current project configuration name.`)
-		(params (code u32) (start i32) (end i32) (text u32))
+		(params (code u32) (start i32) (end i32) (message (shared-slice u8)))
 		(returns i32)
-		(body
-			(let-mut name (array.alloc u8 (i32 64)))
-			(let count (call wove_cli_text (u32 0) (borrow-mut (local name)) (i32 64)))
-			(if
-				(:doc "Keep the publication buffer bounded even if the host cannot supply the project name.")
-				(i32.lt (local count) (i32 0))
-				(then (return (i32 1))))
-			(return (call report_source (borrow-shared (slice.range (local name) (i32 0) (local count)))
-				(local code) (local start) (local end) (local text))))))
+		(body (return (call report_source (borrow-shared (local project_file))
+			(local code) (local start) (local end) (borrow-shared (local message)))))))

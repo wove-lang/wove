@@ -88,16 +88,6 @@ int32_t wove_cli_read_asset(const char *module, const char *request, uint8_t *by
 	return read_exact(file, bytes + start, end - start);
 }
 
-// Locate the project configuration in the current project directory.
-int32_t wove_cli_project_size(void) {
-	return wove_cli_input_size(project_file);
-}
-
-// Read project bytes through the same bounded host operation as source.
-int32_t wove_cli_read_project(uint8_t *bytes, int32_t length) {
-	return wove_cli_read_input(project_file, bytes, length);
-}
-
 // Accept a single named directory component.
 static bool component(const char *name) {
 	return name[0] != '\0' && strchr(name, '/') == NULL &&
@@ -179,32 +169,4 @@ int32_t wove_cli_publish(const char *path, const char *input, const uint8_t *byt
 	const bool published = ready && !is_same_file(path, input) && !is_same_file(path, project_file) &&
 		write_unit(path, bytes, length);
 	return published ? 0 : -1;
-}
-
-// Write one complete text view and surface a stream error in the command status.
-int32_t wove_cli_stdout(const uint8_t *bytes, int32_t length) {
-	const bool written = fwrite(bytes, 1, (size_t)length, stdout) == (size_t)length;
-	return written && fflush(stdout) == 0 ? 0 : 1;
-}
-
-// Write the Wove serializer's original JSON bytes as one stderr record.
-int32_t wove_cli_stderr(const uint8_t *bytes, int32_t length) {
-	const bool written = fwrite(bytes, 1, (size_t)length, stderr) == (size_t)length;
-	return written && fputc('\n', stderr) != EOF ? 0 : -1;
-}
-
-// Copy fixed diagnostic text or the project path into a caller-owned byte view.
-int32_t wove_cli_text(uint32_t text, uint8_t *bytes, int32_t capacity) {
-	static const char *const messages[] = {
-		project_file, "invalid command arguments", "invalid project configuration",
-		"invalid Wove source", "could not read file", "could not publish retained C",
-		"cc requires one explicit source and an explicit output target",
-		"source operand must be UTF-8", "invalid output target", "could not read embedded asset"
-	};
-	// The supplied view must fit the whole string without its terminator.
-	if (text >= sizeof messages / sizeof *messages) { return -1; }
-	const size_t length = strlen(messages[text]);
-	if (length > (size_t)capacity) { return -1; }
-	memcpy(bytes, messages[text], length);
-	return (int32_t)length;
 }
