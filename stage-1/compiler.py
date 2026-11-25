@@ -48,13 +48,19 @@ WRAPPING_OPS = {
 	"u32.add.wrapping": (U32, "wvrt_u32_add_wrapping"),
 	"u32.sub.wrapping": (U32, "wvrt_u32_sub_wrapping"),
 }
-COMPARISON_OPS = {
-	"u8.eq": (U8, "=="),
-	"u8.lt": (U8, "<"),
-	"i32.eq": (I32, "=="),
-	"i32.lt": (I32, "<"),
-	"u32.eq": (U32, "=="),
-	"u32.lt": (U32, "<"),
+BINARY_OPS = {
+	"u8.eq": (U8, BOOL, "=="),
+	"u8.lt": (U8, BOOL, "<"),
+	"i32.eq": (I32, BOOL, "=="),
+	"i32.lt": (I32, BOOL, "<"),
+	"u32.eq": (U32, BOOL, "=="),
+	"u32.lt": (U32, BOOL, "<"),
+	"u32.and": (U32, U32, "&"),
+	"u32.or": (U32, U32, "|"),
+}
+U32_SHIFT_OPS = {
+	"u32.shl": "<<",
+	"u32.shr": ">>",
 }
 
 
@@ -643,14 +649,25 @@ class FunctionEmitter:
 			second = self.typed(right, kind)
 			return self.temporary(kind, f"{helper}({first.c}, {second.c})")
 
-		comparison = COMPARISON_OPS.get(expr.tag)
-		# Check both operand types before using the corresponding C comparison.
-		if comparison is not None:
-			kind, operator = comparison
+		binary = BINARY_OPS.get(expr.tag)
+		# Check both operand types before applying the comparison or mask.
+		if binary is not None:
+			kind, result, operator = binary
 			left, right = form(expr, arity=2).operands
 			first = self.typed(left, kind)
 			second = self.typed(right, kind)
-			return self.temporary(BOOL, f"{first.c} {operator} {second.c}")
+			return self.temporary(result, f"{first.c} {operator} {second.c}")
+
+		shift = U32_SHIFT_OPS.get(expr.tag)
+		# Widen the word before shifting and check the count at this form's location.
+		if shift is not None:
+			left, right = form(expr, arity=2).operands
+			word = self.typed(left, U32)
+			count = self.typed(right, I32)
+			return self.temporary(
+				U32, f"(uint32_t)((uint64_t){word.c} {shift} "
+				f"wvrt_u32_shift_count({count.c}, {self.site(node.line)}))"
+			)
 
 		# Call lowering manages the lifetime of its argument loans.
 		if expr.tag == "call":

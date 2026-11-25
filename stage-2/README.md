@@ -259,6 +259,14 @@ and yield `u32` results modulo 2^32. Each operand runs once, left to
 right. Emitted C widens the operands to unsigned 64-bit arithmetic and
 keeps the low 32 bits.
 
+`u32.and` and `u32.or` combine two exact `u32` operands bitwise.
+`(u32.shl word count)` and `(u32.shr word count)` take an exact
+`u32` word and `i32` count. The left shift discards bits above the
+word width, and the logical right shift fills with zeroes. All four
+forms return `u32` and evaluate both operands once, left to right.
+A count outside `[0, 32)` traps before shifting and reports the
+original file ID and half-open span of the shift.
+
 `(int.convert target value)` evaluates the integer operand once and
 preserves its numerical value when it fits the target `i8`, `u8`, `i32`,
 or `u32`. A value outside the target range traps before the cast. The
