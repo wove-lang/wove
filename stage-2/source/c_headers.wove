@@ -17,7 +17,7 @@
 	(use wove-file "./types.wove" (only source_builtin_type is_builtin_integer is_builtin_float is_builtin_scalar reference_mode))
 	(use wove-file "./owned.wove" (only is_byte_owner_descriptor))
 	(use wove-file "./c_scope.wove" (only read_bridge_policy project_bridge))
-	(use wove-file "./c_optional.wove" (only read_c_optional))
+	(use wove-file "./c_markers.wove" (only read_c_optional read_c_value_macro))
 	(use wove-file "./c_formals.wove" (only is_c_fixed_formal read_c_fixed_formal c_formal_name next_c_value_formal find_c_fixed_formal))
 	(use wove-file "./c_names.wove" (only c_function_opening native_symbol_start native_symbol_end))
 	(use wove-file "./c_owners.wove" (only is_native_name check_c_type is_c_storage_type))
@@ -33,7 +33,7 @@
 	(struct CMemberRead
 		(fields (declaration i32) (native_start i32) (native_end i32) (signature_start i32) (signature_end i32)
 			(start i32) (end i32) (error u32) (native_type i32) (drop_start i32) (drop_end i32)
-			(type_start i32) (type_end i32) (namespace u32) (optional bool)))
+			(type_start i32) (type_end i32) (namespace u32) (optional bool) (value_macro bool)))
 	(struct CMemberLookup (fields (declaration i32) (start i32) (end i32) (error u32)))
 
 	(fn header_match
@@ -279,7 +279,7 @@
 		(body
 			(return (struct.new CMemberRead (declaration -1i32) (native_start -1i32) (native_end -1i32)
 				(signature_start -1i32) (signature_end -1i32) (start (local start)) (end (local end)) (error (local error))
-				(native_type 0i32) (drop_start 0i32) (drop_end 0i32) (type_start 0i32) (type_end 0i32) (namespace 0u32) (optional (bool false))))))
+				(native_type 0i32) (drop_start 0i32) (drop_end 0i32) (type_start 0i32) (type_end 0i32) (namespace 0u32) (optional (bool false)) (value_macro (bool false))))))
 
 	(fn is_c_scalar
 		(:doc `Accept one of the exact scalar types supported by the Stage 2 value ABI.`)
@@ -674,7 +674,7 @@
 				(native_type (struct.get (local resource) native_type))
 				(drop_start (struct.get (local resource) drop_start)) (drop_end (struct.get (local resource) drop_end))
 				(type_start (struct.get (local resource) type_start)) (type_end (struct.get (local resource) type_end)) (namespace 0u32)
-				(optional (struct.get (local availability) present))))))
+				(optional (struct.get (local availability) present)) (value_macro (bool false))))))
 
 	(fn read_c_value_type
 		(:doc `Check the type of a selected scalar, resource, or vector snapshot.`)
@@ -687,6 +687,10 @@
 				(local snapshot)
 				(then (return (call c_member_error 0i32 0i32 0u32))))
 			(let scalar (call source_builtin_type (borrow-shared (local source)) (local node)))
+			(if
+				(:doc "The constant contract needs an integral type for its range assertion.")
+				(bool.and (u32.eq (local tag) 14u32) (call is_builtin_float (local scalar)))
+				(then (return (call c_member_error (struct.get (local node) start) (struct.get (local node) end) 23u32))))
 			(if
 				(:doc "Built-in scalar values need no defining type row.")
 				(call is_builtin_scalar (local scalar))
@@ -731,9 +735,26 @@
 					(i32.lt -1i32 (struct.get (array.load (local nodes) (local type)) next_sibling)))
 				(then (return (call c_member_error (struct.get (local form) start) (struct.get (local form) end) 23u32))))
 			(let type_node (array.load (local nodes) (local type)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
+			(let readonly (u32.eq (local tag) 12u32))
+			(let-mut expression (bool false))
+			(if
+				(:doc "A read-only scalar macro supplies a C expression in place of addressable storage.")
+				(local readonly)
+				(then
+					(let marker (call read_c_value_macro (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts)))
+					(if
+						(:doc "Malformed and repeated markers report at the directive.")
+						(u32.lt 0u32 (struct.get (local marker) error))
+						(then (return (call c_member_error (struct.get (local marker) start) (struct.get (local marker) end)
+							(struct.get (local marker) error)))))
+					(set (local expression) (struct.get (local marker) present))
+					(if
+						(:doc "An expression macro must name a scalar type or its native alias.")
+						(bool.and (local expression) (bool.not (u32.eq (struct.get (local type_node) kind) 1u32)))
+						(then (return (call c_member_error (struct.get (local type_node) start) (struct.get (local type_node) end) 23u32))))))
 			(let snapshot (call read_c_vector_snapshot (borrow-shared (local source)) (borrow-shared (local nodes))
-				(call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local form))
-				(local type_node) (u32.eq (local tag) 12u32)))
+				(local parts) (local type_node) (local readonly)))
 			(if
 				(:doc "A bad snapshot retains the contract's original declaration span.")
 				(u32.lt 0u32 (struct.get (local snapshot) error))
@@ -751,7 +772,7 @@
 				(start (struct.get (local form) start)) (end (struct.get (local form) end)) (error 0u32)
 				(native_type (struct.get (local native) native_type))
 				(drop_start (struct.get (local native) drop_start)) (drop_end (struct.get (local native) drop_end))
-				(type_start (struct.get (local native) type_start)) (type_end (struct.get (local native) type_end)) (namespace 2u32) (optional (bool false))))))
+				(type_start (struct.get (local native) type_start)) (type_end (struct.get (local native) type_end)) (namespace 2u32) (optional (bool false)) (value_macro (local expression))))))
 
 	(fn matches_c_member_tag
 		(:doc `Match a declaration in the function, type, or value namespace.`)
@@ -891,7 +912,7 @@
 						(signature_start (struct.get (local node) start)) (signature_end (struct.get (local node) end))
 						(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 0u32)
 						(native_type (local declaration)) (drop_start -1i32) (drop_end -1i32)
-						(type_start (struct.get (local representation) start)) (type_end (struct.get (local representation) end)) (namespace 1u32) (optional (bool false))))))
+						(type_start (struct.get (local representation) start)) (type_end (struct.get (local representation) end)) (namespace 1u32) (optional (bool false)) (value_macro (bool false))))))
 			(let checked (call check_c_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(if
 				(:doc "The contract's invalid annotation lives in the defining source.")
@@ -913,7 +934,7 @@
 				(signature_start (struct.get (local node) start)) (signature_end (struct.get (local node) end))
 				(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 0u32)
 				(native_type (local declaration)) (drop_start (local drop_start)) (drop_end (local drop_end))
-				(type_start (struct.get (local native) start)) (type_end (struct.get (local native) end)) (namespace 1u32) (optional (bool false))))))
+				(type_start (struct.get (local native) start)) (type_end (struct.get (local native) end)) (namespace 1u32) (optional (bool false)) (value_macro (bool false))))))
 
 	(fn find_c_declaration
 		(:doc `Resolve and check a C header's selected function, type, or value.`)

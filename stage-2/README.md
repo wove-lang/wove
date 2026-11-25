@@ -740,6 +740,11 @@ Argument expressions run once in source order even when the macro
 repeats or discards an operand. The invocation's result is stored in
 its declared Wove type.
 
+A read-only C bridge value can use `(let (:pragma (c_macro)) HUGE_VAL f64)`
+to bind a scalar expression macro. The emitted C checks the expansion's
+exact type without evaluating it. Each Wove read expands the original
+native name, including through an imported alias.
+
 Use `(:pragma (c_cstr parameter ...))` or `(:pragma (c_cstr_raw parameter ...))`
 after the bridge function name. Shared byte slices pass `const char *`.
 Mutable byte slices pass `char *`. After evaluating all arguments, the call
