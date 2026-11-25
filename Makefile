@@ -33,7 +33,7 @@ SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove st
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
-C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove emit/embeds.wove hashing/base16.wove emit/c.wove emit/arrays.wove emit/bindings.wove emit/runtime.wove emit/c_arguments.wove emit/c_bytes.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
+C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove emit/embeds.wove hashing/base16.wove emit/c.wove emit/arrays.wove emit/bindings.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_bytes.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
 	scalar/syntax.wove scalar/signatures.wove scalar/flow.wove scalar/host_entry.wove scalar/plan.wove scalar/graph.wove scalar/c_types.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_DIGITS := stage-2/hashing/digits.wove
 HASHING_BITS := stage-2/hashing/bits.wove
@@ -132,7 +132,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv $(PROCESS_CASES) tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
-		tests/stage-2/test_execution.tsv tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/graph/targets/cases.tsv
+		tests/stage-2/test_execution.tsv tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv tests/stage-2/graph/targets/cases.tsv
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/hashing" "$(HASHING_CASES)"
 
 # Run the standalone JSON utilities with the same manifest runner as the seed.

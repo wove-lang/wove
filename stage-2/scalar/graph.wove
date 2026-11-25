@@ -23,7 +23,8 @@
 	(use wove-file "./plan.wove"
 		(only register_function read_parameters register_module_bindings
 			(type ScalarFunction) (type ScalarParameter) (type FunctionScope) (type ScalarExpression)))
-	(use wove-file "./flow.wove" (only block_statement (type ScalarStatement)))
+	(use wove-file "./flow.wove" (only block_statement (type ScalarStatement)
+			(value c_constant_binding) (value c_readonly_binding) (value c_writable_binding)))
 	(use wove-file "./syntax.wove" (only scalar_type entry_at (type EntryRead)))
 
 	(struct ScalarTree (fields (base i32) (rows i32) (start i32) (end i32)))
@@ -583,12 +584,44 @@
 			(return (call signatures_result (local next_function) (local next_param) (local records_count)
 				(local entry) (i32 -1) (i32 0) (i32 0) (u32 0)))))
 
+	(fn native_value_binding
+		(:doc `Build the shared checked definition of a selected constant or foreign binding.`)
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(binding GraphBinding) (base i32) (definition i32))
+		(returns ScalarStatement)
+		(body
+			(let parts (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(slice.load (local nodes) (local definition))))
+			(let tag (call import_keyword (borrow-shared (local arena)) (slice.load (local nodes) (record.get (local parts) head))))
+			(let name (record.get (local parts) operands))
+			(let type_node (record.get (slice.load (local nodes) (local name)) next_sibling))
+			(let-mut type (call scalar_type (borrow-shared (local arena)) (borrow-shared (local nodes)) (local type_node)))
+			(let native (record.get (local binding) native_type))
+			(if
+				(:doc "Keep native integers and shared resources tied to their defining declarations.")
+				(i32.lt (i32 0) (local native))
+				(then
+					(if
+						(:doc "Only borrowed pointer resources refer to a type with a destructor.")
+						(i32.lt (i32 -1) (record.get (local binding) drop_start))
+						(then (set (local type) (call native_owner_type (i32.add.wrapping (local base) (local native)))))
+						(else
+							(let row (call find_native_definition (borrow-shared (local records)) (record.get (local binding) file) (local native)))
+							(set (local type) (call native_integer_type (local row)))))))
+			(let-mut kind (local c_readonly_binding))
+			(if (u32.eq (local tag) (u32 14)) (then (set (local kind) (local c_constant_binding))))
+			(if (u32.eq (local tag) (u32 15)) (then (set (local kind) (local c_writable_binding))))
+			(return (record.make ScalarStatement (kind (local kind)) (target (local name)) (value (i32 -1))
+				(type (local type)) (first (i32 -1)) (previous_owner (i32 -1))
+				(falls_through (bool false)) (move_site (i32 -1))))))
+
 	(fn register_graph_value_aliases
-		(:doc `Link imported immutable names to their checked defining rows.
+		(:doc `Link imported Wove values and C header names to their checked defining rows.
 
 		Store each alias at its original name node in the importer. Only the
-		defining declaration carries an initializer and emits storage.`)
-		(params (trees (shared-slice ScalarTree)) (bindings (shared-slice GraphBinding))
+		defining declaration can carry an initializer and emit storage.`)
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
+			(trees (shared-slice ScalarTree)) (bindings (shared-slice GraphBinding))
 			(statements (mut-slice ScalarStatement)))
 		(returns void)
 		(body
@@ -600,15 +633,22 @@
 					(let binding (slice.load (local bindings) (local index)))
 					(let owner (record.get (local binding) owner))
 					(let file (record.get (local binding) file))
+					(let native (u32.eq (record.get (local binding) provider) (u32 8)))
 					(if
-						(:doc "Register only imported values. Local values already link from the file root.")
+						(:doc "A selected C value can be declared in the same source file as its import.")
 						(bool.and (u32.eq (record.get (local binding) namespace) (u32 2))
-							(bool.not (i32.eq (local owner) (local file))))
+							(bool.or (local native) (bool.not (i32.eq (local owner) (local file)))))
 						(then
 							(let base (record.get (slice.load (local trees) (local owner)) base))
 							(let definition_base (record.get (slice.load (local trees) (local file)) base))
 							(let name (i32.add.wrapping (local base) (record.get (local binding) name_node)))
 							(let definition (i32.add.wrapping (local definition_base) (record.get (local binding) declaration)))
+							(if
+								(:doc "Each alias shares the original native spelling, type, and mutability.")
+								(local native)
+								(then (slice.store (local statements) (local definition)
+									(call native_value_binding (borrow-shared (local arena)) (borrow-shared (local nodes))
+										(borrow-shared (local records)) (local binding) (local definition_base) (local definition)))))
 							(let first (record.get (slice.load (local statements) (local base)) first))
 							(slice.store (local statements) (local name)
 								(record.make ScalarStatement (kind (u32 63)) (target (local name)) (value (local definition))
@@ -652,8 +692,6 @@
 								(then (return (local checked))))
 							(set (local next_record) (record.get (local checked) records))))
 					(set (local file) (i32.add.wrapping (local file) (i32 1)))))
-			(call register_graph_value_aliases (borrow-shared (local trees)) (borrow-shared (local bindings))
-				(borrow-mut (local statements)))
 			(let native_count (call register_graph_native_types (borrow-shared (local arena))
 				(borrow-shared (local nodes)) (borrow-shared (local trees)) (borrow-shared (local bindings))
 				(borrow-mut (local records)) (local next_record) (local context)))
@@ -665,6 +703,9 @@
 				(u32.lt (u32 0) (record.get (local views_checked) error))
 				(then (return (local views_checked))))
 			(set (local next_record) (record.get (local views_checked) records))
+			(call register_graph_value_aliases (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local trees)) (borrow-shared (local bindings))
+				(borrow-mut (local statements)))
 			(let wove (call register_graph_signatures (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings)) (local root)
 				(borrow-shared (local nodes)) (borrow-shared (local selected)) (borrow-shared (local views))
