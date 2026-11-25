@@ -1,0 +1,130 @@
+(module test_runner
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "List the executable's inline tests and report each isolated child result.")
+
+	(use wove-file "../io/process.wove" (only run_process_capture))
+	(use wove-file "../io/stdio.wove" (only write_stdout write_stderr_line))
+	(use wove-file "../text/decimal_write.wove" (only write_decimal_u32 write_decimal_i32))
+
+	(struct ArgSpan (fields (start i32) (end i32)))
+
+	(let list_argument "--list\u0000")
+	(let list_error "could not list Wove tests")
+	(let passed "pass\t")
+	(let failed "fail\t")
+
+	(fn report_result
+		(:doc "Write the escaped label and normalized status in the existing tab-separated format.")
+		(params (inventory (shared-slice u8)) (start i32) (end i32) (status i32))
+		(returns bool)
+		(body
+			(let-mut prefix_written (bool false))
+			(if
+				(:doc "Select the report prefix from the child status.")
+				(i32.eq (local status) 0i32)
+				(then (set (local prefix_written) (call write_stdout (borrow-shared (local passed)))))
+				(else (set (local prefix_written) (call write_stdout (borrow-shared (local failed))))))
+			(let label_written (call write_stdout (borrow-shared (slice.range (local inventory) (local start) (local end)))))
+			(let-mut suffix (array.alloc u8 13i32))
+			(slice.store (local suffix) 0i32 9u8)
+			(let length (call write_decimal_i32 (borrow-mut (local suffix)) 1i32 (local status)))
+			(slice.store (local suffix) (local length) 10u8)
+			(let status_written (call write_stdout
+				(borrow-shared (slice.range (local suffix) 0i32 (i32.add.wrapping (local length) 1i32)))))
+			(return (bool.and (local prefix_written) (bool.and (local label_written) (local status_written))))))
+
+	(fn listing_failed
+		(:doc "Report a child listing or inventory framing failure through inherited stderr.")
+		(params)
+		(returns i32)
+		(body
+			(let written (call write_stderr_line (borrow-shared (local list_error))))
+			(return 1i32)))
+
+	(fn execute_inventory
+		(:doc "Run each listed test once in discovery order, even after earlier child failures.")
+		(params (program (shared-slice u8)) (inventory (shared-slice u8)))
+		(returns i32)
+		(body
+			(let-mut selection (array.alloc u8 11i32))
+			(let-mut discard (array.alloc u8 0i32))
+			(let length (slice.len (local inventory)))
+			(let-mut start 0i32)
+			(let-mut index 0u32)
+			(let-mut unsuccessful (bool false))
+			(while
+				(:doc "One LF terminates each escaped file and name pair.")
+				(i32.lt (local start) (local length))
+				(body
+					(let-mut end (local start))
+					(while
+						(:doc "Find the next record boundary without interpreting escaped label bytes.")
+						(bool.and (i32.lt (local end) (local length))
+							(bool.not (u8.eq (slice.load (local inventory) (local end)) 10u8)))
+						(body (set (local end) (i32.add.wrapping (local end) 1i32))))
+					(if
+						(:doc "A truncated record cannot name a dispatch slot.")
+						(i32.eq (local end) (local length))
+						(then (return (call listing_failed))))
+					(let width (call write_decimal_u32 (borrow-mut (local selection)) 0i32 (local index)))
+					(slice.store (local selection) (local width) 0u8)
+					(let child (call run_process_capture (borrow-shared (local program))
+						(borrow-shared (slice.range (local selection) 0i32 (i32.add.wrapping (local width) 1i32)))
+						(borrow-mut (local discard))))
+					(let status (record.get (local child) status))
+					(let written (call report_result (borrow-shared (local inventory)) (local start) (local end) (local status)))
+					(set (local unsuccessful) (bool.or (local unsuccessful)
+						(bool.or (bool.not (local written)) (bool.not (i32.eq (local status) 0i32)))))
+					(set (local index) (u32.add.wrapping (local index) 1u32))
+					(set (local start) (i32.add.wrapping (local end) 1i32))))
+			(if
+				(:doc "Any child failure or report write failure makes the aggregate status nonzero.")
+				(local unsuccessful)
+				(then (return 1i32)))
+			(return 0i32)))
+
+	(fn run_inventory
+		(:doc "Capture a complete inventory before dispatching any test.")
+		(params (program (shared-slice u8)))
+		(returns i32)
+		(body
+			(let-mut capacity 256i32)
+			(while
+				(:doc "A too-small view is dropped before retrying with more room.")
+				(bool true)
+				(body
+					(let-mut inventory (array.alloc u8 (local capacity)))
+					(let listed (call run_process_capture (borrow-shared (local program))
+						(borrow-shared (local list_argument)) (borrow-mut (local inventory))))
+					(if
+						(:doc "A nonzero list status invalidates even a fully captured prefix.")
+						(bool.not (i32.eq (record.get (local listed) status) 0i32))
+						(then (return (call listing_failed))))
+					(if
+						(:doc "Execute only a complete list, including an empty one.")
+						(bool.not (record.get (local listed) overflow))
+						(then (return (call execute_inventory (borrow-shared (local program))
+							(borrow-shared (slice.range (local inventory) 0i32 (record.get (local listed) length)))))))
+					(if
+						(:doc "Beyond the largest signed view, the inventory cannot be represented.")
+						(i32.eq (local capacity) 2147483647i32)
+						(then (return (call listing_failed))))
+					(if
+						(:doc "Double the next view without overflowing the signed length domain.")
+						(i32.lt 1073741823i32 (local capacity))
+						(then (set (local capacity) 2147483647i32))
+						(else (set (local capacity) (i32.add.wrapping (local capacity) (local capacity)))))))
+			(return 1i32)))
+
+	(fn main
+		(:doc "Accept the running executable's resolved path from the generated test entry.")
+		(params (bytes (shared-slice u8)) (argv (shared-slice ArgSpan)))
+		(returns i32)
+		(body
+			(if
+				(:doc "The host bridge supplies exactly one nonempty path and no user selections.")
+				(bool.or (bool.not (i32.eq (slice.len (local argv)) 1i32)) (i32.eq (slice.len (local bytes)) 0i32))
+				(then (return 2i32)))
+			(return (call run_inventory (borrow-shared (local bytes))))))
+)
