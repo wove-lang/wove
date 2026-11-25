@@ -40,7 +40,7 @@
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies (type ScalarFunction) (type ScalarParameter) (type CallSite)))
 	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword word_shift_type is_i32_division is_fixed_access is_fixed_initializer native_alloc_kind (type ScalarOperator)))
 	(use wove-file "./runtime.wove"
-		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_i32_division open_slice_access open_shared_projection write_slice_length close_runtime_call
+		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_i32_division open_slice_access open_shared_projection write_slice_length close_runtime_call write_site_number
 			open_slice_offset write_slice_items open_array_allocation open_array_copy open_array_drop open_array_borrow))
 	(use wove-file "./integers.wove" (only write_integer_literal))
 	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment c_cast c_i32_bias write_c_name
@@ -755,9 +755,10 @@
 					(let row (array.load (local expressions) (local index)))
 					(if
 						(:doc "Use the temporary if evaluation captured this argument before a later operand.")
-						(bool.or (call requires_value_temporary (struct.get (local row) kind))
-							(call captures_value_argument (local row)
-								(struct.get (array.load (local nodes) (local index)) next_sibling) (borrow-shared (local records))))
+						(bool.or (i32.lt -1i32 (struct.get (local row) extent_check))
+							(bool.or (call requires_value_temporary (struct.get (local row) kind))
+								(call captures_value_argument (local row)
+									(struct.get (array.load (local nodes) (local index)) next_sibling) (borrow-shared (local records)))))
 						(then (set (local cursor) (call write_temporary_name
 							(borrow-shared (local source)) (local index) (local tree_base)
 							(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
@@ -779,6 +780,25 @@
 			(let name_end (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
 				(borrow-mut (local output)) (local space) (local name_prefix) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local name_end) 61u8 (local writing)))))
+
+	(let extent_check_call "wvrt_check_slice_extent_at_span(")
+
+	(fn write_extent_check
+		(:doc "Check the captured descriptor at the argument's original site before evaluating later arguments.")
+		(params (source (shared-array u8)) (expression ScalarExpression) (index i32) (tree_base i32) (file i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local extent_check_call))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let name (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let length (call write_slice_length (borrow-mut (local output)) (local name) (local writing)))
+			(let-mut digits (array.alloc u8 11i32))
+			(let expected (call write_site_number (borrow-mut (local output)) (local length)
+				(struct.get (local expression) extent_check) (borrow-mut (local digits)) (local writing)))
+			(let closed (call close_runtime_call (borrow-mut (local output)) (local expected)
+				(local file) (struct.get (local expression) start) (struct.get (local expression) end) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local closed) 59u8 (local writing)))))
 
 	(fn write_short_circuit_edge
 		(:doc `Write the branch boundary after either operand of bool.and or bool.or.
@@ -922,13 +942,14 @@
 							(let already_ready (bool.or (bool.or (local converted) (local repeated))
 								(bool.or (bool.or (local direct_array) (struct.get (local operator) short_circuit))
 									(u32.eq (local kind) (call c_null_argument_kind)))))
+							(let extent_guard (i32.lt -1i32 (struct.get (local expression) extent_check)))
 							(let copy_argument (bool.and (u32.eq (local parent_kind) 3u32)
 								(call captures_value_argument (local expression) (struct.get (local node) next_sibling)
 									(borrow-shared (local records)))))
 							(if
 								(:doc "Save an eager compound value or checked operand before moving to its sibling.")
 								(bool.and (bool.not (local already_ready))
-									(bool.or (bool.or (local copy_argument) (call requires_value_temporary (local kind)))
+									(bool.or (bool.or (local extent_guard) (bool.or (local copy_argument) (call requires_value_temporary (local kind))))
 										(bool.or (u32.lt 0u32 (struct.get (local parent_operator) result))
 											(bool.or (call is_c_argument_call (local parent) (borrow-shared (local functions)))
 												(bool.or
@@ -942,6 +963,12 @@
 										(local index) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
 										(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 59u8 (local writing)))))
+							(if
+								(:doc "A checked call argument reuses the same captured descriptor after its guard.")
+								(local extent_guard)
+								(then (set (local cursor) (call write_extent_check (borrow-shared (local source))
+									(local expression) (local index) (local tree_base) (struct.get (local caller) file)
+									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 							(if
 								(:doc "Open the right guard after the left value. Close it after the right value.")
 								(struct.get (local parent_operator) short_circuit)

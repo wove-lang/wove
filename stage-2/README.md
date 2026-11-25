@@ -533,6 +533,16 @@ to record owners.
 array. It evaluates a computed fixed array receiver before returning its
 extent.
 
+Wove functions can require an exact element count with
+`(shared-array u8 FACET)` or `(mut-array u8 2)`. The optional extent uses the
+same decimal or immutable module integer syntax as an inline array. A
+whole inline array, a reborrow of an exact parameter, or a byte range with
+nonnegative literal endpoints can prove the argument's length. The usual
+range bounds checks still apply. If the length is unknown at compile time,
+the compiler checks the evaluated descriptor at the call argument before
+any later arguments run. An exact view can reborrow into a parameter that
+accepts any length.
+
 A byte-range argument uses `(borrow-shared (array.range (local source) start end))`
 or the same projection with `borrow-mut`. An exclusive range requires a
 writable owner or mutable view. The source view and its exact `i32` endpoints
