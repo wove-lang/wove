@@ -1,0 +1,116 @@
+(module source_target
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Represent the caller's explicit target for source selection.
+
+	Zero denotes an unspecified OS or architecture. Deployment uses
+	major * 10000 + minor * 100 + patch, with -1 for unavailable metadata.
+	No predicate consults the host running the compiler.`)
+
+	(use wove-file "../c/identifiers.wove" (only (as is_c_identifier is_target_identifier)))
+	(use wove-file "../text/match.wove" (only (as is_byte_at byte_at) is_three_bytes))
+	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
+	(use wove-file "./scan.wove" (only (type SourceNode) (type Token)))
+	(use wove-file "./strings.wove" (only decode_string))
+
+	(struct SelectionContext (fields (mode u32) (os u8) (arch u8) (deployment i32)))
+
+	(fn default_selection
+		(:doc `Create a mode-only context for callers without a supplied target.`)
+		(params (mode u32))
+		(returns SelectionContext)
+		(body (return (record.make SelectionContext
+			(mode (local mode)) (os (u8 0)) (arch (u8 0)) (deployment (i32 -1))))))
+
+	(fn target_os
+		(:doc `Map canonical target names to OS codes. Linux is 1 and macOS is 2.`)
+		(params (bytes (shared-slice u8)))
+		(returns u8)
+		(body
+			(if
+				(:doc "Neither supported OS has a name longer or shorter than five bytes.")
+				(bool.not (i32.eq (slice.len (local bytes)) (i32 5)))
+				(then (return (u8 0))))
+			(if
+				(:doc "Match linux exactly.")
+				(bool.and (call is_three_bytes (borrow-shared (local bytes)) (i32 0) (u8 108) (u8 105) (u8 110))
+					(bool.and (call byte_at (borrow-shared (local bytes)) (i32 0) (i32 3) (u8 117))
+						(call byte_at (borrow-shared (local bytes)) (i32 0) (i32 4) (u8 120))))
+				(then (return (u8 1))))
+			(if
+				(:doc "The archived cfg spelling for Darwin is macos.")
+				(bool.and (call is_three_bytes (borrow-shared (local bytes)) (i32 0) (u8 109) (u8 97) (u8 99))
+					(bool.and (call byte_at (borrow-shared (local bytes)) (i32 0) (i32 3) (u8 111))
+						(call byte_at (borrow-shared (local bytes)) (i32 0) (i32 4) (u8 115))))
+				(then (return (u8 2))))
+			(return (u8 0))))
+
+	(fn target_arch
+		(:doc `Map canonical architecture names to codes. aarch64 is 1 and x86_64 is 2.`)
+		(params (bytes (shared-slice u8)))
+		(returns u8)
+		(body
+			(let width (slice.len (local bytes)))
+			(if
+				(:doc "Match aarch64 including its final digit.")
+				(bool.and (i32.eq (local width) (i32 7))
+					(bool.and (call is_three_bytes (borrow-shared (local bytes)) (i32 0) (u8 97) (u8 97) (u8 114))
+						(bool.and (call is_three_bytes (borrow-shared (local bytes)) (i32 3) (u8 99) (u8 104) (u8 54))
+							(call byte_at (borrow-shared (local bytes)) (i32 0) (i32 6) (u8 52)))))
+				(then (return (u8 1))))
+			(if
+				(:doc "Match the underscore in the canonical x86_64 spelling.")
+				(bool.and (i32.eq (local width) (i32 6))
+					(bool.and (call is_three_bytes (borrow-shared (local bytes)) (i32 0) (u8 120) (u8 56) (u8 54))
+						(call is_three_bytes (borrow-shared (local bytes)) (i32 3) (u8 95) (u8 54) (u8 52))))
+				(then (return (u8 2))))
+			(return (u8 0))))
+
+	(fn cfg_target_name
+		(:doc `Decode an OS or architecture operand. Return -1 for malformed syntax and zero for other names.`)
+		(params (source (shared-slice u8)) (node SourceNode) (architecture bool))
+		(returns i32)
+		(body
+			(if
+				(:doc "Platform names are string operands.")
+				(bool.not (u32.eq (record.get (local node) kind) (u32 2)))
+				(then (return (i32 -1))))
+			(let start (record.get (local node) start))
+			(let end (record.get (local node) end))
+			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let result (call decode_string (borrow-shared (local source))
+				(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
+				(borrow-mut (local decoded))))
+			(if
+				(:doc "A rejected escape has no decoded name to compare.")
+				(u32.lt (u32 0) (record.get (local result) error))
+				(then (return (i32 -1))))
+			(let written (record.get (local result) written))
+			(if
+				(:doc "The archive requires a nonempty ASCII identifier inside the target string.")
+				(bool.not (call is_target_identifier (borrow-shared (local decoded)) (i32 0) (local written)))
+				(then (return (i32 -1))))
+			(if
+				(:doc "Architecture codes are independent of operating system codes.")
+				(local architecture)
+				(then (return (int.convert i32 (call target_arch
+					(borrow-shared (slice.range (local decoded) (i32 0) (local written))))))))
+			(return (int.convert i32 (call target_os
+				(borrow-shared (slice.range (local decoded) (i32 0) (local written))))))))
+
+	(fn cfg_deployment_limit
+		(:doc `Read the archive's nonnegative i32 deployment limit, or return -1 for a malformed operand.`)
+		(params (source (shared-slice u8)) (node SourceNode))
+		(returns i32)
+		(body
+			(if
+				(:doc "A deployment limit is an unquoted decimal atom.")
+				(bool.not (u32.eq (record.get (local node) kind) (u32 1)))
+				(then (return (i32 -1))))
+			(let read (call read_decimal_digits (borrow-shared (local source))
+				(record.get (local node) start) (record.get (local node) end) (u32 214748364) (u32 7)))
+			(if
+				(:doc "Reject invalid digits and values above INT32_MAX.")
+				(i32.lt (record.get (local read) digits) (i32 0))
+				(then (return (i32 -1))))
+			(return (int.convert i32 (record.get (local read) magnitude))))))

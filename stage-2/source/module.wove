@@ -12,6 +12,8 @@
 	(use wove-file "./scan.wove"
 		(only is_identifier_head is_metadata_form is_disabled_form named_form_error (type SourceNode) (type FormCheck)))
 
+	(use wove-file "./target.wove" (only default_selection cfg_target_name cfg_deployment_limit (type SelectionContext)))
+
 	(struct FormParts (fields (head i32) (metadata i32) (operands i32) (name i32)))
 	(struct SelectedDeclaration (fields (node i32) (test bool)))
 	(struct ModuleRead
@@ -139,48 +141,157 @@
 			(return (record.make Selection (active (local active)) (error (local error)) (test (local test))
 				(start (record.get (local node) start)) (end (record.get (local node) end))))))
 
+	(fn cfg_operator
+		(:doc `Classify not, all, any, os, arch, os_min, and os_max with codes 6 and 8 through 13.`)
+		(params (source (shared-slice u8)) (head SourceNode))
+		(returns u32)
+		(body
+			(let start (record.get (local head) start))
+			(let width (i32.sub.wrapping (record.get (local head) end) (local start)))
+			(if
+				(:doc "Boolean predicate operators are exactly three bytes.")
+				(i32.eq (local width) (i32 3))
+				(then
+					(if
+						(:doc "Match the complete all operator.")
+						(call is_three_bytes (borrow-shared (local source)) (local start) (u8 97) (u8 108) (u8 108))
+						(then (return (u32 8))))
+					(if
+						(:doc "Match the complete any operator.")
+						(call is_three_bytes (borrow-shared (local source)) (local start) (u8 97) (u8 110) (u8 121))
+						(then (return (u32 9))))
+					(return (call source_keyword (borrow-shared (local source)) (local head)))))
+			(if
+				(:doc "Match the operating system selector.")
+				(bool.and (i32.eq (local width) (i32 2))
+					(bool.and (call is_head_byte (borrow-shared (local source)) (local start) (i32 0) (u8 111))
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 1) (u8 115))))
+				(then (return (u32 10))))
+			(if
+				(:doc "Match the complete architecture selector.")
+				(bool.and (i32.eq (local width) (i32 4))
+					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) (u8 97) (u8 114) (u8 99))
+						(call is_head_byte (borrow-shared (local source)) (local start) (i32 3) (u8 104))))
+				(then (return (u32 11))))
+			(if
+				(:doc "The two deployment selectors share the os_m prefix.")
+				(bool.and (i32.eq (local width) (i32 6))
+					(call is_three_bytes (borrow-shared (local source)) (local start) (u8 111) (u8 115) (u8 95)))
+				(then
+					(let suffix (i32.add.wrapping (local start) (i32 3)))
+					(if
+						(:doc "Select the inclusive lower bound.")
+						(call is_three_bytes (borrow-shared (local source)) (local suffix) (u8 109) (u8 105) (u8 110))
+						(then (return (u32 12))))
+					(if
+						(:doc "Select the inclusive upper bound.")
+						(call is_three_bytes (borrow-shared (local source)) (local suffix) (u8 109) (u8 97) (u8 120))
+						(then (return (u32 13))))))
+			(return (u32 0))))
+
+	(fn cfg_target_selection
+		(:doc `Compare one target predicate operand and retain its span when malformed.`)
+		(params (source (shared-slice u8)) (value SourceNode) (operator u32) (context SelectionContext))
+		(returns Selection)
+		(body
+			(if
+				(:doc "OS and architecture predicates compare the decoded string to the supplied name.")
+				(u32.lt (local operator) (u32 12))
+				(then
+					(let architecture (u32.eq (local operator) (u32 11)))
+					(let code (call cfg_target_name (borrow-shared (local source)) (local value) (local architecture)))
+					(if (i32.lt (local code) (i32 0)) (then (return (call selection_at (local value) (bool false) (u32 21) (bool false)))))
+					(let-mut target (record.get (local context) os))
+					(if (local architecture) (then (set (local target) (record.get (local context) arch))))
+					(return (call selection_at (local value)
+						(bool.and (u8.lt (u8 0) (local target)) (i32.eq (local code) (int.convert i32 (local target))))
+						(u32 0) (bool false)))))
+			(let limit (call cfg_deployment_limit (borrow-shared (local source)) (local value)))
+			(if (i32.lt (local limit) (i32 0)) (then (return (call selection_at (local value) (bool false) (u32 21) (bool false)))))
+			(let version (record.get (local context) deployment))
+			(if
+				(:doc "Without deployment metadata neither bound can match.")
+				(i32.lt (local version) (i32 0))
+				(then (return (call selection_at (local value) (bool false) (u32 0) (bool false)))))
+			(let below (i32.lt (local version) (local limit)))
+			(let above (i32.lt (local limit) (local version)))
+			(let active (bool.not (bool.or (bool.and (u32.eq (local operator) (u32 12)) (local below))
+				(bool.and (u32.eq (local operator) (u32 13)) (local above)))))
+			(return (call selection_at (local value) (local active) (u32 0) (bool false)))))
+
 	(fn cfg_selection
-		(:doc `Check bootstrap or test, optionally negated, in the selected compilation mode.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (operand i32) (mode u32))
+		(:doc `Evaluate one predicate while validating every operand, including inactive alternatives.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(operand i32) (context SelectionContext) (depth i32))
 		(returns Selection)
 		(body
 			(let node (slice.load (local nodes) (local operand)))
-			(let negate (u32.eq (record.get (local node) kind) (u32 40)))
-			(let-mut argument (local operand))
 			(if
-				(:doc "A compound predicate must be not with one ordinary operand.")
-				(local negate)
+				(:doc "Limit recursive predicate evaluation before an arbitrarily deep source can exhaust the host stack.")
+				(i32.eq (local depth) (i32 64))
+				(then (return (call selection_at (local node) (bool false) (u32 21) (bool false)))))
+			(if
+				(:doc "Only bootstrap and test are supported as bare predicates.")
+				(bool.not (u32.eq (record.get (local node) kind) (u32 40)))
 				(then
-					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-					(let head (slice.load (local nodes) (record.get (local parts) head)))
-					(set (local argument) (record.get (local parts) operands))
+					(let keyword (call source_keyword (borrow-shared (local source)) (local node)))
 					(if
-						(:doc "Report an unsupported operator or missing operand at the predicate.")
-						(bool.or (bool.not (u32.eq (call source_keyword (borrow-shared (local source)) (local head)) (u32 6)))
-							(i32.lt (local argument) (i32 0)))
+						(:doc "Unknown features keep the existing unsupported-predicate diagnostic.")
+						(bool.not (bool.or (u32.eq (local keyword) (u32 7)) (u32.eq (local keyword) (u32 5))))
 						(then (return (call selection_at (local node) (bool false) (u32 21) (bool false)))))
-					(let arg (slice.load (local nodes) (local argument)))
-					(if
-						(:doc "Negation accepts no second operand.")
-						(bool.not (i32.lt (record.get (local arg) next_sibling) (i32 0)))
-						(then (return (call selection_at (local node) (bool false) (u32 21) (bool false)))))))
-			(let predicate (slice.load (local nodes) (local argument)))
-			(let keyword (call source_keyword (borrow-shared (local source)) (local predicate)))
+					(let mode (record.get (local context) mode))
+					(let active (bool.or (bool.and (u32.eq (local keyword) (u32 7)) (u32.eq (local mode) (u32 1)))
+						(bool.and (u32.eq (local keyword) (u32 5)) (u32.eq (local mode) (u32 2)))))
+					(return (call selection_at (local node) (local active) (u32 0) (bool false)))))
+			(let next_depth (i32.add.wrapping (local depth) (i32 1)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let operator (call cfg_operator (borrow-shared (local source)) (slice.load (local nodes) (record.get (local parts) head))))
+			(let argument (record.get (local parts) operands))
+			(let conjunction (u32.eq (local operator) (u32 8)))
 			(if
-				(:doc "Only the exact bootstrap and test predicates are supported.")
-				(bool.not (bool.or (u32.eq (local keyword) (u32 7)) (u32.eq (local keyword) (u32 5))))
-				(then (return (call selection_at (local predicate) (bool false) (u32 21) (bool false)))))
-			(let active (bool.or (bool.and (u32.eq (local keyword) (u32 7)) (u32.eq (local mode) (u32 1)))
-				(bool.and (u32.eq (local keyword) (u32 5)) (u32.eq (local mode) (u32 2)))))
+				(:doc "An empty all is true and an empty any is false.")
+				(bool.or (local conjunction) (u32.eq (local operator) (u32 9)))
+				(then
+					(let-mut active (local conjunction))
+					(let-mut child (local argument))
+					(while
+						(:doc "Validate later operands even after the combined result is known.")
+						(i32.lt (i32 -1) (local child))
+						(body
+							(let result (call cfg_selection (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local child) (local context) (local next_depth)))
+							(if (u32.lt (u32 0) (record.get (local result) error)) (then (return (local result))))
+							(if
+								(:doc "Combine the checked child using the parent's Boolean operator.")
+								(local conjunction)
+								(then (set (local active) (bool.and (local active) (record.get (local result) active))))
+								(else (set (local active) (bool.or (local active) (record.get (local result) active)))))
+							(set (local child) (record.get (slice.load (local nodes) (local child)) next_sibling))))
+					(return (call selection_at (local node) (local active) (u32 0) (bool false)))))
+			(let negation (u32.eq (local operator) (u32 6)))
 			(if
-				(:doc "Negation inverts the predicate without changing the compilation mode.")
-				(local negate)
-				(then (return (call selection_at (local node) (bool.not (local active)) (u32 0) (bool false)))))
-			(return (call selection_at (local node) (local active) (u32 0) (bool false)))))
+				(:doc "Only negation and the target predicates take a single operand.")
+				(bool.or (i32.lt (local argument) (i32 0))
+					(bool.not (bool.or (local negation) (u32.lt (u32 9) (local operator)))))
+				(then (return (call selection_at (local node) (bool false) (u32 21) (bool false)))))
+			(let value (slice.load (local nodes) (local argument)))
+			(if
+				(:doc "An extra operand makes the predicate malformed.")
+				(i32.lt (i32 -1) (record.get (local value) next_sibling))
+				(then (return (call selection_at (local node) (bool false) (u32 21) (bool false)))))
+			(if
+				(:doc "Negate a checked predicate without changing the context.")
+				(local negation)
+				(then
+					(let result (call cfg_selection (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local argument) (local context) (local next_depth)))
+					(if (u32.lt (u32 0) (record.get (local result) error)) (then (return (local result))))
+					(return (call selection_at (local node) (bool.not (record.get (local result) active)) (u32 0) (bool false)))))
+			(return (call cfg_target_selection (borrow-shared (local source)) (local value) (local operator) (local context)))))
 
 	(fn select_directive
 		(:doc `Read a checked pragma directive and retain a direct test marker on the selected form.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (selectable bool) (mode u32))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (selectable bool) (context SelectionContext))
 		(returns Selection)
 		(body
 			(if
@@ -202,7 +313,7 @@
 					(if
 						(:doc "An empty test marker is valid on a selectable form in every mode.")
 						(bool.and (local selectable) (i32.lt (local operand) (i32 0)))
-						(then (return (call selection_at (local node) (u32.eq (local mode) (u32 2)) (u32 0) (bool true)))))
+						(then (return (call selection_at (local node) (u32.eq (record.get (local context) mode) (u32 2)) (u32 0) (bool true)))))
 					(return (call selection_at (local node) (bool false) (u32 21) (bool false)))))
 			(if
 				(:doc "A cfg with no predicate fails before reading any operand row.")
@@ -213,7 +324,7 @@
 				(:doc "A cfg accepts exactly one predicate.")
 				(bool.not (i32.lt (record.get (local predicate) next_sibling) (i32 0)))
 				(then (return (call selection_at (local node) (bool false) (u32 21) (bool false)))))
-			(let choice (call cfg_selection (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand) (local mode)))
+			(let choice (call cfg_selection (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand) (local context) (i32 0)))
 			(if
 				(:doc "A valid cfg is still invalid where declaration selection is unavailable.")
 				(bool.and (bool.not (local selectable)) (u32.eq (record.get (local choice) error) (u32 0)))
@@ -240,7 +351,7 @@
 		Every known directive is checked in prefix order even after one excludes
 		the target. Other entries and unknown directive contents remain opaque.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
-			(node SourceNode) (parts FormParts) (selectable bool) (mode u32))
+			(node SourceNode) (parts FormParts) (selectable bool) (context SelectionContext))
 		(returns Selection)
 		(body
 			(if
@@ -270,7 +381,7 @@
 								(body
 									(let item (slice.load (local nodes) (local directive)))
 									(let result (call select_directive (borrow-shared (local source))
-										(borrow-shared (local nodes)) (local item) (local selectable) (local mode)))
+										(borrow-shared (local nodes)) (local item) (local selectable) (local context)))
 									(if
 										(:doc "Return the first malformed directive's original span.")
 										(u32.lt (u32 0) (record.get (local result) error))
@@ -286,7 +397,7 @@
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (parts FormParts))
 		(returns Selection)
 		(body (return (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
-			(local node) (local parts) (bool false) (u32 0)))))
+			(local node) (local parts) (bool false) (call default_selection (u32 0))))))
 
 	(fn next_declaration
 		(:doc `Find the next declaration after a leaf or a group that will not be descended.`)
@@ -314,6 +425,14 @@
 				(start (local start)) (end (local end)) (error (local error)) (mode (local mode))))))
 
 	(fn read_module
+		(:doc `Read a module for a caller that supplies only the compilation mode.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (checked FormCheck) (mode u32)
+			(output (mut-slice SelectedDeclaration)))
+		(returns ModuleRead)
+		(body (return (call read_module_for_target (borrow-shared (local source)) (borrow-shared (local nodes))
+			(local checked) (call default_selection (local mode)) (borrow-mut (local output))))))
+
+	(fn read_module_for_target
 		(:doc `Read a checked module and collect selected declarations in source order.
 
 		Meta and operand views refer to the original tree. An excluded module succeeds
@@ -321,11 +440,12 @@
 		at its source span and keep the previously written indices.`)
 		(:expect
 			(tests "stage-2/source_modules.tsv")
-			(issues "gh:wove-lang/wove:66" "gh:wove-lang/wove:146"))
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (checked FormCheck) (mode u32)
+			(issues "gh:wove-lang/wove:66" "gh:wove-lang/wove:146" "gh:wove-lang/wove:190"))
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (checked FormCheck) (context SelectionContext)
 			(output (mut-slice SelectedDeclaration)))
 		(returns ModuleRead)
 		(body
+			(let mode (record.get (local context) mode))
 			(let start (record.get (local checked) start))
 			(let end (record.get (local checked) end))
 			(let error (record.get (local checked) error))
@@ -357,7 +477,7 @@
 				(then (return (call module_result (local mode) (i32 -1) (i32 0) (bool false)
 					(record.get (local name_node) start) (record.get (local name_node) end) (u32 19)))))
 			(let selected (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local node) (local parts) (bool true) (local mode)))
+				(local node) (local parts) (bool true) (local context)))
 			(if
 				(:doc "A malformed module selector keeps its own coordinates.")
 				(u32.lt (u32 0) (record.get (local selected) error))
@@ -381,7 +501,7 @@
 							(record.get (local item) start) (record.get (local item) end) (u32 20)))))
 					(let item_parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
 					(let choice (call select_form (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local item) (local item_parts) (bool true) (local mode)))
+						(local item) (local item_parts) (bool true) (local context)))
 					(if
 						(:doc "Selection failures keep the directive span and any earlier indices.")
 						(u32.lt (u32 0) (record.get (local choice) error))

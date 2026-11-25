@@ -37,6 +37,9 @@ def read_cases(manifest):
 			assets = []
 		elif kind == "mode" and label is not None:
 			arguments[:0] = ["--mode", payload]
+		elif kind == "target" and label is not None:
+			os_name, arch, deployment = fields
+			arguments[:0] = ["--target", os_name, arch, deployment]
 		elif kind == "file" and label is not None:
 			identity, virtual_path, source = fields
 			arguments.extend((identity, virtual_path, source))
