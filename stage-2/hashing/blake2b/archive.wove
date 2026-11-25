@@ -1,0 +1,369 @@
+(module blake2b
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Unkeyed sequential BLAKE2b-256 as specified in RFC 7693.")
+
+	(use wove-file "../base32hex.wove" (only digest_base32hex))
+
+	(struct Blake2b
+		(fields
+			(words (fixed-array u64 (i32 8)))
+			(block (fixed-array u8 (i32 128)))
+			(used i32)
+			(bytes_low u64)
+			(bytes_high u64)))
+
+	(fn blake2b_iv
+		(:doc "Return the RFC initialization vector shared by the parameter block and compression.")
+		(params)
+		(returns (fixed-array u64 (i32 8)))
+		(body
+			(return (array.make u64
+				(u64 7640891576956012808) (u64 13503953896175478587)
+				(u64 4354685564936845355) (u64 11912009170470909681)
+				(u64 5840696475078001361) (u64 11170449401992604703)
+				(u64 2270897969802886507) (u64 6620516959819538809)))))
+
+	(fn blake2b
+		(:doc "Set digest size 32, key length zero, fanout one, and depth one in the parameter block.")
+		(params)
+		(returns Blake2b)
+		(body
+			(let-mut words (call blake2b_iv))
+			(slice.store (local words) (i32 0) (u64.xor (slice.load (local words) (i32 0)) (u64 16842784)))
+			(return (record.make Blake2b
+				(words (local words))
+				(block (array.repeat u8 (i32 128) (u8 0)))
+				(used (i32 0))
+				(bytes_low (u64 0))
+				(bytes_high (u64 0))))))
+
+	(fn blake2b_load
+		(:doc "Load one complete message word in the specified byte order on every target.")
+		(params (block (shared-slice u8)) (at i32))
+		(returns u64)
+		(body
+			(return
+				(u64.or
+					(u64.or
+						(u64.or
+							(u64.or
+								(u64.or
+									(u64.or
+										(u64.or
+											(int.convert u64 (slice.load (local block) (local at)))
+											(u64.shl (int.convert u64 (slice.load (local block)
+												(i32.add.wrapping (local at) (i32 1)))) (i32 8)))
+										(u64.shl (int.convert u64 (slice.load (local block)
+											(i32.add.wrapping (local at) (i32 2)))) (i32 16)))
+									(u64.shl (int.convert u64 (slice.load (local block)
+										(i32.add.wrapping (local at) (i32 3)))) (i32 24)))
+								(u64.shl (int.convert u64 (slice.load (local block)
+									(i32.add.wrapping (local at) (i32 4)))) (i32 32)))
+							(u64.shl (int.convert u64 (slice.load (local block)
+								(i32.add.wrapping (local at) (i32 5)))) (i32 40)))
+						(u64.shl (int.convert u64 (slice.load (local block)
+							(i32.add.wrapping (local at) (i32 6)))) (i32 48)))
+					(u64.shl (int.convert u64 (slice.load (local block)
+						(i32.add.wrapping (local at) (i32 7)))) (i32 56))))))
+
+	(fn blake2b_rotate
+		(:doc "Rotate a mixing word by a nonzero BLAKE2b rotation count.")
+		(params (value u64) (count i32))
+		(returns u64)
+		(body
+			(return (u64.or (u64.shr (local value) (local count))
+				(u64.shl (local value) (i32.sub.wrapping (i32 64) (local count)))))))
+
+	(struct
+		(:doc "Store one G group as four words, with no dynamic work-vector indices.")
+		Blake2bLane
+		(fields (a u64) (b u64) (c u64) (d u64)))
+
+	(struct
+		(:doc "The work vector's four columns in column order.")
+		Blake2bWork
+		(fields (c0 Blake2bLane) (c1 Blake2bLane) (c2 Blake2bLane) (c3 Blake2bLane)))
+
+	(fn blake2b_mix
+		(:doc "Mix two message words into a column or diagonal.")
+		(params (lane Blake2bLane) (x u64) (y u64))
+		(returns Blake2bLane)
+		(body
+			(let-mut next (local lane))
+			(set (record.get (local next) a) (u64.add.wrapping
+				(u64.add.wrapping (record.get (local next) a) (record.get (local next) b)) (local x)))
+			(set (record.get (local next) d) (call blake2b_rotate
+				(u64.xor (record.get (local next) d) (record.get (local next) a)) (i32 32)))
+			(set (record.get (local next) c) (u64.add.wrapping (record.get (local next) c) (record.get (local next) d)))
+			(set (record.get (local next) b) (call blake2b_rotate
+				(u64.xor (record.get (local next) b) (record.get (local next) c)) (i32 24)))
+			(set (record.get (local next) a) (u64.add.wrapping
+				(u64.add.wrapping (record.get (local next) a) (record.get (local next) b)) (local y)))
+			(set (record.get (local next) d) (call blake2b_rotate
+				(u64.xor (record.get (local next) d) (record.get (local next) a)) (i32 16)))
+			(set (record.get (local next) c) (u64.add.wrapping (record.get (local next) c) (record.get (local next) d)))
+			(set (record.get (local next) b) (call blake2b_rotate
+				(u64.xor (record.get (local next) b) (record.get (local next) c)) (i32 63)))
+			(return (local next))))
+
+	(fn blake2b_pair
+		(:doc "Read consecutive message selectors from the round's packed permutation.")
+		(params (lane Blake2bLane) (words (shared-slice u64)) (permutation u64))
+		(returns Blake2bLane)
+		(body
+			(let x (slice.load (local words) (int.convert i32 (u64.and (local permutation) (u64 15)))))
+			(let y (slice.load (local words) (int.convert i32 (u64.and (u64.shr (local permutation) (i32 4)) (u64 15)))))
+			(return (call blake2b_mix (local lane) (local x) (local y)))))
+
+	(fn blake2b_round
+		(:doc "Gather the diagonals after the column mixes, then restore column order.")
+		(params (work Blake2bWork) (words (shared-slice u64)) (permutation u64))
+		(returns Blake2bWork)
+		(body
+			(let c0 (call blake2b_pair (record.get (local work) c0) (borrow-shared (local words)) (local permutation)))
+			(let c1 (call blake2b_pair (record.get (local work) c1) (borrow-shared (local words)) (u64.shr (local permutation) (i32 8))))
+			(let c2 (call blake2b_pair (record.get (local work) c2) (borrow-shared (local words)) (u64.shr (local permutation) (i32 16))))
+			(let c3 (call blake2b_pair (record.get (local work) c3) (borrow-shared (local words)) (u64.shr (local permutation) (i32 24))))
+			(let d0 (call blake2b_pair (record.make Blake2bLane
+				(a (record.get (local c0) a)) (b (record.get (local c1) b))
+				(c (record.get (local c2) c)) (d (record.get (local c3) d)))
+				(borrow-shared (local words)) (u64.shr (local permutation) (i32 32))))
+			(let d1 (call blake2b_pair (record.make Blake2bLane
+				(a (record.get (local c1) a)) (b (record.get (local c2) b))
+				(c (record.get (local c3) c)) (d (record.get (local c0) d)))
+				(borrow-shared (local words)) (u64.shr (local permutation) (i32 40))))
+			(let d2 (call blake2b_pair (record.make Blake2bLane
+				(a (record.get (local c2) a)) (b (record.get (local c3) b))
+				(c (record.get (local c0) c)) (d (record.get (local c1) d)))
+				(borrow-shared (local words)) (u64.shr (local permutation) (i32 48))))
+			(let d3 (call blake2b_pair (record.make Blake2bLane
+				(a (record.get (local c3) a)) (b (record.get (local c0) b))
+				(c (record.get (local c1) c)) (d (record.get (local c2) d)))
+				(borrow-shared (local words)) (u64.shr (local permutation) (i32 56))))
+			(return (record.make Blake2bWork
+				(c0 (record.make Blake2bLane
+					(a (record.get (local d0) a)) (b (record.get (local d3) b))
+					(c (record.get (local d2) c)) (d (record.get (local d1) d))))
+				(c1 (record.make Blake2bLane
+					(a (record.get (local d1) a)) (b (record.get (local d0) b))
+					(c (record.get (local d3) c)) (d (record.get (local d2) d))))
+				(c2 (record.make Blake2bLane
+					(a (record.get (local d2) a)) (b (record.get (local d1) b))
+					(c (record.get (local d0) c)) (d (record.get (local d3) d))))
+				(c3 (record.make Blake2bLane
+					(a (record.get (local d3) a)) (b (record.get (local d2) b))
+					(c (record.get (local d1) c)) (d (record.get (local d0) d))))))))
+
+	(fn blake2b_block
+		(:doc "Compress one padded or full block with the cumulative count of unpadded bytes.")
+		(params (state (mut-slice u64)) (block (shared-slice u8)) (low u64) (high u64) (last bool))
+		(returns void)
+		(body
+			(let iv (call blake2b_iv))
+			(let-mut words (array.repeat u64 (i32 16) (u64 0)))
+			(let-mut i (i32 0))
+			(while
+				(:doc "Decode all sixteen little-endian message words.")
+				(i32.lt (local i) (i32 16))
+				(body
+					(slice.store (local words) (local i)
+						(call blake2b_load (borrow-shared (local block)) (i32.mul (local i) (i32 8))))
+					(set (local i) (i32.add.wrapping (local i) (i32 1)))))
+			(let-mut final_word (slice.load (local iv) (i32 6)))
+			(if
+				(:doc "Complement the final flag word for the last block.")
+				(local last)
+				(then (set (local final_word) (u64.not (local final_word)))))
+			(let-mut work (record.make Blake2bWork
+				(c0 (record.make Blake2bLane
+					(a (slice.load (local state) (i32 0))) (b (slice.load (local state) (i32 4)))
+					(c (slice.load (local iv) (i32 0))) (d (u64.xor (slice.load (local iv) (i32 4)) (local low)))))
+				(c1 (record.make Blake2bLane
+					(a (slice.load (local state) (i32 1))) (b (slice.load (local state) (i32 5)))
+					(c (slice.load (local iv) (i32 1))) (d (u64.xor (slice.load (local iv) (i32 5)) (local high)))))
+				(c2 (record.make Blake2bLane
+					(a (slice.load (local state) (i32 2))) (b (slice.load (local state) (i32 6)))
+					(c (slice.load (local iv) (i32 2))) (d (local final_word))))
+				(c3 (record.make Blake2bLane
+					(a (slice.load (local state) (i32 3))) (b (slice.load (local state) (i32 7)))
+					(c (slice.load (local iv) (i32 3))) (d (slice.load (local iv) (i32 7)))))))
+			(let
+				(:doc "RFC 7693 SIGMA rows packed with the first selector in the low nibble. Rounds ten and eleven repeat the first two permutations.")
+				schedule (array.make u64
+					(u64 18364758544493064720) (u64 3853709921291437230)
+					(u64 5266788149650328715) (u64 10305543691612001175)
+					(u64 15242093322790139145) (u64 10515720223929181890)
+					(u64 13270197634454188380) (u64 11702690517083809725)
+					(u64 6503616966983130870) (u64 991893350865389610)))
+			(set (local i) (i32 0))
+			(while
+				(:doc "All twelve rounds mix the same block with a different order of message words.")
+				(i32.lt (local i) (i32 12))
+				(body
+					(set (local work) (call blake2b_round (local work) (borrow-shared (local words))
+						(slice.load (local schedule) (i32.rem (local i) (i32 10)))))
+					(set (local i) (i32.add.wrapping (local i) (i32 1)))))
+			(slice.store
+				(:doc "Fold both halves back into the original chaining state.")
+				(local state) (i32 0) (u64.xor (u64.xor
+					(slice.load (local state) (i32 0)) (record.get (record.get (local work) c0) a))
+					(record.get (record.get (local work) c0) c)))
+			(slice.store (local state) (i32 1) (u64.xor (u64.xor
+				(slice.load (local state) (i32 1)) (record.get (record.get (local work) c1) a))
+				(record.get (record.get (local work) c1) c)))
+			(slice.store (local state) (i32 2) (u64.xor (u64.xor
+				(slice.load (local state) (i32 2)) (record.get (record.get (local work) c2) a))
+				(record.get (record.get (local work) c2) c)))
+			(slice.store (local state) (i32 3) (u64.xor (u64.xor
+				(slice.load (local state) (i32 3)) (record.get (record.get (local work) c3) a))
+				(record.get (record.get (local work) c3) c)))
+			(slice.store (local state) (i32 4) (u64.xor (u64.xor
+				(slice.load (local state) (i32 4)) (record.get (record.get (local work) c0) b))
+				(record.get (record.get (local work) c0) d)))
+			(slice.store (local state) (i32 5) (u64.xor (u64.xor
+				(slice.load (local state) (i32 5)) (record.get (record.get (local work) c1) b))
+				(record.get (record.get (local work) c1) d)))
+			(slice.store (local state) (i32 6) (u64.xor (u64.xor
+				(slice.load (local state) (i32 6)) (record.get (record.get (local work) c2) b))
+				(record.get (record.get (local work) c2) d)))
+			(slice.store (local state) (i32 7) (u64.xor (u64.xor
+				(slice.load (local state) (i32 7)) (record.get (record.get (local work) c3) b))
+				(record.get (record.get (local work) c3) d)))))
+
+	(fn blake2b_count
+		(:doc "Advance the byte counter modulo 2^128, carrying out of the low limb.")
+		(params (hash (mut-ref Blake2b)) (length i32))
+		(returns void)
+		(body
+			(let low (u64.add.wrapping (record.get (local hash) bytes_low) (int.convert u64 (local length))))
+			(if
+				(:doc "A wrapped low word carries one into the high word.")
+				(u64.lt (local low) (record.get (local hash) bytes_low))
+				(then (set (record.get (local hash) bytes_high)
+					(u64.add.wrapping (record.get (local hash) bytes_high) (u64 1)))))
+			(set (record.get (local hash) bytes_low) (local low))))
+
+	(fn blake2b_update
+		(:doc "Keep the final block pending, including a full block when input ends on its boundary.")
+		(params (hash (mut-ref Blake2b)) (bytes (shared-slice u8)))
+		(returns void)
+		(body
+			(if (i32.eq (slice.len (local bytes)) (i32 0)) (then (return)))
+			(let-mut i (i32 0))
+			(if
+				(:doc "A pending block becomes nonfinal only when another byte is known to follow it.")
+				(bool.not (i32.eq (record.get (local hash) used) (i32 0)))
+				(then
+					(while
+						(:doc "Fill any remaining space in the pending block from the new input.")
+						(bool.and (i32.lt (record.get (local hash) used) (i32 128))
+							(i32.lt (local i) (slice.len (local bytes))))
+						(body
+							(slice.store (record.get (local hash) block) (record.get (local hash) used)
+								(slice.load (local bytes) (local i)))
+							(set (record.get (local hash) used) (i32.add.wrapping (record.get (local hash) used) (i32 1)))
+							(set (local i) (i32.add.wrapping (local i) (i32 1)))))
+					(if (i32.eq (local i) (slice.len (local bytes))) (then (return)))
+					(call blake2b_count (borrow-mut (local hash)) (i32 128))
+					(call blake2b_block
+						(borrow-mut (record.get (local hash) words)) (borrow-shared (record.get (local hash) block))
+						(record.get (local hash) bytes_low) (record.get (local hash) bytes_high) (bool false))
+					(set (record.get (local hash) used) (i32 0))))
+			(while
+				(:doc "Process complete nonfinal blocks directly from the caller's view.")
+				(i32.lt (i32 128) (i32.sub.wrapping (slice.len (local bytes)) (local i)))
+				(body
+					(call blake2b_count (borrow-mut (local hash)) (i32 128))
+					(call blake2b_block
+						(borrow-mut (record.get (local hash) words))
+						(borrow-shared (slice.range (local bytes) (local i) (i32.add.wrapping (local i) (i32 128))))
+						(record.get (local hash) bytes_low) (record.get (local hash) bytes_high) (bool false))
+					(set (local i) (i32.add.wrapping (local i) (i32 128)))))
+			(while
+				(:doc "Copy at most one block so callers can release or refill the input buffer.")
+				(i32.lt (local i) (slice.len (local bytes)))
+				(body
+					(slice.store (record.get (local hash) block) (record.get (local hash) used)
+						(slice.load (local bytes) (local i)))
+					(set (record.get (local hash) used) (i32.add.wrapping (record.get (local hash) used) (i32 1)))
+					(set (local i) (i32.add.wrapping (local i) (i32 1)))))))
+
+	(fn blake2b_number
+		(:doc "Feed one unsigned field in the cache's canonical little-endian representation.")
+		(params (hash (mut-ref Blake2b)) (value u64))
+		(returns void)
+		(body
+			(let-mut bytes (array.repeat u8 (i32 8) (u8 0)))
+			(let-mut i (i32 0))
+			(while
+				(:doc "Write each successive low byte into the framing buffer.")
+				(i32.lt (local i) (i32 8))
+				(body
+					(slice.store (local bytes) (local i)
+						(int.convert u8 (u64.and (u64.shr (local value) (i32.mul (local i) (i32 8))) (u64 255))))
+					(set (local i) (i32.add.wrapping (local i) (i32 1)))))
+			(call blake2b_update (borrow-mut (local hash)) (borrow-shared (local bytes)))))
+
+	(fn blake2b_field
+		(:doc "Prefix every byte field with its length to retain the original field boundaries.")
+		(params (hash (mut-ref Blake2b)) (data (shared-slice u8)))
+		(returns void)
+		(body
+			(call blake2b_number (borrow-mut (local hash)) (int.convert u64 (slice.len (local data))))
+			(call blake2b_update (borrow-mut (local hash)) (borrow-shared (local data)))))
+
+	(fn blake2b_words
+		(:doc "Finalize a copy so a caller can continue updating after taking a digest.")
+		(params (state Blake2b))
+		(returns (fixed-array u64 (i32 4)))
+		(body
+			(let-mut hash (local state))
+			(let-mut i (record.get (local hash) used))
+			(while
+				(:doc "The counter excludes padding, including when hashing an empty stream.")
+				(i32.lt (local i) (i32 128))
+				(body
+					(slice.store (record.get (local hash) block) (local i) (u8 0))
+					(set (local i) (i32.add.wrapping (local i) (i32 1)))))
+			(let used (record.get (local hash) used))
+			(call blake2b_count (borrow-mut (local hash)) (local used))
+			(call blake2b_block
+				(borrow-mut (record.get (local hash) words)) (borrow-shared (record.get (local hash) block))
+				(record.get (local hash) bytes_low) (record.get (local hash) bytes_high) (bool true))
+			(return (array.make u64
+				(slice.load (record.get (local hash) words) (i32 0))
+				(slice.load (record.get (local hash) words) (i32 1))
+				(slice.load (record.get (local hash) words) (i32 2))
+				(slice.load (record.get (local hash) words) (i32 3))))))
+
+	(fn blake2b_base32hex_word
+		(:doc "Read the first four little-endian bytes of a chaining word as one base32hex encoder word.")
+		(params (word u64))
+		(returns u32)
+		(body
+			(return (int.convert u32
+				(u64.or
+					(u64.or
+						(u64.or
+							(u64.shl (u64.and (local word) (u64 255)) (i32 24))
+							(u64.shl (u64.and (local word) (u64 65280)) (i32 8)))
+						(u64.and (u64.shr (local word) (i32 8)) (u64 65280)))
+					(u64.and (u64.shr (local word) (i32 24)) (u64 255)))))))
+
+	(fn blake2b_finish
+		(:doc "Encode the complete checksum once for cache records and filenames.")
+		(params (state Blake2b))
+		(returns (owned-array u8))
+		(body
+			(let words (call blake2b_words (local state)))
+			(return (call digest_base32hex (array.make u32
+				(call blake2b_base32hex_word (slice.load (local words) (i32 0)))
+				(call blake2b_base32hex_word (u64.shr (slice.load (local words) (i32 0)) (i32 32)))
+				(call blake2b_base32hex_word (slice.load (local words) (i32 1)))
+				(call blake2b_base32hex_word (u64.shr (slice.load (local words) (i32 1)) (i32 32)))
+				(call blake2b_base32hex_word (slice.load (local words) (i32 2)))
+				(call blake2b_base32hex_word (u64.shr (slice.load (local words) (i32 2)) (i32 32)))
+				(call blake2b_base32hex_word (slice.load (local words) (i32 3)))
+				(call blake2b_base32hex_word (u64.shr (slice.load (local words) (i32 3)) (i32 32))))))))
+)
