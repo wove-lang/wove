@@ -45,7 +45,7 @@ BASE32HEX_SOURCE := stage-2/hashing/base32hex.wove
 BASE16_SOURCES = stage-2/emit/text.wove stage-2/hashing/base16.wove $(C_IDENTIFIER_MODULE) $(SOURCE_TYPE_MODULE) $(BASE32HEX_SOURCE) $(BOOTSTRAP_WOVE_SOURCES)
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
-BLAKE2B_SOURCES := $(addprefix stage-2/hashing/,blake2b.wove blake2b/word.wove blake2b/compress.wove)
+BLAKE2B_SOURCE := stage-2/hashing/blake2b.wove
 JSON_WRITER_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove \
 	$(UTF8_MODULE) $(BYTE_TEXT_MODULE) $(DECIMAL_WRITER)
 JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove $(QUOTED_TEXT_MODULE) $(UTF8_MODULE)
@@ -128,7 +128,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stag
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
-		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove stage-2/c-stdlib/*.wove $(HASHING_SOURCES) $(BLAKE2B_SOURCES) \
+		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove stage-2/c-stdlib/*.wove $(HASHING_SOURCES) $(BLAKE2B_SOURCE) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(PROCESS_MODULE) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
@@ -264,7 +264,7 @@ $(STAGE2)/hashing/base16: $(BASE16_SOURCES)
 $(addsuffix .c,$(HASHING_NATIVE_PROGRAMS)): $(STAGE2)/hashing/native/%.c: $(HASHING_FIXTURES)/%.wove
 $(STAGE2)/hashing/native/base32hex.c: $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)
 $(STAGE2)/hashing/native/base16.c: $(BASE16_SOURCES)
-$(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCES) $(BASE32HEX_SOURCE) $(HASHING_BITS) $(BYTE_TEXT_MODULE)
+$(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCE) $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)
 
 $(addsuffix .c,$(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE)): $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
 	mkdir -p "$(@D)"
