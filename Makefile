@@ -312,7 +312,7 @@ $(STAGE1)/imports.host_declarations.c: $(OWNERSHIP_TESTS)/imports/nested/shared.
 $(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
 $(STAGE1)/module.select.c: $(MODULE_SELECT_SOURCES)
 $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
-$(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE)
+$(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_TEXT_MODULE)
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
 REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) \
