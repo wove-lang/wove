@@ -189,6 +189,69 @@ static void *wvrt_calloc(size_t wvrtcount, size_t wvrtsize, size_t wvrtalignment
 	return wvrt_storage;
 }
 
+// Keep native object storage stable until the Wove owner is released.
+struct wvrt_c_storage {
+	void *wvrt_data;
+	_Bool wvrt_active;
+};
+
+// Allocate an inactive owner and zeroed storage at the actual C type's alignment.
+wvrt_c_storage *wvrt_c_storage_new(size_t wvrt_size, size_t wvrt_alignment,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	wvrt_c_storage *wvrt_storage = malloc(sizeof *wvrt_storage);
+	// A complete native object has a nonzero size and alignment.
+	if (wvrt_storage == NULL || wvrt_size == 0 || wvrt_alignment == 0) {
+		free(wvrt_storage);
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not allocate C storage");
+	}
+	wvrt_storage->wvrt_data = wvrt_calloc(1, wvrt_size, wvrt_alignment);
+	// Nothing owns the raw allocation if the constructor cannot finish.
+	if (wvrt_storage->wvrt_data == NULL) {
+		free(wvrt_storage);
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not allocate C storage");
+	}
+	wvrt_storage->wvrt_active = 0;
+	return wvrt_storage;
+}
+
+// Require inactive storage for initialization and an active object for other native calls.
+void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	// Check the owner before accessing its lifetime state.
+	if (wvrt_storage == NULL) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "missing C storage");
+	}
+	// The initialization status controls which operations may take its address.
+	if (wvrt_storage->wvrt_active == wvrt_initializing) {
+		const char *wvrt_problem = wvrt_initializing ? "C storage is already initialized" : "C storage is not initialized";
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, wvrt_problem);
+	}
+}
+
+// Return the object address after a checked loan or for its active destructor.
+void *wvrt_c_storage_data(wvrt_c_storage *wvrt_storage) {
+	return wvrt_storage->wvrt_data;
+}
+
+// Parent scope cleanup ignores inactive and already consumed owners.
+_Bool wvrt_c_storage_active(const wvrt_c_storage *wvrt_storage) {
+	return wvrt_storage != NULL && wvrt_storage->wvrt_active;
+}
+
+// A failed C initializer leaves the storage inactive and eligible for another attempt.
+void wvrt_c_storage_finish_init(wvrt_c_storage *wvrt_storage, int32_t wvrt_status) {
+	wvrt_storage->wvrt_active = wvrt_status == 0;
+}
+
+// Release the wrapper and its backing allocation after any required C destructor.
+void wvrt_c_storage_free(wvrt_c_storage *wvrt_storage) {
+	if (wvrt_storage == NULL) { return; }
+	int wvrt_error = errno;
+	free(wvrt_storage->wvrt_data);
+	free(wvrt_storage);
+	errno = wvrt_error;
+}
+
 // Return failure to callers that must release foreign storage before reporting an allocation trap.
 static wvrt_array *wvrt_array_try_new(int32_t wvrtlength, size_t wvrtelement_size,
 	size_t wvrtelement_alignment) {

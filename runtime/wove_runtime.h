@@ -103,6 +103,17 @@ void wvrt_check_c_array(wvrt_slice wvrt_view, size_t wvrt_element_size, int64_t 
 void wvrt_check_c_handle(const volatile void *wvrt_handle, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
 
+typedef struct wvrt_c_storage wvrt_c_storage;
+
+wvrt_c_storage *wvrt_c_storage_new(size_t wvrt_size, size_t wvrt_alignment,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+void *wvrt_c_storage_data(wvrt_c_storage *wvrt_storage);
+_Bool wvrt_c_storage_active(const wvrt_c_storage *wvrt_storage);
+void wvrt_c_storage_finish_init(wvrt_c_storage *wvrt_storage, int32_t wvrt_status);
+void wvrt_c_storage_free(wvrt_c_storage *wvrt_storage);
+
 // Borrow the full owner as a shared view over its existing storage.
 static inline wvrt_slice wvrt_array_borrow_shared(const wvrt_array *wvrtbuffer) {
 	return (wvrt_slice){wvrtbuffer->wvrt_items, wvrtbuffer->wvrt_length, wvrtbuffer->wvrt_element_size};

@@ -720,6 +720,24 @@ A fixed signature can mark a mutable scalar reference with
 For example, the checked-in `waitpid` accepts either a mutable `i32` loan
 or `null` for its status parameter.
 
+The `storage` flag in `(:pragma (c_owned (drop destroy) storage))`
+declares a caller-owned C object. Initialize a local with
+`(native.alloc Actions)` to obtain zeroed storage using the definition's C
+size and alignment. A mutable loan to a formal named by
+`(:pragma (c_init actions))` requires inactive storage. The C call
+receives the object's address and returning `0i32` makes it active.
+A failed initialization leaves the storage inactive for retry or cleanup.
+Ordinary borrows and explicit consumption require an active object.
+Repeated initialization of an active object traps at the argument span.
+
+A shared loan passes `const T *` and a mutable loan passes `T *` for the
+declared object type `T`. Scope exit calls the declared destructor only
+for active storage and always releases the allocation. An explicit
+consuming call takes `(move (local actions))`. It receives the same
+object address and takes responsibility for destruction. Wove releases
+the allocation after the call returns. C may use the borrowed or
+consumed address for the duration of that call.
+
 A fixed C signature can use `(c_null resolved)` for a byte-view formal.
 That slot requires bare `null` and passes C `NULL`, including when the
 slot also has a `c_cstr` conversion. For example, `(call realpath
