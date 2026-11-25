@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "wove_runtime.h"
 
 struct snapshot_record {
 	char name[4];
@@ -56,6 +57,34 @@ static inline struct pointer_record *snapshot_pointer(void) {
 // Expose a flexible member shape without any actual instance.
 static inline struct flexible_record *snapshot_flexible(void) {
 	return NULL;
+}
+
+struct snapshot_nominal_dirent {
+	char d_name[4];
+};
+
+struct snapshot_extended_dirent {
+	struct snapshot_nominal_dirent entry;
+	char extension[6];
+};
+
+// Model a directory result whose terminated name continues into the returned record.
+static inline const struct snapshot_nominal_dirent *snapshot_readdir(int32_t *reads) {
+	static const struct snapshot_extended_dirent record = {{{'l', 'o', 'n', 'g'}}, {'-', 'n', 'a', 'm', 'e', '\0'}};
+	_Static_assert(offsetof(struct snapshot_extended_dirent, extension) == sizeof(record.entry.d_name),
+		"the test record extends the nominal name without padding");
+	++*reads;
+	errno = EDOM;
+	return &record.entry;
+}
+
+// Exercise the same directory adapter as the bundled provider with an extended record.
+static inline const char *snapshot_directory_name(void) {
+	int32_t reads = 0;
+#define readdir(directory) snapshot_readdir(directory)
+	const char *name = WVRT_READDIR_NAME(&reads);
+#undef readdir
+	return reads == 1 ? name : NULL;
 }
 
 #endif

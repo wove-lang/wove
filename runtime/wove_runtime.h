@@ -177,6 +177,13 @@ wvrt_array *wvrt_snapshot_bounded_cstr_at_span(const char *wvrt_text, size_t wvr
 			wvrt_record->field, sizeof(wvrt_record->field), (file), (start), (end)); \
 	})
 
+// readdir guarantees a terminated name even when the returned record extends the declared array.
+#define WVRT_READDIR_NAME(directory) \
+	__extension__ ({ \
+		__auto_type wvrt_entry = readdir(directory); \
+		wvrt_entry == NULL ? NULL : (const char *)wvrt_entry->d_name; \
+	})
+
 wvrt_array *wvrt_snapshot_cstr_at_span(char *wvrt_text, void (*wvrt_release)(void *),
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_snapshot_chars_at_span(char *wvrt_text, void (*wvrt_release)(char *),
