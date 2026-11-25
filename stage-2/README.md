@@ -178,9 +178,10 @@ name lookup, type checking, C emission, and caller inspection.
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices. A value-returning function must
 return its declared type on every path. Helpers can accept and return `i8`,
-`u8`, `i32`, `u32`, and `bool`. Expressions support exact-type literals, binding reads,
-and direct calls. A local declared with `let` or `let-mut` takes its
-scalar type from its initializer and comes into scope afterwards. A `set`
+`u8`, `i32`, `u32`, `u64`, and `bool`. Expressions support exact-type
+literals, binding reads, and direct calls. A local declared with `let` or
+`let-mut` takes its scalar type from its initializer and comes into scope
+afterwards. A `set`
 requires an existing `let-mut` binding and a value of that binding's exact
 type. Forward calls use checked prototypes, and nested calls evaluate from
 left to right.
@@ -231,7 +232,7 @@ the field spelling and type, including the platform-specific
 timestamp members in the bundled Stat views.
 
 A module-local `(struct Token (fields (kind u32) (start i32)))` defines
-a named, copyable record. Fields can use `bool`, `i8`, `u8`, `i32`, or `u32`.
+a named, copyable record. Fields can use `bool`, `i8`, `u8`, `i32`, `u32`, or `u64`.
 `(record.make Token (kind (u32 40)) (start (i32 2)))` evaluates each
 initializer exactly once in the order written. Supply every field once
 with its declared type. A local stores the result by value, and
@@ -280,17 +281,24 @@ and yield `u32` results modulo 2^32. Each operand runs once, left to
 right. Emitted C widens the operands to unsigned 64-bit arithmetic and
 keeps the low 32 bits.
 
-`u32.and` and `u32.or` combine two exact `u32` operands bitwise.
-`(u32.shl word count)` and `(u32.shr word count)` take an exact
-`u32` word and `i32` count. The left shift discards bits above the
-word width, and the logical right shift fills with zeroes. All four
-forms return `u32` and evaluate both operands once, left to right.
-A count outside `[0, 32)` traps before shifting and reports the
-original file ID and half-open span of the shift.
+Native `u64` values use `uint64_t` in emitted C. Decimal literals
+can represent the full range, including `(u64 18446744073709551615)`.
+`u64.add.wrapping` adds modulo 2^64. `u64.eq` and `u64.lt`
+compare two exact `u64` values and return `bool`.
+
+Both unsigned word widths support `and`, `or`, `xor`, and `not`
+with a type prefix such as `u64.xor`. The first three forms take two
+words of the named type. Complement takes one. Shifts such as
+`(u64.shr word count)` take a word of the named type and an exact
+`i32` count. The left shift discards bits above the word width and
+the logical right shift fills with zeroes. Word operations return the
+named word type and evaluate each operand once, from left to right.
+Counts outside `[0, 32)` for `u32` or `[0, 64)` for `u64` trap at
+the original file ID and half-open span of the shift.
 
 `(int.convert target value)` evaluates the integer operand once and
 preserves its numerical value when it fits the target `i8`, `u8`, `i32`,
-or `u32`. A value outside the target range traps before the cast. The
+`u32`, or `u64`. A value outside the target range traps before the cast. The
 runtime diagnostic identifies the original file ID and half-open byte
 span of the conversion, including from a source subrange or an imported
 file. C emitted for conversions includes `wove_runtime.h` and links

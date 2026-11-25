@@ -23,11 +23,11 @@
 	(use wove-file "../scalar/flow.wove" (only after_block (type ScalarStatement) (value c_value_expression) (value c_value_assignment)))
 	(use wove-file "../scalar/plan.wove"
 		(only read_module_declarations plan_bodies (type ScalarFunction) (type ScalarParameter) (type ScalarExpression) (type CallSite)))
-	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword is_u32_shift is_i32_division is_fixed_access is_fixed_initializer (type ScalarOperator)))
+	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword word_shift_type is_i32_division is_fixed_access is_fixed_initializer (type ScalarOperator)))
 	(use wove-file "./runtime.wove"
-		(only write_runtime_header open_host_entry open_conversion open_u32_shift_count open_i32_division open_slice_access open_shared_projection write_slice_length close_runtime_call
+		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_i32_division open_slice_access open_shared_projection write_slice_length close_runtime_call
 			open_slice_offset write_slice_items open_array_allocation open_array_copy open_array_drop open_array_borrow))
-	(use wove-file "./text.wove" (only c_byte c_span c_text_fragment c_cast c_u64_cast c_i32_bias write_c_name write_decimal_literal
+	(use wove-file "./text.wove" (only c_byte c_span c_text_fragment c_cast c_i32_bias write_c_name write_decimal_literal
 			function_name_role parameter_name_role local_name_role write_temporary_name open_static_value write_static_bytes))
 
 	(struct EmitResult
@@ -170,7 +170,7 @@
 					(return (call c_byte (borrow-mut (local output)) (local offset) (local digit) (local writing)))))
 			(return (call write_decimal_literal (borrow-shared (local source))
 				(record.get (local row) start) (record.get (local row) end) (record.get (local row) negative)
-				(u32.eq (record.get (local row) type) (u32 11))
+				(record.get (local row) type)
 				(borrow-mut (local output)) (local offset) (local writing)))))
 
 	(fn is_runtime_operation
@@ -180,7 +180,7 @@
 		(returns bool)
 		(body
 			(return (bool.or
-				(bool.or (call is_i32_division (local kind)) (bool.or (call is_u32_shift (local kind)) (call is_fixed_access (local kind))))
+				(bool.or (call is_i32_division (local kind)) (bool.or (u32.lt (u32 0) (call word_shift_type (local kind))) (call is_fixed_access (local kind))))
 				(bool.or (u32.eq (local kind) (call native_handle_borrow_kind))
 					(bool.or (u32.eq (local kind) (u32 33))
 						(bool.or (u32.eq (local kind) (u32 36))
@@ -204,8 +204,9 @@
 		(:doc `Write an operator using already evaluated operands of its exact type.
 
 		Signed arithmetic uses a wide signed bias to reduce the result and
-		return it to the i32 range. Unsigned word operations widen to uint64_t
-		before taking the low 32 bits, including on C targets with wider int.`)
+		return it to the i32 range. Binary operations with a u32 result use
+		wide unsigned operands and keep the low 32 bits. u64 operations keep
+		all 64 result bits.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (expression ScalarExpression)
 			(operator ScalarOperator) (tree_base i32)
 			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
@@ -217,7 +218,7 @@
 			(let unsigned_word (u32.eq (local result) (u32 11)))
 			(let first (record.get (local expression) first))
 			(if
-				(:doc "Negate the single checked operand with C's logical not.")
+				(:doc "Emit the single checked operand after its negation or complement operator.")
 				(i32.eq (record.get (local operator) arity) (i32 1))
 				(then
 					(let cursor (call c_byte (borrow-mut (local output)) (local offset) (local symbol) (local writing)))
@@ -247,7 +248,7 @@
 				(then
 					(set (local cursor) (call c_cast (borrow-mut (local output)) (local cursor) (u32 11) (local writing)))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 40) (local writing)))
-					(set (local cursor) (call c_u64_cast (borrow-mut (local output)) (local cursor) (local writing)))))
+					(set (local cursor) (call c_cast (borrow-mut (local output)) (local cursor) (u32 54) (local writing)))))
 			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local first) (local tree_base)
 				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(if
@@ -296,7 +297,7 @@
 				(record.get (local expression) target) (record.get (local expression) start)
 				(record.get (local expression) end) (local writing)))))
 
-	(fn write_u32_shift
+	(fn write_word_shift
 		(:doc `Shift the evaluated unsigned word after checking the count at the original span.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (expression ScalarExpression)
 			(tree_base i32) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
@@ -304,19 +305,21 @@
 		(body
 			(let word (record.get (local expression) first))
 			(let count (record.get (slice.load (local nodes) (local word)) next_sibling))
+			(let kind (record.get (local expression) kind))
+			(let type (record.get (local expression) type))
 			(let-mut symbol (u8 60))
 			(if
 				(:doc "A logical right shift uses the unsigned left operand with C's right shift.")
-				(u32.eq (record.get (local expression) kind) (u32 69))
+				(bool.or (u32.eq (local kind) (u32 69)) (u32.eq (local kind) (u32 90)))
 				(then (set (local symbol) (u8 62))))
-			(let narrow (call c_cast (borrow-mut (local output)) (local offset) (u32 11) (local writing)))
+			(let narrow (call c_cast (borrow-mut (local output)) (local offset) (local type) (local writing)))
 			(let open (call c_byte (borrow-mut (local output)) (local narrow) (u8 40) (local writing)))
-			(let wide (call c_u64_cast (borrow-mut (local output)) (local open) (local writing)))
+			(let wide (call c_cast (borrow-mut (local output)) (local open) (u32 54) (local writing)))
 			(let value (call write_temporary_name (borrow-shared (local source)) (local word) (local tree_base)
 				(borrow-mut (local output)) (local wide) (local name_prefix) (local writing)))
 			(let operator (call c_byte (borrow-mut (local output)) (local value) (local symbol) (local writing)))
 			(let after_operator (call c_byte (borrow-mut (local output)) (local operator) (local symbol) (local writing)))
-			(let check (call open_u32_shift_count (borrow-mut (local output)) (local after_operator) (local writing)))
+			(let check (call open_word_shift_count (borrow-mut (local output)) (local after_operator) (local type) (local writing)))
 			(let count_end (call write_temporary_name (borrow-shared (local source)) (local count) (local tree_base)
 				(borrow-mut (local output)) (local check) (local name_prefix) (local writing)))
 			(let end (call close_runtime_call (borrow-mut (local output)) (local count_end)
@@ -579,9 +582,10 @@
 				(then
 					(let operand (record.get (local expression) first))
 					(let target (record.get (local expression) type))
+					(let source_type (record.get (slice.load (local expressions) (local operand)) type))
 					(let native (bool.or (u32.eq (local target) (u32 61))
-						(bool.or (call is_native_integer (local target))
-							(call is_native_integer (record.get (slice.load (local expressions) (local operand)) type)))))
+						(bool.or (bool.or (u32.eq (local target) (u32 54)) (u32.eq (local source_type) (u32 54)))
+							(bool.or (call is_native_integer (local target)) (call is_native_integer (local source_type))))))
 					(let-mut open (call open_conversion (borrow-mut (local output)) (local offset)
 						(local target) (local native) (local writing)))
 					(if
@@ -604,8 +608,8 @@
 					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Checked shifts use both temporaries and a runtime check at the source span.")
-				(call is_u32_shift (local kind))
-				(then (return (call write_u32_shift (borrow-shared (local source)) (borrow-shared (local nodes))
+				(u32.lt (u32 0) (call word_shift_type (local kind)))
+				(then (return (call write_word_shift (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Allocate an owner using the checked element layout and element count.")

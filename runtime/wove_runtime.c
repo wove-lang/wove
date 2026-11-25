@@ -399,23 +399,34 @@ uint32_t wvrt_u32_sub_wrapping(uint32_t wvrtleft, uint32_t wvrtright) {
 }
 
 // Use the Wove operand width even when the C shift widens the word.
-static bool wvrt_valid_u32_shift_count(int32_t wvrtcount) {
-	return 0 <= wvrtcount && wvrtcount < 32;
+static bool wvrt_valid_shift_count(int32_t wvrtcount, int32_t width) {
+	return 0 <= wvrtcount && wvrtcount < width;
 }
 
 // Validate a seed shift count before it reaches the C shift.
 int32_t wvrt_u32_shift_count(int32_t wvrtcount, wvrt_location wvrtsite) {
-	if (!wvrt_valid_u32_shift_count(wvrtcount)) { wvrt_trap(wvrtsite, "shift count out of range"); }
+	if (!wvrt_valid_shift_count(wvrtcount, 32)) { wvrt_trap(wvrtsite, "shift count out of range"); }
 	return wvrtcount;
 }
 
 // Validate a native shift count and keep the original file and span.
-int32_t wvrt_u32_shift_count_at_span(int32_t wvrtcount, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+static int32_t wvrt_shift_count_at_span(int32_t wvrtcount, int32_t width,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	// Both signed and width failures point at the full shift operation.
-	if (!wvrt_valid_u32_shift_count(wvrtcount)) {
+	if (!wvrt_valid_shift_count(wvrtcount, width)) {
 		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "shift count out of range");
 	}
 	return wvrtcount;
+}
+
+// Check a native 32-bit word's shift count.
+int32_t wvrt_u32_shift_count_at_span(int32_t wvrtcount, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_shift_count_at_span(wvrtcount, 32, wvrtfile, wvrtstart, wvrtend);
+}
+
+// Check a native 64-bit word's shift count.
+int32_t wvrt_u64_shift_count_at_span(int32_t wvrtcount, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_shift_count_at_span(wvrtcount, 64, wvrtfile, wvrtstart, wvrtend);
 }
 
 // Interpret wrapped bits as a signed value using only in-range signed casts.
