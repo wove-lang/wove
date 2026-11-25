@@ -25,8 +25,8 @@
 #define decode_string wv_seed_fn_77
 #define form_parts wv_seed_fn_78
 #define read_module_for_target wv_seed_fn_93
-#define emit_module wv_seed_fn_137
-#define resolve_graph_for_target wv_seed_fn_156
+#define emit_module wv_seed_fn_136
+#define resolve_graph_for_target wv_seed_fn_155
 #define default_selection wv_seed_fn_94
 #define target_os wv_seed_fn_95
 #define target_arch wv_seed_fn_96
