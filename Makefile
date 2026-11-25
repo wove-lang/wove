@@ -60,7 +60,8 @@ CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove $(VALUE_TEXT_MODULE
 CLI_FIXTURES := tests/stage-2/cli
 CLI_CASES := $(CLI_FIXTURES)/cases.tsv
 CLI_OPTION_PROGRAMS := $(addprefix $(STAGE2)/cli/,options options_errors)
-CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors host_entry) $(CLI_OPTION_PROGRAMS)
+CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors host_entry jobs) $(CLI_OPTION_PROGRAMS)
+JOB_BUDGET_MODULE := $(NATIVE_DRIVER)/jobs.wove
 CONFIG_FIXTURES := tests/stage-2/config
 CONFIG_PROGRAM := $(STAGE2)/config/project
 CONFIG_SOURCES := $(addprefix stage-2/config/,compiler.wove defaults.wove project.wove schema.wove values.wove)
@@ -126,7 +127,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
 		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove $(HASHING_SOURCES) stage-2/hashing/base16.wove $(BLAKE2B_SOURCES) \
-		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) \
+		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(PROCESS_MODULE) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
@@ -284,6 +285,8 @@ $(CLI_PROGRAMS): $(STAGE2)/cli/%: $(CLI_FIXTURES)/%.wove $(CLI_FIXTURES)/fixture
 # Only the compiler-options fixtures load and validate JSONC configuration.
 $(CLI_OPTION_PROGRAMS): stage-2/cli/options.wove stage-2/config/compiler.wove $(JSON_READER_SOURCES)
 
+$(STAGE2)/cli/jobs: $(JOB_BUDGET_MODULE)
+
 # Build the project fixture with file input supplied by the probe.
 $(CONFIG_PROGRAM).c: $(CONFIG_FIXTURES)/project.wove $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED)
 	mkdir -p "$(@D)"
@@ -293,7 +296,7 @@ $(CONFIG_PROGRAM): $(CONFIG_FIXTURES)/project.probe.c $(CONFIG_PROGRAM).c $(STAG
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Supply an argv arena and config bytes to the standalone command fixture.
-$(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOURCES) $(CONFIG_SOURCES) \
+$(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOURCES) $(CONFIG_SOURCES) $(JOB_BUDGET_MODULE) \
 	$(JSON_READER_SOURCES) $(SOURCE_SCAN_MODULE) $(BYTE_MATCH_MODULE) $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
@@ -329,6 +332,7 @@ $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF
 
 # Force the seed to report missing Wove inputs that Make can skip under .SECONDARY.
 REQUIRED_WOVE_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(SOURCE_PROBE_SOURCES) \
+	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_WOVE_SOURCES)),$(REQUIRED_WOVE_SOURCES))
 
