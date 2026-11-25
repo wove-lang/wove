@@ -191,10 +191,10 @@ test-stage-2-inventory: export WOVE_TEST_RUNTIME = $(TEST_RUNTIME)
 test-stage-2-inventory: $(SOURCE_SCAN) $(TEST_RUNTIME)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/test_execution.tsv
 
-# Give shared Wove helpers distinct names in the runner and the linked test graph.
+# Keep generated runner helpers local to their translation unit.
 $(TEST_RUNNER).c: $(TEST_RUNNER_ROOT) $(TEST_RUNNER_SOURCES) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
 	mkdir -p "$(@D)"
-	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" --virtual-root /wove-test-runtime/ $(filter %.wove,$^)
+	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" --private-helpers $(filter %.wove,$^)
 
 # Expose only the host argument entry under the test-specific C name.
 $(TEST_RUNNER).o: $(TEST_RUNNER).c $(RUNTIME_HEADER)

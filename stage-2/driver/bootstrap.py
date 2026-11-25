@@ -18,16 +18,16 @@ def native_target():
 
 
 # Supply the compiler's full build graph to the seed-built emitter.
-def emit_native(probe, destination, version, paths, providers, virtual_root="/"):
-	# Separately linked drivers can have their own C symbol identities for shared modules.
-	files = [(index, virtual_root + name, name) for index, name in enumerate(dict.fromkeys(paths))]
+def emit_native(probe, destination, version, paths, providers, private_helpers=False):
+	files = [(index, "/" + name, name) for index, name in enumerate(dict.fromkeys(paths))]
 	rows = [str(field) for entry in files for field in entry]
+	command = "--emit-private-graph" if private_helpers else "--emit-graph"
 	# The virtual path is relative to the Wove module even with a custom BUILD_DIR.
-	invocation = [probe, "--mode", "native", "--target", *native_target(), "--emit-graph", "0", "8192", "4194304", *rows,
-		"--asset", virtual_root + "build/version.txt", version]
+	invocation = [probe, "--mode", "native", "--target", *native_target(), command, "0", "8192", "4194304", *rows,
+		"--asset", "/build/version.txt", version]
 	# Give bundled source assets the paths their Wove embeds resolve against.
 	for provider in providers:
-		invocation.extend(("--asset", virtual_root + provider, provider))
+		invocation.extend(("--asset", "/" + provider, provider))
 	result = subprocess.run(invocation, capture_output=True)
 	header, separator, source = result.stdout.partition(b"\n")
 	# Keep a bootstrap failure at its repository-relative source path.
@@ -48,14 +48,14 @@ def emit_native(probe, destination, version, paths, providers, virtual_root="/")
 
 if __name__ == "__main__":
 	probe, destination, version, *inputs = sys.argv[1:]
-	virtual_root = "/"
-	# A private virtual root gives a separately linked entry its own symbol identities.
-	if inputs[:1] == ["--virtual-root"]:
-		_, virtual_root, *inputs = inputs
+	private_helpers = inputs[:1] == ["--private-helpers"]
+	# Separately linked runtime units request internal linkage for their generated helpers.
+	if private_helpers:
+		inputs = inputs[1:]
 	# The optional asset delimiter keeps bundled files out of bootstrap resolution.
 	if "--asset" in inputs:
 		boundary = inputs.index("--asset")
 		paths, providers = inputs[:boundary], inputs[boundary + 1:]
 	else:
 		paths, providers = inputs, []
-	sys.exit(emit_native(probe, destination, version, paths, providers, virtual_root))
+	sys.exit(emit_native(probe, destination, version, paths, providers, private_helpers))

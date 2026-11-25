@@ -900,7 +900,7 @@ static void write_graph_error(wvrt_slice arena, const SuppliedFile *files, uint3
 
 // Compile or inspect a resolved graph and check that the chosen destination remains bounded.
 static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, wvrt_slice modules, wvrt_slice bindings,
-		GraphResult resolved, int32_t root, int32_t query, const char *name, int32_t capacity) {
+		GraphResult resolved, int32_t root, int32_t query, const char *name, int32_t capacity, bool private_helpers) {
 	const bool emit = query < 0;
 	const int32_t byte_capacity = emit ? capacity : 0;
 	const int32_t site_capacity = emit ? 0 : capacity;
@@ -914,7 +914,7 @@ static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, w
 	const size_t site_bytes = (size_t)site_capacity * sizeof(CallSite);
 	memset(sites, 0xa5, site_bytes);
 	const GraphOutput result = run_scalar_graph(arena, files, modules, bindings, resolved, root, query,
-		(wvrt_slice){name, (int32_t)strlen(name), sizeof(uint8_t)}, assets,
+		(wvrt_slice){name, (int32_t)strlen(name), sizeof(uint8_t)}, assets, private_helpers,
 		(wvrt_mut_slice){bytes + 1, byte_capacity, sizeof(uint8_t)},
 		(wvrt_mut_slice){sites, site_capacity, sizeof(CallSite)});
 	const int32_t written = result.wv_field_0;
@@ -985,7 +985,8 @@ static int finish_tests(wvrt_slice arena, wvrt_slice supplied, wvrt_slice module
 
 // Resolve a supplied graph before exposing bindings, compiled C, callers, or tests.
 static int graph_mode(int argc, char **argv, SelectionContext context) {
-	const bool emit = strcmp(argv[1], "--emit-graph") == 0;
+	const bool private_helpers = strcmp(argv[1], "--emit-private-graph") == 0;
+	const bool emit = private_helpers || strcmp(argv[1], "--emit-graph") == 0;
 	const bool inspect = strcmp(argv[1], "--graph-callers") == 0;
 	const bool tests = strcmp(argv[1], "--graph-tests") == 0;
 	const int first_file = inspect ? 7 : (emit || tests) ? 5 : 4;
@@ -1000,6 +1001,7 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 			(inspect && !read_offset(argv[4], &query))) {
 		fputs("usage: source_scan --graph ENTRY SCRATCH (IDENTITY PATH FILE)...\n"
 			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
+			"       source_scan --emit-private-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n"
 			"       source_scan --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n", stderr);
 		return EXIT_FAILURE;
@@ -1049,7 +1051,7 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 		status = finish_graph(arena, supplied, (wvrt_slice){asset_storage->wvrt_items, asset_count, sizeof(SuppliedFile)},
 			(wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},
 			(wvrt_slice){bindings->wvrt_items, result.wv_field_1, sizeof(GraphBinding)}, result, files[entry].wv_field_0,
-			query, inspect ? argv[5] : "", output);
+			query, inspect ? argv[5] : "", output, private_helpers);
 	} else {
 		write_graph(bytes, files, count, modules->wvrt_items, bindings->wvrt_items, result);
 		status = EXIT_SUCCESS;
@@ -1179,6 +1181,7 @@ static int probe_command(int argc, char **argv) {
 		return EXIT_FAILURE;
 	}
 	const bool graph = strcmp(argv[1], "--graph") == 0 || strcmp(argv[1], "--emit-graph") == 0 ||
+		strcmp(argv[1], "--emit-private-graph") == 0 ||
 		strcmp(argv[1], "--graph-callers") == 0 || strcmp(argv[1], "--graph-tests") == 0;
 	return graph ? graph_mode(argc, argv, context) : source_mode(argc, argv, context);
 }

@@ -83,5 +83,6 @@ int wove_test_entry(int argc, char **argv, const wove_test_case *tests, size_t c
 		return run_selected(argv[1], tests, count);
 	}
 	if (argc != 1) { return 2; }
+	if (count == 0) { return 0; }
 	return run_parent(argv[0]);
 }
