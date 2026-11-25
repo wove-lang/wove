@@ -8,6 +8,8 @@
 	on failure. Publish only a complete emitted translation unit.`)
 
 	(use wove-file "./diagnostics.wove" (only report_argv report_source))
+	(use wove-file "./assets.wove" (only copy_source_prefix load_input_assets))
+	(use wove-file "../source/assets.wove" (only (type EmbedAsset)))
 	(use wove-file "../source/scan.wove" (only admit_source check_source_form build_source_tree check_source_metadata (type SourceNode)))
 	(use wove-file "../source/module.wove" (only read_module (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../emit/c.wove" (only emit_module))
@@ -17,7 +19,7 @@
 		(:doc `Retry a short emitter destination, retaining only the first complete unit.`)
 		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
 			(target_index i32) (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
-			(declarations (shared-slice SelectedDeclaration)))
+			(declarations (shared-slice SelectedDeclaration)) (assets (mut-slice EmbedAsset)))
 		(returns i32)
 		(body
 			(let-mut capacity (i32 4096))
@@ -27,7 +29,8 @@
 				(body
 					(let-mut output (array.alloc u8 (local capacity)))
 					(let result (call emit_module (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local module) (borrow-shared (local declarations)) (i32 0) (i32 0) (borrow-mut (local output))))
+						(local module) (borrow-shared (local declarations)) (i32 0) (i32 0)
+						(borrow-mut (local assets)) (bool false) (borrow-mut (local output))))
 					(let error (record.get (local result) error))
 					(if
 						(:doc "Only a successful emitter can publish an artifact.")
@@ -49,6 +52,49 @@
 							(record.get (local result) start) (record.get (local result) end) (u32 3)))))
 					(set (local capacity) (i32.add.wrapping (local capacity) (local capacity)))))
 			(return (i32 1))))
+
+	(fn compile_assets
+		(:doc `Collect checked embed requests, load selected assets, and emit from the resulting arena.`)
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
+			(target_index i32) (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
+			(declarations (shared-slice SelectedDeclaration)))
+		(returns i32)
+		(body
+			(let-mut requests (array.alloc EmbedAsset (slice.len (local nodes))))
+			(let-mut none (array.alloc u8 (i32 0)))
+			(let checked (call emit_module (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local module) (borrow-shared (local declarations)) (i32 0) (i32 0)
+				(borrow-mut (local requests)) (bool true) (borrow-mut (local none))))
+			(if
+				(:doc "The semantic plan reports malformed or ill-typed source before requesting any files.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (call report_source (borrow-shared (local path)) (record.get (local checked) error)
+					(record.get (local checked) start) (record.get (local checked) end) (u32 3)))))
+			(if
+				(:doc "A module without active embeds already has a complete source arena.")
+				(i32.eq (record.get (local checked) written) (i32 0))
+				(then (return (call emit_input (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+					(local mode) (local target_index) (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local module) (borrow-shared (local declarations)) (borrow-mut (local requests))))))
+			(let measured (call load_input_assets (borrow-shared (local path)) (borrow-shared (local source))
+				(borrow-mut (local requests)) (borrow-mut (local none)) (bool false)))
+			(if
+				(:doc "A missing or invalid asset is diagnosed at the selected path token.")
+				(u32.lt (u32 0) (record.get (local measured) error))
+				(then (return (call report_source (borrow-shared (local path)) (record.get (local measured) error)
+					(record.get (local measured) start) (record.get (local measured) end) (u32 9)))))
+			(let-mut arena (array.alloc u8 (record.get (local measured) count)))
+			(call copy_source_prefix (borrow-shared (local source)) (borrow-mut (local arena)))
+			(let loaded (call load_input_assets (borrow-shared (local path)) (borrow-shared (local source))
+				(borrow-mut (local requests)) (borrow-mut (local arena)) (bool true)))
+			(if
+				(:doc "A failed or changed file cannot leave partial data in retained C.")
+				(u32.lt (u32 0) (record.get (local loaded) error))
+				(then (return (call report_source (borrow-shared (local path)) (record.get (local loaded) error)
+					(record.get (local loaded) start) (record.get (local loaded) end) (u32 9)))))
+			(return (call emit_input (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+				(local mode) (local target_index) (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(local module) (borrow-shared (local declarations)) (borrow-mut (local requests))))))
 
 	(fn compile_input
 		(:doc `Validate both operands before reading the source and selecting the native module.`)
@@ -88,6 +134,6 @@
 			(let-mut declarations (array.alloc SelectedDeclaration (local rows)))
 			(let module (call read_module (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local metadata) (bool false) (borrow-mut (local declarations))))
-			(return (call emit_input (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
+			(return (call compile_assets (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local profile))
 				(local mode) (local target_index) (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local module) (borrow-shared (local declarations)))))))

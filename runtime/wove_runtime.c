@@ -223,6 +223,14 @@ wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrtlength, int32_t wvrtfile, int3
 	return wvrt_array_new_at_span(wvrtlength, sizeof(uint8_t), _Alignof(uint8_t), wvrtfile, wvrtstart, wvrtend);
 }
 
+// Copy compiled bytes into a fresh owner on each evaluation.
+wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrtbytes, int32_t wvrtlength,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_array *wvrt_result = wvrt_array_new_u8_at_span(wvrtlength, wvrtfile, wvrtstart, wvrtend);
+	if (wvrtlength > 0) { memcpy(wvrt_result->wvrt_items, wvrtbytes, (size_t)wvrtlength); }
+	return wvrt_result;
+}
+
 // Retire exactly the active owners in an element range.
 static void wvrt_array_drop_range(wvrt_array *wvrtbuffer, int32_t wvrtstart, int32_t wvrtend) {
 	if (wvrtbuffer->wvrt_drop_element == NULL) { return; }
