@@ -26,13 +26,13 @@
 #define form_parts wv_seed_fn_83
 #define read_module_for_target wv_seed_fn_98
 #define emit_module wv_seed_fn_140
-#define resolve_graph_for_target wv_seed_fn_281
+#define resolve_graph_for_target wv_seed_fn_282
 #define default_selection wv_seed_fn_99
 #define target_os wv_seed_fn_100
 #define target_arch wv_seed_fn_101
-#define inspect_callers wv_seed_fn_767
-#define run_scalar_graph wv_seed_fn_783
-#define discover_graph_tests wv_seed_fn_791
+#define inspect_callers wv_seed_fn_773
+#define run_scalar_graph wv_seed_fn_789
+#define discover_graph_tests wv_seed_fn_797
 
 typedef wv_seed_record_1 Token;
 typedef wv_seed_record_2 SourceDiagnostic;

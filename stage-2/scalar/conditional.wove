@@ -1,0 +1,156 @@
+(module scalar_conditional
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Check the shape and execution paths of a conditional value.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/types.wove" (only is_builtin_scalar))
+	(use wove-file "./owners.wove" (only is_local_owner))
+	(use wove-file "./records.wove" (only is_native_integer is_record_type))
+	(use wove-file "./syntax.wove" (only entry_at entry_form native_alloc_kind (type EntryRead)))
+	(use wove-file "./flow.wove" (only within_scope))
+	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
+
+	(let conditional_value 22u32)
+	(let conditional_then 23u32)
+	(let conditional_else 24u32)
+
+	(fn read_conditional_arm
+		(:doc "Read the single evaluated operand of a then or else form.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (arm SourceNode) (tag u32))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local arm) (local tag) 24u32))
+			(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
+			(let value (struct.get (local form) operand))
+			(if
+				(:doc "A value arm cannot be empty or contain a statement sequence.")
+				(bool.or (i32.lt (local value) 0i32)
+					(i32.lt -1i32 (struct.get (array.load (local nodes) (local value)) next_sibling)))
+				(then (return (call entry_at (local arm) -1i32 24u32))))
+			(return (local form))))
+
+	(fn plan_conditional
+		(:doc "Check a value if and seed its predicate and both arm operands in source order.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (expected u32) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local conditional_value) 24u32))
+			(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
+			(let condition (struct.get (local form) operand))
+			(if (i32.lt (local condition) 0i32) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let first (struct.get (array.load (local nodes) (local condition)) next_sibling))
+			(if (i32.lt (local first) 0i32) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let then_node (array.load (local nodes) (local first)))
+			(let then_form (call read_conditional_arm (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local then_node) (local conditional_then)))
+			(if (u32.lt 0u32 (struct.get (local then_form) error)) (then (return (local then_form))))
+			(let last (struct.get (local then_node) next_sibling))
+			(if (i32.lt (local last) 0i32) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let else_node (array.load (local nodes) (local last)))
+			(let else_form (call read_conditional_arm (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local else_node) (local conditional_else)))
+			(if (u32.lt 0u32 (struct.get (local else_form) error)) (then (return (local else_form))))
+			(let extra (struct.get (local else_node) next_sibling))
+			(if
+				(:doc "The else arm ends the value form.")
+				(i32.lt -1i32 (local extra))
+				(then (return (call entry_at (array.load (local nodes) (local extra)) -1i32 24u32))))
+			(let left (struct.get (local then_form) operand))
+			(let right (struct.get (local else_form) operand))
+			(let arm (call expression_row 0u32 (local expected) -1i32 -1i32 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local condition) (call expression_row 0u32 12u32 -1i32 -1i32 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local first) (call expression_row (local conditional_then) 0u32 -1i32 (local left) 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local last) (call expression_row (local conditional_else) 0u32 -1i32 (local right) 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local left) (local arm))
+			(array.store (local expressions) (local right) (local arm))
+			(array.store (local expressions) (local index) (call expression_row (local conditional_value)
+				(local expected) -1i32 (local condition) 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn conditional_arm_is_value
+		(:doc "Accept copyable values and fresh owners that the selected arm can supply without moving a binding.")
+		(params (row ScalarExpression))
+		(returns bool)
+		(body
+			(let type (struct.get (local row) type))
+			(if
+				(:doc "Only calls, supported allocations, and checked conditional results can introduce a fresh owner here.")
+				(call is_local_owner (local type))
+				(then
+					(let kind (struct.get (local row) kind))
+					(return (bool.or (bool.or (u32.eq (local kind) 3u32) (u32.eq (local kind) 41u32))
+						(bool.or (u32.eq (local kind) (call native_alloc_kind)) (u32.eq (local kind) (local conditional_value)))))))
+			(return (bool.or (bool.or (call is_builtin_scalar (local type)) (call is_native_integer (local type)))
+				(call is_record_type (local type))))))
+
+	(fn finish_conditional_values
+		(:doc "Resolve exact conditional result types from the inside out after both arms have been checked.")
+		(params (nodes (shared-array SourceNode)) (first i32) (last i32) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let-mut index (local last))
+			(while
+				(:doc "Inner conditional values occur later in the source rows than their enclosing values.")
+				(bool.not (i32.lt (local index) (local first)))
+				(body
+					(let row (array.load (local expressions) (local index)))
+					(if
+						(:doc "Compare exact types even when both operands were checked against an inference expectation.")
+						(u32.eq (struct.get (local row) kind) (local conditional_value))
+						(then
+							(let condition (struct.get (local row) first))
+							(let then_arm (struct.get (array.load (local nodes) (local condition)) next_sibling))
+							(let else_arm (struct.get (array.load (local nodes) (local then_arm)) next_sibling))
+							(let left (struct.get (array.load (local expressions) (local then_arm)) first))
+							(let right (struct.get (array.load (local expressions) (local else_arm)) first))
+							(let then_value (array.load (local expressions) (local left)))
+							(let else_value (array.load (local expressions) (local right)))
+							(if
+								(:doc "A conditional cannot implicitly copy an owner or yield a borrowed place.")
+								(bool.not (call conditional_arm_is_value (local then_value)))
+								(then (return (call entry_at (array.load (local nodes) (local left)) -1i32 24u32))))
+							(let type (struct.get (local then_value) type))
+							(if
+								(:doc "The else value must have the same exact type and be valid in a value slot.")
+								(bool.not (bool.and (u32.eq (local type) (struct.get (local else_value) type))
+									(call conditional_arm_is_value (local else_value))))
+								(then (return (call entry_at (array.load (local nodes) (local right)) -1i32 24u32))))
+							(array.store (local expressions) (local index) (call expression_row (local conditional_value)
+								(local type) -1i32 (local condition) 0i32 0i32 (bool false)))))
+					(set (local index) (i32.sub.wrapping (local index) 1i32))))
+			(return (call entry_at (array.load (local nodes) (local first)) (local first) 0u32))))
+
+	(fn conditional_transfer_reaches
+		(:doc "Exclude transfers in a mutually exclusive or statically unselected arm from later uses.")
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression)) (transfer i32) (use i32))
+		(returns bool)
+		(body
+			(let site (array.load (local nodes) (local use)))
+			(let-mut index (struct.get (array.load (local nodes) (local transfer)) parent))
+			(while
+				(:doc "Any enclosing conditional arm can exclude execution of this transfer.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let arm (array.load (local nodes) (local index)))
+					(let parent (struct.get (local arm) parent))
+					(let kind (struct.get (array.load (local expressions) (local index)) kind))
+					(let then_arm (u32.eq (local kind) (local conditional_then)))
+					(if
+						(:doc "Within the same arm, the normal order of evaluation still applies.")
+						(bool.and (bool.or (local then_arm) (u32.eq (local kind) (local conditional_else)))
+							(bool.not (call within_scope (local arm) (local site))))
+						(then
+							(let choice (array.load (local expressions) (local parent)))
+							(let condition (array.load (local expressions) (struct.get (local choice) first)))
+							(let literal (struct.get (local condition) kind))
+							(if
+								(:doc "An alternate arm is exclusive. A literal predicate can exclude an arm at the join.")
+								(bool.or (call within_scope (array.load (local nodes) (local parent)) (local site))
+									(bool.or (bool.and (local then_arm) (u32.eq (local literal) 4u32))
+										(bool.and (bool.not (local then_arm)) (u32.eq (local literal) 5u32))))
+								(then (return (bool false))))))
+					(set (local index) (local parent))))
+			(return (bool true))))
+)
