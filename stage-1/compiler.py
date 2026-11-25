@@ -112,6 +112,12 @@ class Function:
 	params: tuple[tuple[str, Type], ...]
 	result: str | Record
 	body: Form
+	host_span: Record | None = None
+
+	# Both entry signatures are reserved for the C host.
+	@property
+	def is_entry(self) -> bool:
+		return self.c_name == "main" or self.host_span is not None
 
 
 @dataclass(frozen=True)
@@ -267,6 +273,24 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 	return BufferType(view.tag, records.get(element, element))
 
 
+# Require the same concrete argument-span layout as the native runtime adapter.
+def read_host_span(params: dict[str, Type], line: int) -> Record:
+	# The host supplies a shared byte arena followed by its shared span table.
+	if len(params) != 2:
+		raise SourceError(line)
+	bytes_kind, spans_kind = params.values()
+	# Validate the two view kinds before inspecting the span element record.
+	if bytes_kind != BufferType(SHARED, U8) or not isinstance(spans_kind, BufferType):
+		raise SourceError(line)
+	record = spans_kind.element
+	# Generated callbacks write the defining record directly, in declaration order.
+	if spans_kind.access != SHARED or not isinstance(record, Record) or tuple(
+		(name, field.kind) for name, field in record.fields.items()
+	) != (("start", I32), ("end", I32)):
+		raise SourceError(line)
+	return record
+
+
 # Read the signature before lowering calls, including forward calls.
 def read_function(
 	name: str, node: Form, index: int, records: dict[str, Record], *, entry_module: bool
@@ -299,12 +323,13 @@ def read_function(
 	if result != VOID and not copyable(result):
 		raise SourceError(result_node.line)
 	entry = entry_module and name == "main"
-	# Keep the root's C entry point on its existing zero-argument i32 ABI.
-	if entry and (params or result != I32):
+	# Both bootstrapping entry signatures return a native i32 exit status.
+	if entry and result != I32:
 		raise SourceError(node.line)
+	host_span = read_host_span(params, node.line) if entry and params else None
 
-	c_name = "main" if entry else f"wv_seed_fn_{index}"
-	return Function(c_name, tuple(params.items()), result, checked_form(body_node, "body"))
+	c_name = "main" if entry and host_span is None else f"wv_seed_fn_{index}"
+	return Function(c_name, tuple(params.items()), result, checked_form(body_node, "body"), host_span)
 
 
 # Encode a source filename as a C literal, including arbitrary path bytes.
@@ -473,7 +498,7 @@ class FunctionEmitter:
 		name, *args = node.operands
 		callee = self.functions.get(identifier(name))
 		# Resolve the signature before pairing arguments with parameters.
-		if callee is None or callee.c_name == "main" or len(args) != len(callee.params):
+		if callee is None or callee.is_entry or len(args) != len(callee.params):
 			raise SourceError(node.line)
 		checkpoint = len(self.loans)
 		values = []
@@ -1271,6 +1296,9 @@ def compile_source(source: str, filename: str) -> str:
 		with source_file(module.filename):
 			# Emit provider bodies only once, regardless of their local aliases.
 			for function in module.functions.values():
-				references = retained if function.c_name == "main" else ()
+				references = retained if function.is_entry else ()
 				lines.extend(FunctionEmitter(function, module, path).emit(references))
+				# Reuse the runtime's bounded host argv adapter for the two-view entry.
+				if function.host_span is not None:
+					lines.extend([f"WVRT_HOST_ENTRY({function.c_name}, {function.host_span.c_name})", ""])
 	return "\n".join(lines)
