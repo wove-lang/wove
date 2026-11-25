@@ -17,7 +17,8 @@ from tempfile import TemporaryDirectory
 # Exercise one invocation with the project and files specified by its fixture row.
 def check_case(compiler, clang, runtime, fixtures, row):
 	label, inputs, argv, status, target, retained, value, diagnostic, *options = row
-	patterns, = options or ["{}"]
+	patterns = json.loads(options[0]) if options else {}
+	flags = json.loads(options[1]) if len(options) > 1 else []
 	with TemporaryDirectory(prefix="native-cli-", dir=compiler.parent) as workspace:
 		root = Path(workspace)
 		entries = json.loads(inputs)
@@ -56,11 +57,12 @@ def check_case(compiler, clang, runtime, fixtures, row):
 			assert not result.stderr and artifacts == [retained], (label, result.stderr, artifacts)
 			generated = (root / retained).read_text()
 			# The case can count defining symbols without pinning installation-dependent hashes.
-			for pattern, count in json.loads(patterns).items():
+			for pattern, count in patterns.items():
 				assert len(re.findall(pattern, generated)) == count, (label, pattern)
 			program = root / "result"
-			subprocess.run([*clang, "-I", "runtime", str(root / retained), runtime, "-o", str(program)], check=True, timeout=30)
-			built = subprocess.run([program], stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+			subprocess.run([*clang, *flags, "-I", "runtime", str(root / retained), runtime, "-o", str(program)],
+				check=True, timeout=30)
+			built = subprocess.run([program], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
 			assert (built.returncode, built.stdout, built.stderr) == (int(value), b"", b""), (label, built)
 		else:
 			assert artifacts == sorted(existing_c) and result.stderr.count(b"\n") == 1, (label, artifacts, result.stderr)
