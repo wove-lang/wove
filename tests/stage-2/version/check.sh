@@ -15,7 +15,8 @@ generator=tools/build-info.sh
 work=$(mktemp -d "$build/version-check.XXXXXX")
 trap 'rm -rf -- "$work"' 0
 trap 'exit 1' HUP INT TERM
-unset WOVEC_BUILD_VERSION
+unset WOVEC_BUILD_VERSION GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 # Compare the complete line, including its one terminating newline.
 check_line() {
@@ -92,14 +93,34 @@ while IFS="$(printf '\t')" read -r kind first second third; do
 				-c user.name='Wove test' -c user.email=test@example.invalid \
 				-c commit.gpgsign=false -c core.hooksPath=/dev/null commit --allow-empty -qm version
 			revision=$(git -C "$project" rev-parse HEAD)
-			TZ=Pacific/Honolulu sh "$tool"
+			TZ=Pacific/Honolulu GIT_DIR="$work/no-git" sh "$tool"
 			check_line "$third-$(printf '%.7s' "$revision")" "$project/build/version.txt"
-			# Missing metadata must ask for an override instead of inventing a version.
-			if GIT_DIR="$work/no-git" sh "$tool" "$asset" > "$work/stdout" 2> "$work/stderr"; then
-				exit 1
-			fi
-			grep -q 'set WOVEC_BUILD_VERSION' "$work/stderr"
-			test ! -e "$asset"
+			;;
+		worktree)
+			linked="$work/linked checkout"
+			git -C "$project" -c core.hooksPath=/dev/null worktree add -q --detach "$linked" HEAD
+			test -f "$linked/.git"
+			mkdir -p "$linked/tools"
+			cp "$generator" "$linked/tools/"
+			sh "$linked/tools/build-info.sh"
+			cmp "$project/build/version.txt" "$linked/build/version.txt"
+			;;
+		nested)
+			archive="$project/source archive"
+			mkdir -p "$archive/tools"
+			cp "$generator" "$archive/tools/"
+			# Check normal Git discovery and an explicitly selected outer Git directory.
+			for outer in "" "$project/.git"; do
+				# An unpacked source tree must request an override in both environments.
+				if (if [ -n "$outer" ]; then export GIT_DIR="$outer"; fi
+					sh "$archive/tools/build-info.sh") > "$work/stdout" 2> "$work/stderr"; then
+					exit 1
+				fi
+				grep -q 'set WOVEC_BUILD_VERSION' "$work/stderr"
+				test ! -e "$archive/build/version.txt"
+			done
+			WOVEC_BUILD_VERSION=$first sh "$archive/tools/build-info.sh"
+			check_line "$first" "$archive/build/version.txt"
 			;;
 		override)
 			GIT_DIR="$work/no-git" WOVEC_BUILD_VERSION=$first sh "$tool" "$asset"

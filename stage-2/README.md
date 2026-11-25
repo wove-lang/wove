@@ -649,7 +649,8 @@ generated C translation unit.
 `wovec <major>.<minor>.YYMMDD.HHMM-<git-short-hash>`. The release components
 live in [the version module](driver/version.wove). The build metadata uses
 the UTC author date of Git `HEAD` and the first seven lowercase hexadecimal
-digits of its revision.
+digits of its revision. Git metadata must belong to the Wove source root,
+which can be a linked worktree.
 
 Make generates `build/version.txt`, or `version.txt` under the selected
 `BUILD_DIR`, before compiling the native entry. Set `WOVEC_BUILD_VERSION`

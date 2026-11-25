@@ -5,7 +5,7 @@
 # Write the last commit's UTC author timestamp and revision for compile-time embedding.
 set -eu
 export LC_ALL=C
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH= cd -P -- "$(dirname -- "$0")/.." && pwd -P)
 
 # Report invalid metadata before changing the embedded version asset.
 fail() {
@@ -24,8 +24,13 @@ esac
 if [ "${WOVEC_BUILD_VERSION+x}" = x ]; then
 	version=$WOVEC_BUILD_VERSION
 else
-	metadata=$(TZ=UTC git -C "$root" log -1 --no-show-signature --date=format-local:%y%m%d.%H%M --format=%ad-%H 2>/dev/null) ||
-		fail 'Git metadata is unavailable; set WOVEC_BUILD_VERSION to YYMMDD.HHMM-SHA'
+	missing='Git metadata is unavailable for the source root; set WOVEC_BUILD_VERSION to YYMMDD.HHMM-SHA'
+	# Pin Git to this root's metadata directory or linked worktree file.
+	metadata=$(
+		unset GIT_COMMON_DIR
+		TZ=UTC git -C "$root" --git-dir=.git --work-tree=. log -1 --no-show-signature \
+			--date=format-local:%y%m%d.%H%M --format=%ad-%H 2>/dev/null
+	) || fail "$missing"
 	revision=${metadata##*-}
 	version="${metadata%-*}-$(printf '%.7s' "$revision")"
 fi
