@@ -147,12 +147,12 @@ fields to the end. All indices refer to existing tree rows.
 
 `read_module` reads the name slot and writes the original indices of selected
 declarations into a caller-provided record slice.
-The caller chooses bootstrap or native mode. `(cfg bootstrap)` selects in
-bootstrap mode and `(cfg (not bootstrap))` selects in native mode. The same
-rules apply to the module, its groups, and its declarations. A `(test)`
-directive excludes its target in either mode. The reader flattens active
-`decls` in source order. An excluded
-module succeeds with its name and zero declarations. Unknown metadata and
+The caller chooses native, bootstrap, or test mode. `(cfg bootstrap)` selects
+only in bootstrap mode. `(cfg test)` and a `(test)` directive select only in
+test mode. The `not` predicate inverts either flag. The same rules apply to
+the module, its groups, and its declarations. The reader flattens active
+`decls` in source order and retains each declaration's direct test marker.
+An excluded module succeeds with its name and zero declarations. Unknown metadata and
 unknown directive payloads stay opaque. Later passes resolve imports and
 interpret declarations.
 
@@ -552,8 +552,9 @@ The [decode fixtures](../tests/stage-2/source_decodings.tsv) check spans,
 compare successful values with Stage 1, and check the prefix on failure.
 
 Prefix a selection, compilation, or caller inspection command with
-`--mode bootstrap` or `--mode native` to choose its mode. The probe defaults
-to bootstrap mode. Native mode also accepts the two-parameter argv entry.
+`--mode bootstrap`, `--mode native`, or `--mode test` to choose its mode. The
+probe defaults to bootstrap mode. Native mode accepts the two-parameter argv
+entry. Test mode supports declaration selection and inventory discovery.
 
 Use `--module FILE [START END [DECL_CAPACITY]]` to select a checked module.
 The first row contains the selected count, start, end, error, line, and
@@ -609,6 +610,22 @@ bytes for emission and call sites for inspection. The success header
 gives the output count, defining file identity, and file-relative span.
 The [scalar graph fixtures](../tests/stage-2/scalar_graphs.tsv) check the
 native result, defining symbols, repeated imports, and original call spans.
+
+## Inline test discovery
+
+Use `--mode test --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...`
+with the supplied-graph probe to discover tests. Mark a function with
+`(:pragma (test))` and give it `(params)` and `(returns void)`. The same
+mode selects test-only imports and `(cfg test)` forms. A `cfg test` group
+can hold shared helpers and individually marked tests.
+
+The inventory needs no `main`. It visits canonical files once in graph
+discovery order and lists each file's tests in declaration order. A success
+header gives the count, followed by rows of the form
+`test FILE DECLARATION START END NAME PATH`. The declaration index and half-open
+byte span refer to the defining source file. A wrong signature reports the
+original parameter list or result type. Ordinary native and bootstrap modes
+exclude test-only forms and imports.
 
 ## Compile-time file embeds
 
