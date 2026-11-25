@@ -248,6 +248,19 @@ through to the original local. The right-hand value must have the
 field's exact type. Copies made by binding, calls, or returns retain
 their own fields.
 
+A Wove function can accept `(shared-ref State)` or `(mut-ref State)` in a
+parameter. The caller supplies `(borrow-shared (local state))` or
+`(borrow-mut (local state))` with the same defining record type. Shared
+loans read fields of the original record, and mutable loans let `set`
+write through field paths. A mutable loan starts at a `let-mut` local
+or an existing mutable reference. Reborrow a reference parameter with
+the same explicit forms to pass it to another call.
+
+The loan lasts through the call. A mutable loan excludes other access
+to the same record while later arguments are evaluated. A shared loan
+allows other shared access during that call. An earlier by-value
+argument keeps the value it had when evaluated.
+
 Functions can take and return locally declared or explicitly imported records.
 Calls pass these values by copy, and a caller retains its original local.
 An argument or return must match the defining record identity, so two
