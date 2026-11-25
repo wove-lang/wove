@@ -8,6 +8,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <unistd.h>
+#endif
+
 #include "../io/process.h"
 
 // Admit only nonempty decimal indices within the dispatch table.
@@ -50,12 +55,27 @@ static int32_t launch_test(const char *program, int32_t length, size_t index) {
 int wove_test_entry(int argc, char **argv, const wove_test_case *tests, size_t count) {
 	if (argc == 2) { return run_selected(argv[1], tests, count); }
 	if (argc != 1) { return 2; }
-	const size_t length = strlen(argv[0]);
-	if (length > INT32_MAX) { return 2; }
+	if (count == 0) { return 0; }
+	const char *program = NULL;
+	// Both OS paths resolve the executable independently of the invocation's display name.
+#if defined(__APPLE__)
+	char path[PROC_PIDPATHINFO_MAXSIZE];
+	if (proc_pidpath(getpid(), path, sizeof(path)) > 0) { program = path; }
+#elif defined(__linux__)
+	// The child still refers to this image when spawn opens the procfs link.
+	program = "/proc/self/exe";
+#endif
+	// Without a path the inventory cannot launch any of its tests.
+	if (program == NULL) {
+		fputs("could not locate the running Wove test executable\n", stderr);
+		return 1;
+	}
+	const size_t length = strlen(program);
+	if (length > INT32_MAX) { return 1; }
 	int failed = 0;
 	// A trap supplies a nonzero child status and leaves later tests runnable.
 	for (size_t index = 0; index < count; ++index) {
-		const int32_t status = launch_test(argv[0], (int32_t)length, index);
+		const int32_t status = launch_test(program, (int32_t)length, index);
 		fputs(status == 0 ? "pass\t" : "fail\t", stdout);
 		write_field(tests[index].file);
 		putchar('\t');

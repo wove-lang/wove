@@ -646,7 +646,9 @@ clang -std=c11 -I runtime -I stage-2/test emitted.c runtime/wove_runtime.c \
 
 With no arguments the executable runs each test in a fresh process and
 reports status, defining path, function name, and child status in
-tab-separated rows. A failed test leaves later tests runnable and makes
+tab-separated rows. On macOS and Linux, child launches use the running
+executable even when the invocation supplies a separate display name.
+A failed test leaves later tests runnable and makes
 the overall status nonzero. Child stdout is drained and stderr is
 inherited. Pass one zero-based decimal test index to run that test
 directly, with status 2 for an invalid selection.
