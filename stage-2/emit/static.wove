@@ -7,68 +7,18 @@
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only record_index (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_member_name))
+	(use wove-file "./runtime.wove" (only write_c_number))
 	(use wove-file "./text.wove" (only c_byte c_literal_text write_decimal_literal))
-
-	(struct RepeatOffset (fields (start u32)))
 
 	(let empty_initializer "{0}")
 	(let array_open "{{")
 	(let array_close "}}")
-
-	(fn add_output_width
-		(:doc `Saturate at one past the maximum C output view length.`)
-		(params (start u32) (width u32))
-		(returns u32)
-		(body
-			(let cap 2147483648u32)
-			(if
-				(:doc "Clamp before adding to preserve a saturated count.")
-				(u32.lt (u32.sub.wrapping (local cap) (local start)) (local width))
-				(then (return (local cap))))
-			(return (u32.add.wrapping (local start) (local width)))))
-
-	(fn repeated_end
-		(:doc `Count repeated text by doubling and saturate above the largest possible C output.`)
-		(params (start u32) (end u32) (count i32))
-		(returns u32)
-		(body
-			(let-mut total (local start))
-			(let-mut width (u32.sub.wrapping (local end) (local start)))
-			(let-mut left (int.convert u32 (local count)))
-			(while
-				(:doc "Each bit of the extent contributes a power-of-two multiple of the first element.")
-				(u32.lt 0u32 (local left))
-				(body
-					(if
-						(:doc "An odd repeat count includes the current power-of-two block.")
-						(u32.eq (u32.and (local left) 1u32) 1u32)
-						(then (set (local total) (call add_output_width (local total) (local width)))))
-					(set (local left) (u32.shr (local left) 1i32))
-					(set (local width) (call add_output_width (local width) (local width)))))
-			(return (local total))))
-
-	(fn repeat_initializer
-		(:doc `Repeat the first rendered element and comma inside the checked output extent.`)
-		(params (output (mut-array u8)) (start u32) (end u32) (count i32) (writing bool))
-		(returns u32)
-		(body
-			(let limit (call repeated_end (local start) (local end) (local count)))
-			(if (bool.not (local writing)) (then (return (local limit))))
-			(let-mut cursor (local end))
-			(let-mut prior (local start))
-			(while
-				(:doc "Copy from the already written first element, never from uninitialized output.")
-				(u32.lt (local cursor) (local limit))
-				(body
-					(let byte (array.load (local output) (int.convert i32 (local prior))))
-					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (local byte) (local writing)))
-					(set (local prior) (u32.add.wrapping (local prior) 1u32))
-					(if (u32.eq (local prior) (local end)) (then (set (local prior) (local start))))))
-			(return (local cursor))))
+	(let repeat_open "[0 ... ")
+	(let repeat_close "]=")
 
 	(fn write_initializer_start
 		(:doc `Write a scalar, a field designator, or the opening of a brace initializer.`)
-		(params (source (shared-array u8)) (row ScalarExpression) (child i32)
+		(params (source (shared-array u8)) (row ScalarExpression) (child i32) (extent i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -98,34 +48,19 @@
 				(:doc "A record has one set of braces. An inline array also opens its item list.")
 				(u32.eq (local kind) 50u32)
 				(then (return (call c_byte (borrow-mut (local output)) (local offset) 123u8 (local writing)))))
-			(return (call c_literal_text (borrow-shared (local array_open))
-				(borrow-mut (local output)) (local offset) (local writing)))))
-
-	(fn repeat_scratch_count
-		(:doc `Bound repeat scratch by the number of checked repeats inside this initializer.`)
-		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression)) (root i32))
-		(returns i32)
-		(body
-			(let node (array.load (local nodes) (local root)))
-			(let start (struct.get (local node) start))
-			(let end (struct.get (local node) end))
-			(let-mut index (local root))
-			(let-mut count 0i32)
-			(while
-				(:doc "The initializer's preorder subtree occupies consecutive source rows.")
-				(i32.lt (local index) (array.len (local nodes)))
-				(body
-					(let at (struct.get (array.load (local nodes) (local index)) start))
-					(if
-						(:doc "A row outside the initializer's byte range ends the scratch scan.")
-						(bool.or (i32.lt (local at) (local start)) (bool.not (i32.lt (local at) (local end))))
-						(then (return (local count))))
-					(if
-						(:doc "Only a repeat needs to remember where its first rendered element starts.")
-						(u32.eq (struct.get (array.load (local expressions) (local index)) kind) 72u32)
-						(then (set (local count) (i32.add.wrapping (local count) 1i32))))
-					(set (local index) (i32.add.wrapping (local index) 1i32))))
-			(return (local count))))
+			(let open (call c_literal_text (borrow-shared (local array_open))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(if
+				(:doc "Lists and single-element repeats need no range designator.")
+				(bool.not (i32.lt 1i32 (local extent)))
+				(then (return (local open))))
+			(let begin (call c_literal_text (borrow-shared (local repeat_open))
+				(borrow-mut (local output)) (local open) (local writing)))
+			(let-mut digits (array.alloc u8 11i32))
+			(let last (call write_c_number (borrow-mut (local output)) (local begin)
+				(i32.sub.wrapping (local extent) 1i32) (borrow-mut (local digits)) (local writing)))
+			(return (call c_literal_text (borrow-shared (local repeat_close))
+				(borrow-mut (local output)) (local last) (local writing)))))
 
 	(fn initializer_extent
 		(:doc `Read the declared count of a checked repeat.`)
@@ -144,11 +79,8 @@
 			(if
 				(:doc "The ordinary scalar module path needs no aggregate traversal.")
 				(u32.lt (struct.get (local value) kind) 50u32)
-				(then (return (call write_initializer_start (borrow-shared (local source)) (local value) -1i32
+				(then (return (call write_initializer_start (borrow-shared (local source)) (local value) -1i32 0i32
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
-			(let-mut repeats (array.alloc RepeatOffset (call repeat_scratch_count (borrow-shared (local nodes))
-				(borrow-shared (local expressions)) (local root))))
-			(let-mut depth 0i32)
 			(let-mut index (local root))
 			(let-mut cursor (local offset))
 			(let-mut entering (bool true))
@@ -158,30 +90,25 @@
 				(body
 					(let row (array.load (local expressions) (local index)))
 					(let kind (struct.get (local row) kind))
-					(let repeat (u32.eq (local kind) 72u32))
+					(let-mut extent 0i32)
 					(let-mut child (struct.get (local row) first))
 					(if
-						(:doc "The value of an empty repeat was checked but contributes no C element.")
-						(bool.and (local repeat) (i32.eq (call initializer_extent (borrow-shared (local records)) (local row)) 0i32))
-						(then (set (local child) -1i32)))
+						(:doc "A repeat emits its one checked element, except when its extent is zero.")
+						(u32.eq (local kind) 72u32)
+						(then
+							(set (local extent) (call initializer_extent (borrow-shared (local records)) (local row)))
+							(if (i32.eq (local extent) 0i32) (then (set (local child) -1i32)))))
 					(if
 						(:doc "Enter the first operand, or prepare to finish a leaf in the next step.")
 						(local entering)
 						(then
-							(set (local cursor) (call write_initializer_start (borrow-shared (local source)) (local row) (local child)
+							(set (local cursor) (call write_initializer_start (borrow-shared (local source)) (local row) (local child) (local extent)
 								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 							(set (local entering) (i32.lt -1i32 (local child)))
 							(if
-								(:doc "Every nonempty repeat saves the first item's start until that item finishes.")
+								(:doc "A nonempty aggregate or field continues at its first checked initializer.")
 								(local entering)
-								(then
-									(if
-										(:doc "The repeat stack only tracks arrays whose item will be reused.")
-										(local repeat)
-										(then
-											(array.store (local repeats) (local depth) (struct.new RepeatOffset (start (local cursor))))
-											(set (local depth) (i32.add.wrapping (local depth) 1i32))))
-									(set (local index) (local child)))))
+								(then (set (local index) (local child)))))
 						(else
 							(if
 								(:doc "Close brace-delimited values that opened a child list.")
@@ -196,21 +123,11 @@
 							(if (i32.eq (local index) (local root)) (then (return (local cursor))))
 							(let node (array.load (local nodes) (local index)))
 							(let parent_index (struct.get (local node) parent))
-							(let parent (array.load (local expressions) (local parent_index)))
-							(let parent_kind (struct.get (local parent) kind))
+							(let parent_kind (struct.get (array.load (local expressions) (local parent_index)) kind))
 							(if
 								(:doc "A field wrapper owns the comma after its value. Array elements own their commas directly.")
 								(bool.not (u32.eq (local parent_kind) 51u32))
-								(then
-									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
-									(if
-										(:doc "Complete the enclosing repeat from its single rendered element.")
-										(u32.eq (local parent_kind) 72u32)
-										(then
-											(set (local depth) (i32.sub.wrapping (local depth) 1i32))
-											(set (local cursor) (call repeat_initializer (borrow-mut (local output))
-												(struct.get (array.load (local repeats) (local depth)) start) (local cursor)
-												(call initializer_extent (borrow-shared (local records)) (local parent)) (local writing)))))))
+								(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))))
 							(let sibling (struct.get (local node) next_sibling))
 							(set (local entering) (i32.lt -1i32 (local sibling)))
 							(set (local index) (local parent_index))
