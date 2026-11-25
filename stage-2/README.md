@@ -193,10 +193,10 @@ string. Its name precedes metadata.
 (let alphabet "0123456789abcdef")
 ```
 
-Functions in the defining file use `(local lowest_digit)` to read the
-scalar. A local or parameter with the same name takes precedence. A
-quoted string is a shared `u8` view over its decoded bytes. Generated
-C puts a referenced nonempty byte table in a single read-only array
+Functions use `(local lowest_digit)` to read the scalar after declaring
+or selecting the binding. A local or parameter with the same name takes
+precedence. A quoted string is a shared `u8` view over its decoded
+bytes. Generated C puts a referenced nonempty byte table in a single read-only array
 with no added terminator. The ordinary `slice.len`, `slice.load`, and
 `borrow-shared` forms work with the static view.
 
@@ -423,9 +423,9 @@ requested function is unavailable in the selected module. Code 16 reports
 the first incoming call that exceeds the supplied output capacity.
 
 The [graph resolver](source/graph.wove) reads a supplied virtual file table
-and binds active function and record imports in separate namespaces. The table maps
-normalized absolute paths to defining file identities and source ranges in a
-shared byte arena. Relative imports use the directory of the reached path.
+and binds active functions, records, and immutable values in separate
+namespaces. The table maps normalized absolute paths to defining file
+identities and source ranges in a shared byte arena. Relative imports use the directory of the reached path.
 Stage 2 resolves virtual paths lexically before lookup, so a directory
 discarded by `..` can be absent from the graph. Stage 1 requires each
 intermediate directory to exist on the host filesystem.
@@ -435,10 +435,16 @@ no names or nested imports. The resolver applies one mode across the graph,
 including C header providers and their selected members. The resolved graph
 retains its mode for signature checking and C emission.
 
-In an `only` list, `Token` or `(as Token read_token)` selects a
-function. `(type Token)` or `(type (as Token LocalToken))` selects a
-record. The same name can refer to one function and one type in a file.
-Each selector binds a declaration defined by the provider.
+In a `wove-file` selection, a bare name or `(as name alias)` selects
+a function or an immutable module binding. When both share a name in
+the provider, the unqualified selector picks the function.
+`(value name)` or `(value (as name alias))` selects the immutable
+binding explicitly. Both aliases and direct selections use
+`(local name)` and read the same defining storage.
+
+`(type Token)` or `(type (as Token LocalToken))` selects a record.
+Function, type, and value selections use separate namespaces. Each
+selector binds a declaration defined by the provider.
 
 A `use c-header` selects functions and native types from a `bridge c-header` with the same
 decoded header key in the supplied source table. A key such as `"<stdlib.h>"`

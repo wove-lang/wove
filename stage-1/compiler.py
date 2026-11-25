@@ -115,6 +115,7 @@ class Module:
 	functions: dict[str, Function] = field(default_factory=dict)
 	bindings: dict[str, Function] = field(default_factory=dict)
 	values: dict[str, ModuleValue] = field(default_factory=dict)
+	value_bindings: dict[str, ModuleValue] = field(default_factory=dict)
 
 
 # Scalars and scalar-only records can be passed without a loan or transfer.
@@ -305,7 +306,7 @@ class FunctionEmitter:
 		self.function = function
 		self.functions = module.bindings
 		self.records = module.type_bindings
-		self.values = module.values
+		self.values = module.value_bindings
 		self.source = source
 		self.lines = []
 		self.scopes = [{
@@ -341,7 +342,7 @@ class FunctionEmitter:
 					raise SourceError(line)
 				return binding
 		declaration = self.values.get(symbol)
-		# A lexical lookup can fall back to the defining file's immutable binding.
+		# A lexical lookup can fall back to a defining or selected module binding.
 		if declaration is not None:
 			return declaration.binding
 		raise SourceError(line)
@@ -991,6 +992,7 @@ def prepare_functions(module: Module, *, entry: bool) -> None:
 		for index, (name, node) in enumerate(module.function_declarations.items(), module.function_index):
 			module.functions[name] = read_function(name, node, index, module.type_bindings, entry_module=entry)
 	module.bindings.update(module.functions)
+	module.value_bindings.update(module.values)
 
 
 # Decode the seed's local-file provider and its explicit selection list.
@@ -1007,26 +1009,38 @@ def read_use(node: Form) -> tuple[str, Form]:
 
 # Bind provider declarations directly so aliases retain the defining identity.
 def bind_use(only: Form, provider: Module, importer: Module) -> None:
-	# Each item selects one declaration in either the function or type namespace.
+	# Each item selects a definition in its provider, including an immutable value.
 	for item in only.operands:
-		selects_type = isinstance(item, Form) and item.tag == "type"
-		# Type selectors wrap a bare name or the same alias form as functions.
-		if selects_type:
-			item, = checked_form(item, "type", 1).operands
+		namespace = item.tag if isinstance(item, Form) and item.tag in ("type", "value") else None
+		# Qualified selectors share the same bare-name and alias syntax.
+		if namespace is not None:
+			item, = checked_form(item, namespace, 1).operands
 		# A bare name uses the provider spelling locally.
 		if isinstance(item, Atom):
 			original = local = item
 		# A renamed import carries both the defining and local names.
 		else:
 			original, local = checked_form(item, "as", 2).operands
-		declarations = provider.records if selects_type else provider.functions
-		target = declarations.get(identifier(original))
+		spelling = identifier(original)
+		# An explicit type selector always uses the provider's own type definitions.
+		if namespace == "type":
+			target = provider.records.get(spelling)
+			bindings = importer.type_bindings
+			reserved = C_TYPE
+		# An unqualified selection preserves function precedence at the provider.
+		elif namespace is None and spelling in provider.functions:
+			target = provider.functions[spelling]
+			bindings = importer.bindings
+			reserved = importer.function_declarations
+		# Value bindings share the selected declaration's existing storage.
+		else:
+			target = provider.values.get(spelling)
+			bindings = importer.value_bindings
+			reserved = importer.values
 		# Only declarations defined in the provider can be selected.
 		if target is None:
 			raise SourceError(original.line)
 		name = identifier(local)
-		bindings = importer.type_bindings if selects_type else importer.bindings
-		reserved = C_TYPE if selects_type else importer.function_declarations
 		# Keep builtins and local declarations distinct from imports in their own namespace.
 		if name in bindings or name in reserved:
 			raise SourceError(local.line)
