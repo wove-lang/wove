@@ -54,8 +54,8 @@
 			(value c_writable_binding) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)
 			(value next_path) (value break_path) (value continue_path) (value break_statement) (value for_statement) (value for_mut_binding) (value for_element_assignment)))
-	(use wove-file "./conditional.wove" (only plan_conditional finish_conditional_values conditional_transfer_reaches
-		(value conditional_value) (value conditional_then) (value conditional_else)))
+	(use wove-file "./conditional.wove" (only plan_conditional finish_conditional_value conditional_transfer_reaches is_pending_value
+		(value conditional_value) (value pending_conditional) (value pending_field_read) (value pending_array_read)))
 	(use wove-file "./control.wove" (only plan_control_blocks enclosing_loop sequence_paths predicate_literal control_paths native_transfer_paths has_path repeats_loop consumption_on_back_edge))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type scalar_operator word_shift_type is_i32_division is_fixed_initializer
@@ -2352,7 +2352,7 @@
 				(:doc "Inline reads can also inspect a returned or constructed fixed array.")
 				(bool.or (local projected)
 					(bool.and (bool.not (local store))
-						(bool.or (u32.eq (local tag) 9u32)
+						(bool.or (bool.or (u32.eq (local tag) 9u32) (u32.eq (local tag) (local conditional_value)))
 							(bool.or (call is_fixed_initializer (local tag)) (call is_integer_byte_encoder (local tag))))))
 				(then (return (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local caller) (local receiver) 42u32 (local statement)
@@ -2428,7 +2428,17 @@
 				(:doc "A failed receiver retains its original source span.")
 				(u32.lt 0u32 (struct.get (local checked) error))
 				(then (return (local checked))))
-			(let view (struct.get (array.load (local expressions) (local receiver)) type))
+			(let origin (array.load (local expressions) (local receiver)))
+			(if
+				(:doc "A conditional temporary can supply a fixed-array read once its exact layout is available.")
+				(call is_pending_value (struct.get (local origin) kind))
+				(then
+					(if (local store) (then (return (call entry_at (local reference) -1i32 24u32))))
+					(array.store (local expressions) (local index)
+						(call expression_row (local pending_array_read) (local expected)
+							(int.convert i32 (local kind)) (local receiver) 0i32 0i32 (bool false)))
+					(return (call entry_at (local node) (local index) 0u32))))
+			(let view (struct.get (local origin) type))
 			(if
 				(:doc "An inline layout supplies its own element type, extent, and original place.")
 				(call is_record_type (local view))
@@ -2714,8 +2724,19 @@
 				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
 				(then (return (call entry_at (local name) -1i32 34u32))))
 			(let value (array.load (local expressions) (local receiver)))
-			(let type (struct.get (local value) type))
-			(let layout (array.load (local records) (call record_index (call record_receiver_type (local type)))))
+			(if
+				(:doc "Wait for the receiver's exact result type before selecting its field.")
+				(call is_pending_value (struct.get (local value) kind))
+				(then
+					(array.store (local expressions) (local index)
+						(call expression_row (local pending_field_read) (local expected) -1i32 (local receiver) 0i32 0i32 (bool false)))
+					(return (call entry_at (local node) (local index) 0u32))))
+			(let type (call record_receiver_type (struct.get (local value) type)))
+			(if
+				(:doc "A resolved field receiver must name a record layout.")
+				(bool.not (call is_record_type (local type)))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let layout (array.load (local records) (call record_index (local type))))
 			(if
 				(:doc "Fixed arrays and enums do not expose named record fields.")
 				(bool.or (call is_fixed_array (local layout)) (call is_enum_layout (local layout)))
@@ -2791,9 +2812,10 @@
 						(then (set (local projection) (local receiver)))
 						(else
 							(if
-								(:doc "A base receiver can come from a binding, call, constructor, or slice load.")
-								(bool.not (bool.or (bool.or (u32.eq (local tag) 8u32) (u32.eq (local tag) 9u32))
-									(bool.or (u32.eq (local tag) 37u32) (u32.eq (local tag) 50u32))))
+								(:doc "A base receiver can start from a place or a record-producing expression.")
+								(bool.not (bool.or (u32.eq (local tag) (local conditional_value))
+									(bool.or (bool.or (u32.eq (local tag) 8u32) (u32.eq (local tag) 9u32))
+										(bool.or (u32.eq (local tag) 37u32) (u32.eq (local tag) 50u32)))))
 								(then (return (call entry_at (local reference) -1i32 24u32))))
 							(if
 								(:doc "Only a named binding supplies storage for a projected call loan.")
@@ -3387,6 +3409,33 @@
 		(body (return (struct.new BodyPlan (count (local count)) (file -1i32) (start 0i32) (end 0i32)
 			(error 0u32) (related_start -1i32) (related_end -1i32)))))
 
+	(fn finish_pending_value
+		(:doc "Resolve a typed join or finish a read whose receiver type was initially deferred.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (row ScalarExpression)
+			(caller ScalarFunction) (view_start i32) (bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let kind (struct.get (local row) kind))
+			(if
+				(:doc "Both child types are now available at a conditional join.")
+				(u32.eq (local kind) (local pending_conditional))
+				(then (return (call finish_conditional_value (borrow-shared (local nodes))
+					(local index) (local row) (borrow-mut (local expressions))))))
+			(let receiver (struct.get (local row) first))
+			(let expected (struct.get (local row) type))
+			(if
+				(:doc "A completed projection can use the usual field lookup and value type check.")
+				(u32.eq (local kind) (local pending_field_read))
+				(then (return (call plan_field_read (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local index) (local receiver) (local expected) (borrow-shared (local bindings))
+					(borrow-shared (local records)) (borrow-mut (local expressions))))))
+			(return (call finish_fixed_access (borrow-shared (local source)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local index)) (array.load (local nodes) (local receiver))
+				(local caller) (local receiver) -1i32 (local index)
+				(int.convert u32 (struct.get (local row) target)) (local expected) (bool false) (local view_start)
+				(borrow-shared (local records)) (borrow-mut (local expressions))))))
+
 	(fn plan_value
 		(:doc `Check a statement's value tree in source order.
 
@@ -3425,8 +3474,8 @@
 						(then (return (call body_error (local caller) (struct.get (local node) start)
 							(struct.get (local node) end) 24u32))))))
 			(let-mut site_count (local site_start))
-			(let-mut first_conditional -1i32)
-			(let-mut last_conditional -1i32)
+			(let-mut first_pending -1i32)
+			(let-mut last_pending -1i32)
 			(let end (struct.get (array.load (local nodes) (local root)) end))
 			(array.store (local expressions) (local root)
 				(call expression_row 0u32 (local expected)
@@ -3473,11 +3522,11 @@
 										(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))))))
 					(let expression (array.load (local expressions) (local index)))
 					(if
-						(:doc "Defer conditional joins until both arm operands have exact types.")
-						(u32.eq (struct.get (local expression) kind) (local conditional_value))
+						(:doc "Record the rows that need their children's final types.")
+						(call is_pending_value (struct.get (local expression) kind))
 						(then
-							(if (i32.lt (local first_conditional) 0i32) (then (set (local first_conditional) (local index))))
-							(set (local last_conditional) (local index))))
+							(if (i32.lt (local first_pending) 0i32) (then (set (local first_pending) (local index))))
+							(set (local last_pending) (local index))))
 					(if
 						(:doc "Record every resolved call in source order, including a field receiver checked by its parent.")
 						(u32.eq (struct.get (local expression) kind) 3u32)
@@ -3493,14 +3542,22 @@
 								(call resolved_call_site (local caller) (local callee) (local node) (local view_start)))
 							(set (local site_count) (i32.add.wrapping (local site_count) 1i32))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
-			(if
-				(:doc "Resolve conditional join types before publishing the enclosing statement.")
-				(i32.lt -1i32 (local first_conditional))
-				(then
-					(let checked (call finish_conditional_values (borrow-shared (local nodes))
-						(local first_conditional) (local last_conditional) (borrow-mut (local expressions))))
-					(if (u32.lt 0u32 (struct.get (local checked) error))
-						(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))))
+			(let-mut pending (local last_pending))
+			(while
+				(:doc "Finish pending types from the inside out, after source-ordered checks of every operand.")
+				(bool.and (i32.lt -1i32 (local pending)) (bool.not (i32.lt (local pending) (local first_pending))))
+				(body
+					(let row (array.load (local expressions) (local pending)))
+					(if
+						(:doc "Only typed joins and their dependent reads are deferred.")
+						(call is_pending_value (struct.get (local row) kind))
+						(then
+							(let checked (call finish_pending_value (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local pending) (local row) (local caller) (local view_start) (borrow-shared (local bindings))
+								(borrow-shared (local records)) (borrow-mut (local expressions))))
+							(if (u32.lt 0u32 (struct.get (local checked) error))
+								(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))))
+					(set (local pending) (i32.sub.wrapping (local pending) 1i32))))
 			(if
 				(:doc "Read exact-length contracts only for expressions that contain checked calls.")
 				(i32.lt (local site_start) (local site_count))

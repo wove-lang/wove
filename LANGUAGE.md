@@ -70,8 +70,9 @@ Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a cal
 In Stage 2, `(if condition (then value) (else value))` can be used as a
 value. The condition must be `bool`, and both arms must contain exactly one
 expression of the same type. The condition runs once and only the selected arm
-runs. A value arm can produce a fresh owner. Transferring an existing binding
-still follows the usual move rules.
+runs. A conditional record or fixed array supports direct reads. A value arm
+can produce a fresh owner. Transferring an existing binding still follows the
+usual move rules.
 
 ## Fieldless enums
 
