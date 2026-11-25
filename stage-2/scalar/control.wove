@@ -1,0 +1,220 @@
+(module scalar_control
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Summarize reachable edges in checked statement sequences and follow native owner transfers.
+
+	Each block reports fallthrough, break, and continue relative to its
+	enclosing loop. A completed loop consumes its own break and continue
+	edges. Literal conditions can exclude an edge even though the branch is
+	still checked and emitted.`)
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/enum_forms.wove" (only (value match_statement)))
+	(use wove-file "./flow.wove" (only within_scope (type ScalarStatement)
+		(value next_path) (value break_path) (value continue_path)))
+	(use wove-file "./loans.wove" (only (type ScalarExpression)))
+
+	(fn has_path
+		(:doc `Test whether any of the requested edges are possible.`)
+		(params (paths u32) (mask u32))
+		(returns bool)
+		(body (return (u32.lt 0u32 (u32.and (local paths) (local mask))))))
+
+	(fn repeats_loop
+		(:doc `Both ordinary body completion and continue reach the next condition check.`)
+		(params (paths u32))
+		(returns bool)
+		(body (return (call has_path (local paths) (u32.or (local next_path) (local continue_path))))))
+
+	(fn enclosing_loop
+		(:doc `Find the nearest checked loop in the source ancestry of a statement.`)
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement)) (index i32) (outer i32))
+		(returns i32)
+		(body
+			(let-mut row (struct.get (array.load (local nodes) (local index)) parent))
+			(while
+				(:doc "Stop at the function body before inspecting declarations outside it.")
+				(bool.not (i32.eq (local row) (local outer)))
+				(body
+					(if
+						(:doc "The first enclosing while is the target.")
+						(u32.eq (struct.get (array.load (local statements) (local row)) kind) 25u32)
+						(then (return (local row))))
+					(set (local row) (struct.get (array.load (local nodes) (local row)) parent))))
+			(return -1i32)))
+
+	(fn sequence_paths
+		(:doc `Follow sibling statements while the incoming path can continue.
+
+		An optional stop row limits the walk to statements completed before
+		the use, which may be inside one of the remaining siblings.`)
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(initial u32) (first i32) (stop i32))
+		(returns u32)
+		(body
+			(let-mut paths (local initial))
+			(let-mut index (local first))
+			(while
+				(:doc "A terminal sequence contributes its accumulated loop exits.")
+				(bool.and (i32.lt -1i32 (local index)) (call has_path (local paths) (local next_path)))
+				(body
+					(let node (array.load (local nodes) (local index)))
+					(if
+						(:doc "Leave the destination statement and any statement containing it unprocessed.")
+						(bool.and (i32.lt -1i32 (local stop))
+							(bool.or (bool.not (i32.lt (local index) (local stop)))
+								(call within_scope (local node) (array.load (local nodes) (local stop)))))
+						(then (return (local paths))))
+					(let row (array.load (local statements) (local index)))
+					(if
+						(:doc "Disabled siblings have no checked statement and leave the path intact.")
+						(u32.lt 0u32 (struct.get (local row) kind))
+						(then (set (local paths) (u32.or (u32.and (local paths) (u32.not (local next_path)))
+							(struct.get (local row) paths)))))
+					(set (local index) (struct.get (local node) next_sibling))))
+			(return (local paths))))
+
+	(fn predicate_literal
+		(:doc `Read the checked literal kind of an if or while predicate. Return zero for other control forms.`)
+		(params (control ScalarStatement) (expressions (shared-array ScalarExpression)))
+		(returns u32)
+		(body
+			(let kind (struct.get (local control) kind))
+			(if
+				(:doc "Only conditionals and loops have boolean predicates.")
+				(bool.or (u32.eq (local kind) 22u32) (u32.eq (local kind) 25u32))
+				(then (return (struct.get (array.load (local expressions) (struct.get (local control) value)) kind))))
+			(return 0u32)))
+
+	(fn control_paths
+		(:doc `Join a completed control statement's arms and keep only exits that reach past it.`)
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(expressions (shared-array ScalarExpression)) (control ScalarStatement))
+		(returns u32)
+		(body
+			(let first (struct.get (local control) first))
+			(let paths (struct.get (array.load (local statements) (local first)) paths))
+			(let literal (call predicate_literal (local control) (borrow-shared (local expressions))))
+			(if
+				(:doc "A loop can end on a false condition or a reachable break from its own body.")
+				(u32.eq (struct.get (local control) kind) 25u32)
+				(then
+					(if
+						(:doc "An always-true loop reaches its successor only through break.")
+						(bool.or (bool.not (u32.eq (local literal) 5u32)) (call has_path (local paths) (local break_path)))
+						(then (return (local next_path))))
+					(return 0u32)))
+			(if
+				(:doc "An exhaustive match joins the reachable edges of all its cases.")
+				(u32.eq (struct.get (local control) kind) (local match_statement))
+				(then
+					(let-mut result 0u32)
+					(let-mut arm (local first))
+					(while
+						(:doc "Each case can be selected at runtime.")
+						(i32.lt -1i32 (local arm))
+						(body
+							(set (local result) (u32.or (local result) (struct.get (array.load (local statements) (local arm)) paths)))
+							(set (local arm) (struct.get (array.load (local nodes) (local arm)) next_sibling))))
+					(return (local result))))
+			(if (u32.eq (local literal) 5u32) (then (return (local paths))))
+			(let alternate (struct.get (array.load (local nodes) (local first)) next_sibling))
+			(let-mut other (local next_path))
+			(if
+				(:doc "An omitted else can continue without executing a statement.")
+				(i32.lt -1i32 (local alternate))
+				(then (set (local other) (struct.get (array.load (local statements) (local alternate)) paths))))
+			(if (u32.eq (local literal) 4u32) (then (return (local other))))
+			(return (u32.or (local paths) (local other)))))
+
+	(fn block_can_run
+		(:doc `Exclude an arm or loop body that its literal predicate cannot enter.`)
+		(params (control ScalarStatement) (block i32) (literal u32))
+		(returns bool)
+		(body
+			(let first (i32.eq (local block) (struct.get (local control) first)))
+			(return (bool.not (bool.or (bool.and (local first) (u32.eq (local literal) 4u32))
+				(bool.and (bool.not (local first)) (u32.eq (local literal) 5u32)))))))
+
+	(fn statement_can_run
+		(:doc `Check that the prefix of a statement's own block can reach it.`)
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement)) (index i32) (block i32))
+		(returns bool)
+		(body
+			(let first (struct.get (array.load (local nodes) (local block)) first_child))
+			(return (call has_path (call sequence_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+				(local next_path) (local first) (local index)) (local next_path)))))
+
+	(fn native_transfer_paths
+		(:doc `Find the edges from a native transfer to a later use or the end of a loop body.
+
+		Follow the rest of the origin's block and then climb through the
+		controls it actually exits. A break joins after the loop it targets.
+		A continue contributes to that loop's next condition, never to
+		later statements in the same iteration.`)
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(expressions (shared-array ScalarExpression)) (transfer i32) (use i32) (back_edge bool))
+		(returns u32)
+		(body
+			(let-mut prior (struct.get (array.load (local nodes) (local transfer)) parent))
+			(while
+				(:doc "Climb from the argument to its checked statement or the statement still being checked.")
+				(bool.and (bool.not (i32.eq (local prior) (local use)))
+					(u32.eq (struct.get (array.load (local statements) (local prior)) kind) 0u32))
+				(body (set (local prior) (struct.get (array.load (local nodes) (local prior)) parent))))
+			(if (i32.eq (local prior) (local use)) (then (return (local next_path))))
+			(let site (array.load (local nodes) (local use)))
+			(let origin (array.load (local nodes) (local prior)))
+			(let-mut block (struct.get (local origin) parent))
+			(if
+				(:doc "A preceding terminal path can exclude an otherwise checked transfer.")
+				(bool.not (call statement_can_run (borrow-shared (local nodes)) (borrow-shared (local statements))
+					(local prior) (local block)))
+				(then (return 0u32)))
+			(let initial (array.load (local statements) (local prior)))
+			(if
+				(:doc "A transfer in the loop predicate precedes every body path.")
+				(bool.and (local back_edge) (i32.eq (local prior) (struct.get (local site) parent)))
+				(then (return (struct.get (array.load (local statements) (local use)) paths))))
+			(if
+				(:doc "A control predicate's transfer precedes a use in any of its arms.")
+				(call within_scope (local origin) (local site))
+				(then (return (local next_path))))
+			(let-mut paths (struct.get (local initial) paths))
+			(while
+				(:doc "Climb only across blocks outside the use's scope.")
+				(bool.not (call within_scope (array.load (local nodes) (local block)) (local site)))
+				(body
+					(let control (struct.get (array.load (local nodes) (local block)) parent))
+					(let row (array.load (local statements) (local control)))
+					(let here (array.load (local nodes) (local control)))
+					(let literal (call predicate_literal (local row) (borrow-shared (local expressions))))
+					(if
+						(:doc "Neither a sibling arm nor a statically excluded path can carry the transfer to this use.")
+						(bool.or (call within_scope (local here) (local site))
+							(bool.not (call block_can_run (local row) (local block) (local literal))))
+						(then (return 0u32)))
+					(set (local paths) (call sequence_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+						(local paths) (struct.get (array.load (local nodes) (local prior)) next_sibling) -1i32))
+					(if
+						(:doc "Only a break or a later false condition can carry the transfer out of the loop.")
+						(u32.eq (struct.get (local row) kind) 25u32)
+						(then
+							(if
+								(:doc "Consume this loop's exits before continuing toward the enclosing use.")
+								(bool.or (call has_path (local paths) (local break_path))
+									(bool.and (bool.not (u32.eq (local literal) 5u32)) (call repeats_loop (local paths))))
+								(then (set (local paths) (local next_path)))
+								(else (set (local paths) 0u32)))))
+					(if (u32.eq (local paths) 0u32) (then (return 0u32)))
+					(set (local prior) (local control))
+					(set (local block) (struct.get (local here) parent))
+					(if
+						(:doc "A terminal prefix in the enclosing block can exclude the whole control.")
+						(bool.not (call statement_can_run (borrow-shared (local nodes)) (borrow-shared (local statements))
+							(local prior) (local block)))
+						(then (return 0u32)))))
+			(let-mut stop (local use))
+			(if (local back_edge) (then (set (local stop) -1i32)))
+			(return (call sequence_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+				(local paths) (struct.get (array.load (local nodes) (local prior)) next_sibling) (local stop))))))

@@ -10,6 +10,19 @@
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only skip_disabled_siblings))
 
+	(let break_statement 144u32)
+	(let continue_statement 145u32)
+	(let next_path 1u32)
+	(let break_path 2u32)
+	(let continue_path 4u32)
+
+	(fn is_loop_exit
+		(:doc `Recognize statements that transfer control to their enclosing loop.`)
+		(params (kind u32))
+		(returns bool)
+		(body (return (bool.or (u32.eq (local kind) (local break_statement))
+			(u32.eq (local kind) (local continue_statement))))))
+
 	(let c_constant_binding 80u32)
 	(let c_readonly_binding 81u32)
 	(let c_writable_binding 82u32)
@@ -47,9 +60,11 @@
 		use kind 63 and point from their name row to the defining declaration
 		in value. Native value definitions carry the original C name and type,
 		and an alias links them to the importing scope the same way.
-		Missing links use -1.`)
+		A loop exit names its target loop. A while with any written break
+		keeps the first break row in target for label emission. Paths summarize
+		reachable fallthrough, break, and continue edges. Missing links use -1.`)
 		ScalarStatement
-		(fields (kind u32) (target i32) (value i32) (type u32) (first i32) (previous_owner i32) (falls_through bool) (move_site i32)))
+		(fields (kind u32) (target i32) (value i32) (type u32) (first i32) (previous_owner i32) (falls_through bool) (move_site i32) (paths u32)))
 
 	(struct BlockExit (fields (owner i32) (alternate i32) (block i32) (statement i32)))
 
@@ -60,7 +75,17 @@
 		(body
 			(return (struct.new ScalarStatement (kind 0u32) (target (local target))
 				(value -1i32) (type 0u32) (first (local first))
-				(previous_owner (local previous_owner)) (falls_through (local falls_through)) (move_site -1i32)))))
+				(previous_owner (local previous_owner)) (falls_through (local falls_through)) (move_site -1i32) (paths 0u32)))))
+
+	(fn statement_exit_state
+		(:doc `Keep a checked statement's operands while recording its target, cleanup, and outgoing paths.`)
+		(params (row ScalarStatement) (target i32) (previous_owner i32) (falls_through bool) (paths u32))
+		(returns ScalarStatement)
+		(body
+			(return (struct.new ScalarStatement (kind (struct.get (local row) kind)) (target (local target))
+				(value (struct.get (local row) value)) (type (struct.get (local row) type))
+				(first (struct.get (local row) first)) (previous_owner (local previous_owner))
+				(falls_through (local falls_through)) (move_site (struct.get (local row) move_site)) (paths (local paths))))))
 
 	(fn moved_owner
 		(:doc `Record a transfer while preserving the source declaration's scope links.`)
@@ -71,7 +96,7 @@
 				(kind (struct.get (local owner) kind)) (target (struct.get (local owner) target))
 				(value (struct.get (local owner) value)) (type (struct.get (local owner) type))
 				(first (struct.get (local owner) first)) (previous_owner (struct.get (local owner) previous_owner))
-				(falls_through (struct.get (local owner) falls_through)) (move_site (local move_site))))))
+				(falls_through (struct.get (local owner) falls_through)) (move_site (local move_site)) (paths (struct.get (local owner) paths))))))
 
 	(fn within_scope
 		(:doc `Determine whether one node's complete span is inside another node in the same source tree.`)
@@ -79,44 +104,6 @@
 		(returns bool)
 		(body (return (bool.not (bool.or (i32.lt (struct.get (local inner) start) (struct.get (local outer) start))
 			(i32.lt (struct.get (local outer) end) (struct.get (local inner) end)))))))
-
-	(fn c_transfer_reaches
-		(:doc `Check whether an earlier consuming argument can reach the current use.
-
-		Only falling-through blocks contribute after a join. Other arms of
-		the same conditional are evaluated independently. Within a statement,
-		an earlier operand may have consumed the owner.`)
-		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement)) (transfer i32) (use i32))
-		(returns bool)
-		(body
-			(let-mut prior (struct.get (array.load (local nodes) (local transfer)) parent))
-			(while
-				(:doc "Climb to the enclosing statement. The current statement has no checked row yet.")
-				(bool.and (bool.not (i32.eq (local prior) (local use)))
-					(u32.eq (struct.get (array.load (local statements) (local prior)) kind) 0u32))
-				(body (set (local prior) (struct.get (array.load (local nodes) (local prior)) parent))))
-			(if
-				(:doc "Expressions in the same statement are planned left to right.")
-				(i32.eq (local prior) (local use))
-				(then (return (bool true))))
-			(if
-				(:doc "An earlier return cannot reach another statement.")
-				(u32.eq (struct.get (array.load (local statements) (local prior)) kind) 7u32)
-				(then (return (bool false))))
-			(let site (array.load (local nodes) (local use)))
-			(let-mut block (struct.get (array.load (local nodes) (local prior)) parent))
-			(while
-				(:doc "Rise toward the block shared by both statements, staying on paths that can continue.")
-				(bool.not (call within_scope (array.load (local nodes) (local block)) (local site)))
-				(body
-					(let parent (array.load (local nodes) (struct.get (array.load (local nodes) (local block)) parent)))
-					(if
-						(:doc "Exited paths and other arms do not reach this site.")
-						(bool.or (call within_scope (local parent) (local site))
-							(bool.not (struct.get (array.load (local statements) (local block)) falls_through)))
-						(then (return (bool false))))
-					(set (local block) (struct.get (local parent) parent))))
-			(return (bool true))))
 
 	(fn after_block
 		(:doc `After a nested block, find its alternate or the next active statement in the enclosing block.`)

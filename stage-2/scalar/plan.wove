@@ -43,9 +43,11 @@
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind
 			is_optional_byte_owner_type optional_unwrap_kind))
 	(use wove-file "./loans.wove" (only has_conflicting_loan field_place_root (type ScalarExpression)))
-	(use wove-file "./flow.wove" (only block_statement moved_owner after_block c_transfer_reaches is_c_value_binding (type ScalarStatement)
+	(use wove-file "./flow.wove" (only block_statement statement_exit_state moved_owner after_block is_loop_exit is_c_value_binding (type ScalarStatement)
 			(value c_writable_binding) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
-			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)))
+			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)
+			(value next_path) (value break_path) (value continue_path) (value break_statement)))
+	(use wove-file "./control.wove" (only enclosing_loop sequence_paths predicate_literal control_paths native_transfer_paths has_path repeats_loop))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type decimal_scalar decimal_suffix_start scalar_operator word_shift_type is_i32_division is_fixed_initializer
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
@@ -935,7 +937,7 @@
 							(array.store (local statements) (local index)
 								(struct.new ScalarStatement (kind 62u32) (target (local name)) (value (local initializer))
 									(type (struct.get (array.load (local expressions) (local initializer)) type))
-									(first (local first)) (previous_owner -1i32) (falls_through (bool false)) (move_site -1i32)))
+									(first (local first)) (previous_owner -1i32) (falls_through (bool false)) (move_site -1i32) (paths 0u32)))
 							(set (local first) (local index))))
 					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
 			(array.store (local statements) (local base) (call block_statement (local first) -1i32 -1i32 (bool false)))
@@ -1034,7 +1036,8 @@
 						(then
 							(if
 								(:doc "Prior operands and continuing paths can make the owner unavailable.")
-								(call c_transfer_reaches (borrow-shared (local nodes)) (borrow-shared (local statements)) (local index) (local statement))
+								(call has_path (call native_transfer_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+									(borrow-shared (local expressions)) (local index) (local statement) (bool false)) (local next_path))
 								(then (return (local index))))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return -1i32)))
@@ -3439,6 +3442,38 @@
 				(local caller) (borrow-shared (local parameters)) (borrow-shared (local statements))
 				(local index) (local statement)))))
 
+	(fn plan_loop_exit
+		(:doc `Record a terminal edge and the enclosing loop whose entry owners remain live.`)
+		(params (nodes (shared-array SourceNode)) (statements (mut-array ScalarStatement))
+			(caller ScalarFunction) (index i32) (kind u32) (previous_owner i32) (site_count i32))
+		(returns BodyPlan)
+		(body
+			(let loop (call enclosing_loop (borrow-shared (local nodes)) (borrow-shared (local statements))
+				(local index) (struct.get (local caller) body)))
+			(if
+				(:doc "Both exit forms require an actual enclosing loop.")
+				(i32.lt (local loop) 0i32)
+				(then
+					(let node (array.load (local nodes) (local index)))
+					(return (call body_error (local caller) (struct.get (local node) start) (struct.get (local node) end) 24u32))))
+			(let-mut paths (local continue_path))
+			(if
+				(:doc "Any written break needs a C label, including a break in an excluded branch.")
+				(u32.eq (local kind) (local break_statement))
+				(then
+					(set (local paths) (local break_path))
+					(let entry (array.load (local statements) (local loop)))
+					(if
+						(:doc "Keep the first written break as the loop's label marker.")
+						(i32.lt (struct.get (local entry) target) 0i32)
+						(then
+							(array.store (local statements) (local loop) (call statement_exit_state (local entry) (local index)
+								(struct.get (local entry) previous_owner) (struct.get (local entry) falls_through) (struct.get (local entry) paths)))))))
+			(array.store (local statements) (local index)
+				(struct.new ScalarStatement (kind (local kind)) (target (local loop)) (value -1i32) (type 0u32)
+					(first -1i32) (previous_owner (local previous_owner)) (falls_through (bool false)) (move_site -1i32) (paths (local paths))))
+			(return (call body_success (local site_count)))))
+
 	(fn plan_statement
 		(:doc `Check a statement and its value, then publish its row and append any calls.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction) (index i32)
@@ -3454,6 +3489,12 @@
 				(u32.lt 0u32 (struct.get (local statement) error))
 				(then (return (call body_error (local caller) (struct.get (local statement) start)
 					(struct.get (local statement) end) (struct.get (local statement) error)))))
+			(let kind (struct.get (local statement) kind))
+			(if
+				(:doc "Loop exits have no value to check and terminate their statement sequence.")
+				(call is_loop_exit (local kind))
+				(then (return (call plan_loop_exit (borrow-shared (local nodes)) (borrow-mut (local statements))
+					(local caller) (local index) (local kind) (local previous_owner) (local site_count)))))
 			(let field_place (call is_field_assignment (borrow-shared (local source)) (borrow-shared (local nodes)) (local statement)))
 			(let binding (call check_statement_target (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (local index) (local statement) (local field_place)
@@ -3464,7 +3505,6 @@
 				(u32.lt 0u32 (struct.get (local binding) error))
 				(then (return (call body_error (local caller) (struct.get (local binding) start)
 					(struct.get (local binding) end) (struct.get (local binding) error)))))
-			(let kind (struct.get (local statement) kind))
 			(let-mut emitted_kind (local kind))
 			(let value (struct.get (local statement) value))
 			(let-mut first -1i32)
@@ -3561,11 +3601,14 @@
 						(then (return (call body_error (local caller) (struct.get (local arms) start)
 							(struct.get (local arms) end) (struct.get (local arms) error)))))
 					(set (local first) (struct.get (local arms) operand))))
+			(let falls (bool.not (u32.eq (local kind) 7u32)))
+			(let-mut paths 0u32)
+			(if (local falls) (then (set (local paths) (local next_path))))
 			(array.store (local statements) (local index)
 				(struct.new ScalarStatement (kind (local emitted_kind)) (target (local target)) (value (local value))
 					(type (local type))
 					(first (local first)) (previous_owner (local previous_owner))
-					(falls_through (bool.not (u32.eq (local kind) 7u32))) (move_site -1i32)))
+					(falls_through (local falls)) (move_site -1i32) (paths (local paths))))
 			(return (local checked))))
 
 	(fn consumption_on_back_edge
@@ -3593,8 +3636,8 @@
 							(if
 								(:doc "Use the loop body as the scope reached by a continuing back edge.")
 								(bool.and (i32.lt (local name) (local loop))
-									(call c_transfer_reaches (borrow-shared (local nodes)) (borrow-shared (local statements))
-										(local cursor) (local block)))
+									(call repeats_loop (call native_transfer_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+										(borrow-shared (local expressions)) (local cursor) (local block) (bool true))))
 								(then (return (local cursor))))))
 					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
 			(return -1i32)))
@@ -3603,9 +3646,9 @@
 		(:doc `Check one function in source order and merge return paths at block boundaries.
 
 		The source links identify which block owns each declaration.
-		Remember the then result while checking an explicit else. A loop
-		or a branch with no else can continue past the statement without
-		entering its block.`)
+		Remember the then result while checking an explicit else.
+		Keep written arms available for diagnostics and compute the
+		reachable edges before closing each control statement.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
 			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord)) (statements (mut-array ScalarStatement))
@@ -3627,14 +3670,19 @@
 						(i32.lt (local index) 0i32)
 						(then
 							(let exit (call after_block (borrow-shared (local source)) (borrow-shared (local nodes)) (local block)))
-							(let owner (array.load (local statements) (struct.get (local exit) owner)))
+							(let owner_index (struct.get (local exit) owner))
+							(let owner (array.load (local statements) (local owner_index)))
 							(let arm (array.load (local statements) (local block)))
-							(array.store (local statements) (local block)
-								(call block_statement (struct.get (local arm) first) (struct.get (local arm) target) (local previous_owner) (local falls_through)))
+							(let paths (call sequence_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+								(local next_path) (struct.get (local arm) first) -1i32))
+							(array.store (local statements) (local block) (call statement_exit_state (local arm)
+								(struct.get (local arm) target) (local previous_owner) (local falls_through) (local paths)))
+							(let loop (u32.eq (struct.get (local owner) kind) 25u32))
 							(if
-								(:doc "A continuing loop must keep every owner that was live at entry.")
-								(bool.and (bool.and (local falls_through) (u32.eq (struct.get (local owner) kind) 25u32))
-									(i32.lt -1i32 (struct.get (local owner) previous_owner)))
+								(:doc "Fallthrough and continue must preserve the owners live at loop entry.")
+								(bool.and (bool.and (local loop) (call repeats_loop (local paths)))
+									(bool.and (i32.lt -1i32 (struct.get (local owner) previous_owner))
+										(bool.not (u32.eq (call predicate_literal (local owner) (borrow-shared (local expressions))) 4u32))))
 								(then
 									(let transfer (call consumption_on_back_edge (borrow-shared (local nodes))
 										(borrow-shared (local statements)) (borrow-shared (local expressions))
@@ -3657,22 +3705,31 @@
 									(set (local falls_through) (bool true)))
 								(else
 									(let first (struct.get (local owner) first))
+									(let paths (call control_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+										(borrow-shared (local expressions)) (local owner)))
 									(if
-										(:doc "An exhaustive match can continue only through one of its checked arms.")
-										(u32.eq (struct.get (local owner) kind) (local match_statement))
-										(then (set (local falls_through) (call match_continues (borrow-shared (local nodes))
-											(borrow-shared (local statements)) (local first))))
+										(:doc "A literal true loop needs a reachable break to continue after its body.")
+										(local loop)
+										(then (set (local falls_through) (call has_path (local paths) (local next_path))))
 										(else
-											(set (local falls_through)
-												(bool.or (local falls_through)
-													(bool.or (i32.eq (local block) (local first))
-														(struct.get (array.load (local statements) (local first)) falls_through))))))
+											(if
+												(:doc "An exhaustive match can continue only through one of its checked arms.")
+												(u32.eq (struct.get (local owner) kind) (local match_statement))
+												(then (set (local falls_through) (call match_continues (borrow-shared (local nodes))
+													(borrow-shared (local statements)) (local first))))
+												(else
+													(set (local falls_through)
+														(bool.or (local falls_through)
+															(bool.or (i32.eq (local block) (local first))
+																(struct.get (array.load (local statements) (local first)) falls_through))))))))
+									(array.store (local statements) (local owner_index) (call statement_exit_state (local owner)
+										(struct.get (local owner) target) (local previous_owner) (local falls_through) (local paths)))
 									(set (local block) (struct.get (local exit) block))
 									(set (local index) (struct.get (local exit) statement)))))
 						(else
 							(let node (array.load (local nodes) (local index)))
 							(if
-								(:doc "An exhaustive return leaves the following statement unreachable.")
+								(:doc "A terminal statement leaves the following statement unreachable.")
 								(bool.not (local falls_through))
 								(then (return (call body_error (local caller) (struct.get (local node) start)
 									(struct.get (local node) end) 24u32))))
