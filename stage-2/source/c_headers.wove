@@ -17,7 +17,7 @@
 	(use wove-file "./types.wove" (only source_builtin_type is_builtin_integer reference_mode))
 	(use wove-file "./c_scope.wove" (only read_bridge_policy project_bridge))
 	(use wove-file "./c_names.wove" (only c_function_opening native_symbol_start native_symbol_end))
-	(use wove-file "./c_owners.wove" (only is_native_name check_c_type))
+	(use wove-file "./c_owners.wove" (only is_native_name check_c_type is_c_storage_type))
 	(use wove-file "./c_records.wove" (only is_c_record read_c_record))
 	(use wove-file "./c_snapshots.wove" (only read_c_snapshot))
 	(use wove-file "./c_arguments.wove" (only c_byte_slice_type read_c_view_type read_c_arguments mark_c_argument_type (type CArgument)))
@@ -333,16 +333,19 @@
 			(let type (call read_c_named_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local bridge) (local context)))
 			(if
-				(:doc "Bridge record storage is supplied by reference in this ABI slice.")
+				(:doc "Native record and owned object storage are supplied by address.")
 				(bool.and (u32.eq (record.get (local type) error) 0u32)
-					(call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
-						(slice.load (local nodes) (record.get (local type) declaration))))
+					(bool.or (call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
+						(slice.load (local nodes) (record.get (local type) declaration)))
+						(bool.and (i32.lt -1i32 (record.get (local type) drop_start))
+							(call is_c_storage_type (borrow-shared (local source)) (borrow-shared (local nodes))
+								(record.get (local type) declaration)))))
 				(then (return (call c_member_error (record.get (local node) start) (record.get (local node) end) 23u32))))
 			(return (local type))))
 
 
 	(fn read_c_reference_parameter
-		(:doc `Read a scalar or record reference, or a shared handle, in its defining C bridge.`)
+		(:doc `Read a reference or borrowed resource in its defining C bridge.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (context SelectionContext))
 		(returns CMemberRead)
 		(body
@@ -385,8 +388,11 @@
 				(bool.and (i32.lt (record.get (local checked) drop_start) 0i32) (u32.eq (local mode) 2u32))
 				(then (return (local checked))))
 			(if
-				(:doc "Pointer owners support shared loans that pass their existing pointer value.")
-				(bool.and (i32.lt -1i32 (record.get (local checked) drop_start)) (u32.eq (local mode) 1u32))
+				(:doc "Pointer handles support shared loans. Caller-owned object storage also permits mutation.")
+				(bool.and (i32.lt -1i32 (record.get (local checked) drop_start))
+					(bool.or (u32.eq (local mode) 1u32)
+						(call is_c_storage_type (borrow-shared (local source)) (borrow-shared (local nodes))
+							(record.get (local checked) declaration))))
 				(then (return (local checked))))
 			(return (call c_member_error (record.get (local name) start) (record.get (local name) end) 23u32))))
 
@@ -551,6 +557,7 @@
 					(let type_node (slice.load (local nodes) (local type)))
 					(let-mut integer (call is_builtin_integer (call source_builtin_type (borrow-shared (local source)) (local type_node))))
 					(let-mut mutable_scalar (bool false))
+					(let-mut storage_mut (bool false))
 					(if
 						(:doc "Resolve native aliases and resource types in their defining bridge.")
 						(bool.not (bool.or (call is_c_scalar (borrow-shared (local source)) (local type_node))
@@ -568,14 +575,19 @@
 							(let mode (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes))
 								(record.get (local type_form) head)))
 							(if
-								(:doc "A checked mut-ref targets a built-in scalar, a native alias, or a record.")
+								(:doc "A mutable reference identifies the storage or scalar contracts applicable to its target.")
 								(u32.eq (local mode) 2u32)
 								(then
 									(let declaration (record.get (local handle) declaration))
+									(let owned (i32.lt -1i32 (record.get (local handle) drop_start)))
+									(set (local storage_mut) (bool.and (local owned)
+										(call is_c_storage_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local declaration))))
 									(set (local mutable_scalar) (bool.or (i32.lt (local declaration) 0i32)
-										(bool.not (call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
-											(slice.load (local nodes) (local declaration))))))))))
-					(call mark_c_argument_type (borrow-mut (local arguments)) (local index) (local integer) (local mutable_scalar))
+										(bool.and (bool.not (local owned))
+											(bool.not (call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
+												(slice.load (local nodes) (local declaration)))))))))))
+					(call mark_c_argument_type (borrow-mut (local arguments)) (local index) (local integer)
+						(local mutable_scalar) (local storage_mut))
 					(let name (slice.load (local nodes) (record.get (local parts) head)))
 					(let name_start (record.get (local name) start))
 					(let name_end (record.get (local name) end))
@@ -602,6 +614,11 @@
 				(u32.lt 0u32 (record.get (local contracts) error))
 				(then (return (call c_member_error (record.get (local contracts) start) (record.get (local contracts) end)
 					(record.get (local contracts) error)))))
+			(if
+				(:doc "Storage initialization uses the native zero i32 success convention.")
+				(bool.and (i32.lt 0i32 (record.get (local contracts) initializers))
+					(bool.not (u32.eq (call source_builtin_type (borrow-shared (local source)) (local result_node)) 5u32)))
+				(then (return (call c_member_error (record.get (local result_node) start) (record.get (local result_node) end) 23u32))))
 			(if
 				(:doc "Snapshot result adaptation currently uses the fixed native call ABI.")
 				(bool.and (i32.lt -1i32 (record.get (local snapshot) drop))
@@ -640,8 +657,11 @@
 					(let reference (call read_c_reference_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local node) (local bridge) (local context)))
 					(if
-						(:doc "Keep reference diagnostics and accept an actual pointer resource descriptor.")
-						(bool.or (u32.lt 0u32 (record.get (local reference) error)) (i32.lt -1i32 (record.get (local reference) drop_start)))
+						(:doc "Foreign reference values expose raw pointer handles, not Wove storage owners.")
+						(bool.or (u32.lt 0u32 (record.get (local reference) error))
+							(bool.and (i32.lt -1i32 (record.get (local reference) drop_start))
+								(bool.not (call is_c_storage_type (borrow-shared (local source)) (borrow-shared (local nodes))
+									(record.get (local reference) declaration)))))
 						(then (return (local reference))))))
 			(return (call c_member_error (record.get (local node) start) (record.get (local node) end) 23u32))))
 

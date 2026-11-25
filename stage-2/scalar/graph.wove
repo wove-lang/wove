@@ -19,7 +19,8 @@
 	(use wove-file "./trees.wove" (only source_span_owner (type ScalarTree)))
 	(use wove-file "../source/c_names.wove" (only c_function_opening))
 	(use wove-file "../source/c_arguments.wove" (only read_c_arguments mark_c_argument_type (type CArgument)))
-	(use wove-file "../c/arguments.wove" (only is_c_value_mode))
+	(use wove-file "../c/arguments.wove" (only is_c_value_mode is_c_storage_mode c_storage_mut_mode))
+	(use wove-file "../source/c_owners.wove" (only is_c_storage_type))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity hash_spelling))
@@ -28,7 +29,7 @@
 	(use wove-file "./c_types.wove" (only remember_native_type register_parameter_native_types register_record_dependencies))
 	(use wove-file "./loans.wove" (only (type ScalarExpression)))
 	(use wove-file "./plan.wove"
-		(only register_function read_parameters register_module_bindings
+		(only register_function read_parameters register_module_bindings expression_row
 			(type ScalarFunction) (type ScalarParameter) (type FunctionScope)))
 	(use wove-file "./flow.wove" (only block_statement (type ScalarStatement)
 			(value c_constant_binding) (value c_readonly_binding) (value c_writable_binding)))
@@ -507,16 +508,21 @@
 			(let arity (i32.sub.wrapping (local limit) (local next_param)))
 			(let-mut arguments (array.alloc CArgument (local arity)))
 			(let-mut parameter (local next_param))
+			(let-mut storage (bool false))
 			(while
 				(:doc "Classify extent counts and nullable scalar places by their checked types.")
 				(i32.lt (local parameter) (local limit))
 				(body
-					(let type (record.get (slice.load (local parameters) (local parameter)) type))
+					(let param (slice.load (local parameters) (local parameter)))
+					(let type (record.get (local param) type))
+					(let mode (record.get (local param) c_mode))
+					(set (local storage) (bool.or (local storage) (call is_c_storage_mode (local mode))))
 					(let integer (bool.or (call is_builtin_integer (local type)) (call is_native_integer (local type))))
 					(let mutable_scalar (bool.and (call is_mutable_place_reference (local type))
 						(bool.not (call is_record_type (call place_reference_target (borrow-shared (local records)) (local type))))))
 					(call mark_c_argument_type (borrow-mut (local arguments))
-						(i32.sub.wrapping (local parameter) (local next_param)) (local integer) (local mutable_scalar))
+						(i32.sub.wrapping (local parameter) (local next_param)) (local integer) (local mutable_scalar)
+						(u8.eq (local mode) (call c_storage_mut_mode)))
 					(set (local parameter) (i32.add.wrapping (local parameter) 1i32))))
 			(let contracts (call read_c_arguments (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(local parts) (local first) (borrow-mut (local arguments))))
@@ -534,7 +540,8 @@
 			(let drop (record.get (local snapshot) drop))
 			(if
 				(:doc "Only formals with native contracts need extra lowering information.")
-				(bool.or (i32.lt 0i32 (local nulls)) (bool.or (i32.lt 0i32 (local strings)) (i32.lt 0i32 (local extents))))
+				(bool.or (i32.lt 0i32 (record.get (local contracts) initializers))
+					(bool.or (i32.lt 0i32 (local nulls)) (bool.or (i32.lt 0i32 (local strings)) (i32.lt 0i32 (local extents)))))
 				(then (call attach_c_arguments (borrow-shared (local arguments)) (borrow-mut (local parameters)) (local next_param))))
 			(let-mut result_type (call scalar_type (borrow-shared (local arena)) (borrow-shared (local nodes)) (local result)))
 			(if
@@ -562,7 +569,7 @@
 					(result (local result_type))
 					(body -1i32) (first_statement -1i32) (identity 0u32) (entry (bool false))
 					(c_strings (local strings)) (c_extents (local extents)) (c_macro (record.get (local contracts) macro))
-					(c_variadic (record.get (local contracts) variadic)) (c_nulls (local nulls)) (c_snapshot_drop (local drop))
+					(c_variadic (record.get (local contracts) variadic)) (c_nulls (local nulls)) (c_storage (local storage)) (c_snapshot_drop (local drop))
 					(file (record.get (local scope) file)) (tree_base (record.get (local scope) tree_base))
 					(tree_limit (record.get (local scope) tree_limit)) (source_base (record.get (local scope) source_base))))
 			(return (local checked))))
@@ -700,6 +707,36 @@
 							(slice.store (local statements) (local base) (call block_statement (local name) -1i32 (bool false)))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))))
 
+	(fn register_storage_aliases
+		(:doc `Link selected storage type names to their original declarations in the flattened tree.`)
+		(params (arena (shared-slice u8)) (nodes (shared-slice SourceNode)) (trees (shared-slice ScalarTree))
+			(bindings (shared-slice GraphBinding)) (expressions (mut-slice ScalarExpression)))
+		(returns void)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Only a checked C type import is a candidate for native allocation.")
+				(i32.lt (local index) (slice.len (local bindings)))
+				(body
+					(let binding (slice.load (local bindings) (local index)))
+					(if
+						(:doc "The existence of a destructor distinguishes owners from ordinary native types.")
+						(bool.and (u32.eq (record.get (local binding) namespace) 1u32)
+							(bool.and (u32.eq (record.get (local binding) provider) 8u32)
+								(i32.lt -1i32 (record.get (local binding) drop_start))))
+						(then
+							(let file (slice.load (local trees) (record.get (local binding) file)))
+							(let declaration (i32.add.wrapping (record.get (local file) base) (record.get (local binding) declaration)))
+							(if
+								(:doc "The import row retains the precise defining type for the allocation planner.")
+								(call is_c_storage_type (borrow-shared (local arena)) (borrow-shared (local nodes)) (local declaration))
+								(then
+									(let owner (slice.load (local trees) (record.get (local binding) owner)))
+									(let name (i32.add.wrapping (record.get (local owner) base) (record.get (local binding) name_node)))
+									(slice.store (local expressions) (local name)
+										(call expression_row 0u32 (call native_owner_type (local declaration)) -1i32 -1i32 0i32 0i32 (bool false)))))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))))
+
 	(fn prepare_graph
 		(:doc `Collect every defining layout before any reached function signature uses it.`)
 		(params (arena (shared-slice u8)) (files (shared-slice SuppliedFile)) (modules (shared-slice GraphModule))
@@ -758,6 +795,8 @@
 			(call register_graph_value_aliases (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local trees)) (borrow-shared (local bindings))
 				(borrow-mut (local statements)))
+			(call register_storage_aliases (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local trees)) (borrow-shared (local bindings)) (borrow-mut (local expressions)))
 			(let wove (call register_graph_signatures (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings)) (local root)
 				(borrow-shared (local nodes)) (borrow-shared (local selected)) (borrow-shared (local views))

@@ -13,13 +13,14 @@
 	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_native_record is_place_reference record_receiver_type place_borrow_kind is_native_integer is_typed_slice slice_element_type is_readable_slice is_writable_slice is_array_owner array_owner_element (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type write_member_name write_member_separator write_parameter_name write_field_place write_place_borrow captures_value_argument write_record_layouts write_record_layout_argument))
 	(use wove-file "./arrays.wove" (only write_fixed_list write_fixed_repeat write_fixed_access write_fixed_slice))
-	(use wove-file "../scalar/owners.wove" (only is_native_owner native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
+	(use wove-file "../scalar/owners.wove" (only is_native_owner native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind is_native_storage_write_loan
 			is_optional_byte_owner_type optional_unwrap_kind))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset)))
 	(use wove-file "./embeds.wove" (only close_embed_copy request_module_embeds bind_module_embeds))
 	(use wove-file "./c_values.wove" (only has_c_values write_c_value_name))
 	(use wove-file "./bindings.wove" (only write_binding_name write_module_bindings))
-	(use wove-file "./owners.wove" (only write_native_destructor write_native_handle_borrow write_owner_transfer))
+	(use wove-file "./owners.wove" (only native_owner_contract write_native_destructor write_native_handle_borrow write_owner_transfer))
+	(use wove-file "./c_storage.wove" (only write_storage_allocation write_storage_cleanup))
 	(use wove-file "../c/arguments.wove" (only c_null_argument_kind))
 	(use wove-file "./c_snapshots.wove" (only write_optional_unwrap))
 	(use wove-file "./c_arguments.wove" (only write_c_argument_call c_symbol_text))
@@ -28,7 +29,7 @@
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies (type ScalarFunction) (type ScalarParameter) (type CallSite)))
-	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword word_shift_type is_i32_division is_fixed_access is_fixed_initializer (type ScalarOperator)))
+	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword word_shift_type is_i32_division is_fixed_access is_fixed_initializer native_alloc_kind (type ScalarOperator)))
 	(use wove-file "./runtime.wove"
 		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_i32_division open_slice_access open_shared_projection write_slice_length close_runtime_call
 			open_slice_offset write_slice_items open_array_allocation open_array_copy open_array_drop open_array_borrow))
@@ -159,6 +160,10 @@
 		(params (kind u32))
 		(returns bool)
 		(body
+			(if
+				(:doc "Native storage allocation and its exclusive loans use the runtime state checks.")
+				(bool.or (u32.eq (local kind) (call native_alloc_kind)) (call is_native_storage_write_loan (local kind)))
+				(then (return (bool true))))
 			(return (bool.or
 				(bool.or (bool.or (call is_i32_division (local kind)) (u32.eq (local kind) (call optional_unwrap_kind))) (bool.or (u32.lt 0u32 (call word_shift_type (local kind))) (call is_fixed_access (local kind))))
 				(bool.or (bool.or (u32.eq (local kind) (call native_handle_borrow_kind)) (u32.eq (local kind) (call native_handle_consume_kind)))
@@ -489,6 +494,11 @@
 					(borrow-shared (local records)) (borrow-shared (local parameters)) (borrow-shared (local expressions))
 					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
+				(:doc "Allocate inactive, correctly aligned storage for the original native type.")
+				(u32.eq (local kind) (call native_alloc_kind))
+				(then (return (call write_storage_allocation (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local expression) (borrow-mut (local output)) (local offset) (local writing)))))
+			(if
 				(:doc "Copy the previously declared static payload into a new byte owner.")
 				(u32.eq (local kind) 60u32)
 				(then
@@ -558,9 +568,9 @@
 				(then (return (call write_optional_unwrap (borrow-shared (local source))
 					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
-				(:doc "A shared handle loan retains the native pointer after checking that it is present.")
-				(u32.eq (local kind) (call native_handle_borrow_kind))
-				(then (return (call write_native_handle_borrow (borrow-shared (local source))
+				(:doc "Capture a handle or storage owner only after checking its runtime state.")
+				(bool.or (u32.eq (local kind) (call native_handle_borrow_kind)) (call is_native_storage_write_loan (local kind)))
+				(then (return (call write_native_handle_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "The runtime checks the already evaluated operand and returns the exact target type.")
@@ -720,8 +730,9 @@
 				(i32.lt 0i32 (record.get (local function) c_variadic)))
 			(bool.or (bool.or (i32.lt 0i32 (record.get (local function) c_strings))
 					(i32.lt 0i32 (record.get (local function) c_extents)))
-				(bool.or (i32.lt 0i32 (record.get (local function) c_nulls))
-					(i32.lt -1i32 (record.get (local function) c_snapshot_drop))))))))
+				(bool.or (record.get (local function) c_storage)
+					(bool.or (i32.lt 0i32 (record.get (local function) c_nulls))
+						(i32.lt -1i32 (record.get (local function) c_snapshot_drop)))))))))
 
 	(fn is_c_argument_call
 		(:doc `Identify a native call that needs ordered, typed argument captures.`)
@@ -894,12 +905,22 @@
 							(bool.or (i32.lt (local move) 0i32)
 								(bool.and (bool.not (i32.lt (local exit_row) 0i32)) (i32.lt (local exit_row) (local move)))))
 						(then
-							(set (local cursor) (call open_owner_drop (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local row) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-							(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
-								(record.get (local row) target) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))
-							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 59u8 (local writing)))))
+							(let type (record.get (local row) type))
+							(let target (record.get (local row) target))
+							(if
+								(:doc "Caller-owned storage releases the allocation even when initialization failed.")
+								(bool.and (call is_native_owner (local type))
+									(record.get (call native_owner_contract (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)) storage))
+								(then (set (local cursor) (call write_storage_cleanup (borrow-shared (local source)) (borrow-shared (local nodes))
+									(local type) (local target) (local tree_base) (borrow-mut (local output))
+									(local cursor) (local name_prefix) (local writing))))
+								(else
+									(set (local cursor) (call open_owner_drop (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local row) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+									(set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local target) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))
+									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 59u8 (local writing)))))))
 					(set (local owner) (record.get (local row) previous_owner))))
 			(return (local cursor))))
 

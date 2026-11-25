@@ -1,0 +1,155 @@
+(module emit_c_storage
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Emit allocation, native address conversion, and lifetime changes for caller-owned C storage.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/plan.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../c/arguments.wove" (only c_storage_shared_mode c_storage_consume_mode is_c_storage_init_mode))
+	(use wove-file "./owners.wove" (only native_owner_contract write_native_type write_native_destructor))
+	(use wove-file "./runtime.wove" (only close_runtime_call))
+	(use wove-file "./text.wove" (only c_byte c_literal_text write_local_name write_temporary_name))
+
+	(let alloc_open "wvrt_c_storage_new(sizeof(")
+	(let alloc_align "),_Alignof(")
+	(let storage_data "wvrt_c_storage_data(")
+	(let constant_type "const __typeof__(")
+	(let init_finish "wvrt_c_storage_finish_init(")
+	(let storage_free "wvrt_c_storage_free(")
+	(let drop_if "if(wvrt_c_storage_active(")
+	(let drop_call "))(void)")
+	(let end_statement ");")
+
+	(fn write_storage_type
+		(:doc "Write the exact underlying C object type of a storage owner.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (type u32)
+			(output (mut-slice u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let contract (call native_owner_contract (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
+			(return (call write_native_type (borrow-shared (local source))
+				(slice.load (local nodes) (record.get (local contract) native))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_storage_allocation
+		(:doc "Allocate a zeroed object using the defining C type's own size and alignment.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (site ScalarExpression)
+			(output (mut-slice u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let type (record.get (local site) type))
+			(let open (call c_literal_text (borrow-shared (local alloc_open)) (borrow-mut (local output)) (local offset) (local writing)))
+			(let size (call write_storage_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)
+				(borrow-mut (local output)) (local open) (local writing)))
+			(let align_open (call c_literal_text (borrow-shared (local alloc_align)) (borrow-mut (local output)) (local size) (local writing)))
+			(let alignment (call write_storage_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)
+				(borrow-mut (local output)) (local align_open) (local writing)))
+			(let close (call c_byte (borrow-mut (local output)) (local alignment) 41u8 (local writing)))
+			(return (call close_runtime_call (borrow-mut (local output)) (local close) (record.get (local site) target)
+				(record.get (local site) start) (record.get (local site) end) (local writing)))))
+
+	(fn write_storage_pointer_type
+		(:doc "Apply const to the whole object even when its C representation is itself a pointer.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (type u32) (shared bool)
+			(output (mut-slice u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(if
+				(:doc "A shared loan qualifies the original C type as a whole.")
+				(local shared)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local constant_type))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call write_storage_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)
+				(borrow-mut (local output)) (local cursor) (local writing)))
+			(if
+				(:doc "End the type operand before appending its pointer.")
+				(local shared)
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) 42u8 (local writing)))))
+
+	(fn open_storage_address
+		(:doc "Begin a cast of the stable object address to the native parameter's pointer type.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (type u32) (shared bool)
+			(output (mut-slice u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let open (call c_byte (borrow-mut (local output)) (local offset) 40u8 (local writing)))
+			(let pointee (call write_storage_pointer_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local type) (local shared) (borrow-mut (local output)) (local open) (local writing)))
+			(let close (call c_byte (borrow-mut (local output)) (local pointee) 41u8 (local writing)))
+			(return (call c_literal_text (borrow-shared (local storage_data)) (borrow-mut (local output)) (local close) (local writing)))))
+
+	(fn write_storage_argument
+		(:doc "Project the original native object from an already evaluated and checked owner.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (param ScalarParameter)
+			(argument i32) (tree_base i32) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let shared (u8.eq (record.get (local param) c_mode) (call c_storage_shared_mode)))
+			(let open (call open_storage_address (borrow-shared (local source)) (borrow-shared (local nodes))
+				(record.get (local param) type) (local shared) (borrow-mut (local output)) (local offset) (local writing)))
+			(let owner (call write_temporary_name (borrow-shared (local source)) (local argument) (local tree_base)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local owner) 41u8 (local writing)))))
+
+	(fn write_storage_after_call
+		(:doc "Activate successful initializations and release consumed allocations after C has returned.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (parameters (shared-slice ScalarParameter))
+			(first i32) (callee ScalarFunction) (index i32) (tree_base i32)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let-mut argument (local first))
+			(let-mut formal (record.get (local callee) params))
+			(let-mut cursor (local offset))
+			(while
+				(:doc "Each initializing or consuming argument retained its original owner temporary.")
+				(i32.lt -1i32 (local argument))
+				(body
+					(let mode (record.get (slice.load (local parameters) (local formal)) c_mode))
+					(if
+						(:doc "A storage initializer keeps its exact i32 status while updating the owner state.")
+						(call is_c_storage_init_mode (local mode))
+						(then
+							(set (local cursor) (call c_literal_text (borrow-shared (local init_finish))
+								(borrow-mut (local output)) (local cursor) (local writing)))
+							(set (local cursor) (call write_temporary_name (borrow-shared (local source))
+								(local argument) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
+							(set (local cursor) (call write_temporary_name (borrow-shared (local source))
+								(local index) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(set (local cursor) (call c_literal_text (borrow-shared (local end_statement))
+								(borrow-mut (local output)) (local cursor) (local writing)))))
+					(if
+						(:doc "The consuming C call owns destruction. Wove releases only its backing allocation.")
+						(u8.eq (local mode) (call c_storage_consume_mode))
+						(then
+							(set (local cursor) (call c_literal_text (borrow-shared (local storage_free))
+								(borrow-mut (local output)) (local cursor) (local writing)))
+							(set (local cursor) (call write_temporary_name (borrow-shared (local source))
+								(local argument) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(set (local cursor) (call c_literal_text (borrow-shared (local end_statement))
+								(borrow-mut (local output)) (local cursor) (local writing)))))
+					(set (local argument) (record.get (slice.load (local nodes) (local argument)) next_sibling))
+					(set (local formal) (i32.add.wrapping (local formal) 1i32))))
+			(return (local cursor))))
+
+	(fn write_storage_cleanup
+		(:doc "Destroy an active scope-owned object once, then release its storage even if it was never initialized.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (type u32) (name i32) (tree_base i32)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local drop_if)) (borrow-mut (local output)) (local offset) (local writing)))
+			(let slot (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local name) (local tree_base) (borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let call_drop (call c_literal_text (borrow-shared (local drop_call)) (borrow-mut (local output)) (local slot) (local writing)))
+			(let destructor (call write_native_destructor (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local type) (borrow-mut (local output)) (local call_drop) (local writing)))
+			(let args (call c_byte (borrow-mut (local output)) (local destructor) 40u8 (local writing)))
+			(let address (call open_storage_address (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local type) (bool false) (borrow-mut (local output)) (local args) (local writing)))
+			(let drop_owner (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local name) (local tree_base) (borrow-mut (local output)) (local address) (local name_prefix) (local writing)))
+			(let data_end (call c_byte (borrow-mut (local output)) (local drop_owner) 41u8 (local writing)))
+			(let drop_end (call c_literal_text (borrow-shared (local end_statement)) (borrow-mut (local output)) (local data_end) (local writing)))
+			(let release (call c_literal_text (borrow-shared (local storage_free)) (borrow-mut (local output)) (local drop_end) (local writing)))
+			(let free_owner (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local name) (local tree_base) (borrow-mut (local output)) (local release) (local name_prefix) (local writing)))
+			(return (call c_literal_text (borrow-shared (local end_statement)) (borrow-mut (local output)) (local free_owner) (local writing))))))
