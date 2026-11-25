@@ -7,11 +7,16 @@
 	(use wove-file "./module.wove" (only form_parts source_keyword (type FormParts)))
 	(use wove-file "./c_owners.wove" (only is_native_name))
 	(use wove-file "./types.wove" (only source_builtin_type))
+	(use wove-file "./owned.wove" (only is_byte_rows_descriptor))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 
 	(struct CSnapshot (fields (active bool) (drop i32) (start i32) (end i32) (error u32)))
 
 	(let snapshot_keyword "c_snapshot")
+	(let vectors_kind "cstrs")
+	(let function_result 0u32)
+	(let readonly_global 1u32)
+	(let other_global 2u32)
 	(let text_kind "cstr")
 	(let drop_keyword "drop")
 	(let optional_keyword "optional")
@@ -66,13 +71,23 @@
 			(end (record.get (local node) end)) (error (local error))))))
 
 	(fn read_snapshot_directive
-		(:doc `Read cstr with an optional drop directive naming a C release function.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (directive SourceNode) (start i32))
+		(:doc `Read the snapshot kind and any release allowed at this declaration.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (directive SourceNode) (start i32) (scope u32))
 		(returns CSnapshot)
 		(body
 			(if (i32.lt (local start) 0i32) (then (return (call snapshot_at (local directive) (bool false) -1i32 23u32))))
 			(let kind (slice.load (local nodes) (local start)))
 			(let next (record.get (local kind) next_sibling))
+			(if
+				(:doc "Only a read-only global can snapshot a borrowed vector. It has no release operand.")
+				(bool.not (u32.eq (local scope) (local function_result)))
+				(then
+					(if
+						(:doc "A global snapshot requires one bare cstrs operand.")
+						(bool.and (bool.and (u32.eq (local scope) (local readonly_global)) (i32.lt (local next) 0i32))
+							(call matches_atom (borrow-shared (local source)) (local kind) (borrow-shared (local vectors_kind))))
+						(then (return (call snapshot_at (local directive) (bool true) -1i32 0u32))))
+					(return (call snapshot_at (local directive) (bool false) -1i32 23u32))))
 			(if
 				(:doc "Only the C string snapshot kind is implemented here.")
 				(bool.not (call matches_atom (borrow-shared (local source)) (local kind) (borrow-shared (local text_kind))))
@@ -98,17 +113,18 @@
 				(then (return (call snapshot_at (local symbol) (bool false) -1i32 23u32))))
 			(return (call snapshot_at (local directive) (bool true) (local release) 0u32))))
 
-	(fn read_c_snapshot
-		(:doc `Check a selected signature for one borrowed or allocating C-string snapshot contract.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function FormParts) (result SourceNode))
+	(fn read_snapshot_contract
+		(:doc `Read at most one snapshot from a selected declaration and check its Wove type.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (declaration FormParts)
+			(result SourceNode) (scope u32))
 		(returns CSnapshot)
 		(body
 			(let-mut active (bool false))
 			(let-mut drop -1i32)
-			(let-mut entry (record.get (local function) metadata))
+			(let-mut entry (record.get (local declaration) metadata))
 			(while
-				(:doc "Search only the checked metadata prefix for native result contracts.")
-				(bool.and (i32.lt -1i32 (local entry)) (bool.not (i32.eq (local entry) (record.get (local function) operands))))
+				(:doc "Search only the checked metadata prefix for native snapshot contracts.")
+				(bool.and (i32.lt -1i32 (local entry)) (bool.not (i32.eq (local entry) (record.get (local declaration) operands))))
 				(body
 					(let node (slice.load (local nodes) (local entry)))
 					(let head (slice.load (local nodes) (record.get (local node) first_child)))
@@ -118,7 +134,7 @@
 						(then
 							(let-mut index (record.get (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)) operands))
 							(while
-								(:doc "Find the exact contract and reject a second snapshot on the same result.")
+								(:doc "Find the exact contract and reject a second snapshot on the same declaration.")
 								(i32.lt -1i32 (local index))
 								(body
 									(let item (slice.load (local nodes) (local index)))
@@ -135,12 +151,22 @@
 												(local active)
 												(then (return (call snapshot_at (local item) (bool false) -1i32 23u32))))
 											(let current (call read_snapshot_directive (borrow-shared (local source)) (borrow-shared (local nodes))
-												(local item) (record.get (local parts) operands)))
+												(local item) (record.get (local parts) operands) (local scope)))
 											(if (u32.lt 0u32 (record.get (local current) error)) (then (return (local current))))
 											(set (local active) (bool true))
 											(set (local drop) (record.get (local current) drop))))
 									(set (local index) (record.get (local item) next_sibling))))))
 					(set (local entry) (record.get (local node) next_sibling))))
+			(if
+				(:doc "A global vector snapshot yields an ordinary owned array of byte owners.")
+				(bool.not (u32.eq (local scope) (local function_result)))
+				(then
+					(if
+						(:doc "Check the exact result descriptor only on an annotated global.")
+						(bool.and (local active)
+							(bool.not (call is_byte_rows_descriptor (borrow-shared (local source)) (borrow-shared (local nodes)) (local result))))
+						(then (return (call snapshot_at (local result) (bool false) -1i32 23u32))))
+					(return (call snapshot_at (local result) (local active) -1i32 0u32))))
 			(let optional (call is_optional_byte_owner (borrow-shared (local source)) (borrow-shared (local nodes)) (local result)))
 			(if
 				(:doc "The snapshot and the optional byte owner result require each other.")
@@ -148,4 +174,25 @@
 					(bool.and (local optional) (bool.not (local active))))
 				(then (return (call snapshot_at (local result) (bool false) -1i32 23u32))))
 			(return (call snapshot_at (local result) (local active) (local drop) 0u32))))
+
+	(fn read_c_snapshot
+		(:doc `Check a function result's optional borrowed or allocating C string contract.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (function FormParts) (result SourceNode))
+		(returns CSnapshot)
+		(body (return (call read_snapshot_contract (borrow-shared (local source)) (borrow-shared (local nodes))
+			(local function) (local result) (local function_result)))))
+
+	(fn read_c_vector_snapshot
+		(:doc `Check a native value's optional contract for copying a borrowed C string table.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (binding FormParts)
+			(type SourceNode) (readonly bool))
+		(returns CSnapshot)
+		(body
+			(let-mut scope (local other_global))
+			(if
+				(:doc "Only a read-only native let can declare a vector snapshot.")
+				(local readonly)
+				(then (set (local scope) (local readonly_global))))
+			(return (call read_snapshot_contract (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local binding) (local type) (local scope)))))
 )
