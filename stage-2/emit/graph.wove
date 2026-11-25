@@ -3,9 +3,10 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Check, emit, and inspect a resolved scalar source graph.
 
-	Build the same scalar plan for both consumers. An emission produces one
-	C translation unit across the reached files. An inspection resolves the
-	requested spelling in its file and reads the defining declaration's callers.`)
+	Keep the checked scalar tables separate from asset binding and C sizing.
+	An emission produces one C translation unit across the reached files.
+	An inspection resolves the requested spelling in its file and reads the
+	defining declaration's callers.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
 	(use wove-file "../source/graph.wove" (only graph_selection (type GraphModule) (type GraphBinding) (type GraphResult)))
@@ -24,15 +25,21 @@
 	(use wove-file "../scalar/graph.wove" (only layout_trees signature_capacity prepare_graph))
 	(use wove-file "./c.wove" (only write_translation_unit))
 	(use wove-file "./tests.wove" (only write_test_entry))
-	(use wove-file "./embeds.wove" (only bind_graph_embeds bind_module_embeds request_module_embeds))
+	(use wove-file "./embeds.wove" (only bind_graph_embeds bind_module_embeds))
 	(use wove-file "./text.wove" (only native_name_prefix_slot))
 	(use wove-file "./c_formals.wove" (only fixed_c_value))
 	(use wove-file "../source/c_formals.wove" (only find_c_fixed_formal))
-	(use wove-file "./headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
+	(use wove-file "./headers.wove" (only include_capacity prepare_includes write_includes (type CInclude) (type Includes)))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset) (type EmbedCheck) embed_check))
 
 	(struct GraphOutput
 		(fields (count i32) (declaration i32) (file i32) (start i32) (end i32) (error u32)
+			(related_start i32) (related_end i32)))
+
+	(struct
+		(:doc "Entry and inventory indices or the first error from checking the graph.")
+		GraphPlan
+		(fields (entry i32) (test_count i32) (call_count i32) (file i32) (start i32) (end i32) (error u32)
 			(related_start i32) (related_end i32)))
 
 	(fn graph_output
@@ -269,12 +276,17 @@
 			(return (local slot))))
 
 	(fn write_graph_c
-		(:doc `Measure and emit the checked graph as a complete C translation unit.`)
+		(:doc `Measure or emit a complete C unit using the checked graph tables.
+
+		A sizing call returns the byte count. The disk driver requests that count,
+		allocates exactly that many bytes, and calls again with the known size.
+		A supplied graph passes a negative size to measure against its caller's buffer.`)
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(trees (shared-array ScalarTree)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
 			(parameters (shared-array ScalarParameter)) (statements (shared-array ScalarStatement))
 			(records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
-			(root i32) (entry i32) (tests (shared-array DiscoveredTest)) (test_count i32) (private_helpers bool) (output (mut-array u8)))
+			(root i32) (plan GraphPlan) (tests (shared-array DiscoveredTest)) (private_helpers bool)
+			(measuring bool) (size i32) (output (mut-array u8)))
 		(returns GraphOutput)
 		(body
 			(let tree (array.load (local trees) (local root)))
@@ -298,50 +310,83 @@
 			(let name_prefix (call choose_name_prefix (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (borrow-shared (local nodes)) (borrow-shared (local records))
 				(borrow-shared (local functions)) (borrow-mut (local occupied))))
-			(let count (struct.get (local headers) count))
-			(let prefix (call write_includes (borrow-shared (local paths)) (borrow-shared (local includes))
-				(local count) (borrow-mut (local output)) (bool false)))
-			(let-mut measured (call write_translation_unit (borrow-shared (local arena)) (borrow-shared (local nodes))
-				(borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-shared (local expressions))
-				(borrow-mut (local output)) (local prefix)
-				(struct.get (local headers) stdint) (struct.get (local headers) runtime) (local private_helpers) (local name_prefix) (bool false)))
+			(let test_count (struct.get (local plan) test_count))
+			(let-mut limit (array.len (local output)))
 			(if
-				(:doc "Include the selected-test entry when measuring a test executable.")
-				(bool.not (i32.lt (local test_count) 0i32))
-				(then (set (local measured) (call write_test_entry (borrow-shared (local arena))
-					(borrow-shared (local files)) (borrow-shared (local nodes)) (borrow-shared (local functions))
-					(borrow-shared (local tests)) (local test_count) (borrow-mut (local output))
-					(local measured) (local name_prefix) (bool false)))))
+				(:doc "Keep the original disk output limit when sizing an exact buffer.")
+				(local measuring)
+				(then (set (local limit) 1073741824i32)))
 			(if
-				(:doc "Keep the destination untouched when the full unit cannot fit.")
-				(u32.lt (int.convert u32 (array.len (local output))) (local measured))
+				(:doc "A sizing request or an unknown width measures the translation unit.")
+				(bool.or (local measuring) (i32.lt (local size) 0i32))
 				(then
+					(let measured (call write_c_pass (borrow-shared (local arena)) (borrow-shared (local files))
+						(borrow-shared (local bindings)) (borrow-shared (local nodes)) (borrow-shared (local functions))
+						(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local records))
+						(borrow-shared (local expressions)) (borrow-shared (local tests)) (local test_count) (local private_helpers)
+						(borrow-shared (local paths)) (borrow-shared (local includes)) (local headers) (local name_prefix)
+						(borrow-mut (local output)) (bool false)))
 					(if
-						(:doc "The test executable has a synthetic entry. Use the original module span.")
-						(i32.lt (local entry) 0i32)
-						(then (return (call graph_output 0i32 -1i32 (local root)
-							(struct.get (local tree) start) (struct.get (local tree) end) 16u32))))
-					(let node (array.load (local nodes) (local entry)))
-					(return (call graph_output 0i32 -1i32 (local root)
-						(i32.sub.wrapping (struct.get (local node) start) (local source_base))
-						(i32.sub.wrapping (struct.get (local node) end) (local source_base)) 16u32))))
-			(let first (call write_includes (borrow-shared (local paths)) (borrow-shared (local includes))
-				(local count) (borrow-mut (local output)) (bool true)))
-			(let-mut written (call write_translation_unit (borrow-shared (local arena)) (borrow-shared (local nodes))
-				(borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-shared (local expressions))
-				(borrow-mut (local output)) (local first)
-				(struct.get (local headers) stdint) (struct.get (local headers) runtime) (local private_helpers) (local name_prefix) (bool true)))
+						(:doc "A short destination keeps its bytes and reports the original entry span.")
+						(u32.lt (int.convert u32 (local limit)) (local measured))
+						(then (return (call short_graph_output (borrow-shared (local nodes))
+							(local root) (struct.get (local plan) entry) (local source_base)
+							(struct.get (local tree) start) (struct.get (local tree) end)))))
+					(if
+						(:doc "The driver uses the measured width to allocate the destination.")
+						(local measuring)
+						(then (return (call graph_output (int.convert i32 (local measured)) -1i32 (local root)
+							(struct.get (local tree) start) (struct.get (local tree) end) 0u32))))))
 			(if
-				(:doc "Write exactly the test dispatch measured above, including an empty inventory.")
-				(bool.not (i32.lt (local test_count) 0i32))
-				(then (set (local written) (call write_test_entry (borrow-shared (local arena))
-					(borrow-shared (local files)) (borrow-shared (local nodes)) (borrow-shared (local functions))
-					(borrow-shared (local tests)) (local test_count) (borrow-mut (local output))
-					(local written) (local name_prefix) (bool true)))))
+				(:doc "A caller supplying a measured width must provide a buffer covering it.")
+				(i32.lt (local limit) (local size))
+				(then (return (call short_graph_output (borrow-shared (local nodes))
+					(local root) (struct.get (local plan) entry) (local source_base)
+					(struct.get (local tree) start) (struct.get (local tree) end)))))
+			(let written (call write_c_pass (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (borrow-shared (local nodes)) (borrow-shared (local functions))
+				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local records))
+				(borrow-shared (local expressions)) (borrow-shared (local tests)) (local test_count) (local private_helpers)
+				(borrow-shared (local paths)) (borrow-shared (local includes)) (local headers) (local name_prefix)
+				(borrow-mut (local output)) (bool true)))
 			(return (call graph_output (int.convert i32 (local written)) -1i32 (local root)
 				(struct.get (local tree) start) (struct.get (local tree) end) 0u32))))
+
+	(fn short_graph_output
+		(:doc "Report capacity at the source entry or the module span for a synthetic test entry.")
+		(params (nodes (shared-array SourceNode)) (root i32) (entry i32) (base i32) (start i32) (end i32))
+		(returns GraphOutput)
+		(body
+			(if (i32.lt (local entry) 0i32)
+				(then (return (call graph_output 0i32 -1i32 (local root) (local start) (local end) 16u32))))
+			(let node (array.load (local nodes) (local entry)))
+			(return (call graph_output 0i32 -1i32 (local root)
+				(i32.sub.wrapping (struct.get (local node) start) (local base))
+				(i32.sub.wrapping (struct.get (local node) end) (local base)) 16u32))))
+
+	(fn write_c_pass
+		(:doc "Use the same ordering of includes, declarations, and test dispatch for measurement and writing.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
+			(nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
+			(tests (shared-array DiscoveredTest)) (test_count i32) (private_helpers bool) (paths (shared-array u8))
+			(includes (shared-array CInclude)) (headers Includes) (name_prefix i32) (output (mut-array u8)) (writing bool))
+		(returns u32)
+		(body
+			(let first (call write_includes (borrow-shared (local paths)) (borrow-shared (local includes))
+				(struct.get (local headers) count) (borrow-mut (local output)) (local writing)))
+			(let width (call write_translation_unit (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local statements))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-shared (local expressions))
+				(borrow-mut (local output)) (local first) (struct.get (local headers) stdint)
+				(struct.get (local headers) runtime) (local private_helpers) (local name_prefix) (local writing)))
+			(if
+				(:doc "An empty test inventory still needs a synthetic entry.")
+				(bool.not (i32.lt (local test_count) 0i32))
+				(then (return (call write_test_entry (borrow-shared (local arena)) (borrow-shared (local files))
+					(borrow-shared (local nodes)) (borrow-shared (local functions)) (borrow-shared (local tests)) (local test_count)
+					(borrow-mut (local output)) (local width) (local name_prefix) (local writing)))))
+			(return (local width))))
 
 	(fn run_scalar_graph
 		(:doc `Consume the successful graph resolver's active modules and populated binding prefix.
@@ -357,71 +402,6 @@
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
 			(bindings (shared-array GraphBinding)) (resolved GraphResult) (root i32) (query_path i32) (name (shared-array u8))
 			(assets (shared-array SuppliedFile)) (private_helpers bool) (output (mut-array u8)) (callers (mut-array CallSite)))
-		(returns GraphOutput)
-		(body
-			(let-mut requests (array.alloc EmbedAsset 0i32))
-			(return (call run_graph (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
-				(local root) (local query_path) (borrow-shared (local name)) (borrow-shared (local assets))
-				(borrow-mut (local requests)) 0u32 (local private_helpers) (borrow-mut (local output)) (borrow-mut (local callers))))))
-
-	(fn run_entry_graph
-		(:doc `Collect checked graph asset requests or emit the graph with their loaded byte ranges.
-
-		Reserve a request slot for each flattened source-tree row so every
-		imported literal keeps its defining file and byte range.`)
-		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
-			(bindings (shared-array GraphBinding)) (resolved GraphResult)
-			(requests (mut-array EmbedAsset)) (collect bool) (output (mut-array u8)))
-		(returns GraphOutput)
-		(body
-			(let-mut assets (array.alloc SuppliedFile 0i32))
-			(let-mut callers (array.alloc CallSite 0i32))
-			(let-mut asset_mode 2u32)
-			(if
-				(:doc "Measurement returns the checked paths before any native file I/O.")
-				(local collect)
-				(then (set (local asset_mode) 1u32)))
-			(return (call run_graph (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
-				0i32 -1i32 (borrow-shared (array.range (local arena) 0i32 0i32))
-				(borrow-shared (local assets)) (borrow-mut (local requests)) (local asset_mode) (bool false)
-				(borrow-mut (local output)) (borrow-mut (local callers))))))
-
-	(fn bind_emission_assets
-		(:doc `Bind external asset rows or the byte ranges already loaded for the entry.`)
-		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
-			(assets (shared-array SuppliedFile)) (requests (shared-array EmbedAsset)) (asset_mode u32)
-			(expressions (mut-array ScalarExpression)))
-		(returns EmbedCheck)
-		(body
-			(if
-				(:doc "An ordinary supplied graph resolves its raw assets through the path table.")
-				(u32.eq (local asset_mode) 0u32)
-				(then (return (call bind_graph_embeds (borrow-shared (local arena)) (borrow-shared (local files))
-					(borrow-shared (local modules)) (borrow-shared (local assets)) (borrow-mut (local expressions))))))
-			(let bound (call bind_module_embeds (array.len (local arena)) (borrow-shared (local requests))
-				(borrow-mut (local expressions))))
-			(if
-				(:doc "Entry requests use arena offsets and the source diagnostic uses entry-relative offsets.")
-				(u32.lt 0u32 (struct.get (local bound) error))
-				(then
-					(let file (struct.get (local bound) file))
-					(let base (struct.get (array.load (local files) (local file)) source_start))
-					(return (call embed_check 0i32 (local file)
-						(i32.sub.wrapping (struct.get (local bound) start) (local base))
-						(i32.sub.wrapping (struct.get (local bound) end) (local base)) (struct.get (local bound) error)))))
-			(return (local bound))))
-
-	(fn run_graph
-		(:doc `Plan the resolved graph once per operation for inspection, asset collection, or C emission.
-
-		Asset mode 0 binds supplied path rows. Mode 1 collects entry requests.
-		Mode 2 binds byte ranges loaded for those entry requests.`)
-		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
-			(bindings (shared-array GraphBinding)) (resolved GraphResult) (root i32) (query_path i32) (name (shared-array u8))
-			(assets (shared-array SuppliedFile)) (requests (mut-array EmbedAsset)) (asset_mode u32) (private_helpers bool)
-			(output (mut-array u8)) (callers (mut-array CallSite)))
 		(returns GraphOutput)
 		(body
 			(let-mut trees (array.alloc ScalarTree (array.len (local files))))
@@ -442,6 +422,85 @@
 				(local test_executable)
 				(then (set (local test_capacity) (local signatures_capacity))))
 			(let-mut tests (array.alloc DiscoveredTest (local test_capacity)))
+			(let-mut functions (array.alloc ScalarFunction (local signatures_capacity)))
+			(let-mut parameters (array.alloc ScalarParameter (local rows)))
+			(let-mut records (array.alloc ScalarRecord (local rows)))
+			(let-mut statements (array.alloc ScalarStatement (local rows)))
+			(let-mut expressions (array.alloc ScalarExpression (local rows)))
+			(let-mut sites (array.alloc CallSite (local rows)))
+			(let plan (call check_graph_plan (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
+				(local root) (local test_executable) (borrow-shared (local trees)) (borrow-mut (local nodes))
+				(borrow-mut (local functions)) (borrow-mut (local parameters)) (borrow-mut (local records))
+				(borrow-mut (local statements)) (borrow-mut (local expressions)) (borrow-mut (local sites))
+				(borrow-mut (local tests))))
+			(if
+				(:doc "Keep checked diagnostics and related transfers in the original file.")
+				(u32.lt 0u32 (struct.get (local plan) error))
+				(then (return (struct.new GraphOutput (count 0i32) (declaration -1i32)
+					(file (struct.get (local plan) file)) (start (struct.get (local plan) start))
+					(end (struct.get (local plan) end)) (error (struct.get (local plan) error))
+					(related_start (struct.get (local plan) related_start)) (related_end (struct.get (local plan) related_end))))))
+			(if
+				(:doc "Inspect the requesting file's bindings against the checked call sites.")
+				(bool.not (i32.lt (local query_path) 0i32))
+				(then
+					(let result (call inspect_graph_name (borrow-shared (local arena)) (borrow-shared (local files))
+						(borrow-shared (local trees)) (borrow-shared (local nodes)) (borrow-shared (local functions))
+						(borrow-shared (local bindings)) (borrow-shared (local sites)) (struct.get (local plan) call_count)
+						(local query_path) (borrow-shared (local name)) (borrow-mut (local callers))))
+					(return (call graph_output (struct.get (local result) count) (struct.get (local result) declaration)
+						(struct.get (local result) file) (struct.get (local result) start) (struct.get (local result) end)
+						(struct.get (local result) error)))))
+			(let embedded (call bind_graph_embeds (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-shared (local assets)) (borrow-mut (local expressions))))
+			(if
+				(:doc "Report the original quoted operand if a supplied asset is unavailable.")
+				(u32.lt 0u32 (struct.get (local embedded) error))
+				(then (return (call graph_output 0i32 -1i32 (struct.get (local embedded) file)
+					(struct.get (local embedded) start) (struct.get (local embedded) end) (struct.get (local embedded) error)))))
+			(return (call write_graph_c (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (borrow-shared (local trees))
+				(borrow-shared (local nodes)) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+				(local root) (local plan) (borrow-shared (local tests)) (local private_helpers)
+				(bool false) -1i32 (borrow-mut (local output))))))
+
+	(fn bind_entry_assets
+		(:doc "Attach loaded ranges to the already checked expressions and preserve source-relative diagnostics.")
+		(params (length i32) (files (shared-array SuppliedFile)) (requests (shared-array EmbedAsset))
+			(expressions (mut-array ScalarExpression))) (returns EmbedCheck)
+		(body
+			(let bound (call bind_module_embeds (local length) (borrow-shared (local requests)) (borrow-mut (local expressions))))
+			(if
+				(:doc "Request spans are measured in the whole arena.")
+				(u32.lt 0u32 (struct.get (local bound) error))
+				(then
+					(let file (struct.get (local bound) file))
+					(let base (struct.get (array.load (local files) (local file)) source_start))
+					(return (call embed_check 0i32 (local file)
+						(i32.sub.wrapping (struct.get (local bound) start) (local base))
+						(i32.sub.wrapping (struct.get (local bound) end) (local base)) (struct.get (local bound) error)))))
+			(return (local bound))))
+
+	(fn graph_plan_error
+		(:doc "Keep the first checking error together with its original source coordinates.")
+		(params (file i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32))
+		(returns GraphPlan)
+		(body
+			(return (struct.new GraphPlan (entry -1i32) (test_count -1i32) (call_count 0i32)
+				(file (local file)) (start (local start)) (end (local end)) (error (local error))
+				(related_start (local related_start)) (related_end (local related_end))))))
+
+	(fn check_graph_plan
+		(:doc "Check the inventory, signatures, and bodies once in their original order.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
+			(bindings (shared-array GraphBinding)) (resolved GraphResult) (root i32) (test_executable bool)
+			(trees (shared-array ScalarTree)) (nodes (mut-array SourceNode)) (functions (mut-array ScalarFunction))
+			(parameters (mut-array ScalarParameter)) (records (mut-array ScalarRecord)) (statements (mut-array ScalarStatement))
+			(expressions (mut-array ScalarExpression)) (sites (mut-array CallSite)) (tests (mut-array DiscoveredTest)))
+		(returns GraphPlan)
+		(body
 			(let-mut test_count -1i32)
 			(if
 				(:doc "Use the existing inventory's ordering and signature diagnostics before lowering bodies.")
@@ -452,15 +511,10 @@
 					(if
 						(:doc "A test declaration error belongs to the defining file.")
 						(u32.lt 0u32 (struct.get (local inventory) error))
-						(then (return (call graph_output 0i32 -1i32 (struct.get (local inventory) file)
+						(then (return (call graph_plan_error (struct.get (local inventory) file)
 							(struct.get (local inventory) start) (struct.get (local inventory) end)
-							(struct.get (local inventory) error)))))
+							(struct.get (local inventory) error) -1i32 -1i32))))
 					(set (local test_count) (struct.get (local inventory) count))))
-			(let-mut functions (array.alloc ScalarFunction (local signatures_capacity)))
-			(let-mut parameters (array.alloc ScalarParameter (local rows)))
-			(let-mut records (array.alloc ScalarRecord (local rows)))
-			(let-mut statements (array.alloc ScalarStatement (local rows)))
-			(let-mut expressions (array.alloc ScalarExpression (local rows)))
 			(let signatures (call prepare_graph (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings)) (local root) (call graph_selection (local resolved))
 				(borrow-mut (local nodes)) (borrow-mut (local functions)) (borrow-mut (local parameters)) (borrow-mut (local records))
@@ -468,10 +522,9 @@
 			(if
 				(:doc "Every reached signature must be valid before resolving cross-file calls.")
 				(u32.lt 0u32 (struct.get (local signatures) error))
-				(then (return (call graph_output 0i32 -1i32 (struct.get (local signatures) file)
+				(then (return (call graph_plan_error (struct.get (local signatures) file)
 					(struct.get (local signatures) start) (struct.get (local signatures) end)
-					(struct.get (local signatures) error)))))
-			(let-mut sites (array.alloc CallSite (local rows)))
+					(struct.get (local signatures) error) -1i32 -1i32))))
 			(let checked (call plan_bodies (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 				(borrow-shared (local records)) (borrow-mut (local statements)) (borrow-mut (local expressions))
@@ -479,39 +532,10 @@
 			(if
 				(:doc "Keep body diagnostics and related transfers in the original file.")
 				(u32.lt 0u32 (struct.get (local checked) error))
-				(then (return (struct.new GraphOutput (count 0i32) (declaration -1i32)
-					(file (struct.get (local checked) file))
-					(start (struct.get (local checked) start)) (end (struct.get (local checked) end))
-					(error (struct.get (local checked) error))
-					(related_start (struct.get (local checked) related_start)) (related_end (struct.get (local checked) related_end))))))
-			(if
-				(:doc "An inspection queries the shared plan through the requesting file's binding table.")
-				(bool.not (i32.lt (local query_path) 0i32))
-				(then
-					(let result (call inspect_graph_name (borrow-shared (local arena)) (borrow-shared (local files))
-						(borrow-shared (local trees)) (borrow-shared (local nodes)) (borrow-shared (local functions))
-						(borrow-shared (local bindings)) (borrow-shared (local sites)) (struct.get (local checked) count)
-						(local query_path) (borrow-shared (local name)) (borrow-mut (local callers))))
-					(return (call graph_output (struct.get (local result) count) (struct.get (local result) declaration)
-						(struct.get (local result) file) (struct.get (local result) start) (struct.get (local result) end)
-						(struct.get (local result) error)))))
-			(if
-				(:doc "Return checked requests before binding assets or writing C.")
-				(u32.eq (local asset_mode) 1u32)
-				(then
-					(let count (call request_module_embeds (borrow-shared (local expressions)) (borrow-mut (local requests))))
-					(return (call graph_output (local count) -1i32 (local root) 0i32 0i32 0u32))))
-			(let embedded (call bind_emission_assets (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local modules)) (borrow-shared (local assets)) (borrow-shared (local requests))
-				(local asset_mode) (borrow-mut (local expressions))))
-			(if
-				(:doc "Asset diagnostics refer to the defining file and its original quoted operand.")
-				(u32.lt 0u32 (struct.get (local embedded) error))
-				(then (return (call graph_output 0i32 -1i32 (struct.get (local embedded) file)
-					(struct.get (local embedded) start) (struct.get (local embedded) end) (struct.get (local embedded) error)))))
-			(return (call write_graph_c (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local bindings)) (borrow-shared (local trees))
-				(borrow-shared (local nodes)) (borrow-shared (local functions)) (borrow-shared (local parameters))
-				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
-				(local root) (struct.get (local signatures) entry) (borrow-shared (local tests)) (local test_count) (local private_helpers)
-				(borrow-mut (local output)))))))
+				(then (return (call graph_plan_error (struct.get (local checked) file)
+					(struct.get (local checked) start) (struct.get (local checked) end) (struct.get (local checked) error)
+					(struct.get (local checked) related_start) (struct.get (local checked) related_end)))))
+			(return (struct.new GraphPlan (entry (struct.get (local signatures) entry)) (test_count (local test_count))
+				(call_count (struct.get (local checked) count)) (file (local root)) (start 0i32) (end 0i32) (error 0u32)
+				(related_start -1i32) (related_end -1i32)))))
+)

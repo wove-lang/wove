@@ -31,8 +31,8 @@
 #define target_os wv_seed_fn_97
 #define target_arch wv_seed_fn_98
 #define inspect_callers wv_seed_fn_686
-#define run_scalar_graph wv_seed_fn_700
-#define discover_graph_tests wv_seed_fn_708
+#define run_scalar_graph wv_seed_fn_702
+#define discover_graph_tests wv_seed_fn_710
 
 typedef wv_seed_record_1 Token;
 typedef wv_seed_record_2 SourceDiagnostic;
@@ -56,8 +56,8 @@ typedef wv_seed_record_63 CallSite;
 typedef wv_seed_record_31 SuppliedFile;
 typedef wv_seed_record_71 CallerInspection;
 typedef wv_seed_record_73 GraphOutput;
-typedef wv_seed_record_74 DiscoveredTest;
-typedef wv_seed_record_75 TestDiscovery;
+typedef wv_seed_record_75 DiscoveredTest;
+typedef wv_seed_record_76 TestDiscovery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
