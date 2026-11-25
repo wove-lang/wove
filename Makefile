@@ -33,17 +33,19 @@ SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove st
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
-C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove emit/embeds.wove hashing/base16.wove emit/c.wove emit/arrays.wove emit/bindings.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_bytes.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
+C_EMITTER_SOURCES := $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove emit/embeds.wove emit/c.wove emit/arrays.wove emit/bindings.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_bytes.wove emit/owners.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
 	scalar/syntax.wove scalar/signatures.wove scalar/flow.wove scalar/host_entry.wove scalar/plan.wove scalar/graph.wove scalar/c_types.wove scalar/records.wove scalar/owners.wove) $(DECIMAL_WRITER)
-HASHING_DIGITS := stage-2/hashing/digits.wove
 HASHING_BITS := stage-2/hashing/bits.wove
-HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_DIGITS) $(HASHING_BITS)
+HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base32hex.wove) $(HASHING_BITS)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
+HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,base32hex base16)
+BASE32HEX_SOURCE := stage-2/hashing/base32hex.wove
+BASE16_SOURCES = stage-2/emit/text.wove $(C_IDENTIFIER_MODULE) $(SOURCE_TYPE_MODULE) $(BASE32HEX_SOURCE) $(BOOTSTRAP_WOVE_SOURCES)
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
-BLAKE2B_SOURCES := $(addprefix stage-2/hashing/,blake2b.wove blake2b/word.wove blake2b/compress.wove base32hex/digest.wove)
+BLAKE2B_SOURCES := $(addprefix stage-2/hashing/,blake2b.wove blake2b/word.wove blake2b/compress.wove)
 JSON_WRITER_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove \
 	$(UTF8_MODULE) $(BYTE_TEXT_MODULE) $(DECIMAL_WRITER)
 JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove $(QUOTED_TEXT_MODULE) $(UTF8_MODULE)
@@ -103,7 +105,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|tracked|bounds-trap|conversion-trap|r
 	}' "$(OWNERSHIP_CASES)")
 
 .PHONY: all stage-1 stage-2 test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
-.PHONY: test-stage-2-gcc test-stage-2-gcc-live test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version force-build-info
+.PHONY: test-stage-2-gcc test-stage-2-gcc-live test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version force-build-info
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -118,7 +120,7 @@ test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version
+test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-gcc test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version
 	"$(BOOTSTRAP_COMPILER)"
 	"$(SOURCE_SCAN)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
@@ -126,14 +128,19 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o $(HASHING_PROGRAMS) test-stage
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
-		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove stage-2/c-stdlib/*.wove $(HASHING_SOURCES) stage-2/hashing/base16.wove $(BLAKE2B_SOURCES) \
+		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove stage-2/c-stdlib/*.wove $(HASHING_SOURCES) $(BLAKE2B_SOURCES) \
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(NATIVE_CLI_SOURCES) $(PROCESS_MODULE) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv $(PROCESS_CASES) tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
 		tests/stage-2/test_execution.tsv tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv tests/stage-2/graph/targets/cases.tsv
+
+# Exercise the same byte and ID encoders in both stages and the native word digest.
+test-stage-2-hashing: $(HASHING_PROGRAMS) $(HASHING_NATIVE_PROGRAMS)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/hashing" "$(HASHING_CASES)"
+	"$(STAGE2)/hashing/native/base16"
+	"$(STAGE2)/hashing/native/base32hex"
 
 # Run the standalone JSON utilities with the same manifest runner as the seed.
 test-stage-2-json: $(JSON_PROGRAMS)
@@ -241,19 +248,28 @@ $(NATIVE_COMPILER): $(STAGE2)/wovec.c $(NATIVE_DRIVER)/host.c $(STAGE1)/runtime.
 	$(call build_versioned,$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(NATIVE_DRIVER)" $(filter-out %.h $(BUILD_VERSION) force-build-info,$^) -o "$@")
 
 # Build utility-only Wove programs with the ordinary Python seed and runtime.
-$(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove stage-2/hashing/%.wove $(SEED) $(STAGE1)/runtime.o
+$(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
 
-# Track the shared hashing helpers used by the standalone fixtures.
-$(STAGE2)/hashing/fnv1a: $(HASHING_BITS)
-$(addprefix $(STAGE2)/hashing/,base16 base32hex): $(HASHING_DIGITS)
+# Track the lookup modules reached by the seed-built hashing fixtures.
+$(STAGE2)/hashing/fnv1a: stage-2/hashing/fnv1a.wove $(HASHING_BITS)
+$(STAGE2)/hashing/base32hex: $(BASE32HEX_SOURCE)
+$(STAGE2)/hashing/base16: $(BASE16_SOURCES)
 
-# Build the standalone BLAKE2b Wove fixture and its manifest transport.
-$(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCES) $(HASHING_DIGITS) $(HASHING_BITS) $(BYTE_TEXT_MODULE) $(SEED)
+# Use the supplied native graph to exercise the shared encoders and fixed-array digest.
+$(addsuffix .c,$(HASHING_NATIVE_PROGRAMS)): $(STAGE2)/hashing/native/%.c: $(HASHING_FIXTURES)/%.wove
+$(STAGE2)/hashing/native/base32hex.c: $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)
+$(STAGE2)/hashing/native/base16.c: $(BASE16_SOURCES)
+$(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCES) $(BASE32HEX_SOURCE) $(HASHING_BITS) $(BYTE_TEXT_MODULE)
+
+$(addsuffix .c,$(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE)): $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
 	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@"
+	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^)
+
+$(HASHING_NATIVE_PROGRAMS): %: %.c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(BLAKE2B_PROBE): $(BLAKE2B_FIXTURES)/probe.probe.c $(BLAKE2B_PROBE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"

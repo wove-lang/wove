@@ -9,9 +9,9 @@
 #include "blake2b.c"
 #undef main
 
-// The seed numbers these entry functions in fixture source order.
-#define check_raw wv_seed_fn_0
-#define check_fields wv_seed_fn_1
+// The graph emitter names these fixture entry functions by module and declaration.
+#define check_raw wgf0vh8tk2check_raw
+#define check_fields wgf03vehi7check_fields
 
 // Decode one ASCII hex digit from a manifest field.
 static int digit(char byte) {
