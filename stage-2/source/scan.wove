@@ -18,6 +18,7 @@
 	(struct SourceNode
 		(fields (kind u32) (start i32) (end i32) (parent i32) (first_child i32) (next_sibling i32)))
 	(struct RenderResult (fields (written i32) (error u32)))
+	(struct BridgeOpening (fields (header i32) (site i32) (error u32)))
 
 	(fn is_ascii_whitespace
 		(:doc `Match the seed's ASCII separators, U+0009–U+000D and U+001C–U+0020.`)
@@ -852,64 +853,99 @@
 												(call is_head_byte (borrow-shared (local source)) (local start) (i32 7) (u8 114))))))))))))))
 
 	(fn first_ordinary_child
-		(:doc `Find the first ordinary child after the head and any legacy metadata.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (head SourceNode))
+		(:doc `Locate an opening slot past any misplaced metadata so its original span remains available.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (previous SourceNode))
 		(returns i32)
 		(body
-			(let-mut index (record.get (local head) next_sibling))
+			(let-mut index (record.get (local previous) next_sibling))
 			(while
-				(:doc "Only a contiguous colon-tagged prefix comes before the first field.")
+				(:doc "Skip only the contiguous metadata that precedes the fixed field.")
 				(bool.and (bool.not (i32.lt (local index) (i32 0)))
 					(call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes))
 						(slice.load (local nodes) (local index))))
 				(body (set (local index) (record.get (slice.load (local nodes) (local index)) next_sibling))))
 			(return (local index))))
 
+	(fn bridge_opening
+		(:doc `Keep a C bridge header row and any fixed-slot diagnostic.`)
+		(params (header i32) (site i32) (error u32))
+		(returns BridgeOpening)
+		(body (return (record.make BridgeOpening (header (local header)) (site (local site)) (error (local error))))))
+
+	(fn c_bridge_opening
+		(:doc `Read the fixed slots that follow a bridge head.
+
+		Recover a quoted header across misplaced metadata so the matching
+		header import can report the placement error in this provider.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (head SourceNode))
+		(returns BridgeOpening)
+		(body
+			(let provider_row (call first_ordinary_child (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))
+			(if
+				(:doc "Other bridge providers retain their ordinary operand grammar.")
+				(bool.or (i32.lt (local provider_row) (i32 0))
+					(bool.not (call is_c_header_provider (borrow-shared (local source)) (slice.load (local nodes) (local provider_row)))))
+				(then (return (call bridge_opening (i32 -1) (i32 -1) (u32 0)))))
+			(let provider (slice.load (local nodes) (local provider_row)))
+			(let header_slot (record.get (local provider) next_sibling))
+			(let header_row (call first_ordinary_child (borrow-shared (local source)) (borrow-shared (local nodes)) (local provider)))
+			(let-mut header (i32 -1))
+			(if
+				(:doc "Only a checked string token can supply a C header key.")
+				(bool.and (i32.lt (i32 -1) (local header_row))
+					(u32.eq (record.get (slice.load (local nodes) (local header_row)) kind) (u32 2)))
+				(then (set (local header) (local header_row))))
+			(let provider_slot (record.get (local head) next_sibling))
+			(if
+				(:doc "A metadata entry in the provider slot points to its own tag.")
+				(bool.not (i32.eq (local provider_slot) (local provider_row)))
+				(then (return (call bridge_opening (local header)
+					(record.get (slice.load (local nodes) (local provider_slot)) first_child) (u32 13)))))
+			(if
+				(:doc "A metadata entry in the header slot is likewise too early.")
+				(bool.not (i32.eq (local header_slot) (local header_row)))
+				(then (return (call bridge_opening (local header)
+					(record.get (slice.load (local nodes) (local header_slot)) first_child) (u32 13)))))
+			(if
+				(:doc "A missing or non-string header is a malformed bridge opening.")
+				(i32.lt (local header) (i32 0))
+				(then (return (call bridge_opening (i32 -1) (local header_row) (u32 26)))))
+			(return (call bridge_opening (local header) (i32 -1) (u32 0)))))
+
 	(fn is_c_bridge_member
-		(:doc `Check that a C bridge member follows an actual provider and header.`)
+		(:doc `Check that a C bridge member follows a complete header-first opening.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (head SourceNode) (start i32))
 		(returns bool)
 		(body
-			(let index (call first_ordinary_child (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))
-			(if
-				(:doc "A supported C bridge begins with its provider operand.")
-				(i32.lt (local index) (i32 0))
-				(then (return (bool false))))
-			(let provider (slice.load (local nodes) (local index)))
-			(let header (record.get (local provider) next_sibling))
-			(let from (record.get (local provider) start))
-			(let short (bool.and (u32.eq (record.get (local provider) kind) (u32 1))
-				(bool.and (i32.eq (i32.sub.wrapping (record.get (local provider) end) (local from)) (i32 1))
-					(u8.eq (slice.load (local source) (local from)) (u8 99)))))
-			(if
-				(:doc "The archived c and current c-header providers have the same two leading fields.")
-				(bool.or (i32.lt (local header) (i32 0))
-					(bool.not (bool.or (local short) (call is_c_header_provider (borrow-shared (local source)) (local provider)))))
-				(then (return (bool false))))
-			(let literal (slice.load (local nodes) (local header)))
-			(return (bool.and (u32.eq (record.get (local literal) kind) (u32 2))
-				(bool.not (i32.lt (local start) (record.get (local literal) end)))))))
+			(let opening (call c_bridge_opening (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))
+			(let header (record.get (local opening) header))
+			(return (bool.and (u32.eq (record.get (local opening) error) (u32 0))
+				(bool.and (i32.lt (i32 -1) (local header))
+					(bool.not (i32.lt (local start) (record.get (slice.load (local nodes) (local header)) end))))))))
 
-	(fn named_declaration_context
-		(:doc `Follow declaration containers to a module or standalone function root.
+	(fn declaration_context
+		(:doc `Follow declaration containers to a module or a standalone declaration root.
 
-		A module binding requires a module or declaration group. Functions
-		can also appear as standalone forms and supported bridge members.`)
-		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (function bool))
+		Module bindings require an enclosing module. Functions and C bridges
+		can also stand alone. C bridges contribute function declarations
+		after their header. Other enclosing forms keep their payload opaque.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (declaration u32))
 		(returns bool)
 		(body
+			(let function (u32.eq (local declaration) (u32 2)))
+			(let standalone (bool.or (local function) (u32.eq (local declaration) (u32 4))))
 			(let-mut index (record.get (local node) parent))
 			(let-mut start (record.get (local node) start))
 			(let-mut in_bridge (bool false))
 			(while
-				(:doc "Trace the entire ancestry before recognizing a declaration name slot.")
+				(:doc "Trace the entire ancestry before recognizing a declaration opening.")
 				(bool.not (i32.lt (local index) (i32 0)))
 				(body
 					(let owner (slice.load (local nodes) (local index)))
 					(if
-						(:doc "Only standalone functions can use a name slot without an enclosing module.")
+						(:doc "Standalone functions and C bridges keep their opening slots without a module.")
 						(u32.eq (record.get (local owner) kind) (u32 0))
-						(then (return (local function))))
+						(then (return (local standalone))))
 					(let parent (record.get (local owner) parent))
 					(let head (slice.load (local nodes) (record.get (local owner) first_child)))
 					(let kind (call declaration_head (borrow-shared (local source)) (local head)))
@@ -940,11 +976,23 @@
 							(if
 								(:doc "A metadata entry, body, or arbitrary payload stops the declaration walk.")
 								(bool.not (bool.or (u32.eq (local kind) (u32 3))
-									(bool.and (local function) (u32.eq (local kind) (u32 5)))))
+									(bool.and (local standalone) (u32.eq (local kind) (u32 5)))))
 								(then (return (bool false))))))
 					(set (local start) (record.get (local owner) start))
 					(set (local index) (local parent))))
 			(return (bool false))))
+
+	(fn read_c_bridge_opening
+		(:doc `Apply the header-first opening only to actual C bridge declarations.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (head SourceNode))
+		(returns BridgeOpening)
+		(body
+			(if
+				(:doc "An opaque payload can use bridge as an ordinary form tag.")
+				(bool.and (u32.eq (call declaration_head (borrow-shared (local source)) (local head)) (u32 4))
+					(call declaration_context (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (u32 4)))
+				(then (return (call c_bridge_opening (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))))
+			(return (call bridge_opening (i32 -1) (i32 -1) (u32 0)))))
 
 	(fn named_form_error
 		(:doc `Return the name diagnostic code for modules, functions, and module bindings.
@@ -974,8 +1022,8 @@
 					(return (u32 0))))
 			(if
 				(:doc "Function and binding name slots depend on the complete declaration ancestry.")
-				(call named_declaration_context (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local function))
+				(call declaration_context (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local tag))
 				(then (return (u32 22))))
 			(return (u32 0))))
 
@@ -988,7 +1036,7 @@
 					(record.get (local node) start) (record.get (local node) end)))))
 
 	(fn check_metadata_children
-		(:doc `Validate child heads, the enclosing name slot, and its one metadata prefix.`)
+		(:doc `Validate child heads, fixed opening slots, and the enclosing metadata prefix.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
 			(container SourceNode) (checked FormCheck))
 		(returns FormCheck)
@@ -1003,7 +1051,25 @@
 					(let tag (slice.load (local nodes) (local child_index)))
 					(set (local name_error) (call named_form_error (borrow-shared (local source))
 						(borrow-shared (local nodes)) (local container) (local tag)))
-					(set (local child_index) (record.get (local tag) next_sibling))))
+					(set (local child_index) (record.get (local tag) next_sibling))
+					(let opening (call read_c_bridge_opening (borrow-shared (local source))
+						(borrow-shared (local nodes)) (local container) (local tag)))
+					(let error (record.get (local opening) error))
+					(if
+						(:doc "Keep a misplaced entry or invalid header on the original slot. An absent header points to the bridge.")
+						(u32.lt (u32 0) (local error))
+						(then
+							(let site (record.get (local opening) site))
+							(if
+								(:doc "The next operand, if present, has the more precise span.")
+								(i32.lt (i32 -1) (local site))
+								(then (return (call source_node_failure (local error) (slice.load (local nodes) (local site))))))
+							(return (call source_node_failure (local error) (local container)))))
+					(let header (record.get (local opening) header))
+					(if
+						(:doc "The C bridge metadata prefix begins immediately after the header.")
+						(i32.lt (i32 -1) (local header))
+						(then (set (local child_index) (record.get (slice.load (local nodes) (local header)) next_sibling))))))
 			(if
 				(:doc "Module and function declarations require a bare name before their metadata.")
 				(u32.lt (u32 0) (local name_error))
@@ -1064,12 +1130,13 @@
 	(fn check_source_metadata
 		(:doc `Validate form heads and metadata attachment without changing the source tree.
 
-		A module or function places its prefix after the bare declaration name.
+		Modules, functions, and module bindings place their prefix after the bare name.
+		A C bridge places its prefix after its provider and quoted header.
 		Other forms start their prefix after the tag. Preserve source order and
 		the original spans of all names, metadata, and fields.`)
 		(:expect
 			(tests "stage-2/source_metadata.tsv")
-			(issues "gh:wove-lang/wove:59" "gh:wove-lang/wove:184"))
+			(issues "gh:wove-lang/wove:59" "gh:wove-lang/wove:184" "gh:wove-lang/wove:246"))
 		(params (source (shared-slice u8)) (checked FormCheck) (nodes (shared-slice SourceNode)))
 		(returns FormCheck)
 		(body
