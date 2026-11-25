@@ -18,7 +18,7 @@
 	(use wove-file "./c_owners.wove" (only is_native_name check_c_type))
 	(use wove-file "./c_records.wove" (only is_c_record read_c_record))
 	(use wove-file "./c_snapshots.wove" (only read_c_snapshot))
-	(use wove-file "./c_arguments.wove" (only c_byte_slice_type read_c_view_type read_c_arguments mark_c_integer_argument (type CArgument)))
+	(use wove-file "./c_arguments.wove" (only c_byte_slice_type read_c_view_type read_c_arguments mark_c_argument_type (type CArgument)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 
 	(use wove-file "./target.wove" (only (type SelectionContext)))
@@ -295,7 +295,7 @@
 
 
 	(fn read_c_reference_parameter
-		(:doc `Read a record reference or shared handle in its defining C bridge.`)
+		(:doc `Read a scalar or record reference, or a shared handle, in its defining C bridge.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode) (bridge i32) (context SelectionContext))
 		(returns CMemberRead)
 		(body
@@ -319,6 +319,12 @@
 				(:doc "The referenced native type must be a bare name.")
 				(bool.not (u32.eq (record.get (local name) kind) 1u32))
 				(then (return (call c_member_error (record.get (local name) start) (record.get (local name) end) 23u32))))
+			(let scalar (call source_builtin_type (borrow-shared (local source)) (local name)))
+			(if
+				(:doc "A mutable built-in scalar reference needs no defining bridge type row.")
+				(bool.and (u32.eq (local mode) 2u32)
+					(bool.or (call is_builtin_integer (local scalar)) (u32.eq (local scalar) 12u32)))
+				(then (return (call c_member_error 0i32 0i32 0u32))))
 			(let checked (call read_c_named_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local name) (local bridge) (local context)))
 			(if (u32.lt 0u32 (record.get (local checked) error)) (then (return (local checked))))
@@ -326,6 +332,10 @@
 				(:doc "Both access modes can reference the complete native record.")
 				(call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
 					(slice.load (local nodes) (record.get (local checked) declaration)))
+				(then (return (local checked))))
+			(if
+				(:doc "A native scalar alias can lend its original writable storage.")
+				(bool.and (i32.lt (record.get (local checked) drop_start) 0i32) (u32.eq (local mode) 2u32))
 				(then (return (local checked))))
 			(if
 				(:doc "Pointer owners support shared loans that pass their existing pointer value.")
@@ -490,6 +500,7 @@
 							(record.get (local choice) error)))))
 					(let type_node (slice.load (local nodes) (local type)))
 					(let-mut integer (call is_builtin_integer (call source_builtin_type (borrow-shared (local source)) (local type_node))))
+					(let-mut mutable_scalar (bool false))
 					(if
 						(:doc "Resolve native aliases and resource types in their defining bridge.")
 						(bool.not (bool.or (call is_c_scalar (borrow-shared (local source)) (local type_node))
@@ -502,11 +513,19 @@
 								(u32.lt 0u32 (record.get (local handle) error))
 								(then (return (local handle))))
 							(set (local integer) (bool.and (u32.eq (record.get (local type_node) kind) 1u32)
-								(i32.lt (record.get (local handle) drop_start) 0i32)))))
-					(if
-						(:doc "Only a built-in integer or a checked integer alias can supply an extent.")
-						(local integer)
-						(then (call mark_c_integer_argument (borrow-mut (local arguments)) (local index))))
+								(i32.lt (record.get (local handle) drop_start) 0i32)))
+							(let type_form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
+							(let mode (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes))
+								(record.get (local type_form) head)))
+							(if
+								(:doc "A checked mut-ref targets a built-in scalar, a native alias, or a record.")
+								(u32.eq (local mode) 2u32)
+								(then
+									(let declaration (record.get (local handle) declaration))
+									(set (local mutable_scalar) (bool.or (i32.lt (local declaration) 0i32)
+										(bool.not (call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
+											(slice.load (local nodes) (local declaration))))))))))
+					(call mark_c_argument_type (borrow-mut (local arguments)) (local index) (local integer) (local mutable_scalar))
 					(let name (slice.load (local nodes) (record.get (local parts) head)))
 					(let name_start (record.get (local name) start))
 					(let name_end (record.get (local name) end))

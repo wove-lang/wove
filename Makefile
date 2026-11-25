@@ -138,7 +138,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stag
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv $(PROCESS_CASES) tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
 		tests/stage-2/test_execution.tsv tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \
 		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_arrays/cases.tsv \
-		tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
+		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
 		tests/stage-2/graph/targets/cases.tsv
 
 # Exercise the same byte and ID encoders in both stages and the native word digest.

@@ -19,14 +19,14 @@
 	(use wove-file "../source/c_headers.wove" (only read_c_native_parameter))
 	(use wove-file "../source/c_arguments.wove" (only read_c_view_type))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
-	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode c_null_argument_kind))
+	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null c_null_argument_kind))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
 	(use wove-file "../source/types.wove" (only void_type is_builtin_integer builtin_type_keyword reference_mode))
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type find_record record_type record_index is_record_type
-			find_member member_value_type read_member_operand fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_slice_element slice_element_code slice_element_type is_readable_slice is_writable_slice
+			find_member member_value_type read_member_operand fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element is_native_integer native_integer_type find_native_definition (type ScalarRecord)
-			is_native_record native_field_type is_record_reference is_mutable_record_reference record_reference_type record_reference_target record_receiver_type record_borrow_kind))
+			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target record_receiver_type place_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
 	(use wove-file "./signatures.wove" (only read_signature_head is_owned_byte_result complete_signature (type ScalarSignature)))
 	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
@@ -189,33 +189,49 @@
 									(start (record.get (local handle) start)) (end (record.get (local handle) end))
 									(error (record.get (local handle) error)) (related -1i32)))))
 							(let declaration (record.get (local handle) declaration))
+							(let-mut target 0u32)
 							(if
-								(:doc "A value alias uses the type-table identity of its defining member.")
-								(i32.lt (record.get (local handle) drop_start) 0i32)
-								(then
-									(let row (call find_native_definition (borrow-shared (local records)) (record.get (local scope) file)
-										(i32.sub.wrapping (local declaration) (record.get (local scope) tree_base))))
-									(if (i32.lt (local row) 0i32)
-										(then (return (call entry_at (local type_node) -1i32 23u32))))
-									(if
-										(:doc "Record formals are pointers to the exact native layout, qualified by access mode.")
-										(u32.lt 0u32 (local reference))
-										(then (set (local type) (call record_reference_type (call record_type (local row))
-											(u32.eq (local reference) 2u32))))
-										(else
-											(let alias (call native_integer_type (local row)))
-											(set (local type) (local alias))
-											(if
-												(:doc "Wrap the defining native integer in the declared slice access mode.")
-												(local native_view)
-												(then (set (local type) (call typed_slice_type (local alias)
-													(u32.eq (record.get (local view) access) 38u32))))))))
+								(:doc "A built-in mutable reference needs no defining type row.")
+								(i32.lt (local declaration) 0i32)
+								(then (set (local target) (call scalar_type (borrow-shared (local source))
+									(borrow-shared (local nodes)) (record.get (local type_form) operands))))
 								(else
-									(set (local type) (call native_owner_type (local declaration)))
 									(if
-										(:doc "A bare resource formal consumes. A shared-ref formal still borrows.")
+										(:doc "Pointer owners keep their defining declaration. Aliases and records keep a type-table row.")
+										(i32.lt -1i32 (record.get (local handle) drop_start))
+										(then (set (local target) (call native_owner_type (local declaration))))
+										(else
+											(let row (call find_native_definition (borrow-shared (local records)) (record.get (local scope) file)
+												(i32.sub.wrapping (local declaration) (record.get (local scope) tree_base))))
+											(if
+												(:doc "Each checked unowned declaration must have a registered type row.")
+												(i32.lt (local row) 0i32)
+												(then (return (call entry_at (local type_node) -1i32 23u32))))
+											(set (local target) (call native_integer_type (local row)))
+											(if
+												(:doc "A complete native record keeps its layout identity.")
+												(call is_native_record (slice.load (local records) (local row)))
+												(then (set (local target) (call record_type (local row)))))))))
+							(set (local type) (local target))
+							(if
+								(:doc "A by-value pointer owner consumes. A shared pointer owner keeps its existing ABI.")
+								(call is_native_owner (local target))
+								(then
+									(if
+										(:doc "Only the bare owner form transfers ownership.")
 										(u32.eq (local reference) 0u32)
-										(then (set (local mode) (call c_consume_mode))))))))
+										(then (set (local mode) (call c_consume_mode)))))
+								(else
+									(if
+										(:doc "A place reference retains its exact pointee and mutability.")
+										(u32.lt 0u32 (local reference))
+										(then (set (local type) (call place_reference_type (local target)
+											(u32.eq (local reference) 2u32)))))))
+							(if
+								(:doc "A slice applies the declared access mode to its exact native element.")
+								(local native_view)
+								(then (set (local type) (call typed_slice_type (local target)
+									(u32.eq (record.get (local view) access) 38u32)))))))
 
 					(let name_node (slice.load (local nodes) (local name)))
 					(let existing (call find_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -838,7 +854,7 @@
 							(let element (call slice_element_code (local type)))
 							(if
 								(:doc "Both types must agree, and exclusive access requires a writable binding.")
-								(bool.or (bool.not (u32.eq (call encode_slice_element (call array_owner_element (local actual))) (local element)))
+								(bool.or (bool.not (u32.eq (call encode_place_type (call array_owner_element (local actual))) (local element)))
 									(bool.and (call is_writable_slice (local type))
 										(bool.not (u32.eq (record.get (local declaration) kind) 16u32))))
 								(then (return (call entry_at (local node) -1i32 24u32)))))
@@ -852,9 +868,12 @@
 					(let target (record.get (local declaration) target))
 					(if
 						(:doc "A value read checks the whole binding. A projected access checks its completed path.")
-						(bool.and (bool.and (bool.not (u32.eq (local expected) 53u32)) (call is_record_type (local actual)))
-							(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
-								(local index) (local statement) (local target) (bool true) -1i32 (bool false)))
+						(bool.and (bool.not (u32.eq (local expected) 53u32))
+							(bool.and (bool.or (call is_record_type (local actual))
+								(bool.or (call is_native_integer (local actual))
+									(bool.or (call is_builtin_integer (local actual)) (u32.eq (local actual) 12u32))))
+								(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
+									(local index) (local statement) (local target) (bool true) -1i32 (bool false))))
 						(then (return (call entry_at (local node) -1i32 24u32))))
 					(slice.store (local expressions) (local index)
 						(record.make ScalarExpression (kind 6u32) (type (local actual)) (target (local target))
@@ -906,7 +925,7 @@
 			(let actual (record.get (slice.load (local parameters) (local target)) type))
 			(if
 				(:doc "A reference used as a whole checks the binding before the read.")
-				(bool.and (bool.and (bool.not (u32.eq (local expected) 53u32)) (call is_record_reference (local actual)))
+				(bool.and (bool.and (bool.not (u32.eq (local expected) 53u32)) (call is_place_reference (local actual)))
 					(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
 						(local index) (local statement) (local target) (bool false) -1i32 (bool false)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
@@ -1126,16 +1145,19 @@
 				(body
 					(let param (slice.load (local parameters) (local formal)))
 					(let operand (slice.load (local nodes) (local argument)))
+					(let mode (record.get (local param) c_mode))
+					(let null (bool.and (call accepts_c_null (local mode))
+						(bool.and (u32.eq (record.get (local operand) kind) 1u32)
+							(call same_bytes (borrow-shared (local source)) (record.get (local operand) start) (record.get (local operand) end)
+								(borrow-shared (local null_literal)) 0i32 (slice.len (local null_literal))))))
 					(if
-						(:doc "A null-only formal accepts the bare literal and needs no evaluated operand.")
-						(call is_c_null_mode (record.get (local param) c_mode))
+						(:doc "A null-only slot cannot take caller-owned storage.")
+						(bool.and (call is_c_null_mode (local mode)) (bool.not (local null)))
+						(then (return (call entry_at (local operand) -1i32 24u32))))
+					(if
+						(:doc "An explicit null supplies no operand to evaluate or borrow.")
+						(local null)
 						(then
-							(if
-								(:doc "Report caller-provided storage at the original argument span.")
-								(bool.not (bool.and (u32.eq (record.get (local operand) kind) 1u32)
-									(call same_bytes (borrow-shared (local source)) (record.get (local operand) start) (record.get (local operand) end)
-										(borrow-shared (local null_literal)) 0i32 (slice.len (local null_literal)))))
-								(then (return (call entry_at (local operand) -1i32 24u32))))
 							(slice.store (local expressions) (local argument)
 								(call expression_row (call c_null_argument_kind) 0u32 -1i32 -1i32 0i32 0i32 (bool false))))
 						(else
@@ -1309,21 +1331,21 @@
 						(then (return 39u32)))
 					(return 35u32)))
 			(if
-				(:doc "An exclusive record argument requires the mutable borrow spelling.")
-				(call is_mutable_record_reference (local expected))
+				(:doc "An exclusive place requires the mutable borrow spelling.")
+				(call is_mutable_place_reference (local expected))
 				(then (return 39u32)))
 			(if
-				(:doc "A shared record or resource formal requires the shared borrow spelling.")
-				(bool.or (call is_native_owner (local expected)) (call is_record_reference (local expected)))
+				(:doc "A shared place or resource formal requires the shared borrow spelling.")
+				(bool.or (call is_native_owner (local expected)) (call is_place_reference (local expected)))
 				(then (return 35u32)))
 			(return (local expected))))
 
-	(fn writable_record_place
+	(fn writable_place
 		(:doc `Identify a writable local or existing exclusive reference at the root of a place.`)
 		(params (binding ScalarExpression))
 		(returns bool)
 		(body (return (bool.or (record.get (local binding) mutable_place)
-			(call is_mutable_record_reference (record.get (local binding) type))))))
+			(call is_mutable_place_reference (record.get (local binding) type))))))
 
 	(fn plan_fixed_slice_loan
 		(:doc `Lend a fixed array in its original local or projected storage.`)
@@ -1347,7 +1369,7 @@
 				(:doc "The original storage must allow the requested access and match the slice's element type.")
 				(bool.or (bool.not (call is_fixed_array (local layout)))
 					(bool.or (bool.not (i32.eq (record.get (local layout) first) (int.convert i32 (call slice_element_code (local type)))))
-						(bool.and (local writable) (bool.not (call writable_record_place (local binding))))))
+						(bool.and (local writable) (bool.not (call writable_place (local binding))))))
 				(then (return (call entry_at (local reference) -1i32 24u32))))
 			(let target (record.get (local binding) target))
 			(let local_binding (u32.eq (record.get (local binding) kind) 6u32))
@@ -1607,46 +1629,51 @@
 					(local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
-	(fn plan_record_borrow
-		(:doc `Borrow a record or reborrow a reference parameter for one call.`)
+	(fn plan_place_borrow
+		(:doc `Borrow a named place or reborrow a reference parameter for one call.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
 			(index i32) (reference_index i32) (caller ScalarFunction) (statement i32) (expected u32)
-			(parameters (shared-slice ScalarParameter)) (statements (shared-slice ScalarStatement))
+			(records (shared-slice ScalarRecord)) (parameters (shared-slice ScalarParameter)) (statements (shared-slice ScalarStatement))
 			(expressions (mut-slice ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(let reference (slice.load (local nodes) (local reference_index)))
 			(let named (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) 8u32 24u32))
 			(if
-				(:doc "Only a named record has storage that can be borrowed here.")
+				(:doc "Only a named binding has storage that can be borrowed here.")
 				(u32.lt 0u32 (record.get (local named) error))
 				(then (return (local named))))
+			(let-mut lookup (call place_reference_target (borrow-shared (local records)) (local expected)))
+			(if
+				(:doc "A record name can also resolve through an existing reference parameter.")
+				(call is_record_type (local lookup))
+				(then (set (local lookup) 53u32)))
 			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)
-				(record.get (local named) operand) 53u32
+				(record.get (local named) operand) (local lookup)
 				(local reference_index) (local caller) (local statement)
 				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
 			(if
-				(:doc "A record type mismatch or loan conflict belongs to the borrow. Keep unknown-name diagnostics.")
+				(:doc "A type mismatch or loan conflict belongs to the borrow. Keep unknown-name diagnostics.")
 				(u32.eq (record.get (local checked) error) 24u32)
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(if (u32.lt 0u32 (record.get (local checked) error)) (then (return (local checked))))
 			(let value (slice.load (local expressions) (local reference_index)))
-			(return (call store_record_loan (borrow-shared (local nodes)) (local node) (local index)
+			(return (call store_place_loan (borrow-shared (local nodes)) (local node) (local index)
 				(local statement) (local expected) (call record_receiver_type (record.get (local value) type))
 				(local value) -1i32 (borrow-mut (local expressions))))))
 
-	(fn store_record_loan
-		(:doc `Check and retain the identity and access mode of a whole or projected record loan.`)
+	(fn store_place_loan
+		(:doc `Check the identity and access mode of a whole or projected place loan.`)
 		(params (nodes (shared-slice SourceNode)) (node SourceNode) (index i32)
 			(statement i32) (expected u32) (actual u32) (binding ScalarExpression) (place i32)
 			(expressions (mut-slice ScalarExpression)))
 		(returns EntryRead)
 		(body
-			(let mutable (call is_mutable_record_reference (local expected)))
+			(let mutable (call is_mutable_place_reference (local expected)))
 			(if
-				(:doc "The exact record type and the original access mode must agree with the requested reference.")
-				(bool.or (bool.not (u32.eq (local actual) (call record_reference_target (local expected))))
-					(bool.and (local mutable) (bool.not (call writable_record_place (local binding)))))
+				(:doc "The exact storage type and original access mode must agree with the requested reference.")
+				(bool.or (bool.not (u32.eq (call encode_place_type (local actual)) (call place_reference_code (local expected))))
+					(bool.and (local mutable) (bool.not (call writable_place (local binding)))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let target (record.get (local binding) target))
 			(let local_binding (u32.eq (record.get (local binding) kind) 6u32))
@@ -1656,14 +1683,14 @@
 					(local index) (local statement) (local target) (local local_binding) (local place) (local mutable))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(slice.store (local expressions) (local index)
-				(record.make ScalarExpression (kind (call record_borrow_kind)) (type (local expected))
+				(record.make ScalarExpression (kind (call place_borrow_kind)) (type (local expected))
 					(target (local target)) (first -1i32) (start 0i32) (end 0i32) (negative (bool false))
 					(borrowed_owner (local local_binding)) (mutable_place (bool false)) (projection (local place))
 					(asset_start 0i32) (asset_end 0i32)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_projected_loan
-		(:doc `Check a static field path and lend its original record or inline array storage.`)
+		(:doc `Check a static field path and lend its original storage.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
 			(index i32) (place i32) (caller ScalarFunction) (statement i32) (expected u32) (view_start i32)
 			(functions (shared-slice ScalarFunction)) (parameters (shared-slice ScalarParameter))
@@ -1689,9 +1716,9 @@
 			(let binding (slice.load (local expressions) (local root)))
 			(let actual (record.get (local field) type))
 			(if
-				(:doc "A reference formal borrows a record field of exactly its defining type.")
-				(call is_record_reference (local expected))
-				(then (return (call store_record_loan (borrow-shared (local nodes)) (local node) (local index)
+				(:doc "A reference formal borrows the field with its exact declared type.")
+				(call is_place_reference (local expected))
+				(then (return (call store_place_loan (borrow-shared (local nodes)) (local node) (local index)
 					(local statement) (local expected) (local actual) (local binding) (local place)
 					(borrow-mut (local expressions))))))
 			(return (call plan_fixed_slice_loan (borrow-shared (local nodes)) (local node) (local index)
@@ -1742,18 +1769,18 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
 			(if
-				(:doc "A projected record or slice loan retains its checked field path.")
+				(:doc "A projected loan retains its checked field path.")
 				(u32.eq (local tag) 52u32)
 				(then (return (call plan_projected_loan (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (local reference_index) (local caller) (local statement) (local expected) (local view_start)
 					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 					(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
-				(:doc "A record loan preserves the address of its original storage.")
-				(call is_record_reference (local expected))
-				(then (return (call plan_record_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
+				(:doc "A place loan preserves the address of its original storage.")
+				(call is_place_reference (local expected))
+				(then (return (call plan_place_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (local reference_index) (local caller) (local statement) (local expected)
-					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
+					(borrow-shared (local records)) (borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "Use a checked byte range and evaluate both endpoints before handing the view to the callee.")
 				(bool.and (u32.eq (local expected) 35u32) (u32.eq (local tag) 44u32))
@@ -2326,7 +2353,7 @@
 					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "Resolve a call argument in its required reborrow mode and element type.")
-				(bool.or (bool.or (call is_native_owner (local expected)) (call is_record_reference (local expected)))
+				(bool.or (bool.or (call is_native_owner (local expected)) (call is_place_reference (local expected)))
 					(bool.or (call is_reborrow_keyword (local expected)) (call is_typed_slice (local expected))))
 				(then (return (call plan_view (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (local caller) (local statement) (local expected) (local view_start)
@@ -2800,7 +2827,7 @@
 			(let name (slice.load (local nodes) (record.get (local parts) operands)))
 			(if
 				(:doc "A mutable local or exclusive record reference supplies the original writable storage.")
-				(bool.not (call writable_record_place (local value)))
+				(bool.not (call writable_place (local value)))
 				(then (return (call entry_at (local name) -1i32 37u32))))
 			(let type (call record_receiver_type (record.get (local value) type)))
 			(let layout (slice.load (local records) (call record_index (local type))))

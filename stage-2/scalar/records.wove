@@ -304,46 +304,56 @@
 		(body (return (bool.or (u32.eq (local type) 38u32)
 			(bool.and (bool.not (u32.lt (local type) 1610612736u32)) (u32.lt (local type) 1879048192u32))))))
 
-	(fn is_mutable_record_reference
-		(:doc `Identify the encoding for an exclusive reference to a record.`)
+	(fn is_mutable_place_reference
+		(:doc `Identify the encoding for an exclusive reference to a scalar or record place.`)
 		(:pragma (inline always))
 		(params (type u32))
 		(returns bool)
 		(body (return (bool.and (bool.not (u32.lt (local type) 1879048192u32)) (u32.lt (local type) 2147483648u32)))))
 
-	(fn is_record_reference
-		(:doc `Distinguish call-scoped record references from by-value records and slice descriptors.`)
+	(fn is_place_reference
+		(:doc `Distinguish call-scoped place references from values and slice descriptors.`)
 		(:pragma (inline always))
 		(params (type u32))
 		(returns bool)
-		(body (return (bool.or (call is_mutable_record_reference (local type))
+		(body (return (bool.or (call is_mutable_place_reference (local type))
 			(bool.and (bool.not (u32.lt (local type) 1342177280u32)) (u32.lt (local type) 1610612736u32))))))
 
-	(fn record_borrow_kind
-		(:doc `Identify a checked argument that borrows the original record storage.`)
+	(fn place_borrow_kind
+		(:doc `Identify a checked argument that borrows the original storage of a place.`)
 		(:pragma (inline always))
 		(params)
 		(returns u32)
 		(body (return 63u32)))
 
-	(fn record_reference_type
-		(:doc `Encode a call-scoped reference to its exact defining record layout.`)
+	(fn place_reference_type
+		(:doc `Encode a call-scoped reference to its exact scalar or record type.`)
 		(params (type u32) (mutable bool))
 		(returns u32)
 		(body
-			(if (local mutable) (then (return (u32.add.wrapping (local type) 1879048192u32))))
-			(return (u32.add.wrapping (local type) 1342177280u32))))
+			(let code (call encode_place_type (local type)))
+			(if
+				(:doc "An exclusive reference has its own type interval.")
+				(local mutable)
+				(then (return (u32.add.wrapping (local code) 1879048192u32))))
+			(return (u32.add.wrapping (local code) 1342177280u32))))
 
-	(fn record_reference_target
-		(:doc `Recover the defining record type from either reference mode.`)
+	(fn place_reference_code
+		(:doc `Recover the encoded pointee from either reference mode.`)
 		(params (type u32))
 		(returns u32)
 		(body
 			(if
 				(:doc "Remove the offset reserved for mutable references.")
-				(call is_mutable_record_reference (local type))
+				(call is_mutable_place_reference (local type))
 				(then (return (u32.sub.wrapping (local type) 1879048192u32))))
 			(return (u32.sub.wrapping (local type) 1342177280u32))))
+
+	(fn place_reference_target
+		(:doc `Recover the original type identity of a borrowed place.`)
+		(params (records (shared-slice ScalarRecord)) (type u32))
+		(returns u32)
+		(body (return (call decode_place_type (borrow-shared (local records)) (call place_reference_code (local type))))))
 
 	(fn record_receiver_type
 		(:doc `Resolve the layout of a field receiver whether read by value or through a reference.`)
@@ -352,12 +362,12 @@
 		(body
 			(if
 				(:doc "A reference keeps access mode separate from the defining layout.")
-				(call is_record_reference (local type))
-				(then (return (call record_reference_target (local type)))))
+				(call is_place_reference (local type))
+				(then (return (call place_reference_code (local type)))))
 			(return (local type))))
 
-	(fn encode_slice_element
-		(:doc `Use a shared table row for a native integer or record element. Built-ins keep their codes.`)
+	(fn encode_place_type
+		(:doc `Encode native integers and records with their disjoint layout table rows. Built-ins keep their codes.`)
 		(params (element u32))
 		(returns u32)
 		(body
@@ -372,7 +382,7 @@
 		(params (element u32) (writable bool))
 		(returns u32)
 		(body
-			(let encoded (call encode_slice_element (local element)))
+			(let encoded (call encode_place_type (local element)))
 			(if
 				(:doc "Mutable slices use the writable type interval.")
 				(local writable)
@@ -401,22 +411,27 @@
 				(then (return (call typed_slice_element_code (local type)))))
 			(return 10u32)))
 
-	(fn slice_element_type
-		(:doc `Recover the exact scalar, record, or native integer type of a slice's element.`)
-		(params (records (shared-slice ScalarRecord)) (type u32))
+	(fn decode_place_type
+		(:doc `Recover a scalar or record type stored in a reference or slice interval.`)
+		(params (records (shared-slice ScalarRecord)) (code u32))
 		(returns u32)
 		(body
-			(let element (call slice_element_code (local type)))
 			(if
-				(:doc "A table-backed element names either a record layout or a native alias.")
-				(call is_record_type (local element))
+				(:doc "A table-backed code names either a record layout or a native alias.")
+				(call is_record_type (local code))
 				(then
-					(let row (call record_index (local element)))
+					(let row (call record_index (local code)))
 					(if
 						(:doc "Only native integer aliases have a negative field count.")
 						(i32.lt (record.get (slice.load (local records) (local row)) count) 0i32)
 						(then (return (call native_integer_type (local row)))))))
-			(return (local element))))
+			(return (local code))))
+
+	(fn slice_element_type
+		(:doc `Recover the exact scalar, record, or native integer type of a slice's element.`)
+		(params (records (shared-slice ScalarRecord)) (type u32))
+		(returns u32)
+		(body (return (call decode_place_type (borrow-shared (local records)) (call slice_element_code (local type))))))
 
 	(fn is_fixed_scalar_slice
 		(:doc `Identify a typed slice that can borrow an inline built-in integer array.`)
@@ -564,7 +579,7 @@
 						(bool.not (call is_native_record (slice.load (local records) (call record_index (local type))))))))
 				(then (return (call entry_at (slice.load (local nodes) (local element)) -1i32 23u32))))
 			(return (call entry_at (local node)
-				(int.convert i32 (call record_reference_type (local type) (u32.eq (local mode) 2u32))) 0u32))))
+				(int.convert i32 (call place_reference_type (local type) (u32.eq (local mode) 2u32))) 0u32))))
 
 	(fn read_parameter_type
 		(:doc `Read a value, slice, or Wove record reference, retaining the original type diagnostic.`)

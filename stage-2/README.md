@@ -697,6 +697,17 @@ to the first NUL and release a present C result exactly once. The release
 has C signature `void (void *)` or `void (char *)`. A null result stays
 absent, and an empty C string produces a present zero-length owner.
 
+A fixed C signature can declare `(mut-ref T)` for writable scalar storage.
+Use `(borrow-mut (local value))` on a mutable local or borrow a writable
+record field with its exact declared type. C receives a pointer to that
+storage, so changes are visible when the call returns. Integer aliases
+keep their defining identity and original C pointer type. The loan remains
+exclusive while evaluating later arguments and running the call.
+A fixed signature can mark a mutable scalar reference with
+`(:pragma (c_nullable parameter))` to also accept the bare `null` literal.
+For example, the checked-in `waitpid` accepts either a mutable `i32` loan
+or `null` for its status parameter.
+
 A fixed C signature can use `(c_null resolved)` for a byte-view formal.
 That slot requires bare `null` and passes C `NULL`, including when the
 slot also has a `c_cstr` conversion. For example, `(call realpath
