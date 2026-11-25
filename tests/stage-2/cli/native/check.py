@@ -42,14 +42,16 @@ def check_case(compiler, clang, runtime, fixtures, row):
 			elif isinstance(source, dict) and "symlink" in source:
 				(root / destination).symlink_to(source["symlink"])
 		# Existing C paths can also be Wove inputs. A failed command must preserve their bytes.
-		existing_c = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.c")}
+		existing_c = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.c") if path.is_file()}
+		stages = {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()}
 		arguments = [argument if isinstance(argument, str) else bytes.fromhex(argument["hex"])
 			for argument in json.loads(argv)]
 		result = subprocess.run([compiler, *arguments], cwd=root, capture_output=True, timeout=30)
 		assert (result.returncode, result.stdout) == (int(status), b""), (label, result)
 		# cc retains C beside its requested target without creating the target itself.
 		assert not (root / target).exists(), (label, target)
-		artifacts = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.c"))
+		artifacts = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.c") if path.is_file())
+		assert {path.relative_to(root): path.read_bytes() for path in root.rglob("main.c.*") if path.is_file()} == stages, label
 		if retained != "-":
 			assert not result.stderr and artifacts == [retained], (label, result.stderr, artifacts)
 			generated = (root / retained).read_text()
