@@ -163,6 +163,27 @@ wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrt_bytes, int32_t wvrt_leng
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_snapshot_borrowed_cstr_at_span(const char *wvrt_text,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_snapshot_bounded_cstr_at_span(const char *wvrt_text, size_t wvrt_capacity,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+// Capture the record pointer once and use the native header's complete field type and size.
+#define WVRT_SNAPSHOT_CSTR_FIELD_AT_SPAN(result, field, file, start, end) \
+	__extension__ ({ \
+		__auto_type wvrt_record = (result); \
+		_Static_assert(sizeof(wvrt_record->field) > 0 && _Generic(&(wvrt_record->field), \
+			char (*)[sizeof(wvrt_record->field)]: 1, const char (*)[sizeof(wvrt_record->field)]: 1, default: 0), \
+			"Wove C snapshot field must be a nonempty inline char array at file " #file " bytes [" #start "," #end ")"); \
+		wvrt_record == NULL ? NULL : wvrt_snapshot_bounded_cstr_at_span( \
+			wvrt_record->field, sizeof(wvrt_record->field), (file), (start), (end)); \
+	})
+
+// readdir guarantees a terminated name even when the returned record extends the declared array.
+#define WVRT_READDIR_NAME(directory) \
+	__extension__ ({ \
+		__auto_type wvrt_entry = readdir(directory); \
+		wvrt_entry == NULL ? NULL : (const char *)wvrt_entry->d_name; \
+	})
+
 wvrt_array *wvrt_snapshot_cstr_at_span(char *wvrt_text, void (*wvrt_release)(void *),
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_snapshot_chars_at_span(char *wvrt_text, void (*wvrt_release)(char *),

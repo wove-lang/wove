@@ -478,13 +478,17 @@ wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrtbytes, int32_t wvrtlength
 	return wvrt_result;
 }
 
-// Copy present native text into an independent owner, including an empty string.
-static wvrt_array *wvrt_try_copy_cstr(const char *wvrttext) {
-	const size_t wvrt_length = strlen(wvrttext);
-	if (wvrt_length > INT32_MAX) { return NULL; }
-	wvrt_array *wvrt_result = wvrt_array_try_new((int32_t)wvrt_length, sizeof(uint8_t), _Alignof(uint8_t));
-	if (wvrt_result != NULL && wvrt_length != 0) { memcpy(wvrt_result->wvrt_items, wvrttext, wvrt_length); }
+// Copy a measured native string into an independent owner, including an empty string.
+static wvrt_array *wvrt_try_copy_cstr_bytes(const char *wvrttext, size_t wvrtlength) {
+	if (wvrtlength > INT32_MAX) { return NULL; }
+	wvrt_array *wvrt_result = wvrt_array_try_new((int32_t)wvrtlength, sizeof(uint8_t), _Alignof(uint8_t));
+	if (wvrt_result != NULL && wvrtlength != 0) { memcpy(wvrt_result->wvrt_items, wvrttext, wvrtlength); }
 	return wvrt_result;
+}
+
+// Measure a null-terminated native string before copying it.
+static wvrt_array *wvrt_try_copy_cstr(const char *wvrttext) {
+	return wvrt_try_copy_cstr_bytes(wvrttext, strlen(wvrttext));
 }
 
 // Report snapshot failure after releasing owned native storage, or restore the call's errno.
@@ -501,6 +505,23 @@ wvrt_array *wvrt_snapshot_borrowed_cstr_at_span(const char *wvrttext,
 	if (wvrttext == NULL) { return NULL; }
 	const int wvrt_saved_errno = errno;
 	wvrt_array *wvrt_result = wvrt_try_copy_cstr(wvrttext);
+	return wvrt_finish_cstr_snapshot(wvrt_result, wvrt_saved_errno, wvrtfile, wvrtstart, wvrtend);
+}
+
+// Scan only through the first terminator or the declared inline field capacity.
+wvrt_array *wvrt_snapshot_bounded_cstr_at_span(const char *wvrttext, size_t wvrtcapacity,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	const int wvrt_saved_errno = errno;
+	size_t wvrt_length = 0;
+	// Test the bound before inspecting the next byte.
+	while (wvrt_length < wvrtcapacity && wvrttext[wvrt_length] != '\0') {
+		++wvrt_length;
+	}
+	// A full field without a terminator cannot supply a C string.
+	if (wvrt_length == wvrtcapacity) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "unterminated C snapshot field");
+	}
+	wvrt_array *wvrt_result = wvrt_try_copy_cstr_bytes(wvrttext, wvrt_length);
 	return wvrt_finish_cstr_snapshot(wvrt_result, wvrt_saved_errno, wvrtfile, wvrtstart, wvrtend);
 }
 
