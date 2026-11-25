@@ -654,6 +654,15 @@ checks the handle at the borrow's source span and passes its original C
 pointer. A missing handle traps before the call. The loan ends on return
 from C, and the local owner retains its destructor responsibility.
 
+Use `(owner.is-null (local file))` to test a named native owner without
+borrowing it. A bare owner type in a C signature consumes that resource.
+For example, `(call fclose (move (local file)))` requires the exact `File`
+owner and traps at the move on a missing handle. The transfer clears the
+local slot, and C becomes responsible for the handle even when the call
+returns an error. Lexical cleanup drops any handle still present on the
+executed path. Later uses on any continuing path that could have
+transferred the owner point to the use and its earlier move.
+
 Each binding identifies the importing namespace and the name span in that
 file. Its target is the defining file identity and declaration node index
 in the defining source tree. Earlier reader diagnostics keep their codes
