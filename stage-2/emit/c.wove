@@ -10,7 +10,7 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only skip_disabled_siblings (type ModuleRead) (type SelectedDeclaration)))
-	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_native_record is_place_reference record_receiver_type place_borrow_kind is_native_integer is_typed_slice slice_element_type is_readable_slice is_writable_slice is_array_owner array_owner_element (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_native_record is_place_reference record_receiver_type place_borrow_kind is_native_integer is_typed_slice slice_element_type is_readable_slice is_writable_slice is_array_owner array_owner_type array_owner_element (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type write_member_name write_member_separator write_parameter_name write_field_place write_place_borrow captures_value_argument write_record_layouts write_record_layout_argument))
 	(use wove-file "./arrays.wove" (only write_fixed_list write_fixed_repeat write_fixed_access write_fixed_slice))
 	(use wove-file "../scalar/owners.wove" (only is_native_owner native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind is_native_storage_write_loan
@@ -33,7 +33,7 @@
 	(use wove-file "./runtime.wove"
 		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_i32_division open_slice_access open_shared_projection write_slice_length close_runtime_call
 			open_slice_offset write_slice_items open_array_allocation open_array_copy open_array_drop open_array_borrow))
-	(use wove-file "./text.wove" (only c_byte c_span c_text_fragment c_cast c_i32_bias write_c_name write_decimal_literal
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment c_cast c_i32_bias write_c_name write_decimal_literal
 			function_name_role write_temporary_name write_local_name open_static_value write_static_bytes))
 
 	(struct EmitResult
@@ -312,6 +312,10 @@
 				(record.get (local expression) end) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local end) 41u8 (local writing)))))
 
+	(let row_load_open "wvrt_array_borrow_row_at_span(")
+	(let row_store_open "wvrt_array_store_row_at_span(")
+	(let rows_alloc_open "wvrt_array_new_rows_at_span(")
+
 	(fn write_slice_access
 		(:doc `Read the descriptor length or pass the evaluated operands and original access span to the runtime.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (records (shared-slice ScalarRecord))
@@ -328,14 +332,28 @@
 						(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
 					(return (call write_slice_length (borrow-mut (local output)) (local cursor) (local writing)))))
 			(let type (record.get (slice.load (local expressions) (local receiver)) type))
+			(let element (call slice_element_type (borrow-shared (local records)) (local type)))
+			(let row (u32.eq (local element) (call array_owner_type 10u32)))
 			(if
-				(:doc "A typed access indexes the original backing array after the span-aware bounds check.")
-				(call is_typed_slice (local type))
+				(:doc "A typed copyable access indexes its backing array after the checked subscript.")
+				(bool.and (call is_typed_slice (local type)) (bool.not (local row)))
 				(then (return (call write_typed_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
-					(borrow-shared (local records)) (local expression) (call slice_element_type (borrow-shared (local records)) (local type)) (local tree_base)
+					(borrow-shared (local records)) (local expression) (local element) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(let index (record.get (slice.load (local nodes) (local receiver)) next_sibling))
-			(let open (call open_slice_access (borrow-mut (local output)) (local offset) (local kind) (local writing)))
+			(let-mut open (local offset))
+			(if
+				(:doc "Owning rows need a checked borrow or replacement with cleanup.")
+				(local row)
+				(then
+					(if
+						(:doc "The row store retires its prior allocation, while the row load only borrows bytes.")
+						(u32.eq (local kind) 40u32)
+						(then (set (local open) (call c_literal_text (borrow-shared (local row_store_open))
+							(borrow-mut (local output)) (local offset) (local writing))))
+						(else (set (local open) (call c_literal_text (borrow-shared (local row_load_open))
+							(borrow-mut (local output)) (local offset) (local writing))))))
+				(else (set (local open) (call open_slice_access (borrow-mut (local output)) (local offset) (local kind) (local writing)))))
 			(let view (call write_temporary_name (borrow-shared (local source)) (local receiver) (local tree_base)
 				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(let comma (call c_byte (borrow-mut (local output)) (local view) 44u8 (local writing)))
@@ -451,13 +469,20 @@
 		(body
 			(let element (call array_owner_element (record.get (local expression) type)))
 			(let byte (u32.eq (local element) 10u32))
-			(let open (call open_array_allocation (borrow-mut (local output)) (local offset) (local byte) (local writing)))
+			(let rows (u32.eq (local element) (call array_owner_type 10u32)))
+			(let-mut open 0u32)
+			(if
+				(:doc "An array of byte owners needs the runtime's element destructor.")
+				(local rows)
+				(then (set (local open) (call c_literal_text (borrow-shared (local rows_alloc_open))
+					(borrow-mut (local output)) (local offset) (local writing))))
+				(else (set (local open) (call open_array_allocation (borrow-mut (local output)) (local offset) (local byte) (local writing)))))
 			(let-mut cursor (call write_temporary_name (borrow-shared (local source))
 				(record.get (local expression) first) (local tree_base)
 				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(if
-				(:doc "Let the C compiler compute the defining record's true stride and alignment.")
-				(bool.not (local byte))
+				(:doc "The generic allocator takes the defining record or alias's C layout.")
+				(bool.not (bool.or (local byte) (local rows)))
 				(then
 					(set (local cursor) (call write_record_layout_argument (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local records)) (local element) (bool false) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))

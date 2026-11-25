@@ -29,7 +29,7 @@ SOURCE_MODULE_READER := stage-2/source/module.wove stage-2/source/target.wove
 SOURCE_TYPE_MODULE := stage-2/source/types.wove
 TEST_DISCOVERY_MODULE := stage-2/scalar/tests.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
-SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_names.wove stage-2/source/c_scope.wove stage-2/source/tree_copy.wove stage-2/source/c_arguments.wove stage-2/source/c_owners.wove stage-2/source/c_records.wove stage-2/source/c_snapshots.wove
+SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/owned.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_names.wove stage-2/source/c_scope.wove stage-2/source/tree_copy.wove stage-2/source/c_arguments.wove stage-2/source/c_owners.wove stage-2/source/c_records.wove stage-2/source/c_snapshots.wove
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
@@ -138,7 +138,7 @@ test-stage-2: stage-2 $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stag
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv $(PROCESS_CASES) tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
 		tests/stage-2/test_execution.tsv tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \
 		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_arrays/cases.tsv \
-		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
+		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_rows/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
 		tests/stage-2/graph/targets/cases.tsv
 
 # Exercise the same byte and ID encoders in both stages and the native word digest.
