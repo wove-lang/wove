@@ -10,7 +10,7 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only skip_disabled_siblings (type ModuleRead) (type SelectedDeclaration)))
-	(use wove-file "../scalar/records.wove" (only count_records is_native_integer is_record_slice record_slice_element is_readable_slice is_writable_slice array_owner_element (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only count_records is_native_integer is_record_slice record_slice_element is_readable_slice is_writable_slice is_array_owner array_owner_element (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type write_member_name write_record_layouts write_record_layout_argument))
 	(use wove-file "../scalar/owners.wove" (only is_native_owner native_handle_borrow_kind))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset)))
@@ -711,9 +711,13 @@
 			(return (call c_byte (borrow-mut (local output)) (local destructor) (u8 40) (local writing)))))
 
 	(fn write_cleanup
-		(:doc `Release live owners in reverse declaration order at a return or block exit.`)
+		(:doc `Release live owners in reverse declaration order at a return or block exit.
+
+		A moved return keeps the owner named by transferred. Other exits
+		pass -1 so this transfer has no effect on their cleanup.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (statements (shared-slice ScalarStatement))
-			(head i32) (stop i32) (exit_row i32) (tree_base i32) (output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+			(head i32) (stop i32) (exit_row i32) (transferred i32) (tree_base i32)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let-mut owner (local head))
@@ -725,9 +729,10 @@
 					(let row (slice.load (local statements) (local owner)))
 					(let move (record.get (local row) move_site))
 					(if
-						(:doc "An earlier return still owns its source. Fallthrough has executed every same-block transfer.")
-						(bool.or (i32.lt (local move) (i32 0))
-							(bool.and (bool.not (i32.lt (local exit_row) (i32 0))) (i32.lt (local exit_row) (local move))))
+						(:doc "Keep the returned owner and skip earlier transfers on this path.")
+						(bool.and (bool.not (i32.eq (local transferred) (record.get (local row) target)))
+							(bool.or (i32.lt (local move) (i32 0))
+								(bool.and (bool.not (i32.lt (local exit_row) (i32 0))) (i32.lt (local exit_row) (local move)))))
 						(then
 							(set (local cursor) (call open_owner_drop (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local row) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
@@ -754,7 +759,7 @@
 				(i32.lt (local root) (i32 0))
 				(then
 					(let cleaned (call write_cleanup (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local index) (local tree_base)
+						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local index) (i32 -1) (local tree_base)
 						(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
 					(let keyword (call c_text_fragment (borrow-mut (local output)) (local cleaned) (u32 11) (local writing)))
 					(return (call c_byte (borrow-mut (local output)) (local keyword) (u8 59) (local writing)))))
@@ -792,8 +797,13 @@
 						(local root) (local tree_base) (borrow-shared (local functions)) (borrow-shared (local parameters))
 						(borrow-shared (local records)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
+					(let-mut transferred (i32 -1))
+					(if
+						(:doc "A checked owner reference in a return denotes an explicit move from that local.")
+						(bool.and (call is_array_owner (record.get (local value) type)) (u32.eq (record.get (local value) kind) (u32 6)))
+						(then (set (local transferred) (record.get (local value) target))))
 					(set (local cursor) (call write_cleanup (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local index) (local tree_base)
+						(borrow-shared (local statements)) (local previous_owner) (i32 -1) (local index) (local transferred) (local tree_base)
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) (u32 3) (local writing)))
 					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
@@ -927,7 +937,8 @@
 								(then (set (local cursor) (call write_cleanup
 									(borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local statements))
 									(record.get (local arm) previous_owner) (record.get (local entry) previous_owner)
-									(i32 -1) (record.get (local function) tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+									(i32 -1) (i32 -1) (record.get (local function) tree_base)
+									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
 							(let alternate (record.get (local exit) alternate))
 							(if
@@ -963,7 +974,7 @@
 				(record.get (local end) falls_through)
 				(then (set (local cursor) (call write_cleanup
 					(borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local statements))
-					(record.get (local end) previous_owner) (i32 -1) (i32 -1) (record.get (local function) tree_base)
+					(record.get (local end) previous_owner) (i32 -1) (i32 -1) (i32 -1) (record.get (local function) tree_base)
 					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(return (local cursor))))
 
@@ -1032,9 +1043,11 @@
 				(:doc "Runtime expressions can occur in any selected body or nested operand.")
 				(i32.lt (local index) (slice.len (local expressions)))
 				(body
+					(let value (slice.load (local expressions) (local index)))
 					(if
-						(:doc "The runtime ABI supplies slice descriptors and checked operations.")
-						(call is_runtime_operation (record.get (slice.load (local expressions) (local index)) kind))
+						(:doc "The runtime ABI supplies checked operations and the owned array result type.")
+						(bool.or (call is_runtime_operation (record.get (local value) kind))
+							(call is_array_owner (record.get (local value) type)))
 						(then (return (bool true))))
 					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
 			(set (local index) (i32 0))

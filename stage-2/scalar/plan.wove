@@ -24,7 +24,7 @@
 			find_member read_member_operand is_record_slice record_slice_type record_slice_element is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element is_native_integer native_integer_type find_native_integer (type ScalarRecord)))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
-	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
+	(use wove-file "./signatures.wove" (only read_signature_head is_owned_byte_result complete_signature (type ScalarSignature)))
 	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind))
 	(use wove-file "./flow.wove" (only block_statement moved_owner after_block (type ScalarStatement)))
 	(use wove-file "./syntax.wove"
@@ -93,6 +93,11 @@
 						(then (set (local result) (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
 							(borrow-shared (local records)) (borrow-shared (local bindings))
 							(record.get (local scope) file) (record.get (local scope) source_base) (local type_node)))))
+					(if
+						(:doc "A Wove helper can return ownership of a byte array.")
+						(bool.and (u32.eq (local result) (u32 0))
+							(call is_owned_byte_result (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
+						(then (set (local result) (call array_owner_type (u32 10)))))
 					(if
 						(:doc "The C entry requires i32 in every compilation mode.")
 						(bool.and (local entry) (bool.not (u32.eq (local result) (u32 5))))
@@ -804,9 +809,10 @@
 				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
 			(let callee (slice.load (local functions) (local target)))
 			(let actual (record.get (local callee) result))
+			(let owning_initializer (bool.and (u32.eq (local expected) (u32 42)) (call is_array_owner (local actual))))
 			(if
-				(:doc "Use the target's declared result to check the call in its original context.")
-				(bool.not (call value_matches_type (local expected) (local actual)))
+				(:doc "A call can introduce a fresh local owner or satisfy its exact expected result.")
+				(bool.not (bool.or (local owning_initializer) (call value_matches_type (local expected) (local actual))))
 				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
 			(let first (record.get (local name) next_sibling))
 			(let-mut argument (local first))
@@ -1627,12 +1633,12 @@
 				(end (i32.add.wrapping (local view_start) (i32.sub.wrapping (record.get (local node) end) (local base))))))))
 
 	(fn plan_move
-		(:doc `Transfer a local owner into a new declaration in the same lexical block.
+		(:doc `Transfer a local owner into a declaration or through a return.
 
-		The initializer reuses the original pointer. Mark its defining
-		statement only after both the source and the transfer are checked.`)
+		A declaration move affects subsequent uses in the same block.
+		A return transfers only on that exit, so other paths keep the source.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (caller ScalarFunction)
-			(root i32) (statement i32) (parameters (shared-slice ScalarParameter))
+			(root i32) (statement i32) (expected u32) (parameters (shared-slice ScalarParameter))
 			(statements (mut-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)) (site_count i32))
 		(returns BodyPlan)
 		(body
@@ -1664,6 +1670,16 @@
 				(u32.lt (u32 0) (record.get (local checked) error))
 				(then (return (call expression_error (local caller) (borrow-shared (local nodes))
 					(call at_owner_use (local checked) (local move))))))
+			(if
+				(:doc "An owned result keeps the same pointer and requires the exact returned array type.")
+				(call is_array_owner (local expected))
+				(then
+					(let actual (record.get (slice.load (local expressions) (local root)) type))
+					(if
+						(:doc "An incompatible owner cannot transfer through the declared result.")
+						(bool.not (u32.eq (local expected) (local actual)))
+						(then (return (call body_error (local caller) (record.get (local move) start) (record.get (local move) end) (u32 24)))))
+					(return (call body_success (local site_count)))))
 			(let from (record.get (local checked) operand))
 			(let declaration (slice.load (local nodes) (local from)))
 			(let receiver (slice.load (local nodes) (local statement)))
@@ -1698,9 +1714,10 @@
 				(:doc "A checked value-less return contributes no expressions or calls.")
 				(i32.lt (local root) (i32 0))
 				(then (return (call body_success (local site_start)))))
+			(let returning_owner (call is_array_owner (local expected)))
 			(if
-				(:doc "Only a declaration initializer can perform a local ownership transfer.")
-				(u32.eq (local expected) (u32 42))
+				(:doc "A declaration initializer or owned return can perform a local ownership transfer.")
+				(bool.or (local returning_owner) (u32.eq (local expected) (u32 42)))
 				(then
 					(let node (slice.load (local nodes) (local root)))
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
@@ -1709,8 +1726,13 @@
 						(:doc "A move changes the source binding after resolving the initializer.")
 						(u32.eq (local tag) (u32 43))
 						(then (return (call plan_move (borrow-shared (local source)) (borrow-shared (local nodes))
-							(local caller) (local root) (local statement) (borrow-shared (local parameters))
-							(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start)))))))
+							(local caller) (local root) (local statement) (local expected) (borrow-shared (local parameters))
+							(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start)))))
+					(if
+						(:doc "Return either an explicitly moved local or a fresh owner from a call.")
+						(bool.and (local returning_owner) (bool.not (u32.eq (local tag) (u32 9))))
+						(then (return (call body_error (local caller) (record.get (local node) start)
+							(record.get (local node) end) (u32 24)))))))
 			(let-mut site_count (local site_start))
 			(let end (record.get (slice.load (local nodes) (local root)) end))
 			(slice.store (local expressions) (local root)
@@ -1970,9 +1992,11 @@
 								(then (return (local checked))))
 							(set (local site_count) (record.get (local checked) count))
 							(let statement (slice.load (local statements) (local index)))
+							(let kind (record.get (local statement) kind))
 							(if
-								(:doc "An owning declaration becomes the newest active owner for this scope.")
-								(call is_local_owner (record.get (local statement) type))
+								(:doc "Only an owning declaration adds an active owner to this scope.")
+								(bool.and (bool.or (u32.eq (local kind) (u32 15)) (u32.eq (local kind) (u32 16)))
+									(call is_local_owner (record.get (local statement) type)))
 								(then (set (local previous_owner) (local index))))
 							(set (local falls_through) (record.get (local statement) falls_through))
 							(let first (record.get (local statement) first))
