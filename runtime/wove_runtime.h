@@ -55,6 +55,9 @@ void wvrt_cstr_drop(char *wvrt_storage);
 void wvrt_check_c_bytes(wvrt_slice wvrt_view, int64_t wvrt_size, int64_t wvrt_count,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 
+void wvrt_check_c_array(wvrt_slice wvrt_view, size_t wvrt_element_size, int64_t wvrt_count,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
 // Test the sign without converting unsigned values into a signed domain.
 #define WVRT_INTEGER_NEGATIVE(value) ((value) <= 0 && (value) != 0)
 
@@ -76,6 +79,25 @@ void wvrt_check_c_bytes(wvrt_slice wvrt_view, int64_t wvrt_size, int64_t wvrt_co
 			wvrt_extent = wvrt_product; \
 		} \
 		wvrt_check_c_bytes((view), 1, wvrt_extent, (file), (start), (end)); \
+	})
+
+// Forward a named count without narrowing or reinterpreting its signedness.
+#define wvrt_check_c_array_native(view, element_size, count, file, start, end) \
+	__extension__ ({ \
+		__auto_type wvrt_count = (count); \
+		int32_t wvrt_checked; \
+		int64_t wvrt_extent; \
+		/* Preserve the original count's sign before reducing to slice length. */ \
+		if (WVRT_INTEGER_NEGATIVE(wvrt_count)) { \
+			wvrt_extent = -1; \
+		/* A count above INT32_MAX exceeds every supported slice length. */ \
+		} else if (__builtin_add_overflow(wvrt_count, 0, &wvrt_checked)) { \
+			wvrt_extent = (int64_t)INT32_MAX + 1; \
+		/* The reduced count fits in the runtime's length domain. */ \
+		} else { \
+			wvrt_extent = wvrt_checked; \
+		} \
+		wvrt_check_c_array((view), (element_size), wvrt_extent, (file), (start), (end)); \
 	})
 
 void wvrt_check_c_handle(const volatile void *wvrt_handle, int32_t wvrt_file,

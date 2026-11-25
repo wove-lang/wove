@@ -61,7 +61,7 @@ verbatim disabled text. Counts below cover active declarations.
 
 | Directive and count | Header and affected declarations | Compiler behavior needed |
 | --- | --- | --- |
-| `c_array` · 7 | `dirent.h` `getdirentries{,64}`, `stdio.h` `fgets`, `sys/stat.h` `futimens` and `utimensat`, `unistd.h` `getgroups` and `pipe` | Check mutable or shared typed element extent before exposing the C pointer. Support literal and parameter lengths and compose the check with allowed null. |
+| `c_array` · 7 | `dirent.h` `getdirentries{,64}`, `stdio.h` `fgets`, `sys/stat.h` `futimens` and `utimensat`, `unistd.h` `getgroups` and `pipe` | The scalar bridge checks literal and named element counts for shared and mutable slices of built-in and native integers. The native fixture exercises `pipe`. Native record element slices and composition with `c_nullable` still need support. |
 | `c_bytes` · 7 | `dirent.h` `getdents64`, `stdio.h` `fread` and `fwrite`, `unistd.h` `read`, `write`, `pread`, and `pwrite` | The scalar bridge checks byte counts and products for shared and mutable slices, including native integer factors. The native fixtures exercise `fread` and `fwrite`. Guarded declarations also need target selection. |
 | `c_callback` · 1 | `stdlib.h` `atexit` | Marshal `(fn-type (params) (returns void))` to a C-callable function pointer. The registered callable must remain valid through ordinary process exit. |
 | `c_cstr` · 54 | Text inputs in `dirent.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdio.h`, `stdlib.h`, `sys/stat.h`, and `unistd.h` | Shared byte slices have checked, call-scoped conversion. Add mutable text and compose null and snapshot contracts where declared. |

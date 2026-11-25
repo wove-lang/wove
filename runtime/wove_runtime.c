@@ -47,6 +47,24 @@ void wvrt_check_c_bytes(wvrt_slice wvrtview, int64_t wvrtsize, int64_t wvrtcount
 	}
 }
 
+// Validate a native array's element count using the original borrowed descriptor.
+void wvrt_check_c_array(wvrt_slice wvrtview, size_t wvrtelement_size, int64_t wvrtcount,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Reject a negative element count before checking the view.
+	if (wvrtcount < 0) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "negative C array extent");
+	}
+	// Empty views need no backing address. Other views must have the declared element width.
+	if (wvrtview.wvrt_length < 0 || (wvrtview.wvrt_length > 0 &&
+		(wvrtview.wvrt_items == NULL || wvrtview.wvrt_element_size != wvrtelement_size))) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "invalid C array slice");
+	}
+	// Compare in elements before C receives the backing address.
+	if (wvrtcount > wvrtview.wvrt_length) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "C array extent out of bounds");
+	}
+}
+
 // Check every argument before allocating one short-lived backing store for the call.
 char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrtarguments, size_t wvrtcount) {
 	if (wvrtcount == 0) { return NULL; }

@@ -258,7 +258,7 @@ the same explicit forms to pass it to another call.
 
 A borrow can name a static field path such as
 `(borrow-mut (record.get (local state) pending))` to lend a nested
-record. A fixed `u8`, `u32`, or `u64` array field can lend a slice of
+record. A fixed integer array field can lend a slice of
 the same element type. The path can start at a local or a record
 parameter, and a mutable loan needs a `let-mut` local or a mutable
 reference parameter.
@@ -293,8 +293,9 @@ that field exclusively during evaluation of the index and value.
 Disjoint sibling fields remain accessible. Both array operations take
 an exact `i32` index and trap at the access span when it is out of bounds.
 
-A fixed `u8`, `u32`, or `u64` local can lend all its elements to a function
-whose formal is a `shared-slice` or `mut-slice` of the same element type.
+A fixed integer array local can lend all its elements to a function whose
+formal is a `shared-slice` or `mut-slice` of the same element type. Supported
+element types are `i8`, `u8`, `i32`, `u32`, and `u64`.
 For example, `(borrow-shared (local words))` supplies a matching
 `(shared-slice u64)` formal. A mutable loan uses
 `(borrow-mut (local words))` and requires a `let-mut` local. The
@@ -626,6 +627,19 @@ view length. Stage 2 compares by division to avoid overflow. Zero extents
 can lend empty views. The check traps at the data argument before entering
 C. A shared view passes a read-only pointer, and a mutable view passes a
 writable pointer to the same storage for the duration of the call.
+
+Use `(:pragma (c_array data count))` when a C argument points to a
+bounded array of integers. The extent is a nonnegative decimal `i32`
+literal or the name of an integer formal, including a native alias.
+The check uses the number of elements in the slice and traps at the
+data argument before entering C if the count is negative or too large.
+A shared slice passes a `const` pointer to the exact declared element
+type. A mutable slice passes a writable pointer, so writes by C reach
+the caller's original storage. A zero count can lend an empty view.
+Built-in elements can use a fixed integer array. Native integer aliases
+can use an owner from `(array.alloc ElementType count)`. For example,
+`<unistd.h>` declares `pipe` with `(mut-slice i32)` and
+`(:pragma (c_array descriptors 2))`.
 
 A bridge can declare an integer alias such as `(type Size (c-type "size_t"))`.
 Select it with `(type Size)` or rename it in the importing file. A function

@@ -10,7 +10,7 @@
 	(use wove-file "../source/scan.wove" (only is_disabled_form is_metadata_form (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts validate_form_metadata (type SelectedDeclaration)))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
-	(use wove-file "../source/types.wove" (only is_reserved_type_name reference_mode))
+	(use wove-file "../source/types.wove" (only is_reserved_type_name reference_mode is_builtin_integer))
 	(use wove-file "../emit/names.wove" (only record_identity))
 	(use wove-file "./syntax.wove"
 		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type read_fixed_array_shape is_fixed_array_type_head
@@ -356,19 +356,31 @@
 				(then (return (call record_reference_target (local type)))))
 			(return (local type))))
 
+	(fn encode_slice_element
+		(:doc `Use a shared table row for a native integer or record element. Built-ins keep their codes.`)
+		(params (element u32))
+		(returns u32)
+		(body
+			(if
+				(:doc "Native aliases use the same table as record layouts, with a disjoint defining row.")
+				(call is_native_integer (local element))
+				(then (return (call record_type (call native_integer_index (local element))))))
+			(return (local element))))
+
 	(fn typed_slice_type
 		(:doc `Encode a typed slice from its exact element and access mode.`)
 		(params (element u32) (writable bool))
 		(returns u32)
 		(body
+			(let encoded (call encode_slice_element (local element)))
 			(if
 				(:doc "Mutable slices use the writable type interval.")
 				(local writable)
-				(then (return (u32.add.wrapping (local element) (u32 1610612736)))))
-			(return (u32.add.wrapping (local element) (u32 1073741824)))))
+				(then (return (u32.add.wrapping (local encoded) (u32 1610612736)))))
+			(return (u32.add.wrapping (local encoded) (u32 1073741824)))))
 
-	(fn typed_slice_element
-		(:doc `Recover a typed slice's element from its access-mode interval.`)
+	(fn typed_slice_element_code
+		(:doc `Recover the element code for comparing view types or switching access modes.`)
 		(params (type u32))
 		(returns u32)
 		(body
@@ -378,30 +390,41 @@
 				(then (return (u32.sub.wrapping (local type) (u32 1610612736)))))
 			(return (u32.sub.wrapping (local type) (u32 1073741824)))))
 
-	(fn slice_element_type
-		(:doc `Recover the scalar element of a byte or typed slice descriptor.`)
+	(fn slice_element_code
+		(:doc `Recover a byte or typed view's encoded element for matching or a fixed-array descriptor.`)
 		(params (type u32))
 		(returns u32)
 		(body
 			(if
 				(:doc "Typed descriptors carry the element in their own interval.")
 				(call is_typed_slice (local type))
-				(then (return (call typed_slice_element (local type)))))
+				(then (return (call typed_slice_element_code (local type)))))
 			(return (u32 10))))
 
-	(fn is_word_element
-		(:doc `Identify the two scalar element types supported by a fixed array loan.`)
-		(params (type u32))
-		(returns bool)
-		(body (return (bool.or (u32.eq (local type) (u32 11)) (u32.eq (local type) (u32 54))))))
+	(fn slice_element_type
+		(:doc `Recover the exact scalar, record, or native integer type of a slice's element.`)
+		(params (records (shared-slice ScalarRecord)) (type u32))
+		(returns u32)
+		(body
+			(let element (call slice_element_code (local type)))
+			(if
+				(:doc "A table-backed element names either a record layout or a native alias.")
+				(call is_record_type (local element))
+				(then
+					(let row (call record_index (local element)))
+					(if
+						(:doc "Only native integer aliases have a negative field count.")
+						(i32.lt (record.get (slice.load (local records) (local row)) count) (i32 0))
+						(then (return (call native_integer_type (local row)))))))
+			(return (local element))))
 
-	(fn is_word_slice
-		(:doc `Identify either access mode of an exact unsigned word slice.`)
+	(fn is_fixed_scalar_slice
+		(:doc `Identify a typed slice that can borrow an inline built-in integer array.`)
 		(params (type u32))
 		(returns bool)
 		(body
 			(return (bool.and (call is_typed_slice (local type))
-				(call is_word_element (call typed_slice_element (local type)))))))
+				(call is_builtin_integer (call typed_slice_element_code (local type)))))))
 
 	(fn is_readable_slice
 		(:doc `Recognize every slice descriptor that supports length and load.`)
@@ -597,8 +620,8 @@
 				(u32.eq (local element_type) (u32 10))
 				(then (return (call entry_at (local node) (int.convert i32 (local type)) (u32 0)))))
 			(if
-				(:doc "Word slices and Wove record slices keep the exact element type in either access mode.")
-				(bool.or (call is_word_element (local element_type))
+				(:doc "Integer and Wove record slices retain their exact element type in either access mode.")
+				(bool.or (bool.or (call is_builtin_integer (local element_type)) (call is_native_integer (local element_type)))
 					(bool.and (call is_record_type (local element_type))
 						(bool.not (call is_native_record (slice.load (local records) (call record_index (local element_type)))))))
 				(then (return (call entry_at (local node)

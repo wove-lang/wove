@@ -17,13 +17,14 @@
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../source/c_headers.wove" (only read_c_native_parameter))
+	(use wove-file "../source/c_arguments.wove" (only read_c_view_type))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode c_null_argument_kind))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
 	(use wove-file "../source/types.wove" (only void_type is_builtin_integer reference_mode))
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type find_record record_type record_index is_record_type
-			find_member member_value_type read_member_operand fixed_array_type is_fixed_array is_typed_slice is_word_slice typed_slice_type typed_slice_element slice_element_type is_readable_slice is_writable_slice
+			find_member member_value_type read_member_operand fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_slice_element slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element is_native_integer native_integer_type find_native_definition (type ScalarRecord)
 			is_native_record native_field_type is_record_reference is_mutable_record_reference record_reference_type record_reference_target record_receiver_type record_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
@@ -46,7 +47,7 @@
 		A positive c_variadic counts the fixed formals before a named C tail.`)
 		ScalarFunction
 		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
-			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_bytes i32) (c_macro bool) (c_variadic i32) (c_nulls i32) (c_snapshot_drop i32)
+			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_extents i32) (c_macro bool) (c_variadic i32) (c_nulls i32) (c_snapshot_drop i32)
 			(file i32) (tree_base i32) (tree_limit i32) (source_base i32) (body i32)))
 	(struct ScalarParameter
 		(fields (name i32) (type u32) (position i32) (c_mode u8) (c_size i32) (c_count i32)))
@@ -152,14 +153,20 @@
 						(borrow-shared (local records)) (borrow-shared (local bindings))
 						(record.get (local scope) file) (record.get (local scope) source_base) (local operand) (i32.lt (local bridge) (i32 0))))
 					(let type_node (slice.load (local nodes) (local operand)))
+					(let view (call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
+					(let view_element (record.get (local view) element))
+					(let native_view (bool.and (i32.lt (i32 -1) (local bridge))
+						(bool.and (i32.lt (i32 -1) (local view_element))
+							(u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local view_element)) (u32 0)))))
 					(let native_alias (bool.and (i32.lt (i32 -1) (local bridge))
 						(bool.and (u32.eq (record.get (local type_node) kind) (u32 1))
 							(u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)) (u32 0)))))
 					(let-mut type (u32 0))
 					(let-mut mode (call c_value_mode))
 					(if
-						(:doc "A bare name in a native signature belongs to its defining bridge.")
-						(bool.and (u32.eq (u32 0) (record.get (local checked) error)) (bool.not (local native_alias)))
+						(:doc "Native aliases in scalar and slice positions resolve in the defining bridge.")
+						(bool.and (u32.eq (u32 0) (record.get (local checked) error))
+							(bool.not (bool.or (local native_alias) (local native_view))))
 						(then (set (local type) (int.convert u32 (record.get (local checked) operand))))
 						(else
 							(if
@@ -169,9 +176,9 @@
 							(let type_form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
 							(let reference (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local type_form) head)))
 							(if
-								(:doc "Keep ordinary parameter diagnostics unless the form names a native alias or reference.")
-								(bool.not (bool.or (u32.eq (record.get (local type_node) kind) (u32 1))
-									(u32.lt (u32 0) (local reference))))
+								(:doc "Keep ordinary parameter diagnostics unless the form names a native value, view, or reference.")
+								(bool.not (bool.or (local native_view) (bool.or (u32.eq (record.get (local type_node) kind) (u32 1))
+									(u32.lt (u32 0) (local reference)))))
 								(then (return (local checked))))
 							(let handle (call read_c_native_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local type_node) (local bridge) (local context)))
@@ -195,7 +202,14 @@
 										(u32.lt (u32 0) (local reference))
 										(then (set (local type) (call record_reference_type (call record_type (local row))
 											(u32.eq (local reference) (u32 2)))))
-										(else (set (local type) (call native_integer_type (local row))))))
+										(else
+											(let alias (call native_integer_type (local row)))
+											(set (local type) (local alias))
+											(if
+												(:doc "Wrap the defining native integer in the declared slice access mode.")
+												(local native_view)
+												(then (set (local type) (call typed_slice_type (local alias)
+													(u32.eq (record.get (local view) access) (u32 38)))))))))
 								(else
 									(set (local type) (call native_owner_type (local declaration)))
 									(if
@@ -316,7 +330,7 @@
 					(params (local next_param)) (arity (local arity))
 					(result (record.get (local signature) result)) (first_statement (record.get (local signature) first_statement))
 					(body (record.get (local signature) body))
-					(identity (local identity)) (entry (local entry)) (c_strings (i32 0)) (c_bytes (i32 0)) (c_macro (bool false)) (c_variadic (i32 0)) (c_nulls (i32 0)) (c_snapshot_drop (i32 -1))
+					(identity (local identity)) (entry (local entry)) (c_strings (i32 0)) (c_extents (i32 0)) (c_macro (bool false)) (c_variadic (i32 0)) (c_nulls (i32 0)) (c_snapshot_drop (i32 -1))
 					(file (record.get (local scope) file)) (tree_base (record.get (local scope) tree_base))
 					(tree_limit (record.get (local scope) tree_limit)) (source_base (record.get (local scope) source_base))))
 			(return (call entry_at (local node) (local limit) (u32 0)))))
@@ -446,7 +460,7 @@
 				(:doc "A mutable typed slice can satisfy a shared formal of the same element type.")
 				(bool.and (bool.and (call is_typed_slice (local expected)) (call is_typed_slice (local actual)))
 					(bool.and (bool.not (call is_writable_slice (local expected))) (call is_writable_slice (local actual))))
-				(then (return (u32.eq (call typed_slice_element (local expected)) (call typed_slice_element (local actual))))))
+				(then (return (u32.eq (call typed_slice_element_code (local expected)) (call typed_slice_element_code (local actual))))))
 			(if
 				(:doc "Both an owner transfer and a native borrow check the underlying owner identity.")
 				(bool.or (u32.eq (local expected) (u32 57)) (u32.eq (local expected) (local c_handle_reference)))
@@ -778,14 +792,10 @@
 						(bool.and (call is_array_owner (local actual))
 							(bool.or (local byte_store) (bool.or (local reborrow) (call is_typed_slice (local expected)))))
 						(then
-							(let-mut element (u32 10))
-							(if
-								(:doc "A typed slice formal carries its exact element type.")
-								(call is_typed_slice (local type))
-								(then (set (local element) (call typed_slice_element (local type)))))
+							(let element (call slice_element_code (local type)))
 							(if
 								(:doc "Both types must agree, and exclusive access requires a writable binding.")
-								(bool.or (bool.not (u32.eq (call array_owner_element (local actual)) (local element)))
+								(bool.or (bool.not (u32.eq (call encode_slice_element (call array_owner_element (local actual))) (local element)))
 									(bool.and (call is_writable_slice (local type))
 										(bool.not (u32.eq (record.get (local declaration) kind) (u32 16)))))
 								(then (return (call entry_at (local node) (i32 -1) (u32 24))))))
@@ -793,7 +803,7 @@
 							(if
 								(:doc "A fixed array loan checks its layout and extent after local lookup.")
 								(bool.not (bool.or (call value_matches_type (local type) (local actual))
-									(bool.and (bool.or (local reborrow) (call is_word_slice (local type)))
+									(bool.and (bool.or (local reborrow) (call is_fixed_scalar_slice (local type)))
 										(call is_record_type (local actual)))))
 								(then (return (call entry_at (local node) (i32 -1) (u32 24)))))))
 					(let target (record.get (local declaration) target))
@@ -1293,7 +1303,7 @@
 			(if
 				(:doc "The original storage must allow the requested access and match the slice's element type.")
 				(bool.or (bool.not (call is_fixed_array (local layout)))
-					(bool.or (bool.not (i32.eq (record.get (local layout) first) (int.convert i32 (call slice_element_type (local type)))))
+					(bool.or (bool.not (i32.eq (record.get (local layout) first) (int.convert i32 (call slice_element_code (local type)))))
 						(bool.and (local writable) (bool.not (call writable_record_place (local binding))))))
 				(then (return (call entry_at (local reference) (i32 -1) (u32 24)))))
 			(let target (record.get (local binding) target))
@@ -1347,8 +1357,8 @@
 				(then (return (call entry_at (local reference) (i32 -1) (u32 24)))))
 			(let reborrow (call is_reborrow_keyword (local expected)))
 			(if
-				(:doc "Explicit byte and word slice borrows lend a fixed local with the exact element type.")
-				(bool.and (bool.or (local reborrow) (call is_word_slice (local expected)))
+				(:doc "An explicit scalar slice borrow lends a fixed local with the exact element type.")
+				(bool.and (bool.or (local reborrow) (call is_fixed_scalar_slice (local expected)))
 					(bool.and (u32.eq (record.get (local resolved) kind) (u32 6)) (call is_record_type (local actual))))
 				(then (return (call plan_fixed_slice_loan (borrow-shared (local nodes)) (local reference) (local index) (local statement)
 					(local expected) (local actual) (local resolved) (i32 -1)
@@ -1374,7 +1384,7 @@
 					(if
 						(:doc "Keep the exact element type when projecting from either access mode.")
 						(call is_typed_slice (local actual))
-						(then (set (local type) (call typed_slice_type (call typed_slice_element (local actual)) (bool false)))))))
+						(then (set (local type) (call typed_slice_type (call slice_element_type (borrow-shared (local records)) (local actual)) (bool false)))))))
 			(if
 				(:doc "A store uses the writable descriptor of a slice or projects one from its byte owner.")
 				(u32.eq (local expected) (u32 56))
@@ -1778,7 +1788,7 @@
 					(if
 						(:doc "Use the exact element type from either access mode.")
 						(call is_typed_slice (local view))
-						(then (set (local element) (call typed_slice_element (local view)))))
+						(then (set (local element) (call slice_element_type (borrow-shared (local records)) (local view)))))
 					(if
 						(:doc "A store checks its value as the element type at the value's own span.")
 						(local store)
@@ -1796,7 +1806,7 @@
 			(return (call entry_at (local node) (local index) (u32 0)))))
 
 	(fn plan_allocation
-		(:doc `Check a local byte or record allocation and seed its exact signed element count.`)
+		(:doc `Check a local array allocation and seed its exact signed element count.`)
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (node SourceNode)
 			(element i32) (index i32) (caller ScalarFunction) (view_start i32)
 			(records (shared-slice ScalarRecord)) (bindings (shared-slice GraphBinding)) (expressions (mut-slice ScalarExpression)))
@@ -1817,8 +1827,8 @@
 				(borrow-shared (local records)) (borrow-shared (local bindings))
 				(record.get (local caller) file) (record.get (local caller) source_base) (local element)))
 			(if
-				(:doc "Array allocation supports bytes and Wove-defined record values.")
-				(bool.not (bool.or (u32.eq (local type) (u32 10))
+				(:doc "Allocate bytes, Wove records, or exact native integers with their checked stride and alignment.")
+				(bool.not (bool.or (bool.or (u32.eq (local type) (u32 10)) (call is_native_integer (local type)))
 					(bool.and (call is_record_type (local type))
 						(bool.not (call is_native_record (slice.load (local records) (call record_index (local type))))))))
 				(then (return (call entry_at (local element_node) (i32 -1) (u32 24)))))
