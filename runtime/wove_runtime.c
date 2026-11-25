@@ -480,18 +480,12 @@ wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrttable, int32_t wvrtfile
 	wvrt_array **wvrt_items = wvrt_rows->wvrt_items;
 	// Leave a safely droppable prefix if a row cannot be copied.
 	for (int32_t wvrt_i = 0; wvrt_i < wvrt_count; ++wvrt_i) {
-		const size_t wvrt_length = strlen(wvrttable[wvrt_i]);
-		wvrt_array *wvrt_row = NULL;
-		// Allocate an ordinary byte owner even when the borrowed string is empty.
-		if (wvrt_length <= INT32_MAX) {
-			wvrt_row = wvrt_array_try_new((int32_t)wvrt_length, sizeof(uint8_t), _Alignof(uint8_t));
-		}
+		wvrt_array *wvrt_row = wvrt_try_copy_cstr(wvrttable[wvrt_i]);
 		// Only the Wove prefix is owned and must be released on failure.
 		if (wvrt_row == NULL) {
 			wvrt_array_drop(wvrt_rows);
 			wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not snapshot C string vector row");
 		}
-		if (wvrt_length > 0) { memcpy(wvrt_row->wvrt_items, wvrttable[wvrt_i], wvrt_length); }
 		wvrt_items[wvrt_i] = wvrt_row;
 	}
 	errno = wvrt_saved_errno;
