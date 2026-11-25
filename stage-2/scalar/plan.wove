@@ -29,7 +29,7 @@
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
 	(use wove-file "./records.wove"
 		(only declaration_kind register_module_records order_record_layouts copyable_type read_parameter_type find_record record_type record_index is_record_type
-			find_member member_value_type read_member_operand fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
+			find_member member_value_type read_member_operand register_static_array fixed_array_type is_fixed_array is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type array_owner_element byte_rows_owner_type is_native_integer native_integer_type find_native_node (type ScalarRecord)
 			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target record_receiver_type place_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
@@ -446,7 +446,8 @@
 				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local layouts) start))
 					(end (struct.get (local layouts) end)) (error (struct.get (local layouts) error)) (related -1i32)))))
 			(let values (call register_module_bindings (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local declarations)) (struct.get (local module) count) 0i32
+				(borrow-shared (local declarations)) (struct.get (local module) count) 0i32 (local file) 0i32
+				(borrow-shared (local bindings)) (borrow-mut (local records)) (struct.get (local types) operand)
 				(borrow-mut (local statements)) (borrow-mut (local expressions))))
 			(if
 				(:doc "Validate even unused module initializers before planning function bodies.")
@@ -657,71 +658,186 @@
 					(set (local index) (struct.get (local row) first))))
 			(return -1i32)))
 
-	(fn plan_binding_initializer
-		(:doc `Check an immutable initializer as a typed integer or an exact quoted byte string.`)
+	(fn plan_binding_string
+		(:doc `Check a quoted module initializer as an exact decoded byte string.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32)
 			(expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(let node (array.load (local nodes) (local index)))
+			(let start (struct.get (local node) start))
+			(let end (struct.get (local node) end))
+			(let-mut buffer (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let decoded (call decode_string (borrow-shared (local source))
+				(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
+				(borrow-mut (local buffer))))
 			(if
-				(:doc "Validate the decoded value before reserving a static byte view.")
-				(u32.eq (struct.get (local node) kind) 2u32)
-				(then
-					(let start (struct.get (local node) start))
-					(let end (struct.get (local node) end))
-					(let-mut buffer (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
-					(let decoded (call decode_string (borrow-shared (local source))
-						(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
-						(borrow-mut (local buffer))))
-					(if
-						(:doc "A bad Unicode escape keeps the decoder's primary span.")
-						(u32.lt 0u32 (struct.get (local decoded) error))
-						(then (return (struct.new EntryRead (operand -1i32)
-							(start (struct.get (local decoded) start)) (end (struct.get (local decoded) end))
-							(error (struct.get (local decoded) error)) (related -1i32)))))
-					(array.store (local expressions) (local index)
-						(call expression_row 0u32 34u32 -1i32 -1i32
-							(local start) (local end) (bool false)))
-					(return (call entry_at (local node) (local index) 0u32))))
+				(:doc "A bad Unicode escape keeps the decoder's primary span.")
+				(u32.lt 0u32 (struct.get (local decoded) error))
+				(then (return (struct.new EntryRead (operand -1i32)
+					(start (struct.get (local decoded) start)) (end (struct.get (local decoded) end))
+					(error (struct.get (local decoded) error)) (related -1i32)))))
+			(array.store (local expressions) (local index)
+				(call expression_row 0u32 34u32 -1i32 -1i32
+					(local start) (local end) (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_constant_value
+		(:doc `Check exactly the constant forms accepted in a static array initializer.
+
+		The ordinary literal and constructor checkers supply the types,
+		native field ordinals, and initializer links. No executable
+		expression can enter the static plan.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (expected u32) (array_type u32) (file i32) (source_base i32)
+			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
 			(if
-				(:doc "A typed atom is an integer initializer with its width declared in the suffix.")
+				(:doc "A suffixed decimal literal uses the exact type named by the suffix.")
 				(u32.eq (struct.get (local node) kind) 1u32)
 				(then (return (call plan_suffixed_decimal (borrow-shared (local source)) (local node)
-					(local index) 1u32 (borrow-mut (local expressions))))))
+					(local index) (local expected) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
-			(let type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(let fixed (call is_fixed_initializer (local tag)))
+			(let record (u32.eq (local tag) 50u32))
 			(if
-				(:doc "A module scalar initializer must be one of the supported integer literals.")
-				(bool.not (call is_builtin_integer (local type)))
+				(:doc "Only literals and value constructors can appear in static initializers.")
+				(bool.not (bool.or (bool.or (local fixed) (local record))
+					(bool.and (bool.or (call is_builtin_integer (local tag)) (u32.eq (local tag) 12u32))
+						(call value_matches_type (local expected) (local tag)))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(let checked (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local node) (local type) 24u32))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) 24u32))
 			(if
-				(:doc "Literal metadata cannot select an initializer independently of its binding.")
-				(u32.lt 0u32 (struct.get (local checked) error))
-				(then (return (local checked))))
+				(:doc "Preserve expression metadata validation at the original form.")
+				(u32.lt 0u32 (struct.get (local form) error))
+				(then (return (local form))))
+			(let operand (struct.get (local form) operand))
+			(if
+				(:doc "A constant record retains the defining type and ordinary field checks.")
+				(local record)
+				(then (return (call plan_record_make (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local operand) (local index) (local file) (local source_base) (local expected)
+					(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "The module table already resolved its element type. Nested array fields use existing scalar layouts.")
+				(local fixed)
+				(then
+					(if
+						(:doc "Only the table itself can introduce a new named element layout.")
+						(u32.eq (local array_type) 0u32)
+						(then (return (call plan_fixed_initializer (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local node) (local index) (local tag) (local operand) (local expected)
+							(borrow-shared (local records)) (borrow-mut (local expressions))))))
+					(return (call seed_fixed_initializer (borrow-shared (local nodes)) (local node) (local index) (local tag)
+						(array.load (local nodes) (local operand)) (local array_type) (local expected)
+						(borrow-shared (local records)) (borrow-mut (local expressions))))))
 			(return (call plan_literal (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
-				(struct.get (local checked) operand) (local type) (local index) (borrow-mut (local expressions))))))
+				(local operand) (local tag) (local index) (borrow-mut (local expressions))))))
+
+	(fn plan_binding_initializer
+		(:doc `Check a static value and walk its typed operands without recursing on source depth.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (root i32) (array_type u32)
+			(file i32) (source_base i32) (bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let node (array.load (local nodes) (local root)))
+			(if
+				(:doc "Only a direct module binding can hold a decoded byte string.")
+				(u32.eq (struct.get (local node) kind) 2u32)
+				(then (return (call plan_binding_string (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local root) (borrow-mut (local expressions))))))
+			(let-mut index (local root))
+			(let-mut expected 1u32)
+			(if (u32.lt 0u32 (local array_type)) (then (set (local expected) (local array_type))))
+			(while
+				(:doc "Only planned initializer operands and field wrappers need to be visited.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let current (array.load (local nodes) (local index)))
+					(let row (array.load (local expressions) (local index)))
+					(if
+						(:doc "The record checker already validated each field wrapper.")
+						(bool.not (u32.eq (struct.get (local row) kind) 51u32))
+						(then
+							(let-mut resolved 0u32)
+							(if (i32.eq (local index) (local root)) (then (set (local resolved) (local array_type))))
+							(let checked (call plan_constant_value (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local current) (local index) (local expected) (local resolved) (local file) (local source_base)
+								(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local expressions))))
+							(if
+								(:doc "Each invalid operand keeps its defining span.")
+								(u32.lt 0u32 (struct.get (local checked) error))
+								(then (return (local checked))))))
+					(let first (struct.get (array.load (local expressions) (local index)) first))
+					(if
+						(:doc "Enter a constructor child or finish the current value and its completed ancestors.")
+						(i32.lt -1i32 (local first))
+						(then (set (local index) (local first)))
+						(else
+							(let-mut sibling -1i32)
+							(while
+								(:doc "Climb past finished values without traversing beyond the initializer root.")
+								(bool.not (i32.eq (local index) (local root)))
+								(body
+									(let finished (array.load (local nodes) (local index)))
+									(set (local sibling) (struct.get (local finished) next_sibling))
+									(set (local index) (local root))
+									(if
+										(:doc "An absent sibling finishes the parent as well.")
+										(i32.lt (local sibling) 0i32)
+										(then (set (local index) (struct.get (local finished) parent))))))
+							(if (i32.lt (local sibling) 0i32) (then (return (call entry_at (local node) (local root) 0u32))))
+							(set (local index) (local sibling))))
+					(set (local expected) (struct.get (array.load (local expressions) (local index)) type))))
+			(return (call entry_at (local node) (local root) 0u32))))
+
+	(fn module_array_layout
+		(:doc `Resolve a top-level fixed initializer's declared type in its own file.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (file i32) (source_base i32)
+			(bindings (shared-array GraphBinding)) (records (mut-array ScalarRecord)) (next i32))
+		(returns EntryRead)
+		(body
+			(let node (array.load (local nodes) (local index)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(if
+				(:doc "Scalars and strings do not introduce a layout.")
+				(bool.not (call is_fixed_initializer (local tag)))
+				(then (return (call entry_at (local node) 0i32 0u32))))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local tag) 24u32))
+			(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
+			(let operand (struct.get (local form) operand))
+			(if (i32.lt (local operand) 0i32) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let spelling (array.load (local nodes) (local operand)))
+			(let type (call register_static_array (borrow-shared (local source)) (borrow-shared (local nodes)) (local spelling)
+				(borrow-shared (local bindings)) (local file) (local source_base) (borrow-mut (local records)) (local next)))
+			(if (u32.eq (local type) 0u32) (then (return (call entry_at (local spelling) -1i32 23u32))))
+			(return (call entry_at (local spelling) (int.convert i32 (local type)) 0u32))))
 
 	(fn register_module_bindings
 		(:doc `Register selected module values at their defining tree rows.
 
 		The synthetic file root links to the first binding. Each binding
 		uses the first field for the next binding and retains its initializer.
-		Selection rows are file-relative even for a rebased graph.`)
+		Selections have already been rebased to this tree's row indices.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
-			(declarations (shared-array SelectedDeclaration)) (count i32) (base i32)
+			(declarations (shared-array SelectedDeclaration)) (count i32) (base i32) (file i32) (source_base i32)
+			(bindings (shared-array GraphBinding)) (records (mut-array ScalarRecord)) (start_record i32)
 			(statements (mut-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
+			(let-mut next (local start_record))
 			(let-mut first -1i32)
 			(let-mut cursor 0i32)
 			(while
 				(:doc "Walk selected leaves in source order and link the checked immutable names.")
 				(i32.lt (local cursor) (local count))
 				(body
-					(let index (i32.add.wrapping (local base) (struct.get (array.load (local declarations) (local cursor)) node)))
+					(let index (struct.get (array.load (local declarations) (i32.add.wrapping (local base) (local cursor))) node))
 					(let node (array.load (local nodes) (local index)))
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 					(if
@@ -743,8 +859,21 @@
 								(i32.lt -1i32 (call find_module_binding (borrow-shared (local source)) (borrow-shared (local nodes))
 									(borrow-shared (local statements)) (local first) (local spelling)))
 								(then (return (call entry_at (local spelling) -1i32 33u32))))
+							(let layout (call module_array_layout (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local initializer) (local file) (local source_base) (borrow-shared (local bindings))
+								(borrow-mut (local records)) (local next)))
+							(if
+								(:doc "A bad table extent or element type points to its type spelling.")
+								(u32.lt 0u32 (struct.get (local layout) error))
+								(then (return (local layout))))
+							(let type (int.convert u32 (struct.get (local layout) operand)))
+							(if
+								(:doc "A unique module table appended one layout after the ordered prefix.")
+								(u32.eq (local type) (call record_type (local next)))
+								(then (set (local next) (i32.add.wrapping (local next) 1i32))))
 							(let checked (call plan_binding_initializer (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local initializer) (borrow-mut (local expressions))))
+								(local initializer) (local type) (local file) (local source_base)
+								(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local expressions))))
 							(if
 								(:doc "Keep the initializer's precise failure span.")
 								(u32.lt 0u32 (struct.get (local checked) error))
@@ -756,7 +885,7 @@
 							(set (local first) (local index))))
 					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
 			(array.store (local statements) (local base) (call block_statement (local first) -1i32 (bool false)))
-			(return (call entry_at (array.load (local nodes) (local base)) (local first) 0u32))))
+			(return (call entry_at (array.load (local nodes) (local base)) (local next) 0u32))))
 
 	(fn find_function_parameter
 		(:doc `Find a parameter in the current function's signature.`)
@@ -2146,7 +2275,7 @@
 		A checked initializer wrapper records the native field ordinal
 		and links to its exact scalar operand for evaluation.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(name i32) (index i32) (caller ScalarFunction) (expected u32) (records (shared-array ScalarRecord))
+			(name i32) (index i32) (file i32) (source_base i32) (expected u32) (records (shared-array ScalarRecord))
 			(bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
@@ -2161,7 +2290,7 @@
 				(then (return (call entry_at (local spelling) -1i32 24u32))))
 			(let type_row (call find_record (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings))
-				(struct.get (local caller) file) (struct.get (local caller) source_base) (local spelling)))
+				(local file) (local source_base) (local spelling)))
 			(if
 				(:doc "Report an unavailable type at its original name.")
 				(i32.lt (local type_row) 0i32)
@@ -2455,6 +2584,17 @@
 				(:doc "The initializer spells its exact element and extent even when its type is inferred.")
 				(u32.eq (local type) 0u32)
 				(then (return (call entry_at (local spelling) -1i32 23u32))))
+			(return (call seed_fixed_initializer (borrow-shared (local nodes)) (local node) (local index)
+				(local kind) (local spelling) (local type) (local expected)
+				(borrow-shared (local records)) (borrow-mut (local expressions))))))
+
+	(fn seed_fixed_initializer
+		(:doc `Apply a resolved fixed layout to the children of a list or repeat.`)
+		(params (nodes (shared-array SourceNode)) (node SourceNode) (index i32) (kind u32)
+			(spelling SourceNode) (type u32) (expected u32) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
 			(if
 				(:doc "The enclosing use must accept the complete structural type.")
 				(bool.not (call value_matches_type (local expected) (local type)))
@@ -2683,7 +2823,7 @@
 				(:doc "Construct the record identified in the current file's type namespace.")
 				(local constructing)
 				(then (return (call plan_record_make (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local operand) (local index) (local caller) (local expected)
+					(local node) (local operand) (local index) (struct.get (local caller) file) (struct.get (local caller) source_base) (local expected)
 					(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "Read the requested field from the receiver's defining layout.")

@@ -197,12 +197,13 @@ requires an existing `let-mut` binding and a value of that binding's exact
 type. Forward calls use checked prototypes, and nested calls evaluate from
 left to right.
 
-An immutable module binding takes a typed integer literal or a quoted
-string. Its name precedes metadata.
+An immutable module binding takes a typed integer literal, a quoted
+string, or a fixed-array initializer. Its name precedes metadata.
 
 ```lisp
 (let lowest_digit (i8 -1))
 (let alphabet "0123456789abcdef")
+(let weights (array.new (array u32 2) 17u32 25u32))
 ```
 
 Functions use `(local lowest_digit)` to read the scalar after declaring
@@ -211,6 +212,18 @@ precedence. A quoted string is a shared `u8` view over its decoded
 bytes. Generated C puts a referenced nonempty byte table in a single read-only array
 with no added terminator. The ordinary `array.len`, `array.load`, and
 `borrow-shared` forms work with the static view.
+
+A module table declares its exact element type and extent with `(array T N)`.
+Use `array.new` for exactly `N` elements or `array.repeat` for one repeated
+element. Elements use scalar literals or constant `struct.new` values of a
+visible Wove record type. Record fields can themselves use constant
+constructors. The compiler checks every selected initializer, including
+bindings with no uses. A referenced table gets one `static const` C
+definition. A repeated initializer uses one C range designator, accepted
+by Clang and GCC, so the initializer text stays compact as the extent
+grows. `array.load` reads the original table at a checked `i32` index
+and copies only the selected element. Stage 1 keeps its integer and
+quoted-byte module initializer subset.
 
 A helper with `(returns void)` can use `(return)` or finish at the end
 of its body. Invoke it with a standalone `(call ...)` statement. The

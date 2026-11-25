@@ -1,16 +1,20 @@
 (module emit_bindings
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Write a single static C value and an exact byte table for each referenced module binding.")
+	(:doc "Write one static C definition for each referenced immutable module binding.")
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
 	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../scalar/flow.wove" (only is_c_value_binding (type ScalarStatement)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
-	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only is_record_type (type ScalarRecord)))
 	(use wove-file "./c_values.wove" (only write_c_value_contract))
 	(use wove-file "./runtime.wove" (only write_site_number))
-	(use wove-file "./text.wove" (only c_byte write_c_name write_decimal_literal open_static_value write_static_bytes (type CNameRole)))
+	(use wove-file "./records.wove" (only write_value_type))
+	(use wove-file "./static.wove" (only write_static_initializer))
+	(use wove-file "./text.wove" (only c_byte c_literal_text write_c_name open_static_storage open_static_value write_static_bytes (type CNameRole)))
+
+	(let c_extension "__extension__ ")
 
 	(fn write_binding_name
 		(:doc "Generate a private name from the defining node with separate roles for views and bytes.")
@@ -72,6 +76,33 @@
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 59u8 (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local cursor) 10u8 (local writing)))))
 
+	(fn write_static_binding
+		(:doc `Emit an immutable scalar or fixed array with its exact native layout.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name i32) (value i32)
+			(expressions (shared-array ScalarExpression)) (records (shared-array ScalarRecord))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let type (struct.get (array.load (local expressions) (local value)) type))
+			(let-mut start (local offset))
+			(if
+				(:doc "Clang and GCC accept aggregate range initializers under strict flags with this qualifier.")
+				(call is_record_type (local type))
+				(then (set (local start) (call c_literal_text (borrow-shared (local c_extension))
+					(borrow-mut (local output)) (local start) (local writing)))))
+			(let prefix (call open_static_storage (borrow-mut (local output)) (local start) (local writing)))
+			(let typed (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local prefix) (local name_prefix) (local writing)))
+			(let space (call c_byte (borrow-mut (local output)) (local typed) 32u8 (local writing)))
+			(let named (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local name) (bool false) (borrow-mut (local output)) (local space) (local name_prefix) (local writing)))
+			(let equal (call c_byte (borrow-mut (local output)) (local named) 61u8 (local writing)))
+			(let initialized (call write_static_initializer (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local expressions)) (borrow-shared (local records)) (local value)
+				(borrow-mut (local output)) (local equal) (local name_prefix) (local writing)))
+			(let end (call c_byte (borrow-mut (local output)) (local initialized) 59u8 (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local end) 10u8 (local writing)))))
+
 	(fn write_module_bindings
 		(:doc "Emit each referenced declaration once in its original tree order.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
@@ -102,21 +133,13 @@
 							(let value (array.load (local expressions) (struct.get (local row) value)))
 							(let type (struct.get (local value) type))
 							(if
-								(:doc "Quoted strings use a shared byte view and integers keep their exact C type.")
+								(:doc "Quoted strings use a shared byte view and ordinary values keep their exact C type.")
 								(u32.eq (local type) 34u32)
 								(then (set (local cursor) (call write_binding_bytes (borrow-shared (local source))
 									(borrow-shared (local nodes)) (local name) (local value)
 									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
-								(else
-									(set (local cursor) (call open_static_value (borrow-mut (local output))
-										(local cursor) (local type) (local writing)))
-									(set (local cursor) (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
-										(local name) (bool false) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 61u8 (local writing)))
-									(set (local cursor) (call write_decimal_literal (borrow-shared (local source))
-										(struct.get (local value) start) (struct.get (local value) end) (struct.get (local value) negative)
-										(local type) (borrow-mut (local output)) (local cursor) (local writing)))
-									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 59u8 (local writing)))
-									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 10u8 (local writing)))))))
+								(else (set (local cursor) (call write_static_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+									(local name) (struct.get (local row) value) (borrow-shared (local expressions)) (borrow-shared (local records))
+									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return (local cursor)))))

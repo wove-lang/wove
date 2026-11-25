@@ -51,7 +51,10 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 | `(embed "./payload.bin")` | Stage 2. Initialize a fresh owned byte buffer from a file relative to the defining module. |
 
 A quoted string in an immutable module binding is a `(shared-array u8)` view.
-Its length counts the decoded bytes.
+Its length counts the decoded bytes. A Stage 2 immutable module binding
+can also declare an inline table with `array.new` or `array.repeat`.
+Its elements are exact scalar literals or constant constructors of a
+named Wove record. `array.load` can read the table directly.
 
 In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
