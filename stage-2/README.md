@@ -293,7 +293,7 @@ that field exclusively during evaluation of the index and value.
 Disjoint sibling fields remain accessible. Both array operations take
 an exact `i32` index and trap at the access span when it is out of bounds.
 
-A fixed `u32` or `u64` local can lend all its elements to a function
+A fixed `u8`, `u32`, or `u64` local can lend all its elements to a function
 whose formal is a `shared-slice` or `mut-slice` of the same element type.
 For example, `(borrow-shared (local words))` supplies a matching
 `(shared-slice u64)` formal. A mutable loan uses
@@ -303,7 +303,7 @@ including zero. Loans last through the call and follow the same
 exclusivity rules as other slice arguments.
 
 In the callee, `slice.len` counts elements and `slice.load` returns
-the declared word type. `slice.store` takes an exact word of that type
+the declared element type. `slice.store` takes an exact value of that type
 and writes into the original fixed array through a mutable slice.
 A checked load or store reports an invalid `i32` index at the original
 operation span.
