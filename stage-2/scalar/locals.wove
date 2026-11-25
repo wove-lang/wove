@@ -1,0 +1,82 @@
+(module scalar_locals
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Resolve local names against checked declarations and the enclosing body scopes.`)
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only skip_disabled_siblings))
+	(use wove-file "./flow.wove" (only (type ScalarStatement) (value for_statement)))
+	(use wove-file "./loops.wove" (only find_iteration_binding))
+	(use wove-file "./syntax.wove" (only entry_at is_scalar_name same_name (type EntryRead)))
+
+	(fn find_local
+		(:doc `Find the nearest declaration visible before a statement.
+
+		Search earlier siblings in the current block. At a block boundary,
+		check iteration bindings before resuming in the enclosing block. Statements follow their
+		previous siblings in the node table.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(first i32) (statement i32) (name SourceNode))
+		(returns i32)
+		(body
+			(let outer (struct.get (array.load (local nodes) (local first)) parent))
+			(let-mut limit (local statement))
+			(while
+				(:doc "One search interval covers the visible declarations of one scope.")
+				(bool.not (i32.lt (local limit) 0i32))
+				(body
+					(let block (struct.get (array.load (local nodes) (local limit)) parent))
+					(let top (i32.eq (local block) (local outer)))
+					(let-mut index (local first))
+					(if
+						(:doc "A nested block starts after its head and metadata.")
+						(bool.not (local top))
+						(then (set (local index) (struct.get (array.load (local statements) (local block)) first))))
+					(while
+						(:doc "Stop before the current statement or the control that enters the inner scope.")
+						(i32.lt (local index) (local limit))
+						(body
+							(let checked (array.load (local statements) (local index)))
+							(let kind (struct.get (local checked) kind))
+							(if
+								(:doc "Only let and let-mut introduce names.")
+								(bool.or (u32.eq (local kind) 15u32) (u32.eq (local kind) 16u32))
+								(then
+									(let declaration (array.load (local nodes) (struct.get (local checked) target)))
+									(if
+										(:doc "Compare the original identifier bytes in this scope.")
+										(call same_name (borrow-shared (local source)) (local declaration) (local name))
+										(then (return (local index))))))
+							(set (local index) (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
+								(struct.get (array.load (local nodes) (local index)) next_sibling)))))
+					(if
+						(:doc "Parameters are resolved separately once all statement scopes have been searched.")
+						(local top)
+						(then (return -1i32)))
+					(let parent (struct.get (array.load (local nodes) (local block)) parent))
+					(if
+						(:doc "Header names are visible only after entering the loop body.")
+						(u32.eq (struct.get (array.load (local statements) (local parent)) kind) (local for_statement))
+						(then
+							(let binding (call find_iteration_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+								(struct.get (array.load (local statements) (local block)) target) (local name)))
+							(if (i32.lt -1i32 (local binding)) (then (return (local binding))))))
+					(set (local limit) (local parent))))
+			(return -1i32)))
+
+	(fn read_local_name
+		(:doc `Check the single name operand shared by reads and assignment targets.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (operand i32))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A local reference takes exactly one name.")
+				(bool.or (i32.lt (local operand) 0i32)
+					(bool.not (i32.lt (struct.get (array.load (local nodes) (local operand)) next_sibling) 0i32)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let name (array.load (local nodes) (local operand)))
+			(if
+				(:doc "A malformed local name keeps the operand span.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+				(then (return (call entry_at (local name) -1i32 34u32))))
+			(return (call entry_at (local name) (local operand) 0u32)))))

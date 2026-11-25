@@ -9,10 +9,67 @@
 	still checked and emitted.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only skip_disabled_siblings))
+	(use wove-file "./syntax.wove" (only entry_form entry_at (type EntryRead)))
 	(use wove-file "../source/enum_forms.wove" (only (value match_statement)))
-	(use wove-file "./flow.wove" (only within_scope is_loop (type ScalarStatement) (value for_statement)
+	(use wove-file "./flow.wove" (only within_scope is_loop block_statement (type ScalarStatement) (value for_statement)
 		(value next_path) (value break_path) (value continue_path)))
 	(use wove-file "./loans.wove" (only (type ScalarExpression)))
+	(use wove-file "./owners.wove" (only native_handle_consume_kind))
+
+	(fn plan_control_blocks
+		(:doc `Check one required control block and the optional else of an if.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (statements (mut-array ScalarStatement))
+			(node SourceNode) (condition i32) (loop bool))
+		(returns EntryRead)
+		(body
+			(let first (struct.get (array.load (local nodes) (local condition)) next_sibling))
+			(if
+				(:doc "The control header must be followed by the first block.")
+				(i32.lt (local first) 0i32)
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let-mut expected 23u32)
+			(if
+				(:doc "A loop has a body. An if starts with then.")
+				(local loop)
+				(then (set (local expected) 6u32)))
+			(let first_node (array.load (local nodes) (local first)))
+			(let first_block (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local first_node) (local expected) 24u32))
+			(if
+				(:doc "Keep the original first-block form or metadata diagnostic.")
+				(u32.lt 0u32 (struct.get (local first_block) error))
+				(then (return (local first_block))))
+			(let then_start (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local first_block) operand)))
+			(array.store (local statements) (local first)
+				(call block_statement (local then_start) -1i32 -1i32 (bool true)))
+			(let alternate (struct.get (local first_node) next_sibling))
+			(if
+				(:doc "An explicit else must be the final arm and supplies its own first statement.")
+				(bool.not (i32.lt (local alternate) 0i32))
+				(then
+					(let else_node (array.load (local nodes) (local alternate)))
+					(if
+						(:doc "A loop accepts a single body block.")
+						(local loop)
+						(then (return (call entry_at (local else_node) -1i32 24u32))))
+					(let else_arm (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local else_node) 24u32 24u32))
+					(if
+						(:doc "Keep the original else-arm form or metadata diagnostic.")
+						(u32.lt 0u32 (struct.get (local else_arm) error))
+						(then (return (local else_arm))))
+					(let extra (struct.get (local else_node) next_sibling))
+					(if
+						(:doc "Point at the first operand beyond the optional else.")
+						(bool.not (i32.lt (local extra) 0i32))
+						(then (return (call entry_at (array.load (local nodes) (local extra)) -1i32 24u32))))
+					(let else_start (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (local else_arm) operand)))
+					(array.store (local statements) (local alternate)
+						(call block_statement (local else_start) -1i32 -1i32 (bool true)))))
+			(return (call entry_at (local node) (local first) 0u32))))
 
 	(fn has_path
 		(:doc `Test whether any of the requested edges are possible.`)
@@ -221,4 +278,39 @@
 			(let-mut stop (local use))
 			(if (local back_edge) (then (set (local stop) -1i32)))
 			(return (call sequence_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
-				(local paths) (struct.get (array.load (local nodes) (local prior)) next_sibling) (local stop))))))
+				(local paths) (struct.get (array.load (local nodes) (local prior)) next_sibling) (local stop)))))
+
+	(fn consumption_on_back_edge
+		(:doc `Find a consuming argument that can reach the next iteration with an outer owner missing.
+
+		A local introduced inside the loop is recreated before its next use.
+		Transfers in return paths never reach the back edge.`)
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(expressions (shared-array ScalarExpression)) (loop i32) (block i32) (limit i32))
+		(returns i32)
+		(body
+			(let-mut cursor (local loop))
+			(if
+				(:doc "A for prepares its source once, so only transfers in its body can repeat.")
+				(u32.eq (struct.get (array.load (local statements) (local loop)) kind) (local for_statement))
+				(then (set (local cursor) (local block))))
+			(let end (struct.get (array.load (local nodes) (local block)) end))
+			(while
+				(:doc "Inspect the repeating part of the loop.")
+				(bool.and (i32.lt (local cursor) (local limit))
+					(i32.lt (struct.get (array.load (local nodes) (local cursor)) start) (local end)))
+				(body
+					(let row (array.load (local expressions) (local cursor)))
+					(if
+						(:doc "Only a transfer of an enclosing local can deplete the next iteration's owners.")
+						(u32.eq (struct.get (local row) kind) (call native_handle_consume_kind))
+						(then
+							(let name (struct.get (array.load (local expressions) (struct.get (local row) first)) target))
+							(if
+								(:doc "Use the loop body as the scope reached by a continuing back edge.")
+								(bool.and (i32.lt (local name) (local loop))
+									(call repeats_loop (call native_transfer_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+										(borrow-shared (local expressions)) (local cursor) (local block) (bool true))))
+								(then (return (local cursor))))))
+					(set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+			(return -1i32))))
