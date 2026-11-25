@@ -25,6 +25,19 @@ static inline char *test_vector_result(char *const *rows, char *text) {
 	return rows[0];
 }
 
+enum { WOVE_TEST_FIXED_LEFT = 40, WOVE_TEST_FIXED_RIGHT = 2 };
+
+// Check that the detached vector stays between two implicit native operands.
+static inline int32_t test_fixed_vector(int32_t left, char *const *rows, int32_t right) {
+	// Require both native operand positions, the detached row, and its pointer sentinel.
+	if (left != WOVE_TEST_FIXED_LEFT || right != WOVE_TEST_FIXED_RIGHT ||
+		rows == NULL || rows[0] == NULL || rows[1] != NULL || strcmp(rows[0], "two words") != 0) {
+		return 1;
+	}
+	rows[0][0] = 'X';
+	return left + right;
+}
+
 // Observe errno immediately after the call's vector cleanup.
 static inline int32_t test_vector_errno(void) {
 	return errno == EDOM ? 0 : 1;

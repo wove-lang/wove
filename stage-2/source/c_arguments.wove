@@ -10,6 +10,7 @@
 	(use wove-file "./module.wove" (only form_parts source_keyword (type FormParts)))
 	(use wove-file "./types.wove" (only source_builtin_type reference_mode))
 	(use wove-file "./owned.wove" (only is_byte_owner_descriptor))
+	(use wove-file "./c_formals.wove" (only next_c_value_formal))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
@@ -19,7 +20,7 @@
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (mutable_scalar bool) (storage_mut bool) (nullable bool)))
 	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
-	(struct CFormal (fields (position i32) (type_node i32) (start i32) (end i32)))
+	(struct CFormal (fields (row i32) (position i32) (type_node i32) (start i32) (end i32)))
 
 	(struct CViewType (fields (access u32) (element i32)))
 
@@ -145,7 +146,7 @@
 		(body (return (call c_argument_error (record.get (local node) start) (record.get (local node) end)))))
 
 	(fn checked_c_arguments
-		(:doc `Retain conversion counts, a macro marker, and the first variadic formal's ordinal.`)
+		(:doc `Retain conversion counts, a macro marker, and the first variadic formal's source row.`)
 		(params (strings i32) (extents i32) (nulls i32) (macro bool) (variadic i32))
 		(returns CArguments)
 		(body (return (record.make CArguments (strings (local strings)) (vectors (bool false)) (extents (local extents)) (nulls (local nulls)) (initializers 0i32) (macro (local macro)) (variadic (local variadic))
@@ -153,9 +154,9 @@
 
 	(fn c_formal
 		(:doc `Keep an original formal position or the problem's source span.`)
-		(params (position i32) (type_node i32) (site SourceNode))
+		(params (row i32) (position i32) (type_node i32) (site SourceNode))
 		(returns CFormal)
-		(body (return (record.make CFormal (position (local position)) (type_node (local type_node))
+		(body (return (record.make CFormal (row (local row)) (position (local position)) (type_node (local type_node))
 			(start (record.get (local site) start)) (end (record.get (local site) end))))))
 
 	(fn mark_c_argument_type
@@ -216,8 +217,8 @@
 			(if
 				(:doc "Quoted strings and forms cannot name a formal parameter.")
 				(bool.not (u32.eq (record.get (local name) kind) 1u32))
-				(then (return (call c_formal -1i32 -1i32 (local name)))))
-			(let-mut parameter (local first))
+				(then (return (call c_formal -1i32 -1i32 -1i32 (local name)))))
+			(let-mut parameter (call next_c_value_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local first)))
 			(let-mut index 0i32)
 			(while
 				(:doc "Search the checked parameter list in its original order.")
@@ -231,10 +232,11 @@
 						(call same_bytes (borrow-shared (local source))
 							(record.get (local spelling) start) (record.get (local spelling) end)
 							(borrow-shared (local source)) (record.get (local name) start) (record.get (local name) end))
-						(then (return (call c_formal (local index) (record.get (local parts) operands) (local name)))))
-					(set (local parameter) (record.get (local node) next_sibling))
+						(then (return (call c_formal (local parameter) (local index) (record.get (local parts) operands) (local name)))))
+					(set (local parameter) (call next_c_value_formal (borrow-shared (local source)) (borrow-shared (local nodes))
+						(record.get (local node) next_sibling)))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
-			(return (call c_formal -1i32 -1i32 (local name)))))
+			(return (call c_formal -1i32 -1i32 -1i32 (local name)))))
 
 	(fn find_c_formal
 		(:doc `Check the named formal's type for the requested argument adaptation.`)
@@ -253,7 +255,7 @@
 						(:doc "An incompatible formal points to its declared type.")
 						(bool.not (call accepts_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (local mode)
 							(slice.load (local contracts) (record.get (local formal) position))))
-						(then (return (call c_formal -1i32 -1i32 (local type)))))))
+						(then (return (call c_formal -1i32 -1i32 -1i32 (local type)))))))
 			(return (local formal))))
 
 	(fn reserve_c_argument
@@ -460,12 +462,12 @@
 				(call matches_pragma (borrow-shared (local source)) (local name) (borrow-shared (local open_tail)))
 				(then (return (call checked_c_arguments 0i32 0i32 0i32 (bool false) 0i32))))
 			(let formal (call find_named_c_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local first) (local name)))
-			(let position (record.get (local formal) position))
+			(let row (record.get (local formal) row))
 			(if
-				(:doc "C requires a known boundary after at least one fixed formal.")
-				(i32.lt (local position) 1i32)
+				(:doc "C requires a known boundary after at least one native formal.")
+				(bool.or (i32.lt (local row) 0i32) (i32.eq (local row) (local first)))
 				(then (return (call c_argument_error_at (local name)))))
-			(return (call checked_c_arguments 0i32 0i32 0i32 (bool false) (local position)))))
+			(return (call checked_c_arguments 0i32 0i32 0i32 (bool false) (local row)))))
 
 	(fn read_c_directive
 		(:doc `Dispatch the recognized argument directives in the checked pragma stream.`)
@@ -601,7 +603,7 @@
 			(let arguments (call read_c_argument_pragmas (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local function) (local first) (bool false) (borrow-mut (local contracts))))
 			(if (u32.lt 0u32 (record.get (local arguments) error)) (then (return (local arguments))))
-			(let-mut parameter (local first))
+			(let-mut parameter (call next_c_value_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local first)))
 			(let-mut index 0i32)
 			(let-mut initializers 0i32)
 			(let-mut vectors (bool false))
@@ -630,7 +632,8 @@
 						(:doc "Count each distinct storage initialization formal.")
 						(call is_c_storage_init_mode (local mode))
 						(then (set (local initializers) (i32.add.wrapping (local initializers) 1i32))))
-					(set (local parameter) (record.get (local node) next_sibling))
+					(set (local parameter) (call next_c_value_formal (borrow-shared (local source)) (borrow-shared (local nodes))
+						(record.get (local node) next_sibling)))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return (record.make CArguments (strings (record.get (local arguments) strings)) (vectors (local vectors))
 				(extents (record.get (local arguments) extents))

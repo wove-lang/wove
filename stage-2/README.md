@@ -634,6 +634,14 @@ This includes `open` and `openat` with the native `Mode` alias. Repeated
 boundaries must agree. A named boundary and `c_macro` cannot share a
 declaration.
 
+A native fixed prefix can supply a header constant with
+`(const command i32 F_SETFL)` in its parameter list. A call to
+`fcntl_setfl` supplies the descriptor and flags. Stage 2 inserts
+`F_SETFL` between them for the original `fcntl` symbol, includes the
+fixed command type in the prototype check, and checks that the header
+constant fits `i32`. Fixed operands may also appear in nonvariadic
+native functions.
+
 Use `(:pragma (c_bytes data count))` for a byte count or
 `(:pragma (c_bytes data size count))` for a product. The named dimensions
 accept `u8`, `i32`, or `u32` formals. After argument evaluation, both
