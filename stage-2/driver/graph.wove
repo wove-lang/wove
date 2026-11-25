@@ -3,6 +3,7 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc "Resolve native C-header imports from the entry and the built-in provider sources.")
 
+	(use wove-file "./assets.wove" (only copy_source_prefix load_input_assets))
 	(use wove-file "./bundled.wove" (only bundled_path_width write_bundled_sources))
 	(use wove-file "./diagnostics.wove" (only report_source))
 	(use wove-file "./output.wove" (only publish_input))
@@ -12,8 +13,8 @@
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only (type SelectedDeclaration) form_parts))
 	(use wove-file "../source/imports.wove" (only import_keyword))
-	(use wove-file "../scalar/plan.wove" (only (type CallSite)))
-	(use wove-file "../emit/graph.wove" (only run_scalar_graph))
+	(use wove-file "../source/assets.wove" (only (type EmbedAsset) (type EmbedCheck)))
+	(use wove-file "../emit/graph.wove" (only run_entry_graph))
 
 	(fn has_c_header_use
 		(:doc "Find an active C-header use in the entry's selected declaration list.")
@@ -74,21 +75,19 @@
 		(:doc "Emit the selected graph and publish its first complete translation unit.")
 		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
 			(target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
-			(modules (shared-slice GraphModule)) (bindings (shared-slice GraphBinding)) (resolved GraphResult))
+			(modules (shared-slice GraphModule)) (bindings (shared-slice GraphBinding)) (resolved GraphResult)
+			(requests (mut-slice EmbedAsset)))
 		(returns i32)
 		(body
-			(let-mut assets (array.alloc SuppliedFile (i32 0)))
-			(let-mut callers (array.alloc CallSite (i32 0)))
 			(let-mut capacity (i32 4096))
 			(while
 				(:doc "Retry a short C output buffer within the signed slice range.")
 				(bool true)
 				(body
 					(let-mut output (array.alloc u8 (local capacity)))
-					(let result (call run_scalar_graph (borrow-shared (local arena)) (borrow-shared (local files))
+					(let result (call run_entry_graph (borrow-shared (local arena)) (borrow-shared (local files))
 						(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
-						(i32 0) (i32 -1) (borrow-shared (slice.range (local arena) (i32 0) (i32 0)))
-						(borrow-shared (local assets)) (borrow-mut (local output)) (borrow-mut (local callers))))
+						(borrow-mut (local requests)) (bool false) (borrow-mut (local output))))
 					(let error (record.get (local result) error))
 					(if
 						(:doc "Publish only a complete emission.")
@@ -104,6 +103,60 @@
 							(record.get (local result) start) (record.get (local result) end)))))
 					(set (local capacity) (i32.add.wrapping (local capacity) (local capacity)))))
 			(return (i32 1))))
+
+	(fn report_entry_asset
+		(:doc "Translate an asset read error from the graph arena into the entry's original view.")
+		(params (path (shared-slice u8)) (files (shared-slice SuppliedFile)) (result EmbedCheck))
+		(returns i32)
+		(body
+			(let base (record.get (slice.load (local files) (i32 0)) source_start))
+			(return (call report_source (borrow-shared (local path)) (record.get (local result) error)
+				(i32.sub.wrapping (record.get (local result) start) (local base))
+				(i32.sub.wrapping (record.get (local result) end) (local base)) (u32 9)))))
+
+	(fn compile_graph_assets
+		(:doc "Load checked entry embeds with the native asset loader before graph emission.")
+		(params (path (shared-slice u8)) (target (shared-slice u8)) (profile (shared-slice u8)) (mode u32)
+			(target_index i32) (arena (shared-slice u8)) (files (shared-slice SuppliedFile))
+			(modules (shared-slice GraphModule)) (bindings (shared-slice GraphBinding)) (resolved GraphResult)
+			(requests (mut-slice EmbedAsset)))
+		(returns i32)
+		(body
+			(let-mut none (array.alloc u8 (i32 0)))
+			(let checked (call run_entry_graph (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)
+				(borrow-mut (local requests)) (bool true) (borrow-mut (local none))))
+			(if
+				(:doc "Check the selected signatures and bodies before opening any file.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (record.get (local checked) file) (record.get (local checked) error)
+					(record.get (local checked) start) (record.get (local checked) end)))))
+			(if
+				(:doc "A graph with no entry embeds already has a complete arena.")
+				(i32.eq (record.get (local checked) count) (i32 0))
+				(then (return (call emit_c_graph (borrow-shared (local path)) (borrow-shared (local target))
+					(borrow-shared (local profile)) (local mode) (local target_index)
+					(borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local modules))
+					(borrow-shared (local bindings)) (local resolved) (borrow-mut (local requests))))))
+			(let measured (call load_input_assets (borrow-shared (local path)) (borrow-shared (local arena))
+				(borrow-mut (local requests)) (borrow-mut (local none)) (bool false)))
+			(if
+				(:doc "A missing or invalid asset keeps its original entry-relative operand span.")
+				(u32.lt (u32 0) (record.get (local measured) error))
+				(then (return (call report_entry_asset (borrow-shared (local path)) (borrow-shared (local files)) (local measured)))))
+			(let-mut extended (array.alloc u8 (record.get (local measured) count)))
+			(call copy_source_prefix (borrow-shared (local arena)) (borrow-mut (local extended)))
+			(let loaded (call load_input_assets (borrow-shared (local path)) (borrow-shared (local arena))
+				(borrow-mut (local requests)) (borrow-mut (local extended)) (bool true)))
+			(if
+				(:doc "A file that disappears or changes size cannot leave partially emitted C.")
+				(u32.lt (u32 0) (record.get (local loaded) error))
+				(then (return (call report_entry_asset (borrow-shared (local path)) (borrow-shared (local files)) (local loaded)))))
+			(return (call emit_c_graph (borrow-shared (local path)) (borrow-shared (local target))
+				(borrow-shared (local profile)) (local mode) (local target_index)
+				(borrow-shared (local extended)) (borrow-shared (local files)) (borrow-shared (local modules))
+				(borrow-shared (local bindings)) (local resolved) (borrow-mut (local requests))))))
 
 	(fn resolve_c_input
 		(:doc "Bind the entry's selections against the three registered sources.")
@@ -125,9 +178,11 @@
 					(record.get (local resolved) start) (record.get (local resolved) end)))))
 			(let-mut bindings (array.alloc GraphBinding (record.get (local resolved) bindings)))
 			(call copy_graph_bindings (borrow-shared (local scratch)) (borrow-mut (local bindings)))
-			(return (call emit_c_graph (borrow-shared (local path)) (borrow-shared (local target))
+			(let-mut requests (array.alloc EmbedAsset (local rows)))
+			(return (call compile_graph_assets (borrow-shared (local path)) (borrow-shared (local target))
 				(borrow-shared (local profile)) (local mode) (local target_index) (borrow-shared (local arena))
-				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved)))))
+				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings))
+				(local resolved) (borrow-mut (local requests))))))
 
 	(fn prepare_bundled_input
 		(:doc "Allocate the source and path arena before registering the embedded modules.")

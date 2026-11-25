@@ -29,7 +29,7 @@
 #define resolve_graph wv_seed_fn_132
 #define inspect_callers wv_seed_fn_409
 #define run_scalar_graph wv_seed_fn_438
-#define discover_graph_tests wv_seed_fn_443
+#define discover_graph_tests wv_seed_fn_446
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_3 FormCheck;
