@@ -466,9 +466,10 @@ The shared loan lasts for the loop, and the body gets a copy of each element
 in source order. Use `(bind index item)` for an additional `i32` position.
 The index starts at zero in the captured view, including a checked byte
 subrange such as `(borrow-shared (array.range (local data) start end))`.
+A module byte string can supply either the whole view or a subrange.
 The bindings are immutable and scoped to the body. `continue` advances to
-the next iteration, and `break` and `return` release owners in the scopes
-being exited.
+the next iteration. Like `break` and `return`, it releases owners in the
+scopes it exits.
 
 A `let` can bind a shared or mutable view of a named local array or array
 parameter. The binding itself is immutable. A mutable view permits writes
