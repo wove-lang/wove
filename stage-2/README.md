@@ -619,8 +619,9 @@ evaluation, with the file's original byte count and content. Emitted C
 carries the payload, so the asset can move after compilation.
 
 Only selected expressions request files. A missing, unreadable, or invalid
-selected path reports error 67 on the original path token. The graph probe
-accepts trailing `--asset VIRTUAL_PATH FILE` triples with raw file bytes.
+selected path reports error 67 on the original path token. A trailing slash
+or a final `.` or `..` component requires a directory. The graph probe accepts
+trailing `--asset VIRTUAL_PATH FILE` triples with raw file bytes.
 Asset rows are separate from source modules and imports. Native `cc`
 reads disk assets for its explicit source file.
 
