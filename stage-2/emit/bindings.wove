@@ -1,0 +1,113 @@
+(module emit_bindings
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Write a single static C value and an exact byte table for each referenced module binding.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
+	(use wove-file "../source/strings.wove" (only decode_string))
+	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
+	(use wove-file "../scalar/plan.wove" (only (type ScalarExpression)))
+	(use wove-file "./runtime.wove" (only write_site_number))
+	(use wove-file "./text.wove" (only c_byte write_c_name write_decimal_literal open_static_value write_static_bytes (type CNameRole)))
+
+	(fn write_binding_name
+		(:doc "Generate a private name from the defining node with separate roles for views and bytes.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name i32) (backing bool)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let node (slice.load (local nodes) (local name)))
+			(let-mut tag (u8 98))
+			(if
+				(:doc "Only a byte array uses the backing storage role.")
+				(local backing)
+				(then (set (local tag) (u8 97))))
+			(return (call write_c_name (borrow-mut (local output)) (local offset) (local writing)
+				(local name_prefix) (record.make CNameRole (tag (local tag))) (int.convert u32 (local name))
+				(borrow-shared (local source)) (record.get (local node) start) (record.get (local node) end)))))
+
+	(fn write_binding_bytes
+		(:doc "Write the decoded table and its shared descriptor without adding a terminator.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (name i32) (value ScalarExpression)
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let start (record.get (local value) start))
+			(let end (record.get (local value) end))
+			(let-mut bytes (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let decoded (call decode_string (borrow-shared (local source))
+				(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
+				(borrow-mut (local bytes))))
+			(let length (record.get (local decoded) written))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "A nonempty view points to exactly one static table.")
+				(i32.lt (i32 0) (local length))
+				(then
+					(set (local cursor) (call open_static_value (borrow-mut (local output)) (local cursor) (u32 10) (local writing)))
+					(set (local cursor) (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local name) (bool true) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call write_static_bytes (borrow-shared (local bytes)) (i32 0) (local length)
+						(borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))))
+			(set (local cursor) (call open_static_value (borrow-mut (local output)) (local cursor) (u32 34) (local writing)))
+			(set (local cursor) (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local name) (bool false) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 123) (local writing)))
+			(if
+				(:doc "An empty descriptor carries a null pointer and has no backing allocation.")
+				(i32.eq (local length) (i32 0))
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 48) (local writing))))
+				(else (set (local cursor) (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local name) (bool true) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(let-mut digits (array.alloc u8 (i32 11)))
+			(set (local cursor) (call write_site_number (borrow-mut (local output)) (local cursor)
+				(local length) (borrow-mut (local digits)) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 44) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 49) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 125) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))))
+
+	(fn write_module_bindings
+		(:doc "Emit each referenced declaration once in its original tree order.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(statements (shared-slice ScalarStatement)) (expressions (shared-slice ScalarExpression))
+			(output (mut-slice u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(let-mut index (i32 0))
+			(while
+				(:doc "The checked declaration row and its use mark select the only C definition.")
+				(i32.lt (local index) (slice.len (local statements)))
+				(body
+					(let row (slice.load (local statements) (local index)))
+					(if
+						(:doc "Unused immutable storage has no generated references or side effects.")
+						(bool.and (u32.eq (record.get (local row) kind) (u32 62))
+							(u32.eq (record.get (slice.load (local expressions) (local index)) kind) (u32 62)))
+						(then
+							(let name (record.get (local row) target))
+							(let value (slice.load (local expressions) (record.get (local row) value)))
+							(let type (record.get (local value) type))
+							(if
+								(:doc "Quoted strings use a shared byte view and integers keep their exact C type.")
+								(u32.eq (local type) (u32 34))
+								(then (set (local cursor) (call write_binding_bytes (borrow-shared (local source))
+									(borrow-shared (local nodes)) (local name) (local value)
+									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
+								(else
+									(set (local cursor) (call open_static_value (borrow-mut (local output))
+										(local cursor) (local type) (local writing)))
+									(set (local cursor) (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local name) (bool false) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 61) (local writing)))
+									(set (local cursor) (call write_decimal_literal (borrow-shared (local source))
+										(record.get (local value) start) (record.get (local value) end) (record.get (local value) negative)
+										(u32.eq (local type) (u32 11)) (borrow-mut (local output)) (local cursor) (local writing)))
+									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 59) (local writing)))
+									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (u8 10) (local writing)))))))
+					(set (local index) (i32.add.wrapping (local index) (i32 1)))))
+			(return (local cursor)))))

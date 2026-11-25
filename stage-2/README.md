@@ -98,8 +98,8 @@ spans both parentheses and has its tag as its first child.
 After building the tree, call `check_source_metadata` with the same source
 view, successful result, and shared node slice. Form heads use
 `[A-Za-z_][A-Za-z0-9_.-]*`. A leading colon marks a metadata entry only
-when the form is in its parent's prefix. For a module or function
-declaration, the bare name directly follows the tag. The contiguous
+when the form is in its parent's prefix. For a module, function, or module-level
+`let` declaration, the bare name directly follows the tag. The contiguous
 metadata prefix follows that name.
 Other forms use the prefix immediately after the tag. Name slots follow
 declaration ancestry through declaration groups and supported C bridges.
@@ -177,13 +177,28 @@ name lookup, type checking, C emission, and caller inspection.
 
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices. A value-returning function must
-return its declared type on every path. Helpers can accept and return `i32`, `u8`,
-`u32`, and `bool`. Expressions support exact-type literals, binding reads,
+return its declared type on every path. Helpers can accept and return `i8`,
+`u8`, `i32`, `u32`, and `bool`. Expressions support exact-type literals, binding reads,
 and direct calls. A local declared with `let` or `let-mut` takes its
 scalar type from its initializer and comes into scope afterwards. A `set`
 requires an existing `let-mut` binding and a value of that binding's exact
 type. Forward calls use checked prototypes, and nested calls evaluate from
 left to right.
+
+An immutable module binding takes a typed integer literal or a quoted
+string. Its name precedes metadata.
+
+```lisp
+(let lowest_digit (i8 -1))
+(let alphabet "0123456789abcdef")
+```
+
+Functions in the defining file use `(local lowest_digit)` to read the
+scalar. A local or parameter with the same name takes precedence. A
+quoted string is a shared `u8` view over its decoded bytes. Generated
+C puts a referenced nonempty byte table in a single read-only array
+with no added terminator. The ordinary `slice.len`, `slice.load`, and
+`borrow-shared` forms work with the static view.
 
 A helper with `(returns void)` can use `(return)` or finish at the end
 of its body. Invoke it with a standalone `(call ...)` statement. The
@@ -204,7 +219,7 @@ zero user arguments supply two empty views. Wove borrows both views for
 the entry call. The wrapper releases the backing storage on return.
 
 A module-local `(struct Token (fields (kind u32) (start i32)))` defines
-a named, copyable record. Fields can use `bool`, `u8`, `i32`, or `u32`.
+a named, copyable record. Fields can use `bool`, `i8`, `u8`, `i32`, or `u32`.
 `(record.make Token (kind (u32 40)) (start (i32 2)))` evaluates each
 initializer exactly once in the order written. Supply every field once
 with its declared type. A local stores the result by value, and
@@ -231,8 +246,8 @@ right. Emitted C widens the operands to unsigned 64-bit arithmetic and
 keeps the low 32 bits.
 
 `(int.convert target value)` evaluates the integer operand once and
-preserves its numerical value when it fits the target `u8`, `i32`, or
-`u32`. A value outside the target range traps before the cast. The
+preserves its numerical value when it fits the target `i8`, `u8`, `i32`,
+or `u32`. A value outside the target range traps before the cast. The
 runtime diagnostic identifies the original file ID and half-open byte
 span of the conversion, including from a source subrange or an imported
 file. C emitted for conversions includes `wove_runtime.h` and links

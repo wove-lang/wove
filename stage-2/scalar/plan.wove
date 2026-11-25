@@ -11,7 +11,8 @@
 	the name that will be used in C, and are indexed by original call node.
 	Retain source-level call sites before either inspection or lowering.`)
 
-	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
+	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../source/module.wove" (only form_parts skip_disabled_siblings validate_form_metadata (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
@@ -53,7 +54,8 @@
 		is its defining parameter row or, for an owner, its name row.
 		A range reborrow links to the checked projection in its child.
 		An embed carries its path token span until asset resolution replaces it
-		with the byte range to emit.`)
+		with the byte range to emit. A module binding reference (62) names its
+		defining name node. The same row at a declaration marks its storage used.`)
 		ScalarExpression
 		(fields (kind u32) (type u32) (target i32) (first i32) (start i32) (end i32) (negative bool) (borrowed_owner bool)
 			(asset_start i32) (asset_end i32)))
@@ -325,7 +327,8 @@
 		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (module ModuleRead)
 			(declarations (shared-slice SelectedDeclaration)) (functions (mut-slice ScalarFunction))
 			(parameters (mut-slice ScalarParameter)) (records (mut-slice ScalarRecord))
-			(bindings (shared-slice GraphBinding)) (file i32) (entry_module bool))
+			(bindings (shared-slice GraphBinding)) (file i32) (entry_module bool)
+			(statements (mut-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(let module_name (slice.load (local nodes) (record.get (local module) name)))
@@ -341,6 +344,13 @@
 				(:doc "Register the full type namespace before reading forward signature references.")
 				(u32.lt (u32 0) (record.get (local types) error))
 				(then (return (local types))))
+			(let values (call register_module_bindings (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local declarations)) (record.get (local module) count) (i32 0)
+				(borrow-mut (local statements)) (borrow-mut (local expressions))))
+			(if
+				(:doc "Validate even unused module initializers before planning function bodies.")
+				(u32.lt (u32 0) (record.get (local values) error))
+				(then (return (local values))))
 			(let-mut index (i32 0))
 			(let-mut next_function (i32 0))
 			(let-mut next_param (i32 0))
@@ -350,10 +360,10 @@
 				(i32.lt (local index) (record.get (local module) count))
 				(body
 					(let declaration (record.get (slice.load (local declarations) (local index)) node))
+					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local declaration)))
 					(if
-						(:doc "Only functions need signatures after the types have been registered.")
-						(bool.not (u32.eq (call declaration_kind (borrow-shared (local source))
-							(borrow-shared (local nodes)) (local declaration)) (u32 48)))
+						(:doc "Types and module bindings have already been registered.")
+						(bool.not (bool.or (u32.eq (local kind) (u32 48)) (u32.eq (local kind) (u32 15))))
 						(then
 							(let registered (call register_function (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local declaration) (local scope) (borrow-mut (local functions)) (local next_function)
@@ -479,6 +489,122 @@
 				(call expression_row (u32 1) (local type) (i32 -1) (i32 -1)
 					(local digits) (record.get (local value) end) (record.get (local spelling) negative)))
 			(return (call entry_at (local node) (local index) (u32 0)))))
+
+	(fn find_module_binding
+		(:doc "Look up a name only within the defining file's registered immutable bindings.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(statements (shared-slice ScalarStatement)) (first i32) (name SourceNode))
+		(returns i32)
+		(body
+			(let-mut index (local first))
+			(while
+				(:doc "Each link identifies another selected binding in the same module.")
+				(i32.lt (i32 -1) (local index))
+				(body
+					(let row (slice.load (local statements) (local index)))
+					(if
+						(:doc "Compare declaration spellings before generating their C names.")
+						(call same_name (borrow-shared (local source))
+							(slice.load (local nodes) (record.get (local row) target)) (local name))
+						(then (return (local index))))
+					(set (local index) (record.get (local row) first))))
+			(return (i32 -1))))
+
+	(fn plan_binding_initializer
+		(:doc "Check an immutable initializer as a typed integer or an exact quoted byte string.")
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode)) (index i32)
+			(expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let node (slice.load (local nodes) (local index)))
+			(if
+				(:doc "Validate the decoded value before reserving a static byte view.")
+				(u32.eq (record.get (local node) kind) (u32 2))
+				(then
+					(let start (record.get (local node) start))
+					(let end (record.get (local node) end))
+					(let-mut buffer (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+					(let decoded (call decode_string (borrow-shared (local source))
+						(record.make Token (kind (u32 2)) (start (local start)) (end (local end)) (error (u32 0)))
+						(borrow-mut (local buffer))))
+					(if
+						(:doc "A bad Unicode escape keeps the decoder's primary span.")
+						(u32.lt (u32 0) (record.get (local decoded) error))
+						(then (return (record.make EntryRead (operand (i32 -1))
+							(start (record.get (local decoded) start)) (end (record.get (local decoded) end))
+							(error (record.get (local decoded) error)) (related (i32 -1))))))
+					(slice.store (local expressions) (local index)
+						(call expression_row (u32 0) (u32 34) (i32 -1) (i32 -1)
+							(local start) (local end) (bool false)))
+					(return (call entry_at (local node) (local index) (u32 0)))))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (record.get (local parts) head)))
+			(if
+				(:doc "A module scalar initializer must be one of the supported integer literals.")
+				(bool.not (call is_builtin_integer (local type)))
+				(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+			(let checked (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local type) (u32 24)))
+			(if
+				(:doc "Literal metadata cannot select an initializer independently of its binding.")
+				(u32.lt (u32 0) (record.get (local checked) error))
+				(then (return (local checked))))
+			(return (call plan_literal (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
+				(record.get (local checked) operand) (local type) (local index) (borrow-mut (local expressions))))))
+
+	(fn register_module_bindings
+		(:doc `Register selected module values at their defining tree rows.
+
+		The synthetic file root links to the first binding. Each binding
+		uses the first field for the next binding and retains its initializer.
+		Selection rows are file-relative even for a rebased graph.`)
+		(params (source (shared-slice u8)) (nodes (shared-slice SourceNode))
+			(declarations (shared-slice SelectedDeclaration)) (count i32) (base i32)
+			(statements (mut-slice ScalarStatement)) (expressions (mut-slice ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let-mut first (i32 -1))
+			(let-mut cursor (i32 0))
+			(while
+				(:doc "Walk selected leaves in source order and link the checked immutable names.")
+				(i32.lt (local cursor) (local count))
+				(body
+					(let index (i32.add.wrapping (local base) (record.get (slice.load (local declarations) (local cursor)) node)))
+					(let node (slice.load (local nodes) (local index)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(if
+						(:doc "Only a selected module-level let introduces an immutable value.")
+						(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+							(record.get (local parts) head)) (u32 15))
+						(then
+							(let name (record.get (local parts) name))
+							(let initializer (record.get (local parts) operands))
+							(if
+								(:doc "A binding has a bare name and exactly one ordinary initializer.")
+								(bool.or (i32.lt (local name) (i32 0))
+									(bool.or (i32.lt (local initializer) (i32 0))
+										(i32.lt (i32 -1) (record.get (slice.load (local nodes) (local initializer)) next_sibling))))
+								(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+							(let spelling (slice.load (local nodes) (local name)))
+							(if
+								(:doc "Repeated names conflict only inside this module's value namespace.")
+								(i32.lt (i32 -1) (call find_module_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+									(borrow-shared (local statements)) (local first) (local spelling)))
+								(then (return (call entry_at (local spelling) (i32 -1) (u32 33)))))
+							(let checked (call plan_binding_initializer (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local initializer) (borrow-mut (local expressions))))
+							(if
+								(:doc "Keep the initializer's precise failure span.")
+								(u32.lt (u32 0) (record.get (local checked) error))
+								(then (return (local checked))))
+							(slice.store (local statements) (local index)
+								(record.make ScalarStatement (kind (u32 62)) (target (local name)) (value (local initializer))
+									(type (record.get (slice.load (local expressions) (local initializer)) type))
+									(first (local first)) (previous_owner (i32 -1)) (falls_through (bool false)) (move_site (i32 -1))))
+							(set (local first) (local index))))
+					(set (local cursor) (i32.add.wrapping (local cursor) (i32 1)))))
+			(slice.store (local statements) (local base) (call block_statement (local first) (i32 -1) (bool false)))
+			(return (call entry_at (slice.load (local nodes) (local base)) (local first) (u32 0)))))
 
 	(fn find_function_parameter
 		(:doc `Find a parameter in the current function's signature.`)
@@ -621,9 +747,27 @@
 			(let target (call find_function_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local caller) (borrow-shared (local parameters)) (local name)))
 			(if
-				(:doc "The name must already be bound in the current function.")
+				(:doc "Parameters and locals shadow immutable storage in the defining module.")
 				(i32.lt (local target) (i32 0))
-				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+				(then
+					(let root (slice.load (local statements) (record.get (local caller) tree_base)))
+					(let module_binding (call find_module_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local statements)) (record.get (local root) first) (local name)))
+					(if
+						(:doc "A module value is visible only to bodies defined in the same file.")
+						(i32.lt (local module_binding) (i32 0))
+						(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+					(let declaration (slice.load (local statements) (local module_binding)))
+					(let actual (record.get (local declaration) type))
+					(if
+						(:doc "Shared static views can only satisfy read access.")
+						(bool.not (call value_matches_type (local type) (local actual)))
+						(then (return (call entry_at (local node) (i32 -1) (u32 24)))))
+					(let reference (call expression_row (u32 62) (local actual) (record.get (local declaration) target)
+						(i32 -1) (i32 0) (i32 0) (bool false)))
+					(slice.store (local expressions) (local index) (local reference))
+					(slice.store (local expressions) (local module_binding) (local reference))
+					(return (call entry_at (local node) (local module_binding) (u32 0)))))
 			(let actual (record.get (slice.load (local parameters) (local target)) type))
 			(if
 				(:doc "Apply the parameter's declared type at this use.")
@@ -717,9 +861,16 @@
 						(i32.eq (record.get (local first) parent) (record.get (local here) parent))
 						(then (return (call entry_at (local name) (i32 -1) (u32 33)))))))
 			(if
-				(:doc "A write cannot introduce a binding.")
+				(:doc "An assignment needs a mutable local. Identify an immutable module name explicitly.")
 				(local assigning)
-				(then (return (call entry_at (local name) (i32 -1) (u32 34)))))
+				(then
+					(let root (slice.load (local statements) (record.get (local caller) tree_base)))
+					(if
+						(:doc "A module binding cannot be assigned.")
+						(i32.lt (i32 -1) (call find_module_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+							(borrow-shared (local statements)) (record.get (local root) first) (local name)))
+						(then (return (call entry_at (local name) (i32 -1) (u32 37)))))
+					(return (call entry_at (local name) (i32 -1) (u32 34)))))
 			(return (call entry_at (local name) (local name_index) (u32 0)))))
 
 	(fn find_defining_function
@@ -1013,6 +1164,10 @@
 				(u32.lt (u32 0) (record.get (local checked) error))
 				(then (return (call at_owner_use (local checked) (local use)))))
 			(let resolved (slice.load (local expressions) (local index)))
+			(if
+				(:doc "A static shared descriptor needs no local or parameter loan.")
+				(u32.eq (record.get (local resolved) kind) (u32 62))
+				(then (return (local checked))))
 			(let target (record.get (local resolved) target))
 			(let actual (record.get (local resolved) type))
 			(let owner (call is_array_owner (local actual)))
@@ -1100,8 +1255,13 @@
 				(u32.lt (u32 0) (record.get (local checked) error))
 				(then (return (local checked))))
 			(let origin (slice.load (local expressions) (local receiver)))
+			(let-mut target (record.get (local origin) target))
+			(if
+				(:doc "A static source cannot conflict with a loan of a local or formal parameter.")
+				(u32.eq (record.get (local origin) kind) (u32 62))
+				(then (set (local target) (i32 -1))))
 			(slice.store (local expressions) (local index)
-				(record.make ScalarExpression (kind (u32 45)) (type (u32 34)) (target (record.get (local origin) target))
+				(record.make ScalarExpression (kind (u32 45)) (type (u32 34)) (target (local target))
 					(first (local projection)) (start (i32 0)) (end (i32 0)) (negative (bool false))
 					(borrowed_owner (record.get (local origin) borrowed_owner)) (asset_start (i32 0)) (asset_end (i32 0))))
 			(slice.store (local expressions) (local projection)
