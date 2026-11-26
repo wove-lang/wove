@@ -243,7 +243,7 @@ grows. `array.load` reads the original table at a checked `i32` index
 and copies only the selected element. Stage 1 keeps its integer and
 quoted-byte module initializer subset.
 
-A fieldless enum declares one or more variants. Every value keeps its nominal
+An enum declares one or more variants. Every value keeps its nominal
 enum type through locals, assignments, parameters, and returns. A type alias
 selected from another module keeps the defining enum and its variant names.
 
@@ -263,6 +263,15 @@ case exits the match after cleaning up its locals. A return exits the
 function and releases its active owners. When every case returns, the
 match satisfies the enclosing return requirement. Missing coverage reports
 code 78 at the match. Unknown or duplicate variants point at the case name.
+
+A variant can declare one copyable payload, as in
+`(enum Parsed (variants (Record Request) (Invalid)))`. Write
+`(enum.new Parsed Record value)` with the exact `Request` type. A case
+for that variant starts with `(case Record (bind request) ...)` to copy
+the payload into an immutable arm-local name. `(bind _)` discards the
+payload. The compiler emits these enums as a tag and a union and reads
+the selected member from the captured subject. Fieldless enums retain
+their ordinal representation.
 
 A helper with `(returns void)` can use `(return)` or finish at the end
 of its body. Invoke it with a standalone `(call ...)` statement. The
