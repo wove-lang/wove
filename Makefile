@@ -97,6 +97,7 @@ WORKER_FIXTURES := $(NATIVE_CLI_FIXTURES)/workers
 WORKER_RUNTIME := $(STAGE2)/workers/runtime.o
 WORKER_PROBE := $(STAGE2)/workers/failure
 WORKER_QUEUE_PROBE := $(STAGE2)/workers/queue-failure
+WORKER_POOL_PROBE := $(STAGE2)/workers/pool
 PROCESS_MODULES := stage-2/io/process.wove stage-2/io/temporary.wove stage-2/io/capture/descriptors.wove stage-2/io/capture/child.wove
 PROCESS_FIXTURES := tests/stage-2/process
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
@@ -237,10 +238,11 @@ test-stage-2-f80: $(NATIVE_COMPILER)
 # Run the Wove transfer fixtures and the host probe for thread API failures.
 test-stage-2-workers: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-workers: export WOVE_TEST_CFLAGS = $(CFLAGS)
-test-stage-2-workers: $(NATIVE_COMPILER) $(WORKER_PROBE) $(WORKER_QUEUE_PROBE)
+test-stage-2-workers: $(NATIVE_COMPILER) $(WORKER_PROBE) $(WORKER_QUEUE_PROBE) $(WORKER_POOL_PROBE)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(WORKER_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_PROBE)" "$(WORKER_FIXTURES)/failure.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_QUEUE_PROBE)" "$(WORKER_FIXTURES)/queue-failure.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_POOL_PROBE)" "$(WORKER_FIXTURES)/pool.tsv"
 
 # Intercept thread creation and join in the runtime object used by the worker probe.
 $(WORKER_RUNTIME): $(RUNTIME) $(RUNTIME_HEADER)
@@ -250,7 +252,7 @@ $(WORKER_RUNTIME): $(RUNTIME) $(RUNTIME_HEADER)
 		-Dcalloc=fixture_worker_calloc -c "$<" -o "$@"
 
 # The probe can still call the original thread APIs when a case allows them.
-$(WORKER_PROBE) $(WORKER_QUEUE_PROBE): $(STAGE2)/workers/%: $(WORKER_FIXTURES)/%.c $(WORKER_RUNTIME) $(RUNTIME_HEADER)
+$(WORKER_PROBE) $(WORKER_QUEUE_PROBE) $(WORKER_POOL_PROBE): $(STAGE2)/workers/%: $(WORKER_FIXTURES)/%.c $(WORKER_RUNTIME) $(RUNTIME_HEADER)
 	$(CLANG) -std=c11 $(CFLAGS) -pthread -I runtime $(filter-out %.h,$^) -o "$@"
 
 # Check generated metadata and version invalidation in an isolated build.

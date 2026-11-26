@@ -276,6 +276,22 @@ wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrt_value, int32_t wvrt_file
 	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
 typedef struct wvrt_worker_receipt wvrt_worker_receipt;
+
+// A single producer owns admission. Each permit reserves one waiting slot and keeps the pool live.
+typedef struct WvrtWorkerPool WvrtWorkerPool;
+typedef struct WvrtWorkerPool WvrtWorkerPermit;
+WvrtWorkerPool *wvrt_worker_pool_open(int32_t threads, int32_t capacity);
+WvrtWorkerPermit *wvrt_worker_pool_reserve(WvrtWorkerPool *pool);
+WvrtWorkerPermit *wvrt_worker_pool_reserve_wait(WvrtWorkerPool *pool);
+bool wvrt_worker_pool_close(WvrtWorkerPool *pool);
+void wvrt_worker_pool_drop(WvrtWorkerPool *pool);
+void wvrt_worker_permit_drop(WvrtWorkerPermit *permit);
+WvrtWorkerPool *wvrt_worker_pool_take(WvrtWorkerPool **slot);
+WvrtWorkerPermit *wvrt_worker_permit_take_at_span(WvrtWorkerPermit **slot,
+	int32_t file, int32_t start, int32_t end);
+wvrt_worker_receipt *wvrt_worker_spawn_on_at_span(wvrt_array *(*handler)(wvrt_array *),
+	WvrtWorkerPermit *permit, wvrt_array *job, int32_t file, int32_t start, int32_t end);
+
 // Launch a job and return the lexical owner of the still joinable thread.
 wvrt_worker_receipt *wvrt_worker_spawn_at_span(wvrt_array *(*handler)(wvrt_array *), wvrt_array *job,
 	int32_t file, int32_t start, int32_t end);
