@@ -100,6 +100,35 @@
 	(let infer_shared_array 49u32)
 	(let infer_mut_array 50u32)
 
+	(fn owned_result_type
+		(:doc "Resolve an owning result using its exact supported array element type.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (scope FunctionScope))
+		(returns u32)
+		(body
+			(let element (call owned_element_node (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(if (i32.lt (local element) 0i32) (then (return 0u32)))
+			(if
+				(:doc "An owned row vector can transfer with all its rows.")
+				(call is_byte_owner_descriptor (borrow-shared (local source)) (borrow-shared (local nodes))
+					(array.load (local nodes) (local element)))
+				(then (return (call byte_rows_owner_type))))
+			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings))
+				(struct.get (local scope) file) (struct.get (local scope) source_base) (local element)))
+			(if
+				(:doc "A numeric array has a directly supported owning ABI.")
+				(call is_builtin_numeric (local type))
+				(then (return (call array_owner_type (local type)))))
+			(if
+				(:doc "A named copyable Wove record supplies its exact nominal element layout.")
+				(call is_record_type (local type))
+				(then
+					(let layout (array.load (local records) (call record_index (local type))))
+					(if (i32.eq (struct.get (local layout) native) 0i32)
+						(then (return (call array_owner_type (local type)))))))
+			(return 0u32)))
+
 	(fn read_signature
 		(:doc `Resolve a named function's result before completing its signature and body shape.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (first_field i32)
@@ -117,32 +146,17 @@
 					(set (local result) (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local type_node)))
 					(if
-						(:doc "Helper results can be void or any in-scope copyable type.")
+						(:doc "Resolve a void result, scalar, or named value layout.")
 						(bool.not (u32.eq (local result) (call void_type)))
 						(then (set (local result) (call value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 							(borrow-shared (local records)) (borrow-shared (local bindings))
 							(struct.get (local scope) file) (struct.get (local scope) source_base) (local type_node)))))
 					(if
-						(:doc "A Wove helper can return an owned numeric array or an owned vector of byte rows.")
+						(:doc "An owned descriptor identifies the result by its element type.")
 						(u32.eq (local result) 0u32)
-						(then
-							(let type (array.load (local nodes) (local type_node)))
-							(let element (call owned_element_node (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
-							(if
-								(:doc "An owner result retains the exact type of its single element.")
-								(i32.lt -1i32 (local element))
-								(then
-									(let element_type (array.load (local nodes) (local element)))
-									(let scalar (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element)))
-									(if
-										(:doc "A numeric owner can transfer through a helper with its exact element type.")
-										(call is_builtin_numeric (local scalar))
-										(then (set (local result) (call array_owner_type (local scalar))))
-										(else
-											(if
-												(:doc "An owned row vector can transfer with all its rows.")
-												(call is_byte_owner_descriptor (borrow-shared (local source)) (borrow-shared (local nodes)) (local element_type))
-												(then (set (local result) (call byte_rows_owner_type))))))))))
+						(then (set (local result) (call owned_result_type (borrow-shared (local source)) (borrow-shared (local nodes))
+							(array.load (local nodes) (local type_node)) (borrow-shared (local records))
+							(borrow-shared (local bindings)) (local scope)))))
 					(if
 						(:doc "The C entry requires i32 in every compilation mode.")
 						(bool.and (local entry) (bool.not (u32.eq (local result) 5u32)))
@@ -3423,7 +3437,7 @@
 				(then (return (call plan_embed (borrow-shared (local nodes)) (local node) (local operand)
 					(local index) (local caller) (local view_start) (borrow-mut (local expressions))))))
 			(if
-				(:doc "Only a local declaration can establish a new owning binding.")
+				(:doc "An allocation creates an owner for a local, an owning field, or an owned result.")
 				(local allocation)
 				(then (return (call plan_allocation (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local operand) (local index) (local expected) (local caller) (local view_start)
@@ -3829,11 +3843,12 @@
 							(borrow-shared (local functions)) (borrow-shared (local parameters))
 							(borrow-shared (local bindings)) (borrow-shared (local records))
 							(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start) (local view_start)))))
+					(let fresh (bool.or (u32.eq (local tag) 9u32) (u32.eq (local tag) (local conditional_value))))
+					(let construct (bool.or (bool.and (local returning_record) (u32.eq (local tag) 50u32))
+						(bool.and (call is_array_owner (local expected)) (u32.eq (local tag) 41u32))))
 					(if
-						(:doc "An owned return uses an explicit move, a fresh call result, or a conditional of fresh results.")
-						(bool.and (local returning_owner) (bool.not (bool.or (u32.eq (local tag) 9u32)
-							(bool.or (u32.eq (local tag) (local conditional_value))
-								(bool.and (local returning_record) (u32.eq (local tag) 50u32))))))
+						(:doc "An owned return needs a fresh value or a checked explicit transfer.")
+						(bool.and (local returning_owner) (bool.not (bool.or (local fresh) (local construct))))
 						(then (return (call body_error (local caller) (struct.get (local node) start)
 							(struct.get (local node) end) 24u32))))))
 			(let-mut site_count (local site_start))

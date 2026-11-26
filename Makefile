@@ -180,7 +180,7 @@ test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-ha
 		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_arrays/cases.tsv tests/stage-2/numeric_arrays/cases.tsv tests/stage-2/native_dirent/cases.tsv tests/stage-2/native_handle_out/cases.tsv \
 		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_rows/cases.tsv tests/stage-2/native_vectors/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
 		tests/stage-2/graph/targets/cases.tsv tests/stage-2/module_arrays/cases.tsv tests/stage-2/integer_conversions/cases.tsv tests/stage-2/integer_checks/cases.tsv tests/stage-2/enums/cases.tsv tests/stage-2/matches/cases.tsv tests/stage-2/floats/cases.tsv tests/stage-2/while/exits.tsv tests/stage-2/scoped_arrays/cases.tsv tests/stage-2/for/cases.tsv
-	WOVE_TEST_RUNTIME="$(STAGE1)/runtime.tracked.o" $(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/owned_records/cases.tsv
+	WOVE_TEST_RUNTIME="$(STAGE1)/runtime.tracked.o" $(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/owned_records/cases.tsv tests/stage-2/owned_record_arrays/cases.tsv
 
 # Exercise the same byte and ID encoders in both stages and the native word digest.
 test-stage-2-hashing: $(HASHING_PROGRAMS) $(HASHING_NATIVE_PROGRAMS)
