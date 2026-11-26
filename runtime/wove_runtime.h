@@ -40,6 +40,14 @@ __extension__ typedef unsigned __int128 wvrt_u128;
 #define WVRT_I128_NEG_C(high, low) (-(wvrt_i128)(WVRT_U128_C(high, low) - 1) - 1)
 
 wvrt_i128 wvrt_i128_from_wrapped_bits(wvrt_u128 wvrt_bits);
+wvrt_i128 wvrt_i128_shift_at_span(wvrt_i128 wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_u128 wvrt_u128_shift_at_span(wvrt_u128 wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_i128 wvrt_i128_rotate_at_span(wvrt_i128 wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_u128 wvrt_u128_rotate_at_span(wvrt_u128 wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_u128 wvrt_u128_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_i128 wvrt_i128_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
@@ -378,10 +386,17 @@ _Noreturn void wvrt_int_arithmetic_trap(int32_t wvrt_file, int32_t wvrt_start, i
 		wvrt_ok; \
 	})
 
+// Include the signed 128-bit minimum only when the target defines the native type.
+#ifdef WVRT_HAS_INT128
+#define WVRT_WIDE_SIGNED_MIN wvrt_i128: WVRT_I128_NEG_C(UINT64_C(0x8000000000000000), 0),
+#else
+#define WVRT_WIDE_SIGNED_MIN
+#endif
+
 // Return the selected signed minimum, or zero for an unsigned integer.
 #define wvrt_int_signed_min(value) \
 	_Generic((value), int8_t: INT8_MIN, int16_t: INT16_MIN, \
-		int32_t: INT32_MIN, int64_t: INT64_MIN, default: 0)
+		int32_t: INT32_MIN, int64_t: INT64_MIN, WVRT_WIDE_SIGNED_MIN default: 0)
 
 // Avoid undefined signed arithmetic and leave the destination alone on failure.
 #define wvrt_int_try_divide(left, right, output, remainder) \
