@@ -1,0 +1,210 @@
+(module c_name_collisions
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Assign private C spelling alternatives only where complete generated names coincide.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/generics.wove" (only function_generic_list))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../scalar/function_rows.wove" (only function_with_c_name_slot (type ScalarFunction)))
+	(use wove-file "../scalar/records.wove" (only is_generic_template record_with_c_name_slot scope_at (type ScalarRecord)))
+	(use wove-file "../scalar/generics/functions.wove" (only (type FunctionInstance)))
+	(use wove-file "../scalar/generics/key_order.wove" (only order_definitions order_record_keys order_application_keys application_site))
+	(use wove-file "./text.wove" (only c_suffix_byte))
+
+	(struct Bucket (fields (head i32)))
+	(struct Candidate (fields (role u32) (fingerprint u32) (start i32) (end i32) (next i32)))
+
+	(fn base_candidate
+		(:doc "Retain the fingerprint and source suffix of one generated file-scope name.")
+		(params (name SourceNode) (role u32) (fingerprint u32)) (returns Candidate)
+		(body (return (struct.new Candidate (role (local role)) (fingerprint (local fingerprint))
+			(start (struct.get (local name) start)) (end (struct.get (local name) end)) (next 0i32)))))
+
+	(fn same_suffix
+		(:doc "Compare the exact suffix bytes that the C writer produces.")
+		(params (source (shared-array u8)) (left Candidate) (right Candidate)) (returns bool)
+		(body
+			(let-mut a (struct.get (local left) start))
+			(let-mut b (struct.get (local right) start))
+			(let end (struct.get (local left) end))
+			(if
+				(:doc "Case and punctuation may change comparison, but sanitizing always preserves length.")
+				(i32.not-eq (i32.sub (local end) (local a)) (i32.sub (struct.get (local right) end) (local b)))
+				(then (return (bool false))))
+			(while
+				(:doc "Both suffix spans have the same remaining extent.")
+				(i32.lt (local a) (local end))
+				(body
+					(if
+						(:doc "Use the same byte mapping as emission.")
+						(u8.not-eq (call c_suffix_byte (array.load (local source) (local a)))
+							(call c_suffix_byte (array.load (local source) (local b))))
+						(then (return (bool false))))
+					(set (local a) (i32.inc (local a)))
+					(set (local b) (i32.inc (local b)))))
+			(return (bool true))))
+
+	(fn bucket
+		(:doc "Reduce a fingerprint to one entry in a power-of-two table.")
+		(params (fingerprint u32) (count i32)) (returns i32)
+		(body (return (i32.from-u32 (u32.and (local fingerprint) (u32.from-i32 (i32.dec (local count))))))))
+
+	(fn link_candidate
+		(:doc "Use one-based links so zeroed buckets require no setup pass.")
+		(params (buckets (mut-array Bucket)) (candidates (mut-array Candidate)) (row i32) (name Candidate))
+		(returns void)
+		(body
+			(let chain (call bucket (struct.get (local name) fingerprint) (array.len (local buckets))))
+			(array.store (local candidates) (local row) (struct.new Candidate
+				(role (struct.get (local name) role)) (fingerprint (struct.get (local name) fingerprint))
+				(start (struct.get (local name) start)) (end (struct.get (local name) end))
+				(next (struct.get (array.load (local buckets) (local chain)) head))))
+			(array.store (local buckets) (local chain) (struct.new Bucket (head (i32.inc (local row)))))))
+
+	(fn order_function_keys
+		(:doc "Compare defining function rows and, within one template, complete specialization keys.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
+			(left ScalarFunction) (right ScalarFunction) (instances (shared-array FunctionInstance))
+			(left_instance i32) (right_instance i32)) (returns i32)
+		(body
+			(let file (struct.get (local left) file))
+			(let origin (struct.get (local left) origin))
+			(let order (call order_definitions (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local nodes))
+				(local file) (local origin) (struct.get (local right) file) (struct.get (local right) origin)))
+			(if (i32.not-eqz (local order)) (then (return (local order))))
+			(let a (array.load (local instances) (local left_instance)))
+			(let b (array.load (local instances) (local right_instance)))
+			(let list (call function_generic_list (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local origin))))
+			(let formal (struct.get (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local list))) operands))
+			(return (call order_application_keys (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local nodes)) (borrow-shared (local records)) (borrow-shared (local bindings))
+				(call application_site (struct.get (local a) site) (struct.get (local a) site_file) (struct.get (local a) site_base))
+				(call application_site (struct.get (local b) site) (struct.get (local b) site_file) (struct.get (local b) site_base))
+				(local formal) (call scope_at (local file) (struct.get (local left) source_base))))))
+
+	(fn collision_rank
+		(:doc "Rank one genuine spelling conflict by its stable exact key. Return zero for an unchanged name.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (functions (shared-array ScalarFunction))
+			(instances (shared-array FunctionInstance)) (first_instance i32) (function_count i32)
+			(candidates (shared-array Candidate)) (row i32) (head i32)) (returns i32)
+		(body
+			(let name (array.load (local candidates) (local row)))
+			(let-mut cursor (local head))
+			(let-mut collision (bool false))
+			(let-mut rank 1i32)
+			(while
+				(:doc "A bucket can contain several fingerprints and separate generated roles.")
+				(i32.gtz (local cursor))
+				(body
+					(let other (i32.dec (local cursor)))
+					(let candidate (array.load (local candidates) (local other)))
+					(if
+						(:doc "Only the complete spelling can put two exact definitions in the same C namespace slot.")
+						(bool.and (i32.not-eq (local other) (local row))
+							(bool.and (u32.eq (struct.get (local name) role) (struct.get (local candidate) role))
+								(bool.and (u32.eq (struct.get (local name) fingerprint) (struct.get (local candidate) fingerprint))
+									(call same_suffix (borrow-shared (local arena)) (local name) (local candidate)))))
+						(then
+							(set (local collision) (bool true))
+							(let-mut order 0i32)
+							(if
+								(:doc "Construct ranks in the function and named-record namespaces independently.")
+								(i32.lt (local row) (local function_count))
+								(then (set (local order) (call order_function_keys (borrow-shared (local arena))
+									(borrow-shared (local files)) (borrow-shared (local nodes)) (borrow-shared (local records))
+									(borrow-shared (local bindings)) (array.load (local functions) (local other))
+									(array.load (local functions) (local row)) (borrow-shared (local instances))
+									(i32.sub (local other) (local first_instance)) (i32.sub (local row) (local first_instance)))))
+								(else (set (local order) (call order_record_keys (borrow-shared (local arena))
+									(borrow-shared (local files)) (borrow-shared (local nodes)) (borrow-shared (local records))
+									(borrow-shared (local bindings)) (array.load (local records) (i32.sub (local other) (local function_count)))
+									(array.load (local records) (i32.sub (local row) (local function_count)))))))
+							(if (i32.ltz (local order)) (then (set (local rank) (i32.inc (local rank)))))))
+					(set (local cursor) (struct.get (local candidate) next))))
+			(if (local collision) (then (return (local rank))))
+			(return 0i32)))
+
+	(fn assign_c_names
+		(:doc "Resolve private generated name collisions before either C emission pass.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(bindings (shared-array GraphBinding)) (instances (shared-array FunctionInstance)) (first_instance i32)
+			(functions (mut-array ScalarFunction)) (function_count i32) (records (mut-array ScalarRecord)))
+		(returns void)
+		(body
+			(let-mut record_count 0i32)
+			(while
+				(:doc "Only the populated layout prefix needs candidate storage.")
+				(bool.and (i32.lt (local record_count) (array.len (local records)))
+					(i32.not-eqz (struct.get (array.load (local records) (local record_count)) name)))
+				(body (set (local record_count) (i32.inc (local record_count)))))
+			(let count (i32.add (local function_count) (local record_count)))
+			(let-mut width 1i32)
+			(while
+				(:doc "Use a power-of-two bucket table with enough space for ordinary small chains.")
+				(bool.and (i32.lt (local width) (local count)) (i32.lt (local width) 536870912i32))
+				(body (set (local width) (i32.add (local width) (local width)))))
+			(let-mut buckets (array.alloc Bucket (local width)))
+			(let-mut candidates (array.alloc Candidate (local count)))
+			(let-mut index 0i32)
+			(while
+				(:doc "Place Wove definitions into their generated-role buckets.")
+				(i32.lt (local index) (local function_count))
+				(body
+					(let function (array.load (local functions) (local index)))
+					(call link_candidate (borrow-mut (local buckets)) (borrow-mut (local candidates)) (local index)
+						(call base_candidate (array.load (local nodes) (struct.get (local function) name)) 1u32
+							(struct.get (local function) identity)))
+					(set (local index) (i32.inc (local index)))))
+			(set (local index) 0i32)
+			(while
+				(:doc "Only concrete Wove nominal layouts use the generated record role.")
+				(i32.lt (local index) (local record_count))
+				(body
+					(let record (array.load (local records) (local index)))
+					(if
+						(:doc "Native layouts have a header spelling and anonymous layouts already have unique rows.")
+						(bool.and (i32.gtz (struct.get (local record) name))
+							(bool.and (i32.not-gtz (struct.get (local record) native)) (bool.not (call is_generic_template (local record)))))
+						(then (call link_candidate (borrow-mut (local buckets)) (borrow-mut (local candidates))
+							(i32.add (local function_count) (local index))
+							(call base_candidate (array.load (local nodes) (struct.get (local record) name)) 2u32
+								(struct.get (local record) identity)))))
+					(set (local index) (i32.inc (local index)))))
+			(set (local index) 0i32)
+			(while
+				(:doc "Give all references to an affected definition the same assigned rank.")
+				(i32.lt (local index) (local count))
+				(body
+					(let name (array.load (local candidates) (local index)))
+					(if
+						(:doc "Skipped rows do not participate in the spelling comparison.")
+						(u32.gtz (struct.get (local name) role))
+						(then
+							(let head (struct.get (array.load (local buckets) (call bucket (struct.get (local name) fingerprint) (local width))) head))
+							(let rank (call collision_rank (borrow-shared (local arena)) (borrow-shared (local files))
+								(borrow-shared (local nodes)) (borrow-shared (local records)) (borrow-shared (local bindings))
+								(borrow-shared (local functions)) (borrow-shared (local instances)) (local first_instance)
+								(local function_count) (borrow-shared (local candidates)) (local index) (local head)))
+							(if
+								(:doc "An unchanged definition keeps the normal generated spelling.")
+								(i32.gtz (local rank))
+								(then
+									(if
+										(:doc "Update only the emission field, leaving all checked rows and fingerprints intact.")
+										(i32.lt (local index) (local function_count))
+										(then
+											(array.store (local functions) (local index)
+												(call function_with_c_name_slot (array.load (local functions) (local index)) (local rank))))
+										(else
+											(let row (i32.sub (local index) (local function_count)))
+											(array.store (local records) (local row)
+												(call record_with_c_name_slot (array.load (local records) (local row)) (local rank)))))))))
+					(set (local index) (i32.inc (local index)))))))
+)
