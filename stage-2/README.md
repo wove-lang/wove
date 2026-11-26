@@ -259,7 +259,8 @@ selected from another module keeps the defining enum and its variant names.
 
 The match evaluates its subject once and runs one case in its own scope.
 An enum match must cover each variant or end in a `(case _ ...)` fallback
-for uncovered variants. A continuing statement case exits the match
+for uncovered variants. A declared variant named `_` keeps its exact
+case spelling. A continuing statement case exits the match
 after cleaning up its locals. A return exits the function and releases
 its active owners. When every case returns, the match satisfies the
 enclosing return requirement. Missing coverage reports code 78 at the

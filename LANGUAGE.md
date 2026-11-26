@@ -92,7 +92,8 @@ declare a nominal, copyable type. `(enum.new Status Ok)` constructs one
 variant of that type. `(match value (case Ok statements...) ...)`
 evaluates its subject once and runs only the selected case in its own
 scope. Cover all enum variants or use a final `(case _ ...)` for
-uncovered variants.
+uncovered variants. In an enum that declares a variant named `_`, that
+spelling continues to select the declared variant.
 
 A variant can carry one copyable value. Declare it as `(Push i64)`, build it
 with `(enum.new Instruction Push value)`, and match it with
