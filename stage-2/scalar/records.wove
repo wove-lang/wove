@@ -17,6 +17,7 @@
 	(use wove-file "../source/c_scope.wove" (only declaring_c_bridge project_bridge))
 	(use wove-file "../source/scan.wove" (only is_disabled_form is_metadata_form (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts validate_form_metadata (type SelectedDeclaration)))
+	(use wove-file "../source/imports.wove" (only import_keyword))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../source/types.wove" (only is_reserved_type_name reference_mode is_builtin_integer is_builtin_float is_builtin_numeric is_builtin_scalar))
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
@@ -38,7 +39,9 @@
 		site and namespace. A repeated site has a non-emitting alias row with name -2.
 		An owning array element has a non-emitting row with name -3 and its exact type in first.
 		A callable layout stores the first formal in first, its scalar or
-		void result in argument_file, and its formal shape in argument_base.`)
+		void result in argument_file, and its formal shape in argument_base.
+		A callable alias has name -5, the defining type form in first, and
+		the canonical type code in alias_of.`)
 		ScalarRecord
 		(fields (name i32) (file i32) (identity u32) (first i32) (count i32)
 			(declaration i32) (native i32) (source_base i32) (emit_row i32) (owns_arrays bool) (borrows_bytes bool)
@@ -64,6 +67,8 @@
 			(u32.lt (local type) 268435456u32)))))
 
 	(let callable_layout_name -4i32)
+	(let callable_alias_name -5i32)
+	(let callable_alias_kind 593u32)
 	(let callable_type_base 805306368u32)
 	(let callable_type_limit 1073741824u32)
 
@@ -78,6 +83,11 @@
 		(:doc "Distinguish a function-pointer signature from data layouts in the shared table.")
 		(params (layout ScalarRecord)) (returns bool)
 		(body (return (i32.eq (struct.get (local layout) name) (local callable_layout_name)))))
+
+	(fn is_callable_alias
+		(:doc "Identify a defining type name that refers to an interned signature.")
+		(params (layout ScalarRecord)) (returns bool)
+		(body (return (i32.eq (struct.get (local layout) name) (local callable_alias_name)))))
 
 	(fn callable_index
 		(:doc "Get the interned signature row for a checked function value.")
@@ -142,6 +152,33 @@
 					(owns_arrays (bool false)) (borrows_bytes (bool false)) (generic -1i32) (specialization -1i32)
 					(argument_file (i32.from-u32 (struct.get (local shape) result))) (argument_base (local named)) (alias_of -1i32)))
 			(return (i32.inc (local next)))))
+
+	(fn find_callable_alias
+		(:doc "Resolve a checked type name through its defining file and original declaration.")
+		(params (source (shared-array u8)) (name SourceNode) (scope TypeScope)
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)))
+		(returns u32)
+		(body
+			(let index (call find_binding (borrow-shared (local source)) (borrow-shared (local source))
+				(struct.get (local name) start) (struct.get (local name) end) (borrow-shared (local bindings)) (array.len (local bindings))
+				(struct.get (local scope) file) (bool false) (struct.get (local scope) source_base) 1u32))
+			(if (i32.ltz (local index)) (then (return 0u32)))
+			(let binding (array.load (local bindings) (local index)))
+			(let-mut row 0i32)
+			(while
+				(:doc "Match only registered callable aliases in the populated layout prefix.")
+				(i32.lt (local row) (array.len (local records)))
+				(body
+					(let alias (array.load (local records) (local row)))
+					(if (i32.eqz (struct.get (local alias) name)) (then (return 0u32)))
+					(if
+						(:doc "An import rename shares the defining alias's canonical type.")
+						(bool.and (call is_callable_alias (local alias))
+							(bool.and (i32.eq (struct.get (local alias) file) (struct.get (local binding) file))
+								(i32.eq (struct.get (local alias) declaration) (struct.get (local binding) declaration))))
+						(then (return (u32.from-i32 (struct.get (local alias) alias_of)))))
+					(set (local row) (i32.inc (local row)))))
+			(return 0u32)))
 
 	(fn layout_count
 		(:doc "Find the populated prefix of the zero-initialized layout table.")
@@ -882,8 +919,18 @@
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
 				(array.load (local nodes) (local declaration))))
-			(return (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
-				(struct.get (local parts) head)))))
+			(let head (struct.get (local parts) head))
+			(let kind (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local head)))
+			(if
+				(:doc "The type selector spelling declares an alias at module scope.")
+				(bool.and (u32.eqz (local kind)) (i32.not-ltz (local head)))
+				(then
+					(if
+						(:doc "Reuse the graph's complete type keyword check.")
+						(u32.eq (call import_keyword (borrow-shared (local source)) (array.load (local nodes) (local head))) 6u32)
+						(then (return (local callable_alias_kind))))))
+			(return (local kind))))
+
 
 	(fn count_declarations
 		(:doc `Count selected declarations of one kind before allocating its checked table.`)
@@ -1400,6 +1447,13 @@
 				(:doc "A value parameter keeps its exact scalar or record type.")
 				(u32.gtz (local value))
 				(then (return (call entry_at (local node) (i32.from-u32 (local value)) 0u32))))
+			(if
+				(:doc "A Wove callable formal can reuse a name from its type namespace.")
+				(bool.and (local wove) (u32.eq (struct.get (local node) kind) 1u32))
+				(then
+					(let type (call find_callable_alias (borrow-shared (local source)) (local node) (call scope_at (local file) (local source_base))
+						(borrow-shared (local records)) (borrow-shared (local bindings))))
+					(if (u32.gtz (local type)) (then (return (call entry_at (local node) (i32.from-u32 (local type)) 0u32))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(if
 				(:doc "Only ordinary Wove functions can take an inline Wove callable signature.")
@@ -1903,7 +1957,7 @@
 					(let prior (array.load (local records) (local previous)))
 					(if
 						(:doc "Distinguish a repeated name in this file from a stable identity collision.")
-						(bool.and (bool.not (call is_fixed_array (local prior)))
+						(bool.and (i32.gtz (struct.get (local prior) name))
 							(u32.eq (local identity) (struct.get (local prior) identity)))
 						(then
 							(let earlier (array.load (local nodes) (struct.get (local prior) name)))
@@ -1984,6 +2038,48 @@
 					(generic (local generic)) (specialization -1i32) (argument_file -1i32) (argument_base 0i32) (alias_of -1i32)))
 			(return (call entry_at (local node) (i32.inc (local index)) 0u32))))
 
+	(fn register_callable_alias
+		(:doc "Bind a module type declaration to one interned callable signature.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32)
+			(file i32) (base i32) (records (mut-array ScalarRecord)) (start i32))
+		(returns EntryRead)
+		(body
+			(let node (array.load (local nodes) (local declaration)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let name (struct.get (local parts) operands))
+			(if (i32.ltz (local name)) (then (return (call entry_at (local node) -1i32 22u32))))
+			(let spelling (array.load (local nodes) (local name)))
+			(if
+				(:doc "An alias must name a type without shadowing a reserved built-in spelling.")
+				(bool.or (bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
+					(call is_reserved_type_name (borrow-shared (local source)) (struct.get (local spelling) start) (struct.get (local spelling) end)))
+				(then (return (call entry_at (local spelling) -1i32 22u32))))
+			(let first (struct.get (local spelling) next_sibling))
+			(if (i32.ltz (local first)) (then (return (call entry_at (local node) -1i32 23u32))))
+			(let target (array.load (local nodes) (local first)))
+			(let extra (struct.get (local target) next_sibling))
+			(if (i32.not-ltz (local extra)) (then (return (call entry_at (array.load (local nodes) (local extra)) -1i32 23u32))))
+			(let shape (call read_callable_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local target)))
+			(if
+				(:doc "Preserve the type parser's precise field or scalar operand diagnostic.")
+				(u32.gtz (struct.get (local shape) error))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local shape) start))
+					(end (struct.get (local shape) end)) (error (struct.get (local shape) error)) (related -1i32)))))
+			(let next (call intern_callable_layout (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-mut (local records)) (local shape) (local start)))
+			(if
+				(:doc "Check room for the canonical signature and its defining alias row.")
+				(bool.or (i32.ltz (local next)) (i32.not-lt (local next) (array.len (local records))))
+				(then (return (call entry_at (local target) -1i32 16u32))))
+			(let type (call find_callable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local shape)))
+			(array.store (local records) (local next)
+				(struct.new ScalarRecord (name (local callable_alias_name)) (file (local file)) (identity 0u32)
+					(first (local first)) (count 0i32) (declaration (i32.sub (local declaration) (local base)))
+					(native -4i32) (source_base 0i32) (emit_row (local next)) (owns_arrays (bool false)) (borrows_bytes (bool false))
+					(generic -1i32) (specialization -1i32) (argument_file -1i32) (argument_base 0i32) (alias_of (i32.from-u32 (local type)))))
+			(return (call entry_at (local node) (i32.inc (local next)) 0u32))))
+
 	(fn register_module_records
 		(:doc `Register every active type in a file before any of its signatures are read.
 
@@ -2002,6 +2098,14 @@
 				(body
 					(let form (i32.add (local base) (struct.get (array.load (local declarations) (local index)) node)))
 					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
+					(if
+						(:doc "A named callable reuses the exact layout interned for its signature.")
+						(u32.eq (local kind) (local callable_alias_kind))
+						(then
+							(let checked (call register_callable_alias (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local form) (local file) (local base) (borrow-mut (local records)) (local next)))
+							(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
+							(set (local next) (struct.get (local checked) operand))))
 					(if
 						(:doc "Checked function, struct, and enum declarations can mention anonymous fixed layouts.")
 						(bool.or (u32.eq (local kind) (local enum_declaration)) (bool.or (bool.and (u32.eq (local kind) 1u32)

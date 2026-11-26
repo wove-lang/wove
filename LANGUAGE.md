@@ -266,6 +266,20 @@ evaluates each argument once from left to right. A callable with a
 Stage 2 supports built-in scalar parameters and scalar or `void`
 results in these signatures.
 
+Use a module type name to reuse the same signature in multiple declarations.
+
+```lisp
+(type UnaryI32 (fn-type (params i32) (returns i32)))
+
+(fn forward (params (operation UnaryI32) (value i32)) (returns i32)
+    (body (return (call apply (local operation) (local value)))))
+```
+
+`UnaryI32` belongs to the module's type namespace. Select it from another
+module with `(type UnaryI32)` in an import's `only` list. An alias is
+transparent, so values can pass between alias-typed and inline parameters
+with the same signature.
+
 ### Generics
 
 Records and functions can declare explicit type, `i32` constant, and
