@@ -27,4 +27,8 @@ static inline int32_t count_chain_drops(void) {
 	return chain_drops;
 }
 
+// Protected calls must invoke the declaration used in their prototype assertions.
+#define default_chain() ((ChainOwner)0)
+#define read_chain(owner) ((void)(owner), 0)
+
 #endif
