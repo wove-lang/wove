@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct fixture_handle {
 	int32_t value;
@@ -28,6 +29,12 @@ static inline int32_t fixture_open(fixture_handle **output, int32_t scenario) {
 	handle->value = 42;
 	*output = handle;
 	return scenario == 1 ? 8 : 0;
+}
+
+// Check projected argument types before publishing the successful native handle.
+static inline int32_t fixture_open_rows(char *const *rows, fixture_handle **output, const char *optional) {
+	if (rows[0] == NULL || strcmp(rows[0], "A") != 0 || rows[1] != NULL || optional != NULL) { return -11; }
+	return fixture_open(output, 2);
 }
 
 // A void pointer would accept the call through implicit conversion.
