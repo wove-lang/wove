@@ -126,6 +126,7 @@ are available at every listed width.
 | Negated comparisons | Prefix any predicate with `not-`, as in `u32.not-eq` or `i32.not-ltz` |
 | Bitwise operations | `and`, `or`, `xor`, `not` |
 | Shifts and rotations | `shl`, `shr`, `rotl`, `rotr` |
+| Bit counts | `clz`, `ctz`, `popcnt` |
 | Range and checked conversion | `T.fits`, `T.from-S`, `int.convert` |
 | Endian byte conversions | `to-le-bytes`, `to-be-bytes`, `from-le-bytes`, `from-be-bytes` |
 | Boolean logic | `bool.and`, `bool.or`, `bool.not` |
@@ -154,6 +155,11 @@ are available at every listed width.
   bits left or right and return the same type. The word and an exact `i32`
   count are evaluated once in that order. Zero leaves the word unchanged.
   Counts outside `[0, width)` trap at the count operand's source span.
+- `(T.clz word)`, `(T.ctz word)`, and `(T.popcnt word)` count leading
+  zeros, trailing zeros, and set bits, respectively. Each evaluates one
+  exact `T` operand and returns `i32`. Counts use the declared-width bit
+  pattern, including the two's-complement bits of signed operands. For
+  zero, `clz` and `ctz` return the width in bits and `popcnt` returns zero.
 - Division truncates toward zero, and a nonzero remainder has the sign of
   the dividend. Both operations trap on zero divisors. Dividing a signed
   minimum by `-1` traps, and its remainder by `-1` is zero. Traps point to

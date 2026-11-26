@@ -39,6 +39,10 @@ __extension__ typedef unsigned __int128 wvrt_u128;
 #define WVRT_I128_C(high, low) ((wvrt_i128)WVRT_U128_C(high, low))
 #define WVRT_I128_NEG_C(high, low) (-(wvrt_i128)(WVRT_U128_C(high, low) - 1) - 1)
 
+int32_t wvrt_clz128(wvrt_u128 wvrt_value);
+int32_t wvrt_ctz128(wvrt_u128 wvrt_value);
+int32_t wvrt_popcnt128(wvrt_u128 wvrt_value);
+
 wvrt_i128 wvrt_i128_from_wrapped_bits(wvrt_u128 wvrt_bits);
 wvrt_i128 wvrt_i128_shift_at_span(wvrt_i128 wvrt_value, int32_t wvrt_count, bool wvrt_right,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
@@ -479,6 +483,9 @@ int32_t wvrt_i32_divide_at_span(int32_t wvrt_left, int32_t wvrt_right, bool wvrt
 uint32_t wvrt_u32_add_wrapping(uint32_t wvrt_left, uint32_t wvrt_right);
 uint32_t wvrt_u32_sub_wrapping(uint32_t wvrt_left, uint32_t wvrt_right);
 int32_t wvrt_u32_shift_count(int32_t wvrt_count, wvrt_location wvrt_site);
+int32_t wvrt_clz(uint64_t wvrt_value, int32_t wvrt_width);
+int32_t wvrt_ctz(uint64_t wvrt_value, int32_t wvrt_width);
+int32_t wvrt_popcnt(uint64_t wvrt_value, int32_t wvrt_width);
 int32_t wvrt_shift_count_at_span(int32_t wvrt_count, int32_t width,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_u32_shift_count_at_span(int32_t wvrt_count, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

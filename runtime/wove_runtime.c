@@ -7,6 +7,7 @@
 #include <float.h>
 #include <math.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1801,6 +1802,44 @@ int32_t wvrt_u64_shift_count_at_span(int32_t wvrtcount, int32_t wvrtfile, int32_
 static uint64_t wvrt_word_mask(int32_t width) {
 	return UINT64_MAX >> (64 - width);
 }
+
+// Count leading zeros in the declared bits, guarding the builtin's zero case.
+int32_t wvrt_clz(uint64_t value, int32_t width) {
+	const uint64_t bits = value & wvrt_word_mask(width);
+	const int32_t builtin_width = (int32_t)(sizeof(unsigned long long) * CHAR_BIT);
+	return bits == 0 ? width : __builtin_clzll(bits) - (builtin_width - width);
+}
+
+// Count trailing zeros in the declared bits, including a whole zero word.
+int32_t wvrt_ctz(uint64_t value, int32_t width) {
+	const uint64_t bits = value & wvrt_word_mask(width);
+	return bits == 0 ? width : __builtin_ctzll(bits);
+}
+
+// Count only the set bits in the declared width.
+int32_t wvrt_popcnt(uint64_t value, int32_t width) {
+	return __builtin_popcountll(value & wvrt_word_mask(width));
+}
+
+// The wide counters combine 64-bit halves on targets with the native ABI.
+#ifdef WVRT_HAS_INT128
+// Leading zeros cross into the low half only when the high half is zero.
+int32_t wvrt_clz128(wvrt_u128 value) {
+	const uint64_t high = (uint64_t)(value >> 64);
+	return high == 0 ? 64 + wvrt_clz((uint64_t)value, 64) : wvrt_clz(high, 64);
+}
+
+// Trailing zeros cross into the high half only when the low half is zero.
+int32_t wvrt_ctz128(wvrt_u128 value) {
+	const uint64_t low = (uint64_t)value;
+	return low == 0 ? 64 + wvrt_ctz((uint64_t)(value >> 64), 64) : wvrt_ctz(low, 64);
+}
+
+// Each half contributes independently to a wide population count.
+int32_t wvrt_popcnt128(wvrt_u128 value) {
+	return wvrt_popcnt((uint64_t)(value >> 64), 64) + wvrt_popcnt((uint64_t)value, 64);
+}
+#endif
 
 // Interpret already masked bits using only representable signed casts.
 static int64_t wvrt_signed_word(uint64_t bits, uint64_t mask) {
