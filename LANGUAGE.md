@@ -24,13 +24,16 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 | Wrapping multiplication | | All integer widths |
 | Checked arithmetic | | `add-checked`, `sub-checked`, and `mul-checked` at all integer widths |
 | Division and remainder | | `div` and `rem` at all integer widths |
+| Recoverable arithmetic | | `try_add`, `try_sub`, `try_mul`, `try_div`, and `try_rem` at all integer widths |
+| Checked conversion and range test | Selected `T.from-S` pairs | `T.from-S` and `T.fits` for all integer type pairs |
+| Endian byte conversions | | `to-le-bytes`, `to-be-bytes`, `from-le-bytes`, and `from-be-bytes` at all integer widths |
 | Equality | `u8.eq`, `i32.eq`, `u32.eq` | All integer widths and `(int.eq Type left right)` |
 | Ordering | `u8.lt`, `i32.lt`, `u32.lt` | `lt`, `le`, `gt`, and `ge` at all integer widths |
 | Compare with zero | | `eqz`, `ltz`, `lez`, `gtz`, and `gez` at all integer widths |
 | Negated comparison | | Prefix the predicate with `not-`, as in `u32.not-eq`, `i32.not-ltz`, or `int.not-eq` |
-| AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | `i32.and`, `i32.or`, `u64.and`, `u64.or`, `u64.xor`, `u64.not` |
-| Left and right shift | `u32.shl`, `u32.shr` | `i32.shl`, `i32.shr`, `u64.shl`, `u64.shr` |
-| Rotate right | | `u64.rotr` |
+| AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | All integer widths |
+| Left and right shift | `u32.shl`, `u32.shr` | All integer widths |
+| Rotate left and right | | `rotl` and `rotr` at all integer widths |
 | Boolean logic | `bool.and`, `bool.or`, `bool.not` | |
 
 - Integer arithmetic evaluates each written operand once, from left to right.
@@ -45,12 +48,18 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
   including when the result is fixed by unsigned ordering. `int.eq` and
   `int.not-eq` also accept a selected native integer alias as their exact
   type. `bool.and` and `bool.or` short-circuit.
-- A shift takes an `i32` count. Counts outside `[0, width)` trap. Left shifts
-  keep the low bits of the declared width. Right shifts extend the sign for
-  signed integers and fill with zeros for unsigned integers.
-- `(u64.rotr word count)` rotates a `u64` right by an `i32` count in
-  `[0, 64)`. A zero count returns the word unchanged. Out-of-range counts
-  trap at the count operand's source span.
+- Bitwise `and`, `or`, `xor`, and `not` take and produce the exact integer
+  type named in the tag. `not` takes one operand. The other three take two.
+  Operands are evaluated once, from left to right.
+- A shift preserves the word type and takes an exact `i32` count. It evaluates
+  the word and then the count, once each. Counts outside `[0, width)` trap
+  at the full shift span. Left shifts keep the low bits of the declared width.
+  Right shifts extend the sign for signed integers and fill with zeros for
+  unsigned integers.
+- `(T.rotl word count)` and `(T.rotr word count)` rotate an exact `T` word's
+  bits left or right and return the same type. The word and an exact `i32`
+  count are evaluated once in that order. Zero leaves the word unchanged.
+  Counts outside `[0, width)` trap at the count operand's source span.
 - Division truncates toward zero, and a nonzero remainder has the sign of
   the dividend. Both operations trap on zero divisors. Dividing a signed
   minimum by `-1` traps, and its remainder by `-1` is zero. Traps point to
