@@ -1,16 +1,22 @@
 (module scalar_matches
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Resolve exhaustive statement cases against one checked enum's variant table.`)
+	(:doc `Check exhaustive matches and retain their scoped case and payload bindings.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only skip_disabled_siblings))
-	(use wove-file "../source/enum_forms.wove" (only (value match_case) (value non_exhaustive_match)))
+	(use wove-file "../source/enum_forms.wove" (only (value match_statement) (value match_case) (value non_exhaustive_match)
+		(value pending_match_value) (value match_value) (value match_value_case) (value match_case_gate)))
+	(use wove-file "../source/types.wove" (only is_builtin_integer))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
-	(use wove-file "./syntax.wove" (only entry_at entry_form is_scalar_name (value for_bind) (type EntryRead)))
+	(use wove-file "./syntax.wove" (only entry_at entry_form is_scalar_name same_name (value for_bind) (type EntryRead)))
 	(use wove-file "./locals.wove" (only read_local_name))
-	(use wove-file "./records.wove" (only find_member member_value_type (type ScalarRecord)))
+	(use wove-file "./records.wove" (only find_member member_value_type is_record_type record_index is_enum_layout (type ScalarRecord)))
 	(use wove-file "./flow.wove" (only block_statement (value case_payload_binding) (type ScalarStatement)))
+
+	(use wove-file "./match_patterns.wove" (only is_match_fallback read_integer_pattern match_key has_match_key (type MatchKey)))
+	(use wove-file "./conditional.wove" (only copyable_choice_type))
+	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
 
 	(fn plan_case_body
 		(:doc `Record the arm's statement list and introduce an immutable copy of any named payload.`)
@@ -20,7 +26,7 @@
 		(body
 			(let first (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
 			(if
-				(:doc "A unit variant starts directly with its statements.")
+				(:doc "A unit variant or wildcard starts directly with its arm body.")
 				(u32.eq (local type) 0u32)
 				(then
 					(array.store (local statements) (local arm) (call block_statement (local first) (local ordinal) -1i32 (bool true)))
@@ -36,9 +42,7 @@
 			(if (u32.lt 0u32 (struct.get (local named) error)) (then (return (local named))))
 			(let name (struct.get (local named) operand))
 			(let spelling (array.load (local nodes) (local name)))
-			(let start (struct.get (local spelling) start))
-			(let discard (bool.and (i32.eq (i32.sub.wrapping (struct.get (local spelling) end) (local start)) 1i32)
-				(u8.eq (array.load (local source) (local start)) 95u8)))
+			(let discard (call is_match_fallback (borrow-shared (local source)) (local spelling)))
 			(let body_start (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes))
 				(struct.get (local binder) next_sibling)))
 			(let-mut bound -1i32)
@@ -57,19 +61,50 @@
 					(move_site -1i32) (paths 0u32) (previous_loan -1i32)))
 			(return (call entry_at (local block) (local arm) 0u32))))
 
+	(fn integer_case_count
+		(:doc "Size the duplicate-check scratch from the number of case forms.")
+		(params (nodes (shared-array SourceNode)) (first i32))
+		(returns i32)
+		(body
+			(let-mut arm (local first))
+			(let-mut count 0i32)
+			(while
+				(:doc "Each sibling contributes room for one constant key.")
+				(i32.lt -1i32 (local arm))
+				(body
+					(set (local count) (i32.add.wrapping (local count) 1i32))
+					(set (local arm) (struct.get (array.load (local nodes) (local arm)) next_sibling))))
+			(return (local count))))
+
 	(fn plan_match_cases
-		(:doc `Check case names and coverage before entering any of the independent arm scopes.`)
+		(:doc `Check exact patterns and coverage before planning any of the independent arm scopes.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(first i32) (layout ScalarRecord) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
-			(statements (mut-array ScalarStatement)))
+			(subject i32) (type u32) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
+			(statements (mut-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
-			(let count (struct.get (local layout) count))
+			(let subject_node (array.load (local nodes) (local subject)))
+			(let first (struct.get (local subject_node) next_sibling))
+			(let integer (call is_builtin_integer (local type)))
+			(let-mut count 0i32)
+			(let-mut keys_count 0i32)
+			(if
+				(:doc "Integer cases require an explicit fallback. Enum cases can exhaust the nominal variants.")
+				(local integer)
+				(then (set (local keys_count) (call integer_case_count (borrow-shared (local nodes)) (local first))))
+				(else
+					(if
+						(:doc "Only a built-in integer or a declared enum can supply a subject.")
+						(bool.not (bool.and (call is_record_type (local type))
+							(call is_enum_layout (array.load (local records) (call record_index (local type))))))
+						(then (return (call entry_at (local subject_node) -1i32 24u32))))
+					(set (local count) (struct.get (array.load (local records) (call record_index (local type))) count))))
+			(let-mut keys (array.alloc MatchKey (local keys_count)))
 			(let-mut seen (array.alloc u8 (local count)))
 			(let-mut covered 0i32)
 			(let-mut arm (local first))
 			(while
-				(:doc "Resolve each case against the subject's exact enum, even when variants share spellings across types.")
+				(:doc "A case label is a checked literal, a variant from the subject's own enum, or the final wildcard.")
 				(i32.lt -1i32 (local arm))
 				(body
 					(let block (array.load (local nodes) (local arm)))
@@ -77,41 +112,173 @@
 						(local block) (local match_case) 24u32))
 					(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
 					(let index (struct.get (local form) operand))
+					(if (i32.lt (local index) 0i32) (then (return (call entry_at (local block) -1i32 24u32))))
+					(let pattern (array.load (local nodes) (local index)))
+					(let operand (struct.get (local pattern) next_sibling))
+					(let-mut fallback (call is_match_fallback (borrow-shared (local source)) (local pattern)))
 					(if
-						(:doc "A case needs its bare variant even when its body is empty.")
-						(i32.lt (local index) 0i32)
-						(then (return (call entry_at (local block) -1i32 24u32))))
-					(let name (array.load (local nodes) (local index)))
+						(:doc "Preserve an exact case for an enum that already declares a variant named underscore.")
+						(bool.and (local fallback) (bool.not (local integer)))
+						(then
+							(let layout (array.load (local records) (call record_index (local type))))
+							(let variant (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+								(struct.get (local layout) first) (local count) (local pattern)))
+							(set (local fallback) (i32.lt (struct.get (local variant) ordinal) 0i32))))
 					(if
-						(:doc "A case variant uses the declaration's bare spelling.")
-						(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
-						(then (return (call entry_at (local name) -1i32 24u32))))
-					(let variant (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
-						(struct.get (local layout) first) (local count) (local name)))
-					(let ordinal (struct.get (local variant) ordinal))
+						(:doc "The wildcard ends the match and binds no payload.")
+						(local fallback)
+						(then
+							(let next (struct.get (local block) next_sibling))
+							(if
+								(:doc "An arm after the wildcard has no reachable subject.")
+								(i32.lt -1i32 (local next))
+								(then (return (call entry_at (array.load (local nodes) (local next)) -1i32 24u32))))
+							(if
+								(:doc "An enum wildcard also needs at least one uncovered variant.")
+								(bool.and (bool.not (local integer)) (i32.eq (local covered) (local count)))
+								(then (return (call entry_at (local pattern) -1i32 24u32))))
+							(array.store (local statements) (local arm) (call block_statement
+								(call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand))
+								-1i32 -1i32 (bool true)))
+							(return (call entry_at (local node) (local first) 0u32))))
 					(if
-						(:doc "An unavailable variant retains the original lookup span.")
-						(i32.lt (local ordinal) 0i32)
-						(then (return (call entry_at (local name) -1i32 34u32))))
-					(if
-						(:doc "A second case for one variant is a duplicate even if the bodies differ.")
-						(u8.eq (array.load (local seen) (local ordinal)) 1u8)
-						(then (return (call entry_at (local name) -1i32 33u32))))
-					(array.store (local seen) (local ordinal) 1u8)
+						(:doc "Integer keys are compared by value, including across radices and leading-zero spellings.")
+						(local integer)
+						(then
+							(let checked (call read_integer_pattern (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local index) (local type) (borrow-mut (local expressions))))
+							(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
+							(let key (call match_key (borrow-shared (local source)) (array.load (local expressions) (local index))))
+							(if
+								(:doc "A repeated constant reports the later pattern.")
+								(call has_match_key (borrow-shared (local keys)) (local covered) (local key))
+								(then (return (call entry_at (local pattern) -1i32 33u32))))
+							(array.store (local keys) (local covered) (local key))
+							(array.store (local statements) (local arm) (call block_statement
+								(call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand))
+								(local index) -1i32 (bool true))))
+						(else
+							(if
+								(:doc "A variant pattern uses the declaration's bare spelling.")
+								(bool.not (call is_scalar_name (borrow-shared (local source)) (local pattern)))
+								(then (return (call entry_at (local pattern) -1i32 24u32))))
+							(let layout (array.load (local records) (call record_index (local type))))
+							(let variant (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+								(struct.get (local layout) first) (local count) (local pattern)))
+							(let ordinal (struct.get (local variant) ordinal))
+							(if (i32.lt (local ordinal) 0i32) (then (return (call entry_at (local pattern) -1i32 34u32))))
+							(if
+								(:doc "A second case for the same variant overlaps the earlier case.")
+								(u8.eq (array.load (local seen) (local ordinal)) 1u8)
+								(then (return (call entry_at (local pattern) -1i32 33u32))))
+							(array.store (local seen) (local ordinal) 1u8)
+							(let payload (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout)
+								(array.load (local nodes) (struct.get (local variant) row))))
+							(let checked (call plan_case_body (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local block) (local arm) (local ordinal) (local operand) (local payload) (borrow-mut (local statements))))
+							(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))))
 					(set (local covered) (i32.add.wrapping (local covered) 1i32))
-					(let payload (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout)
-						(array.load (local nodes) (struct.get (local variant) row))))
-					(let checked (call plan_case_body (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local block) (local arm) (local ordinal) (struct.get (local name) next_sibling) (local payload)
-						(borrow-mut (local statements))))
-					(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
 					(set (local arm) (struct.get (local block) next_sibling))))
 			(if
-				(:doc "Missing variants have no case span. Report the incomplete match form.")
-				(bool.not (i32.eq (local covered) (local count)))
+				(:doc "A missing integer fallback or an uncovered enum variant points at the match.")
+				(bool.or (local integer) (bool.not (i32.eq (local covered) (local count))))
 				(then (return (call entry_at (local node) -1i32 (local non_exhaustive_match)))))
 			(return (call entry_at (local node) (local first) 0u32))))
+
+	(fn seed_match_value
+		(:doc "Schedule case checking after the subject's expression has been checked.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (expected u32) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local match_statement) 24u32))
+			(if (u32.lt 0u32 (struct.get (local form) error)) (then (return (local form))))
+			(let subject (struct.get (local form) operand))
+			(if (i32.lt (local subject) 0i32) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let first (struct.get (array.load (local nodes) (local subject)) next_sibling))
+			(if (i32.lt (local first) 0i32) (then (return (call entry_at (local node) -1i32 (local non_exhaustive_match)))))
+			(array.store (local expressions) (local index) (call expression_row
+				(local pending_match_value) (local expected) -1i32 (local subject) 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local subject) (call expression_row
+				0u32 42u32 -1i32 -1i32 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local first) (call expression_row
+				(local match_case_gate) 0u32 (local index) -1i32 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn seed_match_results
+		(:doc "A value case supplies one expression after its pattern and any checked payload binder.")
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement)) (first i32) (expected u32)
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let-mut arm (local first))
+			(while
+				(:doc "Publish value-case boundaries before visiting the result expressions.")
+				(i32.lt -1i32 (local arm))
+				(body
+					(let block (array.load (local nodes) (local arm)))
+					(let case (array.load (local statements) (local arm)))
+					(let result (struct.get (local case) first))
+					(if
+						(:doc "A case must supply exactly one value in an expression match.")
+						(bool.or (i32.lt (local result) 0i32)
+							(i32.lt -1i32 (struct.get (array.load (local nodes) (local result)) next_sibling)))
+						(then (return (call entry_at (local block) -1i32 24u32))))
+					(array.store (local expressions) (local arm)
+						(call expression_row (local match_value_case) 0u32 -1i32 (local result) 0i32 0i32 (bool false)))
+					(array.store (local expressions) (local result)
+						(call expression_row 0u32 (local expected) -1i32 -1i32 0i32 0i32 (bool false)))
+					(set (local arm) (struct.get (local block) next_sibling))))
+			(return (call entry_at (array.load (local nodes) (local first)) (local first) 0u32))))
+
+	(fn finish_match_value
+		(:doc "Publish the common exact copyable type after each arm value has been checked.")
+		(params (nodes (shared-array SourceNode)) (index i32) (row ScalarExpression) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let subject (struct.get (local row) first))
+			(let-mut arm (struct.get (array.load (local nodes) (local subject)) next_sibling))
+			(let first_result (struct.get (array.load (local expressions) (local arm)) first))
+			(let type (struct.get (array.load (local expressions) (local first_result)) type))
+			(while
+				(:doc "Every result must inhabit the same join slot without an implicit copy of an owner.")
+				(i32.lt -1i32 (local arm))
+				(body
+					(let result (struct.get (array.load (local expressions) (local arm)) first))
+					(let actual (struct.get (array.load (local expressions) (local result)) type))
+					(if
+						(:doc "Point to the result that cannot join.")
+						(bool.not (bool.and (u32.eq (local type) (local actual)) (call copyable_choice_type (local actual))))
+						(then (return (call entry_at (array.load (local nodes) (local result)) -1i32 24u32))))
+					(set (local arm) (struct.get (array.load (local nodes) (local arm)) next_sibling))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local match_value) (local type) -1i32 (local subject) 0i32 0i32 (bool false)))
+			(return (call entry_at (array.load (local nodes) (local index)) (local index) 0u32))))
+
+	(fn find_match_binding
+		(:doc "Resolve a payload name in the closest value arm before looking in enclosing statement scopes.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(expressions (shared-array ScalarExpression)) (use i32) (statement i32) (name SourceNode))
+		(returns i32)
+		(body
+			(let-mut arm (struct.get (array.load (local nodes) (local use)) parent))
+			(while
+				(:doc "Parent links stay inside the current statement until all its expression scopes have been searched.")
+				(i32.lt (local statement) (local arm))
+				(body
+					(if
+						(:doc "Only value case rows introduce a payload copy during an expression.")
+						(u32.eq (struct.get (array.load (local expressions) (local arm)) kind) (local match_value_case))
+						(then
+							(let binding (struct.get (array.load (local statements) (local arm)) value))
+							(if
+								(:doc "A payload name shadows an outer name in this arm only.")
+								(bool.and (i32.lt -1i32 (local binding))
+									(call same_name (borrow-shared (local source)) (array.load (local nodes) (local binding)) (local name)))
+								(then (return (local binding))))))
+					(set (local arm) (struct.get (array.load (local nodes) (local arm)) parent))))
+			(return -1i32)))
 
 	(fn match_continues
 		(:doc `An exhaustive match reaches its successor exactly when at least one arm does.`)

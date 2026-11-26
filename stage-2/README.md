@@ -257,12 +257,14 @@ selected from another module keeps the defining enum and its variant names.
     (case Invalid (return 3i32)))
 ```
 
-The match evaluates its subject once. Every variant of its exact type must
-appear once, and the selected case runs in its own local scope. A continuing
-case exits the match after cleaning up its locals. A return exits the
-function and releases its active owners. When every case returns, the
-match satisfies the enclosing return requirement. Missing coverage reports
-code 78 at the match. Unknown or duplicate variants point at the case name.
+The match evaluates its subject once and runs one case in its own scope.
+An enum match must cover each variant or end in a `(case _ ...)` fallback
+for uncovered variants. A declared variant named `_` keeps its exact
+case spelling. A continuing statement case exits the match
+after cleaning up its locals. A return exits the function and releases
+its active owners. When every case returns, the match satisfies the
+enclosing return requirement. Missing coverage reports code 78 at the
+match. Unknown or duplicate variants point at the case name.
 
 A variant can declare one copyable payload, as in
 `(enum Parsed (variants (Record Request) (Invalid)))`. Write
@@ -272,6 +274,25 @@ the payload into an immutable arm-local name. `(bind _)` discards the
 payload. The compiler emits these enums as a tag and a union and reads
 the selected member from the captured subject. Fieldless enums retain
 their ordinal representation.
+
+A match can also dispatch on a built-in integer. A bare decimal or hex
+pattern takes the subject type. A suffix or literal form names the exact
+type, as in `0u32` or `(u32 0)`. Integer matches require a final
+`(case _ ...)` for unmatched values. Different spellings of the same
+integer count as duplicate patterns.
+
+In a value position, each case provides one expression after its
+pattern and any payload binding. Every expression must yield the same
+exact copyable type. Only the selected expression runs.
+
+```lisp
+(enum Instruction (variants (Push i64) (Add) (Drop)))
+
+(return (match (local opcode)
+    (case 0u32 (enum.new Instruction Push (local immediate)))
+    (case 1u32 (enum.new Instruction Add))
+    (case _ (enum.new Instruction Drop))))
+```
 
 A helper with `(returns void)` can use `(return)` or finish at the end
 of its body. Invoke it with a standalone `(call ...)` statement. The
