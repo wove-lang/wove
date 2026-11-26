@@ -58,6 +58,32 @@ _Float16 wvrt_f80_to_f16(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtst
 #endif
 #endif
 
+// Choose a binary128 type and literal suffix that match the target's native ABI.
+#if defined(__LDBL_MANT_DIG__) && __LDBL_MANT_DIG__ == 113
+typedef long double wvrt_f128;
+#define WVRT_F128_LITERAL(wvrt_literal) wvrt_literal##L
+#define WVRT_HAS_F128 1
+#elif defined(__SIZEOF_FLOAT128__)
+typedef __float128 wvrt_f128;
+#define WVRT_F128_LITERAL(wvrt_literal) wvrt_literal##Q
+#define WVRT_HAS_F128 1
+#endif
+
+// Floating narrowing and integer checks retain the native binary128 operand.
+#ifdef WVRT_HAS_F128
+wvrt_f128 wvrt_f128_to_integer(wvrt_f128 wvrtvalue, wvrt_f128 wvrtlower, wvrt_f128 wvrtupper,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+double wvrt_f128_to_f64(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+float wvrt_f128_to_f32(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+// A target may support binary128 alongside x87 extended precision or binary16.
+#ifdef WVRT_HAS_F80
+long double wvrt_f128_to_f80(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+#endif
+#ifdef WVRT_HAS_F16
+_Float16 wvrt_f128_to_f16(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+#endif
+#endif
+
 int wvrt_run_host_entry(int argc, char **argv, size_t span_size,
 	void (*write_span)(void *, int32_t, int32_t, int32_t), int32_t (*entry)(wvrt_slice, wvrt_slice));
 
