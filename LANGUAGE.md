@@ -737,6 +737,7 @@ original type's Wove identity and C spelling. Select it from the defining
 header to use it outside the bridge. A bridge-local C use with an empty
 `(only)` list adds an include without importing a name. The compiler emits
 the required headers in the stated order before the bridge's own header.
+A type provider's own prerequisites precede its header as well.
 
 Use `(type Size (c-type "size_t"))` for a native integer alias and
 `(struct Stat (c-type "struct stat") (fields (st_size Offset)))` for a
