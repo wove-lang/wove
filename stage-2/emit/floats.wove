@@ -3,7 +3,7 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Write native floating literals, bit copies, and checked numerical conversions.`)
 
-	(use wove-file "../source/types.wove" (only is_builtin_float (value f16_type) (value f32_type) (value f64_type)
+	(use wove-file "../source/types.wove" (only is_builtin_float (value f16_type) (value f32_type) (value f64_type) (value f80_type)
 		(value i16_type) (value u16_type) (value i64_type)))
 	(use wove-file "../source/float_ops.wove" (only (value float_from_bits) (value float_to_bits)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
@@ -21,6 +21,10 @@
 	(let narrow_f32 "wvrt_f32_narrow(")
 	(let narrow_f16 "wvrt_f16_narrow(")
 	(let float_to_integer "wvrt_float_to_integer(")
+	(let extended_to_integer "wvrt_f80_to_integer(")
+	(let extended_to_half "wvrt_f80_to_f16(")
+	(let extended_to_float "wvrt_f80_to_f32(")
+	(let extended_to_double "wvrt_f80_to_f64(")
 	(let i8_bounds ",-129.0,0x1p7")
 	(let u8_bounds ",-1.0,0x1p8")
 	(let i16_bounds ",-32769.0,0x1p15")
@@ -28,6 +32,7 @@
 	(let i32_bounds ",-2147483649.0,0x1p31")
 	(let u32_bounds ",-1.0,0x1p32")
 	(let i64_bounds ",-0x1.0000000000001p63,0x1p63")
+	(let extended_i64_bounds ",-0x1p63L-1.0L,0x1p63L")
 	(let u64_bounds ",-1.0,0x1p64")
 
 	(fn write_floating_literal
@@ -52,6 +57,10 @@
 				(:doc "Use the binary32 suffix so a float is never rounded through double.")
 				(u32.eq (struct.get (local row) type) (local f32_type))
 				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 70u8 (local writing)))))
+			(if
+				(:doc "An L suffix rounds the original decimal directly to native extended precision.")
+				(u32.eq (struct.get (local row) type) (local f80_type))
+				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 76u8 (local writing)))))
 			(return (local cursor))))
 
 	(fn open_bit_copy
@@ -89,9 +98,51 @@
 			(return (call c_literal_text (borrow-shared (local to_u64_bits))
 				(borrow-mut (local output)) (local offset) (local writing)))))
 
+	(fn write_float_narrow
+		(:doc "Select the runtime check that rounds directly from the operand's precision.")
+		(params (source u32) (target u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "Keep the extra precision of an f80 operand through the range check and cast.")
+				(u32.eq (local source) (local f80_type))
+				(then
+					(if
+						(:doc "Use the binary16 destination's exact finite limit.")
+						(u32.eq (local target) (local f16_type))
+						(then (return (call c_literal_text (borrow-shared (local extended_to_half))
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(if
+						(:doc "Round straight from long double to float.")
+						(u32.eq (local target) (local f32_type))
+						(then (return (call c_literal_text (borrow-shared (local extended_to_float))
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(return (call c_literal_text (borrow-shared (local extended_to_double))
+						(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "All smaller inputs use the existing half and binary32 checks.")
+				(u32.eq (local target) (local f16_type))
+				(then (return (call c_literal_text (borrow-shared (local narrow_f16))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local narrow_f32))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_float_integer_check
+		(:doc "Select the integer range check without reducing the precision of the operand.")
+		(params (extended bool) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "Long double can distinguish all values adjacent to the i64 and u64 endpoints.")
+				(local extended)
+				(then (return (call c_literal_text (borrow-shared (local extended_to_integer))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local float_to_integer))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
 	(fn write_integer_bounds
 		(:doc `Write the exact open interval whose truncated values fit the destination type.`)
-		(params (type u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(params (type u32) (extended bool) (output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(if
@@ -125,10 +176,16 @@
 				(then (return (call c_literal_text (borrow-shared (local u32_bounds))
 					(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
-				(:doc "The next binary64 below INT64_MIN is the exclusive lower bound.")
+				(:doc "Select the first excluded value near INT64_MIN at the operand's precision.")
 				(u32.eq (local type) (local i64_type))
-				(then (return (call c_literal_text (borrow-shared (local i64_bounds))
-					(borrow-mut (local output)) (local offset) (local writing)))))
+				(then
+					(if
+						(:doc "Extended precision represents INT64_MIN minus one exactly.")
+						(local extended)
+						(then (return (call c_literal_text (borrow-shared (local extended_i64_bounds))
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(return (call c_literal_text (borrow-shared (local i64_bounds))
+						(borrow-mut (local output)) (local offset) (local writing)))))
 			(return (call c_literal_text (borrow-shared (local u64_bounds))
 				(borrow-mut (local output)) (local offset) (local writing)))))
 
@@ -142,12 +199,15 @@
 			(let target (struct.get (local row) type))
 			(let from_bits (u32.eq (local kind) (local float_from_bits)))
 			(let to_bits (u32.eq (local kind) (local float_to_bits)))
+			(let extended (u32.eq (local input) (local f80_type)))
+			(let float_target (call is_builtin_float (local target)))
 			(let checked_integer (bool.and (bool.not (bool.or (local from_bits) (local to_bits)))
-				(bool.not (call is_builtin_float (local target)))))
-			(let half (bool.and (bool.not (local from_bits)) (bool.and (u32.eq (local target) (local f16_type))
-				(u32.not-eq (local input) (local f16_type)))))
-			(let narrow (bool.or (local half)
-				(bool.and (u32.eq (local input) (local f64_type)) (u32.eq (local target) (local f32_type)))))
+				(bool.not (local float_target))))
+			(let narrow (bool.and (bool.not (local from_bits))
+				(bool.or (bool.and (local extended)
+					(bool.and (local float_target) (u32.not-eq (local input) (local target))))
+					(bool.or (bool.and (u32.eq (local input) (local f64_type)) (u32.eq (local target) (local f32_type)))
+						(bool.and (u32.eq (local target) (local f16_type)) (u32.not-eq (local input) (local target)))))))
 			(let-mut cursor (local offset))
 			(if
 				(:doc "Bit operations pass the original type to a width-matched copy.")
@@ -161,27 +221,21 @@
 					(if
 						(:doc "A narrow helper checks finite range before rounding to the selected width.")
 						(local narrow)
-						(then
-							(if
-								(:doc "The half range also applies when converting from an integer.")
-								(local half)
-								(then (set (local cursor) (call c_literal_text (borrow-shared (local narrow_f16))
-									(borrow-mut (local output)) (local cursor) (local writing))))
-								(else (set (local cursor) (call c_literal_text (borrow-shared (local narrow_f32))
-									(borrow-mut (local output)) (local cursor) (local writing))))))
+						(then (set (local cursor) (call write_float_narrow (local input) (local target)
+							(borrow-mut (local output)) (local cursor) (local writing))))
 						(else
 							(set (local cursor) (call c_cast (borrow-mut (local output)) (local cursor) (local target) (local writing)))
 							(if
 								(:doc "A float-to-integer cast must check the source before truncating.")
 								(local checked_integer)
-								(then (set (local cursor) (call c_literal_text (borrow-shared (local float_to_integer))
+								(then (set (local cursor) (call write_float_integer_check (local extended)
 									(borrow-mut (local output)) (local cursor) (local writing)))))))))
 			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (struct.get (local row) first)
 				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(if
 				(:doc "Only integer destinations use a destination-specific open interval.")
 				(local checked_integer)
-				(then (set (local cursor) (call write_integer_bounds (local target)
+				(then (set (local cursor) (call write_integer_bounds (local target) (local extended)
 					(borrow-mut (local output)) (local cursor) (local writing)))))
 			(if
 				(:doc "Attach the Wove span to either checked numerical conversion.")

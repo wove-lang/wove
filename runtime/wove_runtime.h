@@ -45,6 +45,19 @@ uint16_t wvrt_f16_to_bits(_Float16 wvrtvalue);
 _Float16 wvrt_f16_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
 #endif
 
+// Extended operations use the native long double ABI with a 64-bit significand.
+#if defined(__LDBL_MANT_DIG__) && __LDBL_MANT_DIG__ == 64
+#define WVRT_HAS_F80 1
+long double wvrt_f80_to_integer(long double wvrtvalue, long double wvrtlower, long double wvrtupper,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+double wvrt_f80_to_f64(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+float wvrt_f80_to_f32(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+// The half destination also needs the target's binary16 ABI.
+#ifdef WVRT_HAS_F16
+_Float16 wvrt_f80_to_f16(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+#endif
+#endif
+
 int wvrt_run_host_entry(int argc, char **argv, size_t span_size,
 	void (*write_span)(void *, int32_t, int32_t, int32_t), int32_t (*entry)(wvrt_slice, wvrt_slice));
 
