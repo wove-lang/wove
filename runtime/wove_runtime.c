@@ -957,6 +957,17 @@ int32_t wvrt_u64_shift_count_at_span(int32_t wvrtcount, int32_t wvrtfile, int32_
 	return wvrt_shift_count_at_span(wvrtcount, 64, wvrtfile, wvrtstart, wvrtend);
 }
 
+// Rotate a full unsigned word while preserving the count operand's location.
+uint64_t wvrt_u64_rotr_at_span(uint64_t wvrtvalue, int32_t wvrtcount,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Both component shifts must stay strictly below the word width.
+	if (!wvrt_valid_shift_count(wvrtcount, 64)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "rotate count out of range");
+	}
+	if (wvrtcount == 0) { return wvrtvalue; }
+	return (wvrtvalue >> wvrtcount) | (wvrtvalue << (64 - wvrtcount));
+}
+
 // Interpret wrapped bits as a signed value using only in-range signed casts.
 int32_t wvrt_i32_from_wrapped_bits(uint32_t wvrtbits) {
 	if (wvrtbits <= INT32_MAX) { return (int32_t)wvrtbits; }

@@ -24,6 +24,7 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 | Less than | `u8.lt`, `i32.lt`, `u32.lt` | `i16.lt`, `u16.lt`, `i64.lt`, `u64.lt` |
 | AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | `i32.and`, `i32.or`, `u64.and`, `u64.or`, `u64.xor`, `u64.not` |
 | Left and right shift | `u32.shl`, `u32.shr` | `i32.shl`, `i32.shr`, `u64.shl`, `u64.shr` |
+| Rotate right | | `u64.rotr` |
 | Boolean logic | `bool.and`, `bool.or`, `bool.not` | |
 
 - Comparisons return `bool`. `int.eq` also accepts a selected native integer
@@ -31,6 +32,9 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 - A shift takes an `i32` count. Counts outside `[0, width)` trap. Left shifts
   keep the low bits of the declared width. Right shifts extend the sign for
   signed integers and fill with zeros for unsigned integers.
+- `(u64.rotr word count)` rotates a `u64` right by an `i32` count in
+  `[0, 64)`. A zero count returns the word unchanged. Out-of-range counts
+  trap at the count operand's source span.
 - Division truncates toward zero. A zero divisor traps for division and
   remainder. `INT32_MIN / -1` traps, and `INT32_MIN % -1` is zero.
 - `(int.convert Type value)` converts a fitting integer and traps on an
