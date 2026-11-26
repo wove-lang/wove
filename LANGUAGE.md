@@ -791,6 +791,29 @@ releases the collected results and retires the remaining receipts before
 reporting the join span. An implicit cleanup failure reports the failing
 worker's original submission span.
 
+## Fallible worker launch
+
+`(worker.try-spawn handler (local pending) Launch job)` evaluates the job
+once while holding the mutable receipt queue exclusively. The queue must
+accept the handler's exact declared result type. As with `array.try-push`,
+the outcome is a caller-declared enum with one unit variant and one variant
+carrying the exact job type. Either declaration order is valid. The job
+type must be supported as an enum payload.
+
+```lisp
+(enum Launch (variants (Started) (Rejected Job)))
+(let-mut pending (worker.receipt-queue render))
+(match (worker.try-spawn render (local pending) Launch (move (local job)))
+  (case Started (return (worker.join-all (local pending))))
+  (case Rejected (bind original) (return (call finish_locally (move (local original))))))
+```
+
+Success appends a receipt and transfers the job to the new worker. If
+queue growth, launch allocation, or thread creation fails, the rejection
+variant receives the original job and pending receipts stay in order.
+This form covers startup failures. Collection still reports failures
+from a worker that started.
+
 ## Bounded worker pools
 
 `(worker.open-pool threads capacity)` takes two positive `i32` values.

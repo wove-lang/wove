@@ -383,7 +383,7 @@ static inline void wvrt_inline_array_slot_drop(wvrt_array **slot) {
 
 typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 
-// Declare record transport only in translation units that emit or implement its adapters.
+// Declare record transport and fallible launch only in translation units that use them.
 #define WVRT_DECLARE_RECORD_WORKERS() \
 	typedef wvrt_array *(*wvrt_record_worker)(wvrt_array *job, int32_t file, int32_t start, int32_t end); \
 	wvrt_array *wvrt_worker_pack_at_span(void *value, size_t size, size_t alignment, \
@@ -394,7 +394,9 @@ typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 	wvrt_array *wvrt_worker_spawn_join_record_at_span(wvrt_record_worker handler, wvrt_array *job, \
 		int32_t file, int32_t start, int32_t end); \
 	wvrt_array *wvrt_worker_join_all_records_at_span(wvrt_array **queue, size_t stride, size_t alignment, \
-		size_t value_offset, void (*drop)(void *), int32_t file, int32_t start, int32_t end);
+		size_t value_offset, void (*drop)(void *), int32_t file, int32_t start, int32_t end); \
+	bool wvrt_worker_try_spawn_at_span(wvrt_array *queue, wvrt_array *(*array)(wvrt_array *), \
+		wvrt_record_worker record, void *job, size_t size, size_t alignment, int32_t file, int32_t start, int32_t end);
 
 // Copyable results use their normal inline C layout in the collected array.
 #define WVRT_WORKER_JOIN_RECORDS(type, queue, file, start, end) \
@@ -407,7 +409,7 @@ typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 
 // Use the ordinary record destructor through the runtime's erased drop callback.
 #define WVRT_DEFINE_WORKER_DROP(type, drop) \
-	static inline void wvrt_worker_drop_##type(void *value) { drop((type *)value); }
+	static inline __attribute__((unused)) void wvrt_worker_drop_##type(void *value) { drop((type *)value); }
 
 // Evaluate the incoming value once and move it into the worker transport.
 #define WVRT_WORKER_PACK(type, value, drop, file, start, end) \
