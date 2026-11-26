@@ -13,9 +13,9 @@
 	(use wove-file "./syntax.wove" (only entry_form entry_at (type EntryRead)))
 	(use wove-file "../source/enum_forms.wove" (only (value match_statement)))
 	(use wove-file "./flow.wove" (only within_scope is_loop block_statement (type ScalarStatement) (value for_statement)
-		(value next_path) (value break_path) (value continue_path)))
+		(value next_path) (value break_path) (value continue_path) (value owner_assignment) (value owner_field_assignment)))
 	(use wove-file "./conditional.wove" (only conditional_transfer_reaches))
-	(use wove-file "./loans.wove" (only paths_overlap (type ScalarExpression)))
+	(use wove-file "./loans.wove" (only paths_overlap path_covers (type ScalarExpression)))
 	(use wove-file "./owners.wove" (only native_handle_consume_kind is_owner_take is_optional_byte_owner_type))
 
 	(fn plan_control_blocks
@@ -207,15 +207,149 @@
 			(return (call has_path (call sequence_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
 				(local next_path) (local first) (local index)) (local next_path)))))
 
+	(fn restores_owner
+		(:doc "An assignment reinitializes the recorded slot when it writes that slot or an enclosing owner.")
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
+			(row ScalarStatement) (moved TransferPlace))
+		(returns bool)
+		(body
+			(let target (struct.get (local row) target))
+			(let kind (struct.get (local row) kind))
+			(if
+				(:doc "Replacing a whole local restores every field within it.")
+				(u32.eq (local kind) (local owner_assignment))
+				(then (return (i32.eq (local target) (struct.get (local moved) target)))))
+			(if
+				(:doc "Only a checked owning-field write can fill a projected vacancy.")
+				(u32.not-eq (local kind) (local owner_field_assignment))
+				(then (return (bool false))))
+			(let root (struct.get (array.load (local expressions) (local target)) projection))
+			(let binding (array.load (local expressions) (local root)))
+			(return (bool.and
+				(bool.and (u32.eq (struct.get (local binding) kind) 6u32)
+					(i32.eq (struct.get (local binding) target) (struct.get (local moved) target)))
+				(call path_covers (borrow-shared (local nodes)) (borrow-shared (local expressions))
+					(local target) (struct.get (local moved) path) (bool false))))))
+
+	(fn retained_arm_prefix
+		(:doc "Follow the arm containing a use and test whether any entering path still lacks the owner.")
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(expressions (shared-array ScalarExpression)) (control ScalarStatement) (use i32) (moved TransferPlace))
+		(returns u32)
+		(body
+			(let site (array.load (local nodes) (local use)))
+			(let-mut arm (struct.get (local control) first))
+			(while
+				(:doc "Only a single sibling block can enclose the use.")
+				(i32.not-ltz (local arm))
+				(body
+					(let block (array.load (local nodes) (local arm)))
+					(if
+						(:doc "Scan the checked statement prefix of the matching block.")
+						(call within_scope (local block) (local site))
+						(then (return (call retained_owner_paths (borrow-shared (local nodes))
+							(borrow-shared (local statements)) (borrow-shared (local expressions)) (local moved)
+							(local next_path) (struct.get (array.load (local statements) (local arm)) first) (local use)))))
+					(set (local arm) (struct.get (local block) next_sibling))))
+			(return (local next_path))))
+
+	(fn retained_control_paths
+		(:doc "Join control exits that can continue with the tracked slot still moved.")
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(expressions (shared-array ScalarExpression)) (row ScalarStatement) (moved TransferPlace))
+		(returns u32)
+		(body
+			(let kind (struct.get (local row) kind))
+			(let literal (call predicate_literal (local row) (borrow-shared (local expressions))))
+			(let loop (call is_loop (local kind)))
+			(if
+				(:doc "A loop with a possible zero-iteration path preserves the incoming vacancy.")
+				(bool.and (local loop) (u32.not-eq (local literal) 5u32))
+				(then (return (local next_path))))
+			(let-mut arm (struct.get (local row) first))
+			(let-mut retained 0u32)
+			(if
+				(:doc "A possible missing else leaves the incoming owner state in place.")
+				(bool.and (u32.eq (local kind) 22u32) (u32.not-eq (local literal) 5u32))
+				(then
+					(if (i32.ltz (struct.get (array.load (local nodes) (local arm)) next_sibling))
+						(then (set (local retained) (local next_path))))))
+			(while
+				(:doc "Process only arms that can be selected by the checked predicate.")
+				(i32.not-ltz (local arm))
+				(body
+					(if
+						(:doc "An arm may restore the slot on some exits and leave it moved on others.")
+						(call block_can_run (local row) (local arm) (local literal))
+						(then
+							(let paths (call retained_owner_paths (borrow-shared (local nodes))
+								(borrow-shared (local statements)) (borrow-shared (local expressions)) (local moved)
+								(local next_path) (struct.get (array.load (local statements) (local arm)) first) -1i32))
+							(set (local retained) (u32.or (local retained) (local paths)))))
+					(set (local arm) (struct.get (array.load (local nodes) (local arm)) next_sibling))))
+			(if
+				(:doc "An always-true loop reaches its successor through its own break only.")
+				(local loop)
+				(then
+					(if (call has_path (local retained) (local break_path)) (then (return (local next_path))))
+					(return 0u32)))
+			(return (local retained))))
+
+	(fn retained_owner_paths
+		(:doc "Track the exits where a move survives the checked sequence without a matching reinitialization.")
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(expressions (shared-array ScalarExpression)) (moved TransferPlace) (initial u32) (first i32) (stop i32))
+		(returns u32)
+		(body
+			(let-mut paths (local initial))
+			(let-mut index (local first))
+			(while
+				(:doc "Keep terminal edges while advancing the surviving fallthrough path.")
+				(bool.and (i32.not-ltz (local index)) (call has_path (local paths) (local next_path)))
+				(body
+					(if
+						(:doc "The use itself happens before any assignment performed by that statement.")
+						(bool.and (i32.not-ltz (local stop)) (i32.not-lt (local index) (local stop)))
+						(then (return (local paths))))
+					(let node (array.load (local nodes) (local index)))
+					(let row (array.load (local statements) (local index)))
+					(let kind (struct.get (local row) kind))
+					(if
+						(:doc "A nested use observes assignments already executed in its own arm.")
+						(bool.and (i32.not-ltz (local stop))
+							(call within_scope (local node) (array.load (local nodes) (local stop))))
+						(then (return (call retained_arm_prefix (borrow-shared (local nodes))
+							(borrow-shared (local statements)) (borrow-shared (local expressions))
+							(local row) (local stop) (local moved)))))
+					(if
+						(:doc "Disabled statements leave the incoming state intact.")
+						(u32.not-eqz (local kind))
+						(then
+							(let-mut exits (struct.get (local row) paths))
+							(if
+								(:doc "A matching write kills the moved state after evaluation of its right-hand side.")
+								(call restores_owner (borrow-shared (local nodes)) (borrow-shared (local expressions))
+									(local row) (local moved))
+								(then (set (local exits) 0u32)))
+							(if
+								(:doc "Control statements can restore the owner on individual continuing arms.")
+								(bool.or (call is_loop (local kind))
+									(bool.or (u32.eq (local kind) 22u32) (u32.eq (local kind) (local match_statement))))
+								(then (set (local exits) (call retained_control_paths (borrow-shared (local nodes))
+									(borrow-shared (local statements)) (borrow-shared (local expressions)) (local row) (local moved)))))
+							(set (local paths) (u32.or (u32.and (local paths) (u32.not (local next_path))) (local exits)))))
+					(set (local index) (struct.get (local node) next_sibling))))
+			(return (local paths))))
+
 	(fn native_transfer_paths
-		(:doc `Find the edges from a native transfer to a later use or the end of a loop body.
+		(:doc `Find the edges that carry a move to a later use or loop back edge.
 
 		Follow the rest of the origin's block and then climb through the
 		controls it actually exits. A break joins after the loop it targets.
 		A continue contributes to that loop's next condition, never to
 		later statements in the same iteration.`)
 		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
-			(expressions (shared-array ScalarExpression)) (transfer i32) (use i32) (back_edge bool))
+			(expressions (shared-array ScalarExpression)) (moved TransferPlace) (transfer i32) (use i32) (back_edge bool))
 		(returns u32)
 		(body
 			(let-mut prior (struct.get (array.load (local nodes) (local transfer)) parent))
@@ -235,13 +369,20 @@
 				(then (return 0u32)))
 			(let initial (array.load (local statements) (local prior)))
 			(if
+				(:doc "An assignment may consume its own previous value during evaluation and restore the slot on completion.")
+				(call restores_owner (borrow-shared (local nodes)) (borrow-shared (local expressions)) (local initial) (local moved))
+				(then (return 0u32)))
+			(if
 				(:doc "A transfer in the loop predicate precedes every body path.")
 				(bool.and (local back_edge) (i32.eq (local prior) (struct.get (local site) parent)))
-				(then (return (struct.get (array.load (local statements) (local use)) paths))))
+				(then (return (call retained_owner_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+					(borrow-shared (local expressions)) (local moved) (local next_path)
+					(struct.get (array.load (local statements) (local use)) first) -1i32))))
 			(if
 				(:doc "A control predicate's transfer precedes a use in any of its arms.")
 				(call within_scope (local origin) (local site))
-				(then (return (local next_path))))
+				(then (return (call retained_arm_prefix (borrow-shared (local nodes)) (borrow-shared (local statements))
+					(borrow-shared (local expressions)) (local initial) (local use) (local moved)))))
 			(let-mut paths (struct.get (local initial) paths))
 			(while
 				(:doc "Climb only across blocks outside the use's scope.")
@@ -256,8 +397,9 @@
 						(bool.or (call within_scope (local here) (local site))
 							(bool.not (call block_can_run (local row) (local block) (local literal))))
 						(then (return 0u32)))
-					(set (local paths) (call sequence_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
-						(local paths) (struct.get (array.load (local nodes) (local prior)) next_sibling) -1i32))
+					(set (local paths) (call retained_owner_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+						(borrow-shared (local expressions)) (local moved) (local paths)
+						(struct.get (array.load (local nodes) (local prior)) next_sibling) -1i32))
 					(if
 						(:doc "Only a break or a later false condition can carry the transfer out of the loop.")
 						(call is_loop (struct.get (local row) kind))
@@ -278,8 +420,9 @@
 						(then (return 0u32)))))
 			(let-mut stop (local use))
 			(if (local back_edge) (then (set (local stop) -1i32)))
-			(return (call sequence_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
-				(local paths) (struct.get (array.load (local nodes) (local prior)) next_sibling) (local stop)))))
+			(return (call retained_owner_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
+				(borrow-shared (local expressions)) (local moved) (local paths)
+				(struct.get (array.load (local nodes) (local prior)) next_sibling) (local stop)))))
 
 	(fn owner_transfer_site
 		(:doc "An evaluating unwrap captures its optional slot inside the written move.")
@@ -314,10 +457,30 @@
 					(return (struct.new TransferPlace (target (struct.get (local root) target)) (path (local place))))))
 			(return (struct.new TransferPlace (target (struct.get (local pointer) target)) (path -1i32)))))
 
+	(fn transfer_overlaps
+		(:doc "Compare an owner transfer only with paths rooted at the same binding.")
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
+			(moved TransferPlace) (target i32) (place i32) (whole_only bool) (ancestor_only bool))
+		(returns bool)
+		(body
+			(let path (struct.get (local moved) path))
+			(if
+				(:doc "A whole-only read tolerates vacancies in individual fields.")
+				(bool.or (i32.not-eq (struct.get (local moved) target) (local target))
+					(bool.and (local whole_only) (i32.not-ltz (local path))))
+				(then (return (bool false))))
+			(if
+				(:doc "A field replacement needs its enclosing storage even when the field itself is vacant.")
+				(local ancestor_only)
+				(then (return (call path_covers (borrow-shared (local nodes))
+					(borrow-shared (local expressions)) (local path) (local place) (bool true)))))
+			(return (call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
+				(local place) (local path)))))
+
 	(fn prior_owner_take
 		(:doc "Find an earlier evaluating owner transfer that overlaps this place on a continuing path.")
 		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
-			(expressions (shared-array ScalarExpression)) (target i32) (place i32) (whole_only bool) (site i32) (statement i32))
+			(expressions (shared-array ScalarExpression)) (target i32) (place i32) (whole_only bool) (ancestor_only bool) (site i32) (statement i32))
 		(returns i32)
 		(body
 			(let-mut cursor (i32.inc (local target)))
@@ -332,13 +495,10 @@
 						(bool.or (call is_owner_take (local kind)) (u32.eq (local kind) (call native_handle_consume_kind)))
 						(then
 							(let moved (call owner_transfer_place (borrow-shared (local expressions)) (local row)))
-							(let path (struct.get (local moved) path))
 							(if
 								(:doc "A sibling field has a different path and is still available.")
-								(bool.and (i32.eq (struct.get (local moved) target) (local target))
-									(bool.and (bool.or (bool.not (local whole_only)) (i32.ltz (local path)))
-										(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
-											(local place) (local path))))
+								(call transfer_overlaps (borrow-shared (local nodes)) (borrow-shared (local expressions))
+									(local moved) (local target) (local place) (local whole_only) (local ancestor_only))
 								(then
 									(if
 										(:doc "Only a move that can run and reach this use affects its ownership.")
@@ -346,7 +506,7 @@
 											(borrow-shared (local expressions)) (local cursor) (local site))
 											(call has_path (call native_transfer_paths (borrow-shared (local nodes))
 												(borrow-shared (local statements)) (borrow-shared (local expressions))
-												(local cursor) (local statement) (bool false)) (local next_path)))
+												(local moved) (local cursor) (local statement) (bool false)) (local next_path)))
 										(then (return (call owner_transfer_site (borrow-shared (local nodes)) (local row) (local cursor)))))))))
 					(set (local cursor) (i32.inc (local cursor)))))
 			(return -1i32)))
@@ -385,7 +545,7 @@
 									(bool.and (call conditional_transfer_reaches (borrow-shared (local nodes))
 										(borrow-shared (local expressions)) (local cursor) (local block))
 										(call repeats_loop (call native_transfer_paths (borrow-shared (local nodes)) (borrow-shared (local statements))
-											(borrow-shared (local expressions)) (local cursor) (local block) (bool true)))))
+											(borrow-shared (local expressions)) (local moved) (local cursor) (local block) (bool true)))))
 								(then (return (call owner_transfer_site (borrow-shared (local nodes)) (local row) (local cursor)))))))
 					(set (local cursor) (i32.inc (local cursor)))))
 			(return -1i32))))

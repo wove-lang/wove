@@ -340,16 +340,19 @@
 				(body (set (local root) (struct.get (array.load (local expressions) (local root)) first))))
 			(return (local root))))
 
-	(fn paths_overlap
-		(:doc `Compare paths from the same binding. A path overlaps itself and all enclosing places.`)
+	(fn field_path_relation
+		(:doc `Compare paths from one binding. Return disjoint, equal, left ancestor, or right ancestor.`)
 		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
 			(left i32) (right i32))
-		(returns bool)
+		(returns u32)
 		(body
 			(if
 				(:doc "A whole binding covers every field below it.")
-				(bool.or (i32.ltz (local left)) (i32.ltz (local right)))
-				(then (return (bool true))))
+				(i32.ltz (local left))
+				(then
+					(if (i32.ltz (local right)) (then (return 1u32)))
+					(return 2u32)))
+			(if (i32.ltz (local right)) (then (return 3u32)))
 			(let-mut a (struct.get (array.load (local expressions) (local left)) projection))
 			(let-mut b (struct.get (array.load (local expressions) (local right)) projection))
 			(while
@@ -362,8 +365,34 @@
 						(:doc "Different fields of the same enclosing record have independent storage.")
 						(i32.not-eq (struct.get (array.load (local expressions) (local a)) target)
 							(struct.get (array.load (local expressions) (local b)) target))
-						(then (return (bool false))))))
-			(return (bool true))))
+						(then (return 0u32)))))
+			(if
+				(:doc "The left path ended at or before the right path.")
+				(i32.eq (local a) (local left))
+				(then
+					(if (i32.eq (local b) (local right)) (then (return 1u32)))
+					(return 2u32)))
+			(return 3u32)))
+
+	(fn paths_overlap
+		(:doc "A path overlaps itself and any enclosing or enclosed place.")
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
+			(left i32) (right i32))
+		(returns bool)
+		(body
+			(return (u32.not-eqz (call field_path_relation (borrow-shared (local nodes))
+				(borrow-shared (local expressions)) (local left) (local right))))))
+
+	(fn path_covers
+		(:doc "Test whether the left place contains the right one, optionally requiring a proper ancestor.")
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
+			(left i32) (right i32) (strict bool))
+		(returns bool)
+		(body
+			(let relation (call field_path_relation (borrow-shared (local nodes))
+				(borrow-shared (local expressions)) (local left) (local right)))
+			(return (bool.or (u32.eq (local relation) 2u32)
+				(bool.and (bool.not (local strict)) (u32.eq (local relation) 1u32))))))
 
 	(fn same_binding
 		(:doc `Compare binding rows within their local or parameter namespace.`)
@@ -537,13 +566,13 @@
 					(set (local field) (struct.get (array.load (local nodes) (local field)) next_sibling))))
 			(return (bool false))))
 
-	(fn has_scoped_array_loan
+	(fn has_scoped_place_loan
 		(:doc `Check active lexical loans of a local array, parameter, or parent view.
 
 		A shared loan permits reads of its source. A mutable loan excludes
 		every access through the source for the lifetime of the binding.`)
 		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement)) (expressions (shared-array ScalarExpression))
-			(statement i32) (target i32) (local_binding bool) (exclusive bool))
+			(statement i32) (target i32) (local_binding bool) (place i32) (exclusive bool))
 		(returns bool)
 		(body
 			(let-mut index (struct.get (array.load (local statements) (local statement)) previous_loan))
@@ -564,14 +593,31 @@
 										(struct.get (local origin) first) -1i32 (local target) (local local_binding)))
 								(then (return (bool true)))))
 						(else
+							(let kind (struct.get (local origin) kind))
+							(let-mut projection -1i32)
 							(if
-								(:doc "A named view keeps its immediate parent subject to the access check.")
+								(:doc "A view of a named field only holds the corresponding path.")
+								(bool.or (u32.eq (local kind) (local scoped_field_loan))
+									(u32.eq (local kind) (call owned_field_loan_kind)))
+								(then (set (local projection) (struct.get (local origin) projection))))
+							(if
+								(:doc "A named view freezes overlapping access to its immediate parent.")
 								(bool.and (call same_binding (local target) (local local_binding)
 									(struct.get (local origin) target) (struct.get (local origin) borrowed_owner))
-									(bool.or (local exclusive) (call is_writable_slice (struct.get (local declaration) type))))
+									(bool.and (bool.or (local exclusive) (call is_writable_slice (struct.get (local declaration) type)))
+										(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
+											(local place) (local projection))))
 								(then (return (bool true))))))
 					(set (local index) (struct.get (local declaration) previous_loan))))
 			(return (bool false))))
+
+	(fn has_scoped_array_loan
+		(:doc "Check loans before accessing an entire local array, parameter, or parent view.")
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement)) (expressions (shared-array ScalarExpression))
+			(statement i32) (target i32) (local_binding bool) (exclusive bool))
+		(returns bool)
+		(body (return (call has_scoped_place_loan (borrow-shared (local nodes)) (borrow-shared (local statements))
+			(borrow-shared (local expressions)) (local statement) (local target) (local local_binding) -1i32 (local exclusive)))))
 
 	(fn has_conflicting_loan
 		(:doc `Find a conflicting loan in earlier operands of an enclosing operation.
@@ -587,8 +633,8 @@
 		(body
 			(if
 				(:doc "A named view holds its loan independently of other operands.")
-				(call has_scoped_array_loan (borrow-shared (local nodes)) (borrow-shared (local statements)) (borrow-shared (local expressions))
-					(local statement) (local target) (local local_binding) (local exclusive))
+				(call has_scoped_place_loan (borrow-shared (local nodes)) (borrow-shared (local statements)) (borrow-shared (local expressions))
+					(local statement) (local target) (local local_binding) (local place) (local exclusive))
 				(then (return (bool true))))
 			(let-mut child (local index))
 			(while

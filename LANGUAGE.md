@@ -401,6 +401,14 @@ with `(move (struct.get (local grid) cells))`. A move can take a nested
 struct or a leaf array. Sibling fields stay available. Moving or borrowing
 an entire struct requires all its owning fields to be present.
 
+A mutable local owner or a writable owning field can be replaced with
+`set`, for example `(set (local output) (move (local scratch)))`.
+The replacement must be a fresh or explicitly moved owner of the exact
+type. Its expression evaluates once before the previous value is dropped
+and the replacement is installed. A live overlapping borrow prevents
+replacement. Assigning to a moved slot fills it without dropping a value.
+Every path that reaches a subsequent use must have a live value there.
+
 On scope exit, remaining owners drop in reverse declaration order.
 A struct drops its remaining owning fields in reverse field order,
 including owners inside nested structs and arrays. A return evaluates
