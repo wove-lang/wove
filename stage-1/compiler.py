@@ -21,7 +21,8 @@ BOOL = "bool"
 VOID = "void"
 RUNTIME_INCLUDE = '"wove_runtime.h"'
 HEADER_PATH = re.compile(r"[A-Za-z0-9_./-]+")
-DECIMAL_SUFFIX = re.compile(r"(-?[0-9]+)([iu][0-9]+)")
+INTEGER_LITERAL = re.compile(r"-?(?:0[xX][0-9a-fA-F]+|[0-9]+)")
+INTEGER_SUFFIX = re.compile(rf"({INTEGER_LITERAL.pattern})([iu][0-9]+)")
 SCALAR_LIMITS = {
 	I8: (-128, 127),
 	I32: (-(2**31), 2**31 - 1),
@@ -160,29 +161,33 @@ def c_type(kind: Type) -> str:
 	return kind.c_name if isinstance(kind, Record) else C_TYPE[kind]
 
 
-# Normalize a typed decimal atom only when consuming an expression.
+# Normalize a suffixed integer atom to the equivalent typed form.
 def value_form(node: Node) -> Form:
 	# Quoted strings and other atoms retain the ordinary form check.
 	if isinstance(node, Atom) and not node.quoted:
-		literal = DECIMAL_SUFFIX.fullmatch(node.text)
+		literal = INTEGER_SUFFIX.fullmatch(node.text)
 		# Reuse the typed form's range check and C emission.
 		if literal is not None and literal[2] in SCALAR_LIMITS:
 			return Form(literal[2], (Atom(literal[1], node.line),), node.line)
 	return checked_form(node)
 
 
-# Validate a typed decimal literal before emitting its C spelling.
+# Validate a typed integer literal before emitting its C spelling.
 def read_integer_literal(node: Form) -> Value:
 	literal, = form(node, arity=1).operands
-	# Accept only signed decimal atoms.
-	if not isinstance(literal, Atom) or literal.quoted or not re.fullmatch(r"-?[0-9]+", literal.text):
+	# The grammar limits the radix, digits, and sign before Python parses the value.
+	if not isinstance(literal, Atom) or literal.quoted or not INTEGER_LITERAL.fullmatch(literal.text):
 		raise SourceError(node.line)
-	# Normalize leading zeros so C cannot interpret them as octal.
+	low, high = SCALAR_LIMITS[node.tag]
+	hexadecimal = literal.text.removeprefix("-").startswith(("0x", "0X"))
+	# An unsigned hexadecimal literal cannot carry a minus, even for zero.
+	if hexadecimal and low == 0 and literal.text.startswith("-"):
+		raise SourceError(node.line)
+	# Convert both radices to the same decimal C spelling.
 	try:
-		number = int(literal.text)
+		number = int(literal.text, 16 if hexadecimal else 10)
 	except ValueError:
 		raise SourceError(node.line) from None
-	low, high = SCALAR_LIMITS[node.tag]
 	# Check the declared type before handing the literal to C.
 	if not low <= number <= high:
 		raise SourceError(node.line)
