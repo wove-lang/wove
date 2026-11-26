@@ -325,7 +325,7 @@ chosen expression. An arm can produce a fresh owner or move an existing one.
 | Half-open range | `(for (bind i) (range start end) (body ...))` |
 | Read array elements | `(for (bind item) (borrow-shared (local data)) (body ...))` |
 | Write array elements | `(for (bind item) (borrow-mut (local data)) (body ...))` |
-| Consume owned byte rows | `(for (bind item) (move (local rows)) (body ...))` |
+| Consume owned rows | `(for (bind item) (move (local rows)) (body ...))` |
 
 Range bounds have the same type, `i32` or `u64`. They evaluate once, from
 left to right. An array loop can use `(bind index item)` for a zero-based
@@ -405,16 +405,19 @@ copy of a live element from the same array. Reserving capacity leaves
 the logical length unchanged. Removal and truncation use the logical
 length for bounds and retain the reserved storage.
 
-An array of owned byte rows accepts
+An array of owned rows accepts
 `(array.push (local rows) (move (local row)))`. A successful push
-transfers the original byte owner to the vector. Removing a populated
+transfers the original owner to the vector. Removing a populated
 row transfers it to the result, and removing an unfilled slot traps.
 Truncation drops the owners in the removed suffix immediately.
 
-`array.alloc` supports numeric elements and copyable records. An
-`(owned-array (owned-array u8))` can also hold owned byte rows. Fill a
-slot with `array.store` and a fresh or moved owner. Replacing a slot drops
-its previous row.
+`array.alloc` supports numeric elements, copyable records, and nested
+owners. For example, `(array.alloc (owned-array Digest) count)` creates an
+`(owned-array (owned-array Digest))` with unfilled row slots. Fill a slot
+with `array.store` and a fresh or moved owner of the exact row type.
+Replacing a slot drops its previous row. Use
+`(borrow-shared (array.load (local rows) index))` to read a populated row
+through its exact shared view.
 
 Fixed arrays keep their elements inline and copy by value. Use
 `(array T extent)` for a builtin scalar or copyable Wove record `T`.
