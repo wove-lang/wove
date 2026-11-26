@@ -218,10 +218,17 @@ Native symbols and the ABI entry `main` retain their original spellings.
 For a single module, hash its declared name, the four-byte little-endian
 declaration kind, and the original declaration name using the archive's
 31-bit FNV-1a. Records use the archive's struct kind 1, and functions use
-kind 2. The ID is independent of source layout and
-declaration order. Detect collisions before writing C, even when the
-readable suffixes differ. Each resolved call keeps the callee's defining
-row and its own source node for later analysis.
+kind 2. For a source graph, the canonical file path also contributes
+to the fingerprint. Each resolved call keeps the callee's exact defining
+row and its own source node. Specializations compare the defining
+template and normalized arguments even when their fingerprints match.
+
+Different readable suffixes can share a fingerprint. When the complete
+generated spelling coincides, the two roles use `F` and `R` and place a
+second seven-digit Base32hex word after the fingerprint. This word ranks
+the declarations by their canonical paths, original definitions, and
+normalized specialization arguments. Renaming an import or reordering
+the graph file table preserves the assignments.
 
 The result gives the written count and a view-relative span. Successful
 emission spans the module. A failure preserves the destination bytes and
@@ -234,7 +241,6 @@ uses the originating span. Tree and module diagnostics keep their codes.
 | 23 | Unsupported signature or record field type, or invalid native bridge contract | The offending signature or contract form or operand |
 | 24 | Invalid, unsupported, or unreachable body form, or incompatible expression type | The offending form or expression |
 | 25 | Invalid scalar literal | The value or malformed literal form |
-| 32 | Stable declaration identity collision | The later declaration name |
 | 33 | Duplicate function, parameter, local, record, or field | The later name |
 | 34 | Unavailable function, binding, record, or field | The requested name or incomplete reference |
 | 35 | Wrong call arity | The call expression |

@@ -1,0 +1,138 @@
+(module specialization_key_order
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Order exact declaration and specialization keys independently of the packed graph rows.")
+
+	(use wove-file "../../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../../source/generics.wove" (only (value generic_operation_kind)))
+	(use wove-file "../trees.wove" (only source_span_owner))
+	(use wove-file "../records.wove" (only check_generic_argument is_record_type record_index resolved_generic_kind
+		specialization_first scope_at (type ScalarRecord) (type TypeScope)))
+
+	(struct ApplicationSite (fields (row i32) (file i32) (base i32)))
+
+	(fn application_site
+		(:doc "Keep the application row and the lexical namespace where its arguments resolve.")
+		(params (row i32) (file i32) (base i32)) (returns ApplicationSite)
+		(body (return (struct.new ApplicationSite (row (local row)) (file (local file)) (base (local base))))))
+
+	(fn order_words
+		(:doc "Order exact unsigned keys without an overflowing subtraction.")
+		(params (left u32) (right u32)) (returns i32)
+		(body
+			(if (u32.lt (local left) (local right)) (then (return -1i32)))
+			(if (u32.eq (local left) (local right)) (then (return 0i32)))
+			(return 1i32)))
+
+	(fn order_paths
+		(:doc "Compare the canonical paths byte for byte, keeping a prefix before a longer path.")
+		(params (arena (shared-array u8)) (left SuppliedFile) (right SuppliedFile)) (returns i32)
+		(body
+			(let-mut a (struct.get (local left) path_start))
+			(let-mut b (struct.get (local right) path_start))
+			(let end_a (struct.get (local left) path_end))
+			(let end_b (struct.get (local right) path_end))
+			(while
+				(:doc "Only read bytes in both canonical path spans.")
+				(bool.and (i32.lt (local a) (local end_a)) (i32.lt (local b) (local end_b)))
+				(body
+					(let difference (i32.sub (i32.from-u8 (array.load (local arena) (local a)))
+						(i32.from-u8 (array.load (local arena) (local b)))))
+					(if (i32.not-eqz (local difference)) (then (return (local difference))))
+					(set (local a) (i32.inc (local a)))
+					(set (local b) (i32.inc (local b)))))
+			(return (i32.sub (i32.sub (local end_a) (local a)) (i32.sub (local end_b) (local b))))))
+
+	(fn order_definitions
+		(:doc "Compare the canonical defining file and original declaration position.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(left_file i32) (left i32) (right_file i32) (right i32)) (returns i32)
+		(body
+			(if
+				(:doc "Only graph compilation can compare definitions from different files.")
+				(i32.not-eq (local left_file) (local right_file))
+				(then (return (call order_paths (borrow-shared (local arena))
+					(array.load (local files) (local left_file)) (array.load (local files) (local right_file))))))
+			(return (i32.sub (struct.get (array.load (local nodes) (local left)) start)
+				(struct.get (array.load (local nodes) (local right)) start)))))
+
+	(fn order_record_keys
+		(:doc "Order nominal record keys by their template definition and, for instances, their exact arguments.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
+			(left ScalarRecord) (right ScalarRecord)) (returns i32)
+		(body
+			(let file (struct.get (local left) file))
+			(let definition (call order_definitions (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local nodes))
+				(local file) (struct.get (local left) name) (struct.get (local right) file) (struct.get (local right) name)))
+			(if (i32.not-eqz (local definition)) (then (return (local definition))))
+			(let a (struct.get (local left) specialization))
+			(let b (struct.get (local right) specialization))
+			(if
+				(:doc "The defining template precedes any instantiation of that same declaration.")
+				(bool.or (i32.ltz (local a)) (i32.ltz (local b)))
+				(then (return (i32.sub (local a) (local b)))))
+			(return (call order_application_keys (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local nodes)) (borrow-shared (local records)) (borrow-shared (local bindings))
+				(call application_site (local a) (struct.get (local left) argument_file) (struct.get (local left) argument_base))
+				(call application_site (local b) (struct.get (local right) argument_file) (struct.get (local right) argument_base))
+				(struct.get (local left) generic) (call scope_at (local file) (struct.get (local left) source_base))))))
+
+	(fn order_arguments
+		(:doc "Compare two normalized arguments of a single formal parameter.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
+			(kind u32) (left u32) (right u32)) (returns i32)
+		(body
+			(if (u32.eq (local left) (local right)) (then (return 0i32)))
+			(if
+				(:doc "A compile-time operation carries a canonical defining node in the original source tree.")
+				(u32.eq (local kind) (local generic_operation_kind))
+				(then
+					(let a (i32.from-u32 (local left)))
+					(let b (i32.from-u32 (local right)))
+					(let a_file (call source_span_owner (borrow-shared (local files)) (struct.get (array.load (local nodes) (local a)) start) -1i32))
+					(let b_file (call source_span_owner (borrow-shared (local files)) (struct.get (array.load (local nodes) (local b)) start) -1i32))
+					(return (call order_definitions (borrow-shared (local arena)) (borrow-shared (local files))
+						(borrow-shared (local nodes)) (local a_file) (local a) (local b_file) (local b)))))
+			(if
+				(:doc "A nominal type argument orders by its complete key, including nested specialization arguments.")
+				(bool.and (u32.eq (local kind) 1u32)
+					(bool.and (call is_record_type (local left)) (call is_record_type (local right))))
+				(then (return (call order_record_keys (borrow-shared (local arena)) (borrow-shared (local files))
+					(borrow-shared (local nodes)) (borrow-shared (local records)) (borrow-shared (local bindings))
+					(array.load (local records) (call record_index (local left)))
+					(array.load (local records) (call record_index (local right)))))))
+			(return (call order_words (local left) (local right)))))
+
+	(fn order_application_keys
+		(:doc "Compare two valid applications of the same template in their own lookup contexts.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
+			(left ApplicationSite) (right ApplicationSite) (parameters i32) (definition_scope TypeScope)) (returns i32)
+		(body
+			(let-mut a (call specialization_first (borrow-shared (local arena)) (borrow-shared (local nodes)) (struct.get (local left) row)))
+			(let-mut b (call specialization_first (borrow-shared (local arena)) (borrow-shared (local nodes)) (struct.get (local right) row)))
+			(let-mut formal (local parameters))
+			(while
+				(:doc "An earlier differing normalized argument determines the order.")
+				(i32.not-ltz (local formal))
+				(body
+					(let parameter (array.load (local nodes) (local formal)))
+					(let kind (call resolved_generic_kind (borrow-shared (local arena)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local definition_scope) (local parameter)))
+					(let first (call check_generic_argument (borrow-shared (local arena)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (call scope_at (struct.get (local left) file) (struct.get (local left) base)) (local a) (local kind)))
+					(let second (call check_generic_argument (borrow-shared (local arena)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (call scope_at (struct.get (local right) file) (struct.get (local right) base)) (local b) (local kind)))
+					(let order (call order_arguments (borrow-shared (local arena)) (borrow-shared (local files))
+						(borrow-shared (local nodes)) (borrow-shared (local records)) (borrow-shared (local bindings))
+						(local kind) (struct.get (local first) value) (struct.get (local second) value)))
+					(if (i32.not-eqz (local order)) (then (return (local order))))
+					(set (local a) (struct.get (array.load (local nodes) (local a)) next_sibling))
+					(set (local b) (struct.get (array.load (local nodes) (local b)) next_sibling))
+					(set (local formal) (struct.get (local parameter) next_sibling))))
+			(return 0i32)))
+)
