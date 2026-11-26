@@ -1586,16 +1586,16 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 			(return (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) operands)))))
 
-	(fn is_owned_byte_field
-		(:doc "Identify a checked member whose declared type is an owned byte array.")
+	(fn is_owned_array_field
+		(:doc "Recognize a member with an owned-array descriptor before resolving its element.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (member SourceNode))
 		(returns bool)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 			(let type (struct.get (local parts) operands))
 			(return (bool.and (i32.lt -1i32 (local type))
-				(call is_byte_owner_descriptor (borrow-shared (local source)) (borrow-shared (local nodes))
-					(array.load (local nodes) (local type)))))))
+				(i32.lt -1i32 (call owned_element_node (borrow-shared (local source)) (borrow-shared (local nodes))
+					(array.load (local nodes) (local type))))))))
 
 	(fn is_shared_byte_field
 		(:doc "Recognize an exact shared byte descriptor member without an extent operand.")
@@ -1744,25 +1744,34 @@
 			(layout ScalarRecord) (member SourceNode))
 		(returns u32)
 		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+			(let operand (struct.get (local parts) operands))
+			(if (i32.ltz (local operand)) (then (return 0u32)))
+			(let spelling (array.load (local nodes) (local operand)))
+			(let payload (call is_payload_enum (local layout)))
 			(if
-				(:doc "A direct owned byte field or payload uses the normal owning array representation.")
-				(bool.and (bool.or (struct.get (local layout) owns_arrays) (call is_payload_enum (local layout)))
-					(call is_owned_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+				(:doc "A struct field uses the canonical owner identity resolved in its defining module.")
+				(bool.and (struct.get (local layout) owns_arrays) (bool.not (local payload)))
+				(then
+					(let owner (call read_owned_array_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local spelling) (borrow-shared (local records)) (borrow-shared (local bindings))
+						(call scope_at (struct.get (local layout) file) (struct.get (local layout) source_base))))
+					(if (u32.gtz (local owner)) (then (return (local owner))))))
+			(if
+				(:doc "A direct byte-array enum payload uses its existing descriptor representation.")
+				(bool.and (local payload) (call is_byte_owner_descriptor (borrow-shared (local source))
+					(borrow-shared (local nodes)) (local spelling)))
 				(then (return (call array_owner_type 10u32))))
 			(if
 				(:doc "A scoped byte field stores the ordinary shared slice descriptor.")
 				(bool.and (struct.get (local layout) borrows_bytes)
 					(call is_shared_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 				(then (return 34u32)))
-			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
-			(let operand (struct.get (local parts) operands))
-			(if (i32.ltz (local operand)) (then (return 0u32)))
 			(let-mut type 0u32)
 			(if
 				(:doc "A specialized layout checks the original operand in its concrete parameter environment.")
 				(i32.lt -1i32 (struct.get (local layout) specialization))
 				(then
-					(let spelling (array.load (local nodes) (local operand)))
 					(if
 						(:doc "The specialization pass has already interned any substituted inline array shape.")
 						(call is_member_array (borrow-shared (local source)) (borrow-shared (local nodes)) (local spelling))
@@ -2006,7 +2015,7 @@
 					(if
 						(:doc "Template fields require copyable storage.")
 						(bool.and (i32.lt -1i32 (local generic))
-							(bool.or (call is_owned_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member))
+							(bool.or (call is_owned_array_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member))
 								(call is_shared_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member))))
 						(then (return (call entry_at (local member) -1i32 23u32))))
 					(if
@@ -2014,9 +2023,9 @@
 						(bool.and (local enumeration) (i32.lt -1i32 (struct.get (local checked) operand)))
 						(then (set (local native) -2i32)))
 					(if
-						(:doc "An ordinary record owns storage when a field declares an owned byte array.")
+						(:doc "An ordinary record owns storage when a field declares an owned array.")
 						(bool.and (bool.not (local enumeration))
-							(call is_owned_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+							(call is_owned_array_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 						(then (set (local owns_arrays) (bool true))))
 					(if
 						(:doc "A direct shared byte field marks the record as scoped.")
@@ -2255,8 +2264,49 @@
 			(array.store (local records) (local position)
 				(call layout_state (local entry) (local row) (struct.get (local entry) owns_arrays)))))
 
+	(fn is_record_array_field
+		(:doc "Identify a struct field stored as a heap array descriptor.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord) (member SourceNode))
+		(returns bool)
+		(body (return (bool.and
+			(bool.and (i32.eqz (struct.get (local layout) native)) (struct.get (local layout) owns_arrays))
+			(call is_owned_array_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member))))))
+
+	(fn validate_record_array_fields
+		(:doc "Check each array field after leaf layouts and exact nested owner identities are available.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
+			(records (shared-array ScalarRecord)) (count i32))
+		(returns LayoutCheck)
+		(body
+			(let-mut row 0i32)
+			(while
+				(:doc "Array field validation applies to every defining owning struct, even an unused one.")
+				(i32.lt (local row) (local count))
+				(body
+					(let layout (array.load (local records) (local row)))
+					(if
+						(:doc "Only ordinary Wove structs can hold these array fields.")
+						(bool.and (i32.eqz (struct.get (local layout) native)) (struct.get (local layout) owns_arrays))
+						(then
+							(let-mut field (struct.get (local layout) first))
+							(while
+								(:doc "An invalid field type reports the field in its defining file.")
+								(i32.not-ltz (local field))
+								(body
+									(let member (array.load (local nodes) (local field)))
+									(if
+										(:doc "Require the exact owner type, including every nested row.")
+										(bool.and (call is_owned_array_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member))
+											(bool.not (call is_array_owner (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+												(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))))
+										(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+											(local layout) (local member) 23u32))))
+									(set (local field) (struct.get (local member) next_sibling))))))
+					(set (local row) (i32.inc (local row)))))
+			(return (struct.new LayoutCheck (file -1i32) (start 0i32) (end 0i32) (error 0u32)))))
+
 	(fn finish_layout_ownership
-		(:doc "Classify owning enum payloads after dependencies are complete and verify member copyability.")
+		(:doc "Classify owning members after their layout dependencies are complete.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
 			(records (mut-array ScalarRecord)) (row i32))
 		(returns LayoutCheck)
@@ -2276,21 +2326,26 @@
 				(i32.lt -1i32 (local field))
 				(body
 					(let member (array.load (local nodes) (local field)))
-					(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
 					(if
-						(:doc "An owning enum cannot be copied into a record or inline array member.")
-						(u32.eqz (local type))
+						(:doc "Struct array descriptors are already marked owning and validated after row interning.")
+						(bool.not (call is_record_array_field (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local layout) (local member)))
 						(then
-							(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
-							(if (i32.lt -1i32 (struct.get (local parts) operands))
-								(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
-									(local layout) (local member) 23u32))))))
-					(if
-						(:doc "Any variant with an owner makes the full tagged value an owner.")
-						(bool.or (call is_array_owner (local type))
-							(call is_owning_record (borrow-shared (local records)) (local type)))
-						(then (set (local owns) (bool true))))
+							(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
+							(if
+								(:doc "An owning enum cannot be copied into a record or inline array member.")
+								(u32.eqz (local type))
+								(then
+									(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+									(if (i32.lt -1i32 (struct.get (local parts) operands))
+										(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+											(local layout) (local member) 23u32))))))
+							(if
+								(:doc "Any owning member gives the enclosing aggregate lexical cleanup.")
+								(bool.or (call is_array_owner (local type))
+									(call is_owning_record (borrow-shared (local records)) (local type)))
+								(then (set (local owns) (bool true))))))
 					(set (local field) (struct.get (local member) next_sibling))))
 			(array.store (local records) (local row)
 				(call layout_state (local layout) (struct.get (local layout) emit_row) (local owns)))
@@ -2351,18 +2406,23 @@
 										(then (set (local type) (u32.from-i32 (struct.get (local layout) first))))
 										(else
 											(let member (array.load (local nodes) (local field)))
-											(set (local type) (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-												(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
 											(if
-												(:doc "A unit variant can omit its type. Other members require a visible copyable layout.")
-												(u32.eqz (local type))
+												(:doc "A heap array descriptor has no by-value layout dependency.")
+												(bool.not (call is_record_array_field (borrow-shared (local source)) (borrow-shared (local nodes))
+													(local layout) (local member)))
 												(then
-													(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+													(set (local type) (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+														(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
 													(if
-														(:doc "Missing operands were allowed only for unit variants.")
-														(i32.lt -1i32 (struct.get (local parts) operands))
-														(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
-															(local layout) (local member) 23u32))))))
+														(:doc "A unit variant can omit its type. Other members require a visible copyable layout.")
+														(u32.eqz (local type))
+														(then
+															(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+															(if
+																(:doc "Missing operands were allowed only for unit variants.")
+																(i32.lt -1i32 (struct.get (local parts) operands))
+																(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+																	(local layout) (local member) 23u32))))))))
 											(set (local next) (struct.get (local member) next_sibling))))
 									(array.store (local stack) (local depth)
 										(struct.new LayoutVisit (row (local row)) (field (local next)) (element (bool false))))
