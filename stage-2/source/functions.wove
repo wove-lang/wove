@@ -3,7 +3,8 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc "Collect direct function fields by tag while retaining their original source rows.")
 
-	(use wove-file "./scan.wove" (only is_metadata_form (type SourceNode)))
+	(use wove-file "./scan.wove" (only is_metadata_form is_wove_name (type SourceNode)))
+	(use wove-file "./module.wove" (only form_parts validate_form_metadata))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 
 	(struct FunctionFields (fields (params i32) (result i32) (body i32) (target i32) (error u32) (site i32)))
@@ -12,6 +13,55 @@
 	(let returns_tag "returns")
 	(let body_tag "body")
 	(let target_tag "c-name")
+
+	(struct ReturnOrigin (fields (operand i32) (start i32) (end i32) (error u32)))
+
+	(let from_word "from")
+
+	(fn return_origin_at
+		(:doc "Keep the source row of a parameter or the originating return diagnostic.")
+		(params (node SourceNode) (operand i32) (error u32)) (returns ReturnOrigin)
+		(body (return (struct.new ReturnOrigin (operand (local operand))
+			(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error (local error))))))
+
+	(fn read_return_origin
+		(:doc "Read the one bare parameter name in a return provenance clause.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (returns SourceNode))
+		(returns ReturnOrigin)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (struct.get (local parts) head))
+			(if
+				(:doc "An extra result operand without a from head preserves the returns form's diagnostic.")
+				(i32.ltz (local head))
+				(then (return (call return_origin_at (local returns) -1i32 23u32))))
+			(let tag (array.load (local nodes) (local head)))
+			(if
+				(:doc "Only the exact from keyword can introduce a provenance clause.")
+				(bool.or (u32.not-eq (struct.get (local tag) kind) 1u32)
+					(bool.not (call same_bytes (borrow-shared (local source))
+						(struct.get (local tag) start) (struct.get (local tag) end)
+						(borrow-shared (local from_word)) 0i32 (array.len (local from_word)))))
+				(then (return (call return_origin_at (local returns) -1i32 23u32))))
+			(let name (struct.get (local parts) operands))
+			(if
+				(:doc "A recognized provenance clause takes one name and must be the final result operand.")
+				(bool.or (bool.or (i32.ltz (local name)) (i32.not-ltz (struct.get (local node) next_sibling)))
+					(i32.not-ltz (struct.get (array.load (local nodes) (local name)) next_sibling)))
+				(then (return (call return_origin_at (local node) -1i32 23u32))))
+			(let metadata (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local parts)))
+			(if
+				(:doc "Keep the original misplaced metadata diagnostic.")
+				(u32.gtz (struct.get (local metadata) error))
+				(then (return (struct.new ReturnOrigin (operand -1i32) (start (struct.get (local metadata) start))
+					(end (struct.get (local metadata) end)) (error (struct.get (local metadata) error))))))
+			(let spelling (array.load (local nodes) (local name)))
+			(if
+				(:doc "The source parameter uses the same name spelling as its declaration.")
+				(bool.not (call is_wove_name (borrow-shared (local source)) (local spelling)))
+				(then (return (call return_origin_at (local spelling) -1i32 23u32))))
+			(return (call return_origin_at (local spelling) (local name) 0u32))))
 
 	(fn function_field_tag
 		(:doc "Identify the exact tag of an ordinary function field.")
