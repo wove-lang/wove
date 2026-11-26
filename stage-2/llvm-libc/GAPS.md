@@ -168,6 +168,32 @@ assertion compiled for all four targets. The macOS targets also linked.
 
 [LLVM libc checklist](https://libc.llvm.org/headers/assert.html) · [C11 draft §7.2](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf) · [C23 draft §§6.4.1, 6.7.11, and 7.2](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)
 
+## Bundled ctype coverage
+
+The installed compiler selects `ctype.h.wove` through `use c-header`.
+The native fixtures exercise each callable declaration and each exported
+classification mask. Target fixtures also reject the opposite platform's
+extensions.
+
+Apple Clang 21 inspected the macOS 27.2 SDK for arm64 and x86-64 with
+`_DARWIN_C_SOURCE` and Debian 13 glibc 2.41 headers for aarch64 and x86-64
+Linux with `_GNU_SOURCE`. The listed members and signatures were the same
+in C11, C17, and C23 for each target.
+
+| Members | Availability and disposition |
+| --- | --- |
+| `isalnum`, `isalpha`, `isblank`, `iscntrl`, `isdigit`, `isgraph`, `islower`, `isprint`, `ispunct`, `isspace`, `isupper`, `isxdigit`, `tolower`, `toupper` | Both header sets provide these as `int(int)`. The shared declarations cover the ISO C classifiers and conversions. |
+| `isascii`, `toascii`, `_tolower`, `_toupper` | Both header sets expose these with the tested feature macros. The underscore-prefixed conversions use the argument-capturing C macro contract. |
+| `digittoint`, `ishexnumber`, `isideogram`, `isnumber`, `isphonogram`, `isrune`, `isspecial`, `ct_rune_t`, `rune_t` | Darwin extensions. The two aliases retain their header spelling and the wider rune inputs use `ct_rune_t`. |
+| `isctype` and `_ISupper`, `_ISlower`, `_ISalpha`, `_ISdigit`, `_ISxdigit`, `_ISspace`, `_ISprint`, `_ISgraph`, `_ISblank`, `_IScntrl`, `_ISpunct`, `_ISalnum` | glibc extensions with the tested GNU feature mode. The fixture checks each mask through `isctype`. |
+| `locale_t` and locale-taking classifiers and conversions | glibc exposes the POSIX `_l` forms in `<ctype.h>` and the GNU `isascii_l` and `toascii_l` macros. Darwin exposes locale variants through `<xlocale.h>` with `<ctype.h>` visible. The disabled group records both header contracts pending pointer-typedef ownership and typed nulls (#515) and resolution of the same owner across the acquisition and classifier headers (#516). |
+
+The macOS scanner also saw `size_t`, `wchar_t`, and `wint_t` through system
+includes. Their bridge aliases belong with the headers that define their
+public C interfaces.
+
+[LLVM libc checklist](https://libc.llvm.org/headers/ctype.html) · [Debian arm64 headers](https://packages.debian.org/trixie/arm64/libc6-dev/download) · [Debian amd64 headers](https://packages.debian.org/trixie/amd64/libc6-dev/download)
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
