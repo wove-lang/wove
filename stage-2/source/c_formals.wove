@@ -3,13 +3,45 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Distinguish Wove parameters from fixed C operands in one native declaration.`)
 
-	(use wove-file "./scan.wove" (only (type SourceNode)))
+	(use wove-file "./scan.wove" (only (type SourceNode) (type Token)))
 	(use wove-file "./module.wove" (only form_parts (type FormParts)))
 	(use wove-file "./imports.wove" (only import_keyword is_import_name))
 	(use wove-file "./types.wove" (only source_builtin_type))
-	(use wove-file "./c_owners.wove" (only is_native_name))
+	(use wove-file "./c_owners.wove" (only is_native_name is_c_pointer_spelling read_c_type_form))
+	(use wove-file "./generics.wove" (only read_i32_constant generic_i32_value))
+	(use wove-file "./strings.wove" (only decode_string))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
 
-	(struct CFixedFormal (fields (name i32) (constant i32) (site i32)))
+	(let null_literal "null")
+
+	(struct CFixedFormal
+		(fields (name i32) (constant i32) (pointer_type i32) (value i32)
+			(start i32) (end i32) (error u32)))
+
+	(fn fixed_formal_error
+		(:doc "Keep the invalid operand or directive at its original source span.")
+		(params (start i32) (end i32) (error u32)) (returns CFixedFormal)
+		(body (return (struct.new CFixedFormal (name -1i32) (constant -1i32) (pointer_type -1i32)
+			(value 0i32) (start (local start)) (end (local end)) (error (local error))))))
+
+	(fn invalid_fixed_formal
+		(:doc "Diagnose a fixed operand with an invalid shape or type.")
+		(params (node SourceNode)) (returns CFixedFormal)
+		(body (return (call fixed_formal_error (struct.get (local node) start)
+			(struct.get (local node) end) 23u32))))
+
+	(fn checked_fixed_formal
+		(:doc "Store the checked header name, pointer spelling, or signed literal value.")
+		(params (name i32) (constant i32) (pointer_type i32) (value i32)) (returns CFixedFormal)
+		(body (return (struct.new CFixedFormal (name (local name)) (constant (local constant))
+			(pointer_type (local pointer_type)) (value (local value)) (start 0i32) (end 0i32) (error 0u32)))))
+
+	(fn is_fixed_null
+		(:doc "Match the exact bare null literal.")
+		(params (source (shared-array u8)) (node SourceNode)) (returns bool)
+		(body (return (bool.and (u32.eq (struct.get (local node) kind) 1u32)
+			(call same_bytes (borrow-shared (local source)) (struct.get (local node) start) (struct.get (local node) end)
+				(borrow-shared (local null_literal)) 0i32 4i32)))))
 
 	(fn is_c_fixed_formal
 		(:doc `Match const with extra operands while preserving an ordinary formal named const.`)
@@ -22,34 +54,92 @@
 				(bool.and (u32.eq (call import_keyword (borrow-shared (local source)) (array.load (local nodes) (local head))) 14u32)
 					(i32.lt -1i32 (struct.get (array.load (local nodes) (local first)) next_sibling)))))))
 
+	(fn read_fixed_pointer
+		(:doc "Validate the decoded C pointer spelling and require a null value for the hidden slot.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(name i32) (type SourceNode) (value SourceNode))
+		(returns CFixedFormal)
+		(body
+			(let native (call read_c_type_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
+			(if
+				(:doc "Keep a malformed c-type at its original operand or metadata span.")
+				(u32.gtz (struct.get (local native) error))
+				(then (return (call fixed_formal_error (struct.get (local native) start)
+					(struct.get (local native) end) (struct.get (local native) error)))))
+			(let literal (array.load (local nodes) (struct.get (local native) native)))
+			(let start (struct.get (local literal) start))
+			(let end (struct.get (local literal) end))
+			(let-mut text (array.alloc u8 (i32.sub (local end) (local start))))
+			(let decoded (call decode_string (borrow-shared (local source))
+				(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
+				(borrow-mut (local text))))
+			(if
+				(:doc "Only C type words, whitespace and a nonempty star suffix are admitted.")
+				(bool.or (u32.gtz (struct.get (local decoded) error))
+					(bool.not (call is_c_pointer_spelling
+						(borrow-shared (array.range (local text) 0i32 (struct.get (local decoded) written))))))
+				(then (return (call invalid_fixed_formal (local literal)))))
+			(if
+				(:doc "A hidden pointer supplies no storage and can only pass null.")
+				(bool.not (call is_fixed_null (borrow-shared (local source)) (local value)))
+				(then (return (call invalid_fixed_formal (local value)))))
+			(return (call checked_fixed_formal (local name) -1i32 (struct.get (local native) native) 0i32))))
+
 	(fn read_c_fixed_formal
-		(:doc `Read one fixed i32 operand with a portable C constant name.`)
+		(:doc "Read a hidden i32 literal or header constant, or a null at its exact C pointer type.")
+		(:expect (issues "gh:wove-lang/wove:489"))
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row i32) (parts FormParts))
 		(returns CFixedFormal)
 		(body
 			(let name (struct.get (local parts) operands))
 			(let named (array.load (local nodes) (local name)))
-			(let type (struct.get (local named) next_sibling))
-			(let type_node (array.load (local nodes) (local type)))
-			(let constant (struct.get (local type_node) next_sibling))
+			(let type (array.load (local nodes) (struct.get (local named) next_sibling)))
+			(let constant (struct.get (local type) next_sibling))
 			(if
 				(:doc "The fixed form needs exactly a name, type, and value.")
 				(bool.or (i32.ltz (local constant))
 					(i32.lt -1i32 (struct.get (array.load (local nodes) (local constant)) next_sibling)))
-				(then (return (struct.new CFixedFormal (name -1i32) (constant -1i32) (site (local row))))))
+				(then (return (call invalid_fixed_formal (array.load (local nodes) (local row))))))
 			(if
 				(:doc "The hidden formal still has a Wove declaration name.")
 				(bool.not (call is_import_name (borrow-shared (local source)) (local named)))
-				(then (return (struct.new CFixedFormal (name -1i32) (constant -1i32) (site (local name))))))
+				(then (return (call invalid_fixed_formal (local named)))))
+			(let value (array.load (local nodes) (local constant)))
 			(if
-				(:doc "These fixed commands use an exact built-in i32 C formal.")
-				(u32.not-eq (call source_builtin_type (borrow-shared (local source)) (local type_node)) 5u32)
-				(then (return (struct.new CFixedFormal (name (local name)) (constant -1i32) (site (local type))))))
+				(:doc "A compound type annotation gives the exact C pointer spelling.")
+				(u32.eq (struct.get (local type) kind) 40u32)
+				(then (return (call read_fixed_pointer (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local name) (local type) (local value)))))
 			(if
-				(:doc "Emit only a portable header identifier in the native argument list.")
-				(bool.not (call is_native_name (borrow-shared (local source)) (array.load (local nodes) (local constant))))
-				(then (return (struct.new CFixedFormal (name (local name)) (constant -1i32) (site (local constant))))))
-			(return (struct.new CFixedFormal (name (local name)) (constant (local constant)) (site -1i32)))))
+				(:doc "Integer operands use the existing exact i32 contract.")
+				(u32.not-eq (call source_builtin_type (borrow-shared (local source)) (local type)) 5u32)
+				(then (return (call invalid_fixed_formal (local type)))))
+			(if
+				(:doc "Null is reserved for pointer operands.")
+				(call is_fixed_null (borrow-shared (local source)) (local value))
+				(then (return (call invalid_fixed_formal (local value)))))
+			(if
+				(:doc "Leave portable header identifiers for the C constant check.")
+				(call is_native_name (borrow-shared (local source)) (local value))
+				(then (return (call checked_fixed_formal (local name) (local constant) -1i32 0i32))))
+			(let checked (call read_i32_constant (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local value) (bool true)))
+			(if
+				(:doc "Keep the literal parser's type or range diagnostic.")
+				(u32.gtz (struct.get (local checked) error))
+				(then (return (call fixed_formal_error (struct.get (local checked) start)
+					(struct.get (local checked) end) (struct.get (local checked) error)))))
+			(return (call checked_fixed_formal (local name) -1i32 -1i32
+				(call generic_i32_value (struct.get (local checked) value))))))
+
+	(fn c_fixed_formal_at
+		(:doc "Recover a checked native-only formal from its raw declaration row.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row i32)) (returns CFixedFormal)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local row))))
+			(return (call read_c_fixed_formal (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local row) (local parts)))))
 
 	(fn c_formal_name
 		(:doc `Use each formal's Wove spelling for duplicate-name checks.`)

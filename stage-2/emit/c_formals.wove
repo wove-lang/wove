@@ -4,34 +4,61 @@
 	(:doc `Emit fixed C argument values and check that header constants fit their declared ABI.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "../source/module.wove" (only form_parts))
-	(use wove-file "../source/c_formals.wove" (only read_c_fixed_formal find_c_fixed_formal))
+	(use wove-file "../source/c_formals.wove" (only c_fixed_formal_at find_c_fixed_formal (type CFixedFormal)))
 	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
-	(use wove-file "./text.wove" (only c_literal_text))
+	(use wove-file "./text.wove" (only c_byte c_type_text))
+	(use wove-file "./runtime.wove" (only write_c_number))
+	(use wove-file "./owners.wove" (only write_native_type))
 	(use wove-file "./c_values.wove" (only write_c_value_name write_constant_check))
 
-	(let command_cast "(int32_t)")
-
-	(fn fixed_c_value
-		(:doc `Recover the original C identifier of a checked fixed formal.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row i32))
-		(returns SourceNode)
+	(fn write_fixed_c_type
+		(:doc "Use the same fixed type spelling in the prototype check and argument cast.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (formal CFixedFormal)
+			(output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
 		(body
-			(let item (array.load (local nodes) (local row)))
-			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
-			(let checked (call read_c_fixed_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local row) (local parts)))
-			(return (array.load (local nodes) (struct.get (local checked) constant)))))
+			(let pointer (struct.get (local formal) pointer_type))
+			(if
+				(:doc "Preserve the exact pointee words and indirection from the validated literal.")
+				(i32.not-ltz (local pointer))
+				(then (return (call write_native_type (borrow-shared (local source)) (array.load (local nodes) (local pointer))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_type_text (borrow-mut (local output)) (local offset) 5u32 (local writing)))))
 
 	(fn write_fixed_c_argument
-		(:doc `Pass a header constant using the checked i32 C argument type.`)
+		(:doc "Cast a fixed header name, checked signed literal, or null before the native call.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row i32)
 			(output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
-			(let value (call fixed_c_value (borrow-shared (local source)) (borrow-shared (local nodes)) (local row)))
-			(let cast (call c_literal_text (borrow-shared (local command_cast)) (borrow-mut (local output)) (local offset) (local writing)))
-			(return (call write_c_value_name (borrow-shared (local source)) (local value)
-				(borrow-mut (local output)) (local cast) (local writing)))))
+			(let formal (call c_fixed_formal_at (borrow-shared (local source)) (borrow-shared (local nodes)) (local row)))
+			(let open (call c_byte (borrow-mut (local output)) (local offset) 40u8 (local writing)))
+			(let type (call write_fixed_c_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local formal)
+				(borrow-mut (local output)) (local open) (local writing)))
+			(let cast (call c_byte (borrow-mut (local output)) (local type) 41u8 (local writing)))
+			(let constant (struct.get (local formal) constant))
+			(if
+				(:doc "Only header identifiers are copied verbatim into C.")
+				(i32.not-ltz (local constant))
+				(then (return (call write_c_value_name (borrow-shared (local source)) (array.load (local nodes) (local constant))
+					(borrow-mut (local output)) (local cast) (local writing)))))
+			(return (call write_c_number (borrow-mut (local output)) (local cast) (struct.get (local formal) value) (local writing)))))
+
+	(fn fixed_c_needs_prototype
+		(:doc "Keep existing header-only calls and require a prototype check for a new fixed operand.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32))
+		(returns bool)
+		(body
+			(let-mut row (call find_c_fixed_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local first)))
+			(while
+				(:doc "Look for a checked literal or typed pointer-null among the hidden formals.")
+				(i32.not-ltz (local row))
+				(body
+					(let formal (call c_fixed_formal_at (borrow-shared (local source)) (borrow-shared (local nodes)) (local row)))
+					(if (i32.ltz (struct.get (local formal) constant)) (then (return (bool true))))
+					(set (local row) (call find_c_fixed_formal (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (array.load (local nodes) (local row)) next_sibling)))))
+			(return (bool false))))
 
 	(fn write_fixed_c_checks
 		(:doc `Check the value and sign before narrowing each integer constant to i32.`)
@@ -45,10 +72,14 @@
 				(:doc "Check each macro in an integer constant expression before emitting any call.")
 				(i32.lt -1i32 (local row))
 				(body
-					(let value (call fixed_c_value (borrow-shared (local source)) (borrow-shared (local nodes)) (local row)))
-					(set (local cursor) (call write_constant_check (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (local value) 5u32
-						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(let formal (call c_fixed_formal_at (borrow-shared (local source)) (borrow-shared (local nodes)) (local row)))
+					(let constant (struct.get (local formal) constant))
+					(if
+						(:doc "The Wove checker already validates literal values and pointer nulls.")
+						(i32.not-ltz (local constant))
+						(then (set (local cursor) (call write_constant_check (borrow-shared (local source)) (borrow-shared (local nodes))
+							(borrow-shared (local records)) (array.load (local nodes) (local constant)) 5u32
+							(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 					(set (local row) (call find_c_fixed_formal (borrow-shared (local source)) (borrow-shared (local nodes))
 						(struct.get (array.load (local nodes) (local row)) next_sibling)))))
 			(return (local cursor))))
