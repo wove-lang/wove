@@ -1,0 +1,227 @@
+(module function_specialization_workspace
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Size the private function instantiation workspace from explicit requests and checked template subtrees.")
+
+	(use wove-file "../../source/generics.wove" (only function_generic_list has_specialization_head))
+	(use wove-file "../../source/scan.wove" (only build_source_tree (type FormCheck) (type SourceNode)))
+	(use wove-file "../../source/module.wove" (only form_parts))
+	(use wove-file "../../source/enum_forms.wove" (only (value enum_declaration) (value variants_list)))
+	(use wove-file "../../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../../text/bytes.wove" (only same_bytes))
+	(use wove-file "../syntax.wove" (only entry_keyword))
+	(use wove-file "../trees.wove" (only (type ScalarTree)))
+
+	(struct FunctionFootprint (fields (largest i32) (requests i32)))
+	(struct FunctionWorkspace (fields (rows i32) (functions i32) (error u32)))
+	(let generic_word "generic")
+	(let specialization_word "specialize")
+
+	(let function_workspace_full 4294967294u32)
+
+	(fn can_grow_function_workspace
+		(:doc "Keep the doubled node arena and signature indices within their representable range.")
+		(params (rows i32) (functions i32)) (returns bool)
+		(body (return (bool.and (bool.not (i32.lt 134217696i32 (local rows)))
+			(bool.not (i32.lt 1073741823i32 (local functions)))))))
+
+	(fn original_tree_rows
+		(:doc "Find the end of all original file ranges in the flattened workspace.")
+		(params (trees (shared-array ScalarTree))) (returns i32)
+		(body
+			(let-mut size 0i32)
+			(let-mut index 0i32)
+			(while
+				(:doc "Unavailable files have empty ranges and cannot extend the prefix.")
+				(i32.lt (local index) (array.len (local trees)))
+				(body
+					(let tree (array.load (local trees) (local index)))
+					(let end (i32.add (struct.get (local tree) base) (struct.get (local tree) rows)))
+					(if (i32.lt (local size) (local end)) (then (set (local size) (local end))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(return (local size))))
+
+	(fn subtree_limit
+		(:doc "Recover the exclusive preorder row limit of one checked subtree.")
+		(params (nodes (shared-array SourceNode)) (index i32) (file_limit i32)) (returns i32)
+		(body
+			(let-mut cursor (local index))
+			(while
+				(:doc "A next sibling starts beyond this subtree, even when reached through an ancestor.")
+				(i32.lt -1i32 (local cursor))
+				(body
+					(let node (array.load (local nodes) (local cursor)))
+					(let next (struct.get (local node) next_sibling))
+					(if (i32.lt -1i32 (local next)) (then (return (local next))))
+					(set (local cursor) (struct.get (local node) parent))))
+			(return (local file_limit))))
+
+	(fn is_function_request
+		(:doc "Recognize only a specialization form in the target position of a Wove call.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32)) (returns bool)
+		(body
+			(if
+				(:doc "Only specialization heads with a parent can be call targets.")
+				(bool.not (bool.and (i32.lt -1i32 (struct.get (local node) parent))
+					(call has_specialization_head (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))))
+				(then (return (bool false))))
+			(let target (struct.get (local node) parent))
+			(let invocation (array.load (local nodes) (local target)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local invocation)))
+			(if
+				(:doc "The specialization must be the first operand of an actual call form.")
+				(bool.not (bool.and (i32.eq (local index) (struct.get (local parts) operands))
+					(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)) 9u32)))
+				(then (return (bool false))))
+			(let enclosing (struct.get (local invocation) parent))
+			(if (i32.lt (local enclosing) 0i32) (then (return (bool false))))
+			(let container (array.load (local nodes) (local enclosing)))
+			(let kind (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local container) first_child)))
+			(if
+				(:doc "A member named call can appear in a constructor beside its value operands.")
+				(u32.eq (local kind) 50u32)
+				(then (return (i32.eq (local target)
+					(struct.get (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local container)) operands)))))
+			(let grandparent (struct.get (local container) parent))
+			(if
+				(:doc "Parameter, field, and variant labels are names within their actual declaration lists.")
+				(bool.and (i32.lt -1i32 (local grandparent))
+					(bool.or (bool.or (u32.eq (local kind) 3u32) (u32.eq (local kind) 49u32))
+						(u32.eq (local kind) (local variants_list))))
+				(then
+					(let owner (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (array.load (local nodes) (local grandparent)) first_child)))
+					(return (bool.not (bool.or
+						(bool.and (u32.eq (local kind) 3u32) (u32.eq (local owner) 1u32))
+						(bool.or (bool.and (u32.eq (local kind) 49u32) (u32.eq (local owner) 48u32))
+							(bool.and (u32.eq (local kind) (local variants_list)) (u32.eq (local owner) (local enum_declaration)))))))))
+			(return (bool true))))
+
+	(fn scan_function_workspace
+		(:doc "Measure the largest named template and count possible explicit applications in a parsed file.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))) (returns FunctionFootprint)
+		(body
+			(let-mut largest 0i32)
+			(let-mut requests 0i32)
+			(let-mut index 0i32)
+			(while
+				(:doc "Every request occupies a unique original source row.")
+				(i32.lt (local index) (array.len (local nodes)))
+				(body
+					(let node (array.load (local nodes) (local index)))
+					(if
+						(:doc "Only form rows can define templates or explicit requests.")
+						(u32.eq (struct.get (local node) kind) 40u32)
+						(then
+							(if
+								(:doc "A generic function's clone reserves just the declaration subtree.")
+								(bool.and (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+									(struct.get (local node) first_child)) 1u32)
+									(i32.lt -1i32 (call function_generic_list (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))))
+								(then
+									(let size (i32.sub (call subtree_limit (borrow-shared (local nodes)) (local index) (array.len (local nodes))) (local index)))
+									(if (i32.lt (local largest) (local size)) (then (set (local largest) (local size))))))
+							(if
+								(:doc "A closed site can request at most one new concrete signature.")
+								(call is_function_request (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local index))
+								(then (set (local requests) (i32.add (local requests) 1i32))))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(return (struct.new FunctionFootprint (largest (local largest)) (requests (local requests))))))
+
+	(fn might_use_generic_functions
+		(:doc "Avoid an extra parse for sources without a generic declaration or application spelling.")
+		(params (source (shared-array u8))) (returns bool)
+		(body
+			(let length (array.len (local source)))
+			(let-mut start 0i32)
+			(while
+				(:doc "A byte match may overestimate but cannot miss a true keyword.")
+				(bool.not (i32.lt (i32.sub (local length) (local start)) 7i32))
+				(body
+					(let first (array.load (local source) (local start)))
+					(if
+						(:doc "Only the two spellings can contribute function demands.")
+						(bool.or
+							(bool.and (u8.eq (local first) 103u8)
+								(call same_bytes (borrow-shared (local source)) (local start) (i32.add (local start) 7i32)
+									(borrow-shared (local generic_word)) 0i32 7i32))
+							(bool.and (bool.and (u8.eq (local first) 115u8) (i32.lt 9i32 (i32.sub (local length) (local start))))
+								(call same_bytes (borrow-shared (local source)) (local start) (i32.add (local start) 10i32)
+									(borrow-shared (local specialization_word)) 0i32 10i32)))
+						(then (return (bool true))))
+					(set (local start) (i32.add (local start) 1i32))))
+			(return (bool false))))
+
+	(fn measure_function_source
+		(:doc "Reuse a measured file's row count and inspect its checked tree for function demands.")
+		(params (source (shared-array u8)) (tree ScalarTree)) (returns FunctionFootprint)
+		(body
+			(let rows (struct.get (local tree) rows))
+			(if
+				(:doc "Most compiler inputs need no secondary tree or function expansion workspace.")
+				(bool.not (call might_use_generic_functions (borrow-shared (local source))))
+				(then (return (struct.new FunctionFootprint (largest 0i32) (requests 0i32)))))
+			(let-mut nodes (array.alloc SourceNode (local rows)))
+			(let ready (call build_source_tree (borrow-shared (local source))
+				(struct.new FormCheck (rows (int.convert u32 (local rows))) (start (struct.get (local tree) start))
+					(end (struct.get (local tree) end)) (error 0u32))
+				(borrow-mut (local nodes))))
+			(if
+				(:doc "Only a fully initialized secondary tree can contribute a workspace measurement.")
+				(u32.lt 0u32 (struct.get (local ready) error))
+				(then (return (struct.new FunctionFootprint (largest 0i32) (requests 0i32)))))
+			(return (call scan_function_workspace (borrow-shared (local source)) (borrow-shared (local nodes))))))
+
+	(fn function_workspace
+		(:doc "Bound the reserved clones using measured application sites and the largest template subtree.")
+		(params (rows i32) (functions i32) (largest i32) (requests i32)) (returns FunctionWorkspace)
+		(body
+			(if
+				(:doc "Ordinary compilation keeps the original table capacities.")
+				(i32.eq (local requests) 0i32)
+				(then (return (struct.new FunctionWorkspace (rows (local rows)) (functions (local functions)) (error 0u32)))))
+			(if
+				(:doc "Leave space for one signature per explicit application, including a target that later fails checking.")
+				(i32.lt (i32.sub 2147483647i32 (local functions)) (local requests))
+				(then (return (struct.new FunctionWorkspace (rows 0i32) (functions 0i32) (error 16u32)))))
+			(let-mut size (local rows))
+			(let-mut request 0i32)
+			(while
+				(:doc "Check every reservation before adding it to the positive signed row arena.")
+				(i32.lt (local request) (local requests))
+				(body
+					(if
+						(:doc "Record IDs and row indices must remain representable throughout the enlarged plan.")
+						(i32.lt (i32.sub 268435392i32 (local size)) (local largest))
+						(then (return (struct.new FunctionWorkspace (rows 0i32) (functions 0i32) (error 16u32)))))
+					(set (local size) (i32.add (local size) (local largest)))
+					(set (local request) (i32.add (local request) 1i32))))
+			(return (struct.new FunctionWorkspace (rows (local size)) (functions (i32.add (local functions) (local requests))) (error 0u32)))))
+
+	(fn graph_function_workspace
+		(:doc "Preserve original graph sizes and reserve contiguous storage for function clones when requested.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (trees (shared-array ScalarTree))
+			(rows i32) (functions i32)) (returns FunctionWorkspace)
+		(body
+			(let-mut largest 0i32)
+			(let-mut requests 0i32)
+			(let-mut file 0i32)
+			(while
+				(:doc "Only original, reserved source views contribute function templates and requests.")
+				(i32.lt (local file) (array.len (local files)))
+				(body
+					(let tree (array.load (local trees) (local file)))
+					(if
+						(:doc "Inactive files without a checked tree have no expansion work.")
+						(i32.lt 0i32 (struct.get (local tree) rows))
+						(then
+							(let input (array.load (local files) (local file)))
+							(let footprint (call measure_function_source
+								(borrow-shared (array.range (local arena) (struct.get (local input) source_start) (struct.get (local input) source_end)))
+								(local tree)))
+							(let size (struct.get (local footprint) largest))
+							(if (i32.lt (local largest) (local size)) (then (set (local largest) (local size))))
+							(set (local requests) (i32.add (local requests) (struct.get (local footprint) requests)))))
+					(set (local file) (i32.add (local file) 1i32))))
+			(return (call function_workspace (local rows) (local functions) (local largest) (local requests)))))
+)

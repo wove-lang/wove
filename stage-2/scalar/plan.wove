@@ -44,7 +44,8 @@
 	(use wove-file "../source/float_ops.wove" (only float_literal_shape is_float_conversion (value float_literal)))
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
 	(use wove-file "./specializations.wove" (only register_module_specializations))
-	(use wove-file "../source/generics.wove" (only has_specialization_head))
+	(use wove-file "../source/generics.wove" (only has_specialization_head generic_i32_value
+		(value normalized_i32_literal) (value checked_i32_operand) (value checked_function_operand)))
 	(use wove-file "./records.wove"
 		(only scope_at is_generic_template declaration_kind register_module_records register_module_record_arrays order_record_layouts value_type copyable_type is_owning_record is_scoped_record read_parameter_type read_view_parameter_extent find_record record_type record_index is_record_type
 			find_member member_value_type read_member_operand register_static_array find_fixed_array_type fixed_array_type named_extent_site is_fixed_array is_enum_layout is_payload_enum is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
@@ -79,10 +80,10 @@
 		A C text snapshot can retain a release symbol or an inline field name.
 		Both refer to the packed defining source tree.`)
 		ScalarFunction
-		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
+		(fields (declaration i32) (origin i32) (name i32) (params i32) (arity i32) (result u32)
 			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_vectors bool) (c_extents i32) (c_macro bool) (c_variadic i32) (c_nulls i32) (c_storage bool) (c_handle_out bool)
 			(c_snapshot bool) (c_snapshot_drop i32) (c_snapshot_field i32) (c_formals i32) (c_fixed bool)
-			(file i32) (tree_base i32) (tree_limit i32) (source_base i32) (body i32)))
+			(file i32) (tree_base i32) (name_base i32) (tree_limit i32) (source_base i32) (body i32)))
 	(struct ScalarParameter
 		(fields (name i32) (type u32) (position i32) (c_mode u8) (c_size i32) (c_count i32) (extent i32)))
 	(struct
@@ -368,6 +369,18 @@
 							(borrow-shared (local nodes)) (local index)))))))
 			(return (struct.new EntryRead (operand (local written)) (start 0i32) (end 0i32) (error 0u32) (related -1i32)))))
 
+	(fn checked_function_count
+		(:doc "Count the initialized signature prefix before visiting an overallocated graph table.")
+		(params (functions (shared-array ScalarFunction))) (returns i32)
+		(body
+			(let-mut count 0i32)
+			(while
+				(:doc "Only positive source name rows are complete function signatures.")
+				(bool.and (i32.lt (local count) (array.len (local functions)))
+					(i32.lt 0i32 (struct.get (array.load (local functions) (local count)) name)))
+				(body (set (local count) (i32.add (local count) 1i32))))
+			(return (local count))))
+
 	(fn find_function
 		(:doc `Look up a checked function by a byte span from either the source or an inspection query.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
@@ -380,6 +393,7 @@
 				(i32.lt (local cursor) (array.len (local functions)))
 				(body
 					(let target (array.load (local functions) (local cursor)))
+					(if (i32.eq (struct.get (local target) name) 0i32) (then (return -1i32)))
 					(let declared (array.load (local nodes) (struct.get (local target) name)))
 					(if
 						(:doc "C suffix sanitization has no role in source name resolution.")
@@ -390,11 +404,22 @@
 			(return -1i32)))
 
 	(fn register_function
+		(:doc "Register an ordinary declaration with its own source row and emitted identity.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32) (scope FunctionScope)
+			(functions (mut-array ScalarFunction)) (index i32) (parameters (mut-array ScalarParameter)) (next_param i32)
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))) (returns EntryRead)
+		(body
+			(return (call register_concrete_function (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local declaration) (local declaration) 0u32 (local scope)
+				(borrow-mut (local functions)) (local index) (borrow-mut (local parameters)) (local next_param)
+				(borrow-shared (local records)) (borrow-shared (local bindings))))))
+
+	(fn register_concrete_function
 		(:doc `Register one defining function and its parameters in the checked program tables.
 
 		Names and source spans address the supplied source view. Across files,
 		the canonical file and tree base recover the original declaration row.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32) (scope FunctionScope)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32) (origin i32) (specialized_identity u32) (scope FunctionScope)
 			(functions (mut-array ScalarFunction)) (index i32) (parameters (mut-array ScalarParameter)) (next_param i32)
 			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)))
 		(returns EntryRead)
@@ -412,8 +437,13 @@
 				(:doc "Function names use the checked Wove identifier alphabet.")
 				(bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
 				(then (return (call entry_at (local spelling) -1i32 22u32))))
-			(let identity (call function_identity (borrow-shared (local source))
-				(struct.get (local spelling) start) (struct.get (local spelling) end) (struct.get (local scope) module_id)))
+			(let specialized (bool.not (i32.eq (local declaration) (local origin))))
+			(let-mut identity (local specialized_identity))
+			(if
+				(:doc "Ordinary functions use the defining name hash. Specializations already have a checked argument key.")
+				(bool.not (local specialized))
+				(then (set (local identity) (call function_identity (borrow-shared (local source))
+					(struct.get (local spelling) start) (struct.get (local spelling) end) (struct.get (local scope) module_id)))))
 			(let-mut previous 0i32)
 			(while
 				(:doc "Reject a stable hash collision even if readable suffixes differ.")
@@ -427,8 +457,9 @@
 							(let prior (array.load (local nodes) (struct.get (local earlier) name)))
 							(if
 								(:doc "A repeated name is a source-level binding conflict.")
-								(bool.and (i32.eq (struct.get (local scope) file) (struct.get (local earlier) file))
-								(call same_name (borrow-shared (local source)) (local spelling) (local prior)))
+								(bool.and (bool.not (local specialized))
+									(bool.and (i32.eq (struct.get (local scope) file) (struct.get (local earlier) file))
+										(call same_name (borrow-shared (local source)) (local spelling) (local prior))))
 								(then (return (call entry_at (local spelling) -1i32 33u32))))
 							(return (call entry_at (local spelling) -1i32 32u32))))
 					(set (local previous) (i32.add (local previous) 1i32))))
@@ -473,13 +504,14 @@
 						(i32.lt -1i32 (struct.get (array.load (local parameters) (i32.add (local next_param) 1i32)) extent))))
 				(then (return (call entry_at (array.load (local nodes) (struct.get (local parts) operands)) -1i32 23u32))))
 			(array.store (local functions) (local index)
-				(struct.new ScalarFunction (declaration (local declaration)) (name (local name))
+				(struct.new ScalarFunction (declaration (local declaration)) (origin (local origin)) (name (local name))
 					(params (local next_param)) (arity (local arity))
 					(result (struct.get (local signature) result)) (first_statement (struct.get (local signature) first_statement))
 					(body (struct.get (local signature) body))
 					(identity (local identity)) (entry (local entry)) (c_strings 0i32) (c_vectors (bool false)) (c_extents 0i32) (c_macro (bool false)) (c_variadic 0i32) (c_nulls 0i32) (c_storage (bool false)) (c_handle_out (bool false))
 					(c_snapshot (bool false)) (c_snapshot_drop -1i32) (c_snapshot_field -1i32) (c_formals -1i32) (c_fixed (bool false))
 					(file (struct.get (local scope) file)) (tree_base (struct.get (local scope) tree_base))
+					(name_base (i32.add (struct.get (local scope) tree_base) (i32.sub (local declaration) (local origin))))
 					(tree_limit (struct.get (local scope) tree_limit)) (source_base (struct.get (local scope) source_base))))
 			(return (call entry_at (local node) (local limit) 0u32))))
 
@@ -1222,6 +1254,18 @@
 				(:doc "Parameters and locals shadow immutable storage in the defining module.")
 				(i32.lt (local target) 0i32)
 				(then
+					(if
+						(:doc "A generic i32 constant is immutable and shadows the defining module's value binding.")
+						(u8.eq (struct.get (local name) generic_kind) (local checked_i32_operand))
+						(then
+							(if
+								(:doc "A constant read preserves its declared type.")
+								(bool.not (call value_matches_type (local type) 5u32))
+								(then (return (call entry_at (local node) -1i32 24u32))))
+							(let value (call generic_i32_value (struct.get (local name) generic_value)))
+							(array.store (local expressions) (local index)
+								(call expression_row 1u32 5u32 (local normalized_i32_literal) -1i32 (local value) 0i32 (bool false)))
+							(return (call entry_at (local node) (local index) 0u32))))
 					(let root (array.load (local statements) (struct.get (local caller) tree_base)))
 					(let module_binding (call find_module_binding (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local statements)) (struct.get (local root) first) (local name)))
@@ -1422,6 +1466,7 @@
 				(i32.lt (local index) (array.len (local functions)))
 				(body
 					(let function (array.load (local functions) (local index)))
+					(if (i32.eq (struct.get (local function) name) 0i32) (then (return -1i32)))
 					(if
 						(:doc "Compare the defining file and the declaration row within that file.")
 						(bool.and
@@ -1473,6 +1518,24 @@
 
 	(let null_literal "null")
 
+	(fn find_function_instance
+		(:doc "Locate the concrete signature by its private cloned declaration row.")
+		(params (functions (shared-array ScalarFunction)) (declaration i32)) (returns i32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "An instance declaration can only be reached through a checked application.")
+				(i32.lt (local index) (array.len (local functions)))
+				(body
+					(let instance (array.load (local functions) (local index)))
+					(if (i32.eq (struct.get (local instance) name) 0i32) (then (return -1i32)))
+					(if
+						(:doc "A repeated application points to the same clone.")
+						(i32.eq (struct.get (local instance) declaration) (local declaration))
+						(then (return (local index))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(return -1i32)))
+
 	(fn plan_call
 		(:doc `Resolve a direct call and seed each argument from its formal type.
 
@@ -1489,12 +1552,19 @@
 				(i32.lt (local operand) 0i32)
 				(then (return (call entry_at (local node) -1i32 34u32))))
 			(let name (array.load (local nodes) (local operand)))
+			(let-mut target -1i32)
 			(if
-				(:doc "A direct call names a function binding with a bare identifier.")
-				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
-				(then (return (call entry_at (local name) -1i32 34u32))))
-			(let target (call resolve_call_target (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local functions)) (borrow-shared (local bindings)) (local caller) (local name)))
+				(:doc "An explicit application refers to the already registered concrete declaration.")
+				(u8.eq (struct.get (local name) generic_kind) (local checked_function_operand))
+				(then (set (local target) (call find_function_instance (borrow-shared (local functions))
+					(int.convert i32 (struct.get (local name) generic_value)))))
+				(else
+					(if
+						(:doc "An ordinary call target begins with a bare function binding.")
+						(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+						(then (return (call entry_at (local name) -1i32 34u32))))
+					(set (local target) (call resolve_call_target (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local functions)) (borrow-shared (local bindings)) (local caller) (local name)))))
 			(if
 				(:doc "The ABI entry is a host entry point and is unavailable to direct Wove calls.")
 				(bool.or (i32.lt (local target) 0i32)
@@ -3803,9 +3873,9 @@
 			(let base (struct.get (local caller) source_base))
 			(return (struct.new CallSite
 				(caller_file (struct.get (local caller) file))
-				(caller (i32.sub (struct.get (local caller) declaration) (struct.get (local caller) tree_base)))
+				(caller (i32.sub (struct.get (local caller) origin) (struct.get (local caller) tree_base)))
 				(callee_file (struct.get (local callee) file))
-				(callee (i32.sub (struct.get (local callee) declaration) (struct.get (local callee) tree_base)))
+				(callee (i32.sub (struct.get (local callee) origin) (struct.get (local callee) tree_base)))
 				(start (i32.add (local view_start) (i32.sub (struct.get (local node) start) (local base))))
 				(end (i32.add (local view_start) (i32.sub (struct.get (local node) end) (local base))))))))
 
@@ -4928,9 +4998,10 @@
 		(body
 			(let-mut site_count 0i32)
 			(let-mut function 0i32)
+			(let count (call checked_function_count (borrow-shared (local functions))))
 			(while
 				(:doc "Each Wove function has its own block scopes and checked exits.")
-				(i32.lt (local function) (array.len (local functions)))
+				(i32.lt (local function) (local count))
 				(body
 					(let definition (array.load (local functions) (local function)))
 					(if

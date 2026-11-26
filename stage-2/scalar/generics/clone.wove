@@ -1,0 +1,118 @@
+(module function_specialization_clone
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Copy a checked function template to private plan rows and attach its concrete operands.")
+
+	(use wove-file "../../source/generics.wove" (only with_generic_operand (value checked_type_operand) (value checked_i32_operand)))
+	(use wove-file "../../source/module.wove" (only form_parts))
+	(use wove-file "../../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../records.wove"
+		(only check_generic_argument generic_argument_kind specialization_first (type ScalarRecord) (type TypeScope)))
+	(use wove-file "../syntax.wove" (only same_name))
+
+	(struct ConcreteOperand (fields (name i32) (kind u8) (value u32)))
+
+	(fn generic_parameter_count
+		(:doc "Measure the checked formal list before allocating its substitution bindings.")
+		(params (nodes (shared-array SourceNode)) (first i32)) (returns i32)
+		(body
+			(let-mut count 0i32)
+			(let-mut row (local first))
+			(while
+				(:doc "Each selected formal has exactly one checked argument.")
+				(i32.lt -1i32 (local row))
+				(body
+					(set (local count) (i32.add (local count) 1i32))
+					(set (local row) (struct.get (array.load (local nodes) (local row)) next_sibling))))
+			(return (local count))))
+
+	(fn collect_concrete_operands
+		(:doc "Record each normalized application value once before walking the defining syntax.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (application i32) (parameters i32)
+			(operands (mut-array ConcreteOperand))) (returns void)
+		(body
+			(let-mut formal (local parameters))
+			(let-mut actual (call specialization_first (borrow-shared (local source)) (borrow-shared (local nodes)) (local application)))
+			(let-mut index 0i32)
+			(while
+				(:doc "The application key has already checked operand counts and types.")
+				(i32.lt -1i32 (local formal))
+				(body
+					(let parameter (array.load (local nodes) (local formal)))
+					(let kind (call generic_argument_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+					(let checked (call check_generic_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local actual) (local kind)))
+					(let-mut annotation (local checked_type_operand))
+					(if (u32.eq (local kind) 2u32) (then (set (local annotation) (local checked_i32_operand))))
+					(array.store (local operands) (local index) (struct.new ConcreteOperand
+						(name (struct.get (local parts) operands)) (kind (local annotation)) (value (struct.get (local checked) value))))
+					(set (local formal) (struct.get (local parameter) next_sibling))
+					(set (local actual) (struct.get (array.load (local nodes) (local actual)) next_sibling))
+					(set (local index) (i32.add (local index) 1i32))))))
+
+	(fn annotate_concrete_operand
+		(:doc "Attach a checked value to a matching bare operand while preserving its original spelling and span.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (operands (shared-array ConcreteOperand)))
+		(returns SourceNode)
+		(body
+			(let node (array.load (local nodes) (local index)))
+			(if
+				(:doc "Form heads, strings, and other nodes cannot name a substituted operand.")
+				(bool.or (bool.not (u32.eq (struct.get (local node) kind) 1u32))
+					(i32.eq (struct.get (array.load (local nodes) (struct.get (local node) parent)) first_child) (local index)))
+				(then (return (local node))))
+			(let-mut row 0i32)
+			(while
+				(:doc "Check the declared names from the same defining function.")
+				(i32.lt (local row) (array.len (local operands)))
+				(body
+					(let operand (array.load (local operands) (local row)))
+					(if
+						(:doc "The same spelling may be used in a value or type position. Consumers check the operand kind.")
+						(call same_name (borrow-shared (local source)) (local node)
+							(array.load (local nodes) (struct.get (local operand) name)))
+						(then (return (call with_generic_operand (local node) (struct.get (local operand) kind)
+							(struct.get (local operand) value)))))
+					(set (local row) (i32.add (local row) 1i32))))
+			(return (local node))))
+
+	(fn clone_link
+		(:doc "Rebase a present internal link while keeping absent links and the original declaration parent.")
+		(params (link i32) (first i32) (delta i32)) (returns i32)
+		(body
+			(if (i32.lt (local link) (local first)) (then (return (local link))))
+			(return (i32.add (local link) (local delta)))))
+
+	(fn clone_function_nodes
+		(:doc "Copy one isolated declaration whose runtime signature skips the compile-time parameter list.")
+		(params (source (shared-array u8)) (nodes (mut-array SourceNode))
+			(first i32) (end i32) (generic i32) (target i32) (operands (shared-array ConcreteOperand))) (returns void)
+		(body
+			(let delta (i32.sub (local target) (local first)))
+			(let following (struct.get (array.load (local nodes) (local generic)) next_sibling))
+			(let-mut index (local first))
+			(while
+				(:doc "The clone's detached declaration root retains its original lexical ancestry.")
+				(i32.lt (local index) (local end))
+				(body
+					(let node (call annotate_concrete_operand (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local index) (borrow-shared (local operands))))
+					(let-mut sibling (struct.get (local node) next_sibling))
+					(if
+						(:doc "Skip the generic list when exposing ordinary fields to the signature checker.")
+						(i32.eq (local sibling) (local generic))
+						(then (set (local sibling) (local following))))
+					(if (i32.eq (local index) (local first)) (then (set (local sibling) -1i32)))
+					(array.store (local nodes) (i32.add (local index) (local delta))
+						(struct.new SourceNode (kind (struct.get (local node) kind))
+							(start (struct.get (local node) start)) (end (struct.get (local node) end))
+							(parent (call clone_link (struct.get (local node) parent) (local first) (local delta)))
+							(first_child (call clone_link (struct.get (local node) first_child) (local first) (local delta)))
+							(next_sibling (call clone_link (local sibling) (local first) (local delta)))
+							(bridge_project -1i32) (bridge_default -1i32)
+							(generic_kind (struct.get (local node) generic_kind)) (generic_value (struct.get (local node) generic_value))))
+					(set (local index) (i32.add (local index) 1i32))))))
+)

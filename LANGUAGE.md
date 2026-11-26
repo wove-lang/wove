@@ -110,6 +110,24 @@ are exactly typed `i32` literals. A specialization is identified by the
 defining record and its normalized arguments. Different arguments define
 distinct types even when their layouts match.
 
+Stage 2 functions can also have explicit generic parameters. Place the
+`generic` list before the ordinary signature fields and specialize the
+function at its call site.
+
+```lisp
+(fn last (generic (const Width i32))
+    (params (bytes (array u8 Width)))
+    (returns u8)
+    (body (return (array.load (local bytes) (i32.sub (local Width) 1i32)))))
+
+(call (specialize last 4i32) (array.new (array u8 4) 1u8 2u8 3u8 4u8))
+```
+
+A type parameter supplies the exact types in the concrete signature and
+body. An `i32` constant parameter can size an array, supply a nested
+specialization argument, or be read with `local`. Equal arguments to the
+same defining function share one checked body across call sites.
+
 In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
 A `(mut-ref T)` parameter can also borrow a writable place of an exact

@@ -7,7 +7,8 @@
 	Resolve fields by original spelling and use declaration order for
 	their native ordinals. The record table is a zero-initialized prefix.`)
 
-	(use wove-file "../source/generics.wove" (only has_generic_head has_specialization_head read_generic_parameter read_generic_i32 hash_generic_word parameter_kind (type GenericConstant)))
+	(use wove-file "../source/generics.wove" (only has_generic_head has_specialization_head read_generic_parameter read_generic_i32 hash_generic_word parameter_kind function_generic_list
+		(value checked_type_operand) (value checked_i32_operand) (type GenericConstant)))
 	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value variants_list) (value match_case)))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_encoder))
 	(use wove-file "../source/c_scope.wove" (only declaring_c_bridge project_bridge))
@@ -137,6 +138,17 @@
 		(params (source (shared-array u8)) (node SourceNode) (bindings (shared-array GraphBinding))
 			(file i32) (source_base i32)) (returns i32)
 		(body
+			(if
+				(:doc "A substituted constant carries exact signed i32 bits. Array extents require a clear sign bit.")
+				(u8.eq (struct.get (local node) generic_kind) (local checked_i32_operand))
+				(then
+					(let bits (struct.get (local node) generic_value))
+					(if (u32.lt 2147483647u32 (local bits)) (then (return -1i32)))
+					(return (int.convert i32 (local bits)))))
+			(if
+				(:doc "A type parameter cannot fall through to an identically spelled module constant.")
+				(u8.eq (struct.get (local node) generic_kind) (local checked_type_operand))
+				(then (return -1i32)))
 			(let start (struct.get (local node) start))
 			(let end (struct.get (local node) end))
 			(if
@@ -819,7 +831,13 @@
 			(if
 				(:doc "Only explicitly typed i32 literals inhabit the constant parameter kind.")
 				(u32.eq (local kind) 2u32)
-				(then (return (call read_generic_i32 (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
+				(then
+					(if
+						(:doc "A cloned constant operand carries its checked application value.")
+						(u8.eq (struct.get (local node) generic_kind) (local checked_i32_operand))
+						(then (return (struct.new GenericConstant (value (struct.get (local node) generic_value))
+							(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 0u32)))))
+					(return (call read_generic_i32 (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
 			(let-mut type 0u32)
 			(if
 				(:doc "Type arguments are named Wove types or explicit record applications.")
@@ -851,6 +869,52 @@
 					(return (call hash_generic_word (call hash_generic_word (local prefix) 1u32)
 						(struct.get (local record) identity)))))
 			(return (call hash_generic_word (call hash_generic_word (local prefix) 0u32) (local value)))))
+
+	(fn read_specialization_arguments
+		(:doc "Validate both kinds of actuals and derive a deterministic identity from the defining declaration.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (use i32) (enclosing i32)
+			(template i32) (parameters i32) (definition u32)) (returns SpecializationKey)
+		(body
+			(let node (array.load (local nodes) (local use)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let selected (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local parts)))
+			(if
+				(:doc "The application inherits the selection of its enclosing declaration.")
+				(u32.lt 0u32 (struct.get (local selected) error))
+				(then (return (struct.new SpecializationKey (template -1i32) (identity 0u32)
+					(start (struct.get (local selected) start)) (end (struct.get (local selected) end))
+					(error (struct.get (local selected) error))))))
+			(let-mut formal (local parameters))
+			(let-mut actual (call specialization_first (borrow-shared (local source)) (borrow-shared (local nodes)) (local use)))
+			(let-mut identity (call hash_generic_word (local definition) (local specialization_domain)))
+			(while
+				(:doc "Read each declared kind against exactly one argument, in order.")
+				(i32.lt -1i32 (local formal))
+				(body
+					(if (i32.lt (local actual) 0i32) (then (return (call specialization_at (local node) -1i32 0u32 23u32))))
+					(let parameter (array.load (local nodes) (local formal)))
+					(let argument (array.load (local nodes) (local actual)))
+					(if
+						(:doc "Only closed field applications can share a mapping keyed by their source row.")
+						(call names_enclosing_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
+							(borrow-shared (local records)) (local enclosing) (local argument))
+						(then (return (call specialization_at (local argument) -1i32 0u32 23u32))))
+					(let kind (call generic_argument_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+					(let checked (call check_generic_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local actual) (local kind)))
+					(if
+						(:doc "A bad argument points to its original operand, with its own type or literal error.")
+						(u32.lt 0u32 (struct.get (local checked) error))
+						(then (return (struct.new SpecializationKey (template -1i32) (identity 0u32)
+							(start (struct.get (local checked) start)) (end (struct.get (local checked) end))
+							(error (struct.get (local checked) error))))))
+					(set (local identity) (call key_argument_identity (borrow-shared (local records)) (local identity) (local kind)
+						(struct.get (local checked) value)))
+					(set (local actual) (struct.get (local argument) next_sibling))
+					(set (local formal) (struct.get (local parameter) next_sibling))))
+			(if (i32.lt -1i32 (local actual)) (then (return (call specialization_at (array.load (local nodes) (local actual)) -1i32 0u32 23u32))))
+			(return (call specialization_at (local node) (local template) (local identity) 0u32))))
 
 	(fn read_specialization_key
 		(:doc `Check all explicit arguments against the named template and construct its stable C identity.
@@ -884,48 +948,20 @@
 			(if (i32.lt (local template) 0i32) (then (return (call specialization_at (local spelling) -1i32 0u32 34u32))))
 			(let layout (array.load (local records) (local template)))
 			(if (bool.not (call is_generic_template (local layout))) (then (return (call specialization_at (local spelling) -1i32 0u32 23u32))))
-			(let-mut formal (struct.get (local layout) generic))
-			(let-mut actual (struct.get (local spelling) next_sibling))
-			(let-mut identity (call hash_generic_word (struct.get (local layout) identity) (local specialization_domain)))
-			(while
-				(:doc "Read each declared kind against exactly one argument, in order.")
-				(i32.lt -1i32 (local formal))
-				(body
-					(if (i32.lt (local actual) 0i32) (then (return (call specialization_at (local node) -1i32 0u32 23u32))))
-					(let parameter (array.load (local nodes) (local formal)))
-					(let argument (array.load (local nodes) (local actual)))
-					(if
-						(:doc "Only closed field applications can share a mapping keyed by their source row.")
-						(call names_enclosing_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
-							(borrow-shared (local records)) (local enclosing) (local argument))
-						(then (return (call specialization_at (local argument) -1i32 0u32 23u32))))
-					(let kind (call generic_argument_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
-					(let checked (call check_generic_argument (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local actual) (local kind)))
-					(if
-						(:doc "A bad argument points to its original operand, with its own type or literal error.")
-						(u32.lt 0u32 (struct.get (local checked) error))
-						(then (return (struct.new SpecializationKey (template -1i32) (identity 0u32)
-							(start (struct.get (local checked) start)) (end (struct.get (local checked) end))
-							(error (struct.get (local checked) error))))))
-					(set (local identity) (call key_argument_identity (borrow-shared (local records)) (local identity) (local kind)
-						(struct.get (local checked) value)))
-					(set (local actual) (struct.get (local argument) next_sibling))
-					(set (local formal) (struct.get (local parameter) next_sibling))))
-			(if (i32.lt -1i32 (local actual)) (then (return (call specialization_at (array.load (local nodes) (local actual)) -1i32 0u32 23u32))))
-			(return (call specialization_at (local node) (local template) (local identity) 0u32))))
+			(return (call read_specialization_arguments (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local use) (local enclosing)
+				(local template) (struct.get (local layout) generic) (struct.get (local layout) identity)))))
 
 	(fn same_specialization_arguments
 		(:doc "Compare exact type identities and normalized i32 values across the two original namespaces.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
-			(bindings (shared-array GraphBinding)) (scope TypeScope) (use i32) (stored ScalarRecord)) (returns bool)
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (use i32)
+			(previous_scope TypeScope) (previous i32) (parameters i32)) (returns bool)
 		(body
-			(let previous (struct.get (local stored) specialization))
 			(if (i32.eq (local use) (local previous)) (then (return (bool true))))
 			(let-mut left (call specialization_first (borrow-shared (local source)) (borrow-shared (local nodes)) (local use)))
 			(let-mut right (call specialization_first (borrow-shared (local source)) (borrow-shared (local nodes)) (local previous)))
-			(let-mut formal (struct.get (local stored) generic))
-			(let previous_scope (call use_scope (local stored)))
+			(let-mut formal (local parameters))
 			(while
 				(:doc "Both applications have already been checked against this parameter list.")
 				(i32.lt -1i32 (local formal))
@@ -968,7 +1004,8 @@
 								(bool.and
 									(bool.and (i32.eq (local name) (struct.get (local template) name)) (i32.lt -1i32 (struct.get (local layout) specialization)))
 									(call same_specialization_arguments (borrow-shared (local source)) (borrow-shared (local nodes))
-										(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local use) (local layout)))
+										(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local use)
+										(call use_scope (local layout)) (struct.get (local layout) specialization) (struct.get (local layout) generic)))
 								(then (return (local row))))
 							(return -2i32)))
 					(set (local row) (i32.add (local row) 1i32))))
@@ -1024,6 +1061,14 @@
 				(u32.lt 0u32 (local scalar))
 				(then (return (local scalar))))
 			(let name (array.load (local nodes) (local index)))
+			(if
+				(:doc "A concrete function clone can bind this type operand to a declaration from another file.")
+				(u8.eq (struct.get (local name) generic_kind) (local checked_type_operand))
+				(then (return (struct.get (local name) generic_value))))
+			(if
+				(:doc "A constant parameter cannot fall through to an identically spelled module type.")
+				(u8.eq (struct.get (local name) generic_kind) (local checked_i32_operand))
+				(then (return 0u32)))
 			(if
 				(:doc "A generic record type carries explicit arguments at its point of use.")
 				(call has_specialization_head (borrow-shared (local source)) (borrow-shared (local nodes)) (local name))
@@ -1696,7 +1741,9 @@
 					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
 					(if
 						(:doc "Checked function, struct, and enum declarations can mention anonymous fixed layouts.")
-						(bool.or (u32.eq (local kind) (local enum_declaration)) (bool.or (u32.eq (local kind) 1u32)
+						(bool.or (u32.eq (local kind) (local enum_declaration)) (bool.or (bool.and (u32.eq (local kind) 1u32)
+								(i32.lt (call function_generic_list (borrow-shared (local source)) (borrow-shared (local nodes))
+									(array.load (local nodes) (local form))) 0i32))
 							(bool.and (u32.eq (local kind) 48u32)
 								(i32.lt (call declaration_generic_list (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)) 0i32))))
 						(then
@@ -1738,7 +1785,9 @@
 					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
 					(if
 						(:doc "Functions, record fields, and enum payloads can contain fixed record array spellings.")
-						(bool.or (u32.eq (local kind) (local enum_declaration)) (bool.or (u32.eq (local kind) 1u32)
+						(bool.or (u32.eq (local kind) (local enum_declaration)) (bool.or (bool.and (u32.eq (local kind) 1u32)
+								(i32.lt (call function_generic_list (borrow-shared (local source)) (borrow-shared (local nodes))
+									(array.load (local nodes) (local form))) 0i32))
 							(bool.and (u32.eq (local kind) 48u32)
 								(i32.lt (call declaration_generic_list (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)) 0i32))))
 						(then
