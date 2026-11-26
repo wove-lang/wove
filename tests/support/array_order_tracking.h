@@ -21,6 +21,11 @@ static size_t descriptors;
 static size_t backings;
 static size_t dropped;
 
+#ifdef WOVE_TRACK_GROWN_ARRAY
+static size_t growths;
+static void *retired_backing;
+#endif
+
 // Report the allocation invariant that failed.
 static _Noreturn void fail(const char *reason) {
 	fprintf(stderr, "%s\n", reason);
@@ -40,6 +45,20 @@ void *tracked_malloc(size_t size) {
 
 // Associate one backing block with the most recent descriptor.
 void *tracked_calloc(size_t count, size_t size) {
+#ifdef WOVE_TRACK_GROWN_ARRAY
+	// The selected descriptor may replace its backing once without starting a new owner.
+	if (backings == descriptors) {
+		// Match the requested capacity and keep both backing identities until the old one is retired.
+		if (growths != 0 || descriptors <= WOVE_TRACK_GROWN_ARRAY || count != WOVE_TRACK_GROWN_CAPACITY) {
+			fail("unexpected array growth");
+		}
+		Allocation *allocation = &live[WOVE_TRACK_GROWN_ARRAY];
+		retired_backing = allocation->backing;
+		allocation->backing = calloc(count, size);
+		++growths;
+		return allocation->backing;
+	}
+#endif
 	if (backings + 1 != descriptors) { fail("unexpected array backing"); }
 	Allocation *allocation = &live[backings++];
 	allocation->backing = calloc(count, size);
@@ -49,6 +68,14 @@ void *tracked_calloc(size_t count, size_t size) {
 // Require each owned backing and then its descriptor to be released once.
 void tracked_free(void *pointer) {
 	if (pointer == NULL) { return; }
+#ifdef WOVE_TRACK_GROWN_ARRAY
+	// Growth releases only the old backing. It must leave the descriptor and its owners live.
+	if (pointer == retired_backing) {
+		retired_backing = NULL;
+		free(pointer);
+		return;
+	}
+#endif
 	if (dropped == sizeof live / sizeof live[0]) { fail("extra array drop"); }
 	Allocation *allocation = &live[wove_track_drop_order[dropped]];
 	// Retain only live addresses, even when the allocator reuses a retired block.
@@ -70,6 +97,10 @@ int main(int argc, char **argv) {
 	if (descriptors != sizeof live / sizeof live[0] || backings != descriptors || dropped != descriptors) {
 		fail("missing recursive array cleanup");
 	}
+#ifdef WOVE_TRACK_GROWN_ARRAY
+	// The replacement backing and its retired predecessor each have their own release.
+	if (growths != 1 || retired_backing != NULL) { fail("missing array growth cleanup"); }
+#endif
 	return result;
 }
 

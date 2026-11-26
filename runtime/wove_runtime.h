@@ -271,7 +271,7 @@ void wvrt_array_push_owned_at_span(wvrt_array *owner, void *slot, int32_t file, 
 void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slot,
 	int32_t file, int32_t start, int32_t end);
 
-// Wrap each owning record in an inline slot whose first member tracks initialization.
+// Wrap an owning aggregate in a slot whose first member tracks initialization.
 #define WVRT_DEFINE_OWNED_SLOT(type, slot, destroy) \
 	typedef struct { bool wvrt_live; type wvrt_value; } slot; \
 	static inline __attribute__((unused)) void slot##_drop(void *wvrt_item) { \
@@ -292,6 +292,14 @@ void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slo
 	(&((const slot *)wvrt_array_borrow_owned_at_span((view), (index), (file), (start), (end)))->wvrt_value)
 #define wvrt_owned_array_borrow_mut(slot, view, index, file, start, end) \
 	(&((slot *)wvrt_array_borrow_mut_owned_at_span((view), (index), (file), (start), (end)))->wvrt_value)
+
+// Take the live value while retaining an empty slot at the same array index.
+#define wvrt_owned_array_take(slot, view, index, file, start, end) \
+	__extension__ ({ \
+		slot *wvrt_taken = wvrt_array_borrow_mut_owned_at_span((view), (index), (file), (start), (end)); \
+		wvrt_taken->wvrt_live = false; \
+		wvrt_taken->wvrt_value; \
+	})
 
 // Pass the captured owner through a populated slot of the same layout.
 #define wvrt_owned_array_store(slot, view, index, value, file, start, end) \

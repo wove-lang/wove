@@ -16,7 +16,7 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding) collect_standalone_bindings))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only skip_disabled_siblings (type ModuleRead) (type SelectedDeclaration)))
-	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_record_type is_native_record is_optional_record_borrow is_payload_enum is_place_reference is_mutable_place_reference record_receiver_type place_borrow_kind is_native_integer is_typed_slice slice_element_type is_readable_slice is_writable_slice is_array_owner is_owning_record is_owning_struct_element array_owner_element (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_record_type is_native_record is_optional_record_borrow is_payload_enum is_place_reference is_mutable_place_reference record_receiver_type place_borrow_kind is_native_integer is_typed_slice slice_element_type is_readable_slice is_writable_slice is_array_owner is_owning_record is_owning_array_element array_owner_element (type ScalarRecord)))
 	(use wove-file "../scalar/type_sites.wove" (only target_numeric_site))
 	(use wove-file "./records.wove" (only write_value_type write_member_name write_member_separator write_parameter_name write_parameter_place write_field_place write_place_borrow captures_value_argument write_record_layouts write_array_layout_argument))
 	(use wove-file "../source/slice_options.wove" (only (value try_slice_kind) (value optional_view_absent) (value optional_view_unwrap)))
@@ -545,6 +545,7 @@
 	(let owned_load_open "wvrt_owned_array_borrow(")
 	(let owned_mut_open "wvrt_owned_array_borrow_mut(")
 	(let owned_store_open "wvrt_owned_array_store(")
+	(let owned_take_open "wvrt_owned_array_take(")
 
 	(fn open_owned_access
 		(:doc "Choose replacement or the required borrow permission for a wrapped slot.")
@@ -557,6 +558,12 @@
 				(u32.eq (struct.get (local expression) kind) 40u32)
 				(then (return (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local layout) (borrow-shared (local owned_store_open)) (borrow-mut (local output))
+					(local offset) (local name_prefix) (local writing)))))
+			(if
+				(:doc "A direct heap take transfers the checked slot and clears its occupancy.")
+				(u32.eq (struct.get (local expression) kind) (local fixed_owner_take))
+				(then (return (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local layout) (borrow-shared (local owned_take_open)) (borrow-mut (local output))
 					(local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Exclusive views lend the checked mutable place directly.")
@@ -593,7 +600,7 @@
 					(return (call write_slice_length (borrow-mut (local output)) (local cursor) (local writing)))))
 			(let element (call slice_element_type (borrow-shared (local records)) (local type)))
 			(let row (call is_array_owner (local element)))
-			(let owning (call is_owning_struct_element (borrow-shared (local records)) (local element)))
+			(let owning (call is_owning_array_element (borrow-shared (local records)) (local element)))
 			(let typed (call is_typed_slice (local type)))
 			(let range (u32.eq (local kind) 44u32))
 			(if
@@ -623,7 +630,7 @@
 									(borrow-mut (local output)) (local offset) (local writing))))))
 						(else
 							(if
-								(:doc "Wrapped records borrow or replace the initialized value inside the checked slot.")
+								(:doc "Wrapped aggregates use the occupancy-aware operation for their checked slot.")
 								(local owning)
 								(then (set (local open) (call open_owned_access (borrow-shared (local source)) (borrow-shared (local nodes))
 									(array.load (local records) (call record_index (local element))) (local expression)
@@ -765,7 +772,7 @@
 			(let element (call array_owner_element (borrow-shared (local records)) (local type)))
 			(let byte (bool.and (u32.eq (local element) 10u32) (bool.not (local recoverable))))
 			(let rows (call is_array_owner (local element)))
-			(let owning (call is_owning_struct_element (borrow-shared (local records)) (local element)))
+			(let owning (call is_owning_array_element (borrow-shared (local records)) (local element)))
 			(let-mut open 0u32)
 			(if
 				(:doc "An array of owners needs the runtime's row destructor.")
@@ -774,7 +781,7 @@
 					(borrow-mut (local output)) (local offset) (local writing))))
 				(else
 					(if
-						(:doc "A record allocation installs its initialized-slot layout and destructor.")
+						(:doc "An owning aggregate allocation installs its initialized-slot layout and destructor.")
 						(local owning)
 						(then (set (local open) (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
 							(array.load (local records) (call record_index (local element))) (borrow-shared (local owned_alloc_open))
@@ -984,11 +991,19 @@
 				(then (return (call write_temporary_name (borrow-shared (local source)) (local value_index) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
-				(:doc "Fixed accesses carry their own element and original source span.")
+				(:doc "Fixed accesses use inline storage or the checked heap descriptor supplying an owning slot.")
 				(call is_fixed_access (local kind))
-				(then (return (call write_fixed_access (borrow-shared (local source)) (borrow-shared (local nodes))
-					(borrow-shared (local records)) (borrow-shared (local parameters)) (borrow-shared (local expressions))
-					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+				(then
+					(let receiver (array.load (local expressions) (struct.get (local expression) first)))
+					(if
+						(:doc "The heap projection uses the wrapped slot's view, extent, and occupancy checks.")
+						(call is_readable_slice (struct.get (local receiver) type))
+						(then (return (call write_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
+							(borrow-shared (local records)) (borrow-shared (local expressions)) (local expression) (local tree_base)
+							(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+					(return (call write_fixed_access (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local parameters)) (borrow-shared (local expressions))
+						(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Read the C vector once and snapshot it at the Wove use site.")
 				(u32.eq (local kind) (local c_vector_snapshot_expression))

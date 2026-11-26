@@ -601,6 +601,20 @@ an unfilled slot traps. Indexed loans keep the source array live for the
 call. An owning slot cannot be loaded by value or bound as an array
 iteration item.
 
+An owned array can also hold an owning fixed-array layout directly, as in
+`(array.alloc (array (owned-array i32) 2) 3i32)`. Each heap slot starts
+unfilled. Store or push an exact fresh value or an explicitly moved owner
+to fill it. A nested subscript selects the original fixed slots for
+borrowing or replacement. A mutable heap owner can move out an element
+without changing its length, leaving that slot unfilled. Removing a live
+element transfers its ownership and shifts the following slots.
+
+The fixed element's exact leaf type and every extent are checked. An
+indexed loan keeps the underlying heap storage stable. Growth preserves
+the occupied slots and all nested live flags. Replacing, truncating, or
+dropping a slot releases its remaining owners, including after a partial
+move.
+
 Fixed arrays keep their elements inline. Use
 `(array T extent)` for a builtin scalar, a Wove record, an owned array,
 or another fixed array. Each extent is a nonnegative decimal, an

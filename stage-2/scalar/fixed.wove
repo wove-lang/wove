@@ -12,7 +12,7 @@
 		check_writable_field fixed_access_base has_conflicting_loan))
 	(use wove-file "./records.wove" (only (type ScalarRecord) fixed_array_type invalid_array_type
 		record_index is_fixed_array is_record_type record_receiver_type is_array_owner is_place_reference
-		place_reference_type place_reference_target is_writable_slice slice_element_code owner_view_type))
+		place_reference_type place_reference_target is_readable_slice is_writable_slice slice_element_code owner_view_type))
 	(use wove-file "./syntax.wove" (only (type EntryRead) entry_at entry_keyword is_reborrow_keyword
 		(value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_borrow)
 		(value fixed_owner_store) (value pending_exact_move) (value fixed_take_request)))
@@ -138,6 +138,26 @@
 				(call runtime_expression (local kind) (local type) (local node) (local receiver) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
+	(fn finish_heap_fixed_access
+		(:doc "Keep an owning fixed element in its heap slot or transfer it from the original owner.")
+		(params (node SourceNode) (reference SourceNode) (caller ScalarFunction) (receiver i32) (index i32)
+			(element u32) (moving bool) (writable bool) (view_start i32) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "A mutable view can lend a place. A take must come directly from a mutable owner.")
+				(local moving)
+				(then
+					(if
+						(:doc "The direct owner produces a mutable owner loan in the checked receiver row.")
+						(u32.not-eq (struct.get (array.load (local expressions) (local receiver)) kind) 39u32)
+						(then (return (call entry_at (local reference) -1i32 24u32))))
+					(return (call store_fixed_access (local node) (local caller) (local receiver) (local index)
+						(local fixed_owner_take) (local element) (local view_start) (borrow-mut (local expressions))))))
+			(return (call store_fixed_access (local node) (local caller) (local receiver) (local index)
+				(local fixed_subarray_place) (call place_reference_type (local element) (local writable))
+				(local view_start) (borrow-mut (local expressions))))))
+
 	(fn finish_owned_fixed_access
 		(:doc "Check the original inline owner and plan a loan, transfer, or replacement of its exact element.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (reference SourceNode)
@@ -158,14 +178,26 @@
 					(set (local path) (local base))))
 			(if (i32.ltz (local home)) (then (return (call entry_at (local reference) -1i32 24u32))))
 			(let binding (array.load (local expressions) (local home)))
-			(let local_binding (u32.eq (struct.get (local binding) kind) 6u32))
+			(let type (struct.get (local binding) type))
+			(let heap (call is_readable_slice (local type)))
+			(let kind_of_binding (struct.get (local binding) kind))
+			(let local_binding (bool.or (u32.eq (local kind_of_binding) 6u32)
+				(bool.and (local heap) (struct.get (local binding) borrowed_owner))))
 			(let moving (u32.eq (local expected) (local fixed_take_request)))
+			(let-mut can_move (local local_binding))
+			(let-mut can_write (call writable_place (local binding)))
 			(if
-				(:doc "Access stays tied to a named place, and an explicit transfer requires a local owner.")
+				(:doc "A heap projection inherits descriptor permissions and only a direct owner permits a nested take.")
+				(local heap)
+				(then
+					(set (local can_move) (u32.eq (local kind_of_binding) 39u32))
+					(set (local can_write) (call is_writable_slice (local type)))))
+			(if
+				(:doc "Access stays tied to its original place, including an owning heap element's captured view.")
 				(bool.or
-					(bool.or (bool.not (bool.or (local local_binding) (call is_place_reference (struct.get (local binding) type))))
-						(bool.and (local moving) (bool.not (local local_binding))))
-					(bool.or (bool.and (local writable) (bool.not (call writable_place (local binding))))
+					(bool.or (bool.not (bool.or (local heap) (bool.or (local local_binding) (call is_place_reference (local type)))))
+						(bool.and (local moving) (bool.not (local can_move))))
+					(bool.or (bool.and (local writable) (bool.not (local can_write)))
 						(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
 							(borrow-shared (local statements)) (local receiver) (local statement)
 							(struct.get (local binding) target) (local local_binding) (local path) (local writable))))
