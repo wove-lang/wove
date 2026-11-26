@@ -355,6 +355,14 @@ write through field paths. A mutable loan starts at a `let-mut` local
 or an existing mutable reference. Reborrow a reference parameter with
 the same explicit forms to pass it to another call.
 
+A record with a `(shared-array u8)` field is scoped to its local declaration.
+Initialize each shared field with an explicit `borrow-shared` of its
+source. The loan lasts through the record's block and allows source reads.
+Use a shared or mutable record reference to pass it to a Wove helper.
+A mutable reference can advance a scalar cursor field while the byte
+descriptor stays fixed. Array reads and shared reborrows of the descriptor
+use the original backing storage. The record stays in its defining binding.
+
 A field such as `(cells (owned-array u8))` makes its record an owner.
 Initialize the field with a fresh array or `(move (local cells))`. Move
 an entire local record with `(move (local grid))`, or transfer a single

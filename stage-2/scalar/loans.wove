@@ -38,6 +38,7 @@
 	(let indirect_local_place -2i32)
 	(let local_slice_view 146u32)
 	(let local_slice_projection 147u32)
+	(let scoped_field_loan 252u32)
 
 	(fn expression_row
 		(:doc `Build a checked expression row, or an unvisited row with an expected scalar type.`)
@@ -156,7 +157,8 @@
 			(if
 				(:doc "Ranges and local reborrows retain the requested access mode.")
 				(bool.or (u32.eq (local kind) (call owned_field_loan_kind))
-					(bool.or (u32.eq (local kind) 45u32) (call is_local_slice_view (local kind))))
+					(bool.or (bool.or (u32.eq (local kind) 45u32) (u32.eq (local kind) (local scoped_field_loan)))
+						(call is_local_slice_view (local kind))))
 				(then (return (bool.or (local exclusive) (call is_writable_slice (struct.get (local loan) type))))))
 			(return (bool.or
 				(bool.or (u32.eq (local kind) 39u32) (u32.eq (local kind) (local fixed_mut_loan)))
@@ -180,12 +182,35 @@
 			(return (bool.and (u32.eq (struct.get (local pointer) kind) 6u32)
 				(i32.eq (struct.get (local pointer) target) (local target))))))
 
+	(fn scoped_record_source
+		(:doc "Check the original array or parent view of each initialized borrowed field.")
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
+			(first i32) (stop i32) (target i32) (local_binding bool))
+		(returns bool)
+		(body
+			(let-mut field (local first))
+			(while
+				(:doc "Only earlier or fully initialized fields hold a descriptor.")
+				(bool.and (i32.lt -1i32 (local field)) (bool.not (i32.eq (local field) (local stop))))
+				(body
+					(let member (array.load (local expressions) (local field)))
+					(let view (array.load (local expressions) (struct.get (local member) first)))
+					(if
+						(:doc "A shared descriptor freezes its defining source; static data needs no loan.")
+						(bool.and (u32.eq (struct.get (local view) type) 34u32)
+							(bool.and (bool.not (u32.eq (struct.get (local view) kind) 62u32))
+								(call same_binding (local target) (local local_binding)
+									(struct.get (local view) target) (struct.get (local view) borrowed_owner))))
+						(then (return (bool true))))
+					(set (local field) (struct.get (array.load (local nodes) (local field)) next_sibling))))
+			(return (bool false))))
+
 	(fn has_scoped_array_loan
 		(:doc `Check active lexical loans of a local array, parameter, or parent view.
 
 		A shared loan permits reads of its source. A mutable loan excludes
 		every access through the source for the lifetime of the binding.`)
-		(params (statements (shared-array ScalarStatement)) (expressions (shared-array ScalarExpression))
+		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement)) (expressions (shared-array ScalarExpression))
 			(statement i32) (target i32) (local_binding bool) (exclusive bool))
 		(returns bool)
 		(body
@@ -197,11 +222,22 @@
 					(let declaration (array.load (local statements) (local index)))
 					(let origin (array.load (local expressions) (struct.get (local declaration) value)))
 					(if
-						(:doc "A reborrow keeps its immediate parent subject to the same permission check.")
-						(bool.and (call same_binding (local target) (local local_binding)
-							(struct.get (local origin) target) (struct.get (local origin) borrowed_owner))
-							(bool.or (local exclusive) (call is_writable_slice (struct.get (local declaration) type))))
-						(then (return (bool true))))
+						(:doc "A scoped record holds the shared loans of its constructor fields.")
+						(u32.eq (struct.get (local origin) kind) 50u32)
+						(then
+							(if
+								(:doc "Shared field loans allow reads but prevent exclusive access to their sources.")
+								(bool.and (local exclusive)
+									(call scoped_record_source (borrow-shared (local nodes)) (borrow-shared (local expressions))
+										(struct.get (local origin) first) -1i32 (local target) (local local_binding)))
+								(then (return (bool true)))))
+						(else
+							(if
+								(:doc "A named view keeps its immediate parent subject to the access check.")
+								(bool.and (call same_binding (local target) (local local_binding)
+									(struct.get (local origin) target) (struct.get (local origin) borrowed_owner))
+									(bool.or (local exclusive) (call is_writable_slice (struct.get (local declaration) type))))
+								(then (return (bool true))))))
 					(set (local index) (struct.get (local declaration) previous_loan))))
 			(return (bool false))))
 
@@ -219,7 +255,7 @@
 		(body
 			(if
 				(:doc "A named view holds its loan independently of other operands.")
-				(call has_scoped_array_loan (borrow-shared (local statements)) (borrow-shared (local expressions))
+				(call has_scoped_array_loan (borrow-shared (local nodes)) (borrow-shared (local statements)) (borrow-shared (local expressions))
 					(local statement) (local target) (local local_binding) (local exclusive))
 				(then (return (bool true))))
 			(let-mut child (local index))
@@ -244,6 +280,12 @@
 							(bool.and (bool.or (u32.eq (local operation_kind) 37u32) (u32.eq (local operation_kind) 44u32))
 								(call descriptor_receiver_conflicts (borrow-shared (local nodes)) (borrow-shared (local expressions))
 									(local first) (local target) (local local_binding) (local place) (local exclusive))))
+						(then (return (bool true))))
+					(if
+						(:doc "An initialized record field keeps its shared loan through later constructor operands.")
+						(bool.and (bool.and (local exclusive) (u32.eq (local operation_kind) 50u32))
+							(call scoped_record_source (borrow-shared (local nodes)) (borrow-shared (local expressions))
+								(local first) (local child) (local target) (local local_binding)))
 						(then (return (bool true))))
 					(if
 						(:doc "A call argument or direct store receiver can still hold a loan of its source.")
