@@ -16,7 +16,7 @@ typedef struct {
 
 #undef main
 int wove_emitted_main(int argc, char **argv);
-wgr0r80f1mToken wgf0at5uakreplace_token(wvrt_mut_slice view, int32_t index, wgr0r80f1mToken value);
+wgr0r80f1mToken wgf2at5uakreplace_token(wvrt_mut_slice view, int32_t index, wgr0r80f1mToken value);
 
 // Print every field of a copy or backing record without truncating its scalar values.
 static void print_token(wgr0r80f1mToken value) {
@@ -36,12 +36,12 @@ int main(int argc, char **argv) {
 	// An invalid store must trap before touching inaccessible backing storage.
 	if (argc == 2) {
 		const wvrt_mut_slice inaccessible = {NULL, full.wvrt_length, sizeof *data};
-		if (strcmp(argv[1], "negative") == 0) { (void)wgf0at5uakreplace_token(inaccessible, -1, replacement); }
-		if (strcmp(argv[1], "end") == 0) { (void)wgf0at5uakreplace_token(inaccessible, full.wvrt_length, replacement); }
+		if (strcmp(argv[1], "negative") == 0) { (void)wgf2at5uakreplace_token(inaccessible, -1, replacement); }
+		if (strcmp(argv[1], "end") == 0) { (void)wgf2at5uakreplace_token(inaccessible, full.wvrt_length, replacement); }
 		return 2;
 	}
 
-	const wgr0r80f1mToken observed = wgf0at5uakreplace_token(full, 1, replacement);
+	const wgr0r80f1mToken observed = wgf2at5uakreplace_token(full, 1, replacement);
 	printf("%d", wove_emitted_main(argc, argv));
 	print_token(observed);
 	print_token(data[0]);

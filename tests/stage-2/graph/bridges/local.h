@@ -30,12 +30,12 @@ static inline int32_t wgt0000024(int32_t first, int32_t second) {
 }
 
 // Occupy the default file-scope name of the Wove helper.
-static inline int32_t wgf0fth8djhelper(void) {
+static inline int32_t wgf3unmtnknumber(void) {
 	return 22;
 }
 
 // Occupy the first fallback even though the Wove program only selects this function.
-static inline int32_t wwgf0fth8djhelper(void) {
+static inline int32_t wwgf3unmtnknumber(void) {
 	return 1;
 }
 

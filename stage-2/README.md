@@ -181,13 +181,13 @@ their original nodes and metadata.
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices.
 
-[FNV-1a](hashing/fnv1a.wove) exposes the immutable 31-bit seed `fnv1a_seed`
+[FNV-1a](hashing/fnv1a.wove) exposes the immutable 32-bit seed `fnv1a_seed`
 and updates it one raw byte at a time with `fnv1a_byte`. The declaration
 identity builder supplies the order and delimiters for its components.
 
-[Base32hex](hashing/base32hex.wove) exposes the fixed width `base32hex31_width` and
-`encode_base32hex31`. The encoder writes all seven digits at the requested
-offset and returns true. An out-of-range ID or output span returns false
+[Base32hex](hashing/base32hex.wove) exposes the fixed width `base32hex32_width` and
+`encode_base32hex32`. The encoder writes all seven digits at the requested
+offset and returns true. An out-of-range output span returns false
 and preserves the destination.
 
 The [C name generator](emit/text.wove) takes a `CNameRole`, a checked ID,
@@ -195,7 +195,7 @@ the source name's byte span, and a translation unit prefix. The seed represents
 the role enum with a record and named constructors. The default spelling is
 `wg<role><id><suffix>`, where `wg` stands for Wove-generated. The character
 after the prefix identifies the role. The ID uses seven lowercase
-Base32hex digits and starts with `0` or `1` because IDs are 31 bits.
+Base32hex digits and starts with `0`, `1`, `2`, or `3` because IDs are 32 bits.
 A suffix uses the validated identifier bytes directly. Graph emission
 reserves a prefix against selected
 native function names, type spellings, and destructors before writing C. It uses the first available prefix from
@@ -216,8 +216,8 @@ Native symbols and the ABI entry `main` retain their original spellings.
 | `b` | C-string call storage | Original call's file-local tree row | `a` for descriptors, `b` for backing storage |
 
 For a single module, hash its declared name, the four-byte little-endian
-declaration kind, and the original declaration name using the archive's
-31-bit FNV-1a. Records use the archive's struct kind 1, and functions use
+declaration kind, and the original declaration name using standard
+32-bit FNV-1a. Records use the archive's struct kind 1, and functions use
 kind 2. For a source graph, the canonical file path also contributes
 to the fingerprint. Each resolved call keeps the callee's exact defining
 row and its own source node. Specializations compare the defining
