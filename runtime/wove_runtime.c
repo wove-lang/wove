@@ -1619,6 +1619,24 @@ static wvrt_slice wvrt_slice_subrange(wvrt_slice wvrtview, int32_t wvrtstart, in
 	return (wvrt_slice){wvrt_base, wvrtend - wvrtstart, wvrtview.wvrt_element_size};
 }
 
+// Narrow a shared view only after proving the signed offset and extent fit.
+wvrt_slice wvrt_slice_try_exact(wvrt_slice view, int32_t offset, int32_t extent) {
+	// Subtract first so a large offset or extent cannot overflow or form an invalid pointer.
+	if (offset < 0 || offset > view.wvrt_length || extent < 0 || extent > view.wvrt_length - offset) {
+		return (wvrt_slice){NULL, -1, view.wvrt_element_size};
+	}
+	return wvrt_slice_subrange(view, offset, offset + extent);
+}
+
+// Extract a present shared view, including an empty one, at the written unwrap site.
+wvrt_slice wvrt_slice_require_present_at_span(wvrt_slice view, int32_t file, int32_t start, int32_t end) {
+	// A negative length is reserved for absence and is never readable as an ordinary view.
+	if (view.wvrt_length < 0) {
+		wvrt_trap_at_span(file, start, end, "optional view is absent");
+	}
+	return view;
+}
+
 // Form a shared view relative to the first byte and retain the seed's line diagnostic.
 wvrt_slice wvrt_slice_range_u8(const void *wvrtitems, int32_t wvrtlength,
 	int32_t wvrtstart, int32_t wvrtend, wvrt_location wvrtsite) {

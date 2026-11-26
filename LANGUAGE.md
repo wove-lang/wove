@@ -656,6 +656,25 @@ A parameter can require an exact count, as in `(shared-array u8 4)`. An
 argument whose length is unknown at compile time is checked before later
 arguments run. The usual range bounds still apply.
 
+Use `(array.try-slice (borrow-shared source) offset extent)` to bind a
+fallible exact-length shared view with `let`. The offset is an `i32`
+evaluated once after capturing the source. The extent uses the same
+nonnegative compile-time spelling as an exact array parameter. A negative
+offset, an offset past the end, or insufficient remaining elements yields
+absence. A zero extent at the end yields a present empty view.
+
+```wove
+(let word (array.try-slice (borrow-shared (local data)) (local offset) 4))
+(if (optional.is-none (local word)) (then (return 0u32)))
+(return (u32.from-le-bytes (borrow-shared (optional.unwrap (local word)))))
+```
+
+`optional.unwrap` checks presence at its source span and preserves the exact
+extent. Its shared borrow can initialize a regular view or satisfy an exact
+shared parameter. The optional binding holds the source's shared loan until
+the end of its block, including when it is absent. A function with an explicit
+source contract can return the unwrapped view when it borrows that parameter.
+
 Return a fresh owner from a call or transfer an existing owner with
 `(return (move (local buffer)))`. A move ends the original binding's
 ownership. Completed call borrows allow a move.
