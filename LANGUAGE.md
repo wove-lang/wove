@@ -628,6 +628,30 @@ block. A shared loan permits source reads. An exclusive loan also excludes
 reads through the source. Mutable views can write their underlying elements.
 Reborrows follow the same rules for their immediate parent view.
 
+A Wove function can return an array view or a non-owning scoped record
+with shared byte fields. Write `(returns (shared-array u8) (from bytes))` for a shared view or
+`(returns Cursor (from bytes))` for a record. Each returned borrow must trace
+back to the named array parameter. A mutable result requires a mutable
+parameter. For example:
+
+```wove
+(struct Cursor (fields (bytes (shared-array u8)) (at i32)))
+(fn start_cursor
+  (params (bytes (shared-array u8)))
+  (returns Cursor (from bytes))
+  (body
+    (return (struct.new Cursor
+      (bytes (borrow-shared (local bytes))) (at 0i32)))))
+```
+
+Bind a borrowing call with `let`, or use `let-mut` to update a scoped record's
+ordinary fields. The selected argument's loan, including its access mode,
+lasts until the binding's block ends. Other arguments keep their usual
+call-scoped loans. A direct return can forward a borrowing call when its
+exact result type and originating argument satisfy the enclosing function's
+contract. The compiler rejects views of storage owned by the callee and
+views derived from a different parameter.
+
 A parameter can require an exact count, as in `(shared-array u8 4)`. An
 argument whose length is unknown at compile time is checked before later
 arguments run. The usual range bounds still apply.

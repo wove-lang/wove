@@ -164,7 +164,7 @@ interfaces and design constraints.
 | `sys/stat.h` timestamp aliases and host extensions | Represent overlapping timestamp aliases and add separate availability, ownership, and record contracts for host extensions. |
 | `sys/wait.h` `WCOREDUMP`, `WCORE_DUMPED`, `Usage`, `wait3`, and `wait4` | Select the optional macros and functions from the target header and check native `struct rusage` output storage. |
 | `unistd.h` `execl`, `execle`, and `execlp` | Marshal each variable-length text operand to a call-scoped C string and supply a typed terminating null. `execle` also needs the environment vector after that null. The open scalar tail supplies neither pointer contract. |
-| `unistd.h` text and returned-alias families, `optarg`, and `getopt` | Check native character storage, termination and returned aliases. Track the retained or reordered argv vector and the lifetime of its borrowed text. |
+| `unistd.h` text and returned-alias families, `optarg`, and `getopt` | Check native character storage, termination and returned aliases. Track the retained or reordered argv vector and the lifetime of its borrowed text. Wove `(returns T (from parameter))` applies to ordinary Wove functions. Native returned aliases also need a bridge lifetime contract. |
 | `unistd.h` selector catalogs, `vfork`, and deprecated or removed APIs listed in the final note | Select host and header feature catalogs. Model the shared-address-space control flow of `vfork` before enabling it or any separately supported extension. |
 
 Each corpus file can be checked and round-tripped with the existing Stage 2
