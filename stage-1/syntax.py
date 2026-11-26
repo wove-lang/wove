@@ -41,8 +41,9 @@ TOKEN = re.compile(
 	r'(?P<string>"(?:\\[^\n]|[^"\\\n])*"|`(?:``|[^`])*`(?!`))|'
 	r'(?P<atom>[^\s();"`]+)|(?P<invalid>.)'
 )
-IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
-TAG = re.compile(":?" + IDENTIFIER.pattern)
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
+TAG = re.compile(":?" + WORD.pattern)
 
 
 # Recognize metadata entries without interpreting their payloads.
@@ -220,9 +221,9 @@ def form(node: Node, tag: str | None = None, arity: int | None = None) -> Form:
 	return node
 
 
-# Read an identifier or a form tag with its permitted symbol spelling.
+# Read a user name or a fixed language word with its own spelling rules.
 def identifier(node: Node, pattern: re.Pattern[str] = IDENTIFIER) -> str:
-	# Only form heads accept the optional metadata prefix.
+	# The caller supplies the separate word grammar for fixed syntax.
 	if not isinstance(node, Atom) or node.quoted or not pattern.fullmatch(node.text):
 		raise SourceError(node.line)
 	return node.text

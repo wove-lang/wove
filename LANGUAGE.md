@@ -10,6 +10,11 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 Wove source uses tagged forms. A file contains one named `module`. Each
 Wove function definition has a name and exactly one `params`, `returns`, and `body` form.
 Spell `(params)` for a zero-argument helper. Tags and names are case-sensitive.
+An identifier begins with an ASCII letter or underscore. Its remaining
+characters may also be ASCII digits. This grammar applies to module,
+declaration, binding, parameter, field, variant, generic parameter, and
+import names. Fixed words and operators retain their own spellings, such
+as `let-mut` and `u32.add-checked`.
 
 ```lisp
 (module example
