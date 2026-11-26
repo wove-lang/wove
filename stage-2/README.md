@@ -352,15 +352,17 @@ An argument or return must match the defining record identity, so two
 types with the same fields remain distinct. Record layout declarations
 can follow the signatures that refer to them.
 
-`(array element extent)` describes a fixed array of an exact builtin
-scalar type and a nonnegative `i32` extent. Use a bare decimal size or the
+`(array element extent)` describes a fixed array of a builtin scalar or an
+ordinary copyable Wove record and a nonnegative `i32` extent. Use a bare decimal size or the
 name of a local or selectively imported immutable module integer. The
 defining initializer must be a literal that fits the extent range. Both
 the element type and resolved size are part of
 the type. Use `(array.new (array u8 2) (u8 17) (u8 25))` for a typed
 list and `(array.repeat (array u8 128) (u8 0))` to fill a fixed block.
 Lists evaluate their elements left to right. Repetition evaluates its
-initializer once, including at extent zero.
+initializer once, including at extent zero. Repeating a record copies
+that value into each inline slot. Aliases of the element record share
+one layout for each resolved extent.
 
 A fixed array keeps its elements inline and can be a record field, a
 function parameter, or a return value. Binding, passing, and returning
