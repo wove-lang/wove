@@ -765,6 +765,7 @@ struct wvrt_worker_receipt {
 	atomic_bool done;
 	pthread_t thread;
 	WvrtWorkerSite origin;
+	WvrtWorkerPool *pool;
 };
 
 // Publish the last frame access on both normal return and native thread exit.
@@ -798,14 +799,290 @@ static int wvrt_worker_protect(WvrtWorkerSite site, wvrt_array *job) {
 	return previous;
 }
 
-// Start a frame with either lexical storage in the joined call or heap storage in a receipt.
-static void wvrt_worker_start(wvrt_worker_receipt *worker, wvrt_array *(*handler)(wvrt_array *),
-	wvrt_array *job, WvrtWorkerSite site, bool submitted) {
+// The producer owns admission and shutdown. A permit or receipt keeps one reference to the state.
+struct WvrtWorkerPool {
+	pthread_mutex_t lock;
+	pthread_cond_t available;
+	pthread_cond_t completed;
+	pthread_cond_t admission;
+	pthread_t *threads;
+	wvrt_worker_receipt **queue;
+	size_t started;
+	size_t capacity;
+	size_t first;
+	size_t waiting;
+	size_t reserved;
+	size_t references;
+	bool accepting;
+	bool stopping;
+};
+
+static const wvrt_location wvrt_pool_site = {"<worker pool>", 1, 1};
+
+// Report failed synchronization before operating on state that may no longer be locked.
+static void wvrt_pool_check(int error, const char *message) {
+	if (error != 0) { wvrt_trap(wvrt_pool_site, message); }
+}
+
+// Drain and retirement may join threads while their ownership transfer is still in progress.
+static int wvrt_pool_disable_cancellation(void) {
+	int previous;
+	wvrt_pool_check(pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &previous), "could not protect worker pool cleanup");
+	return previous;
+}
+
+// An abnormal native exit cannot strand a receipt or reduce the pool to zero workers.
+static void wvrt_pool_abandoned(void *context) {
+	wvrt_worker_receipt *frame = context;
+	const WvrtWorkerSite site = frame->origin;
+	wvrt_trap_at_span(site.file, site.start, site.end, "pooled worker exited without returning its result");
+}
+
+// A job may enter native code. Keep its exit handler active until cancellation is disabled again.
+static void wvrt_pool_execute(wvrt_worker_receipt *frame) {
+	pthread_cleanup_push(wvrt_pool_abandoned, frame);
+	frame->result = frame->handler(frame->job);
+	(void)wvrt_pool_disable_cancellation();
+	pthread_cleanup_pop(0);
+}
+
+// Dispatch accepted frames until the producer has stopped the queue and every job has started.
+static void *wvrt_pool_thread(void *context) {
+	WvrtWorkerPool *pool = context;
+	(void)wvrt_pool_disable_cancellation();
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not lock worker queue");
+	// The queue and the receipt publication predicate use the same mutex.
+	for (;;) {
+		// A closing pool can exit only after all queued jobs have been taken.
+		while (pool->waiting == 0 && !pool->stopping) {
+			wvrt_pool_check(pthread_cond_wait(&pool->available, &pool->lock), "could not wait for pool work");
+		}
+		if (pool->waiting == 0) { break; }
+		wvrt_worker_receipt *frame = pool->queue[pool->first];
+		pool->first = (pool->first + 1) % pool->capacity;
+		--pool->waiting;
+		wvrt_pool_check(pthread_cond_signal(&pool->admission), "could not signal pool capacity");
+		wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock worker queue");
+		wvrt_pool_execute(frame);
+		wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not publish pooled result");
+		wvrt_worker_done(frame);
+		// Pool-local waiters can be interested in different frames, so each checks its own predicate.
+		wvrt_pool_check(pthread_cond_broadcast(&pool->completed), "could not signal pooled result");
+	}
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock stopped worker queue");
+	return NULL;
+}
+
+// Stop the native workers only once admission has closed and no permit can add another job.
+static bool wvrt_pool_stop_locked(WvrtWorkerPool *pool) {
+	if (pool->accepting || pool->reserved != 0 || pool->stopping) { return false; }
+	pool->stopping = true;
+	wvrt_pool_check(pthread_cond_broadcast(&pool->available), "could not wake workers for shutdown");
+	return true;
+}
+
+// Join every initialized thread without holding the queue lock.
+static void wvrt_pool_join(WvrtWorkerPool *pool) {
+	// Startup rollback uses the same initialized prefix as graceful shutdown.
+	while (pool->started != 0) {
+		--pool->started;
+		wvrt_pool_check(pthread_join(pool->threads[pool->started], NULL), "could not join pooled worker");
+	}
+	free(pool->threads);
+	pool->threads = NULL;
+	free(pool->queue);
+	pool->queue = NULL;
+}
+
+// A completed receipt can outlive the threads and keeps its completion synchronization live.
+static void wvrt_pool_release(WvrtWorkerPool *pool) {
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not lock pool ownership");
+	bool last = --pool->references == 0;
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock pool ownership");
+	// The final holder releases the state only after joined shutdown.
+	if (last) {
+		wvrt_pool_check(pthread_cond_destroy(&pool->admission), "could not release pool admission");
+		wvrt_pool_check(pthread_cond_destroy(&pool->completed), "could not release pool completion");
+		wvrt_pool_check(pthread_cond_destroy(&pool->available), "could not release pool work signal");
+		wvrt_pool_check(pthread_mutex_destroy(&pool->lock), "could not release pool mutex");
+		free(pool);
+	}
+}
+
+// Allocate the waiting queue and roll back all resources if any part of startup fails.
+WvrtWorkerPool *wvrt_worker_pool_open(int32_t threads, int32_t capacity) {
+	if (threads <= 0 || capacity <= 0) { return NULL; }
+	WvrtWorkerPool *pool = calloc(1, sizeof *pool);
+	if (pool == NULL) { return NULL; }
+	pool->threads = calloc((size_t)threads, sizeof *pool->threads);
+	pool->queue = calloc((size_t)capacity, sizeof *pool->queue);
+	if (pool->threads == NULL || pool->queue == NULL) { goto wvrt_storage; }
+	if (pthread_mutex_init(&pool->lock, NULL) != 0) { goto wvrt_storage; }
+	if (pthread_cond_init(&pool->available, NULL) != 0) { goto wvrt_unlock; }
+	if (pthread_cond_init(&pool->completed, NULL) != 0) { goto wvrt_available; }
+	if (pthread_cond_init(&pool->admission, NULL) != 0) { goto wvrt_completed; }
+	pool->capacity = (size_t)capacity;
+	pool->accepting = true;
+	pool->references = 1;
+	// Workers see complete shared state before the first one is started.
+	while (pool->started < (size_t)threads) {
+		// A failed start still leaves a valid owner for closing the initialized prefix.
+		if (pthread_create(&pool->threads[pool->started], NULL, wvrt_pool_thread, pool) != 0) {
+			wvrt_worker_pool_drop(pool);
+			return NULL;
+		}
+		++pool->started;
+	}
+	return pool;
+wvrt_completed:
+	(void)pthread_cond_destroy(&pool->completed);
+wvrt_available:
+	(void)pthread_cond_destroy(&pool->available);
+wvrt_unlock:
+	(void)pthread_mutex_destroy(&pool->lock);
+wvrt_storage:
+	free(pool->queue);
+	free(pool->threads);
+	free(pool);
+	return NULL;
+}
+
+// The locked queue counts waiting frames and unused permits against the same capacity.
+static bool wvrt_pool_can_reserve(const WvrtWorkerPool *pool) {
+	return pool->accepting &&
+		pool->reserved < pool->capacity - pool->waiting &&
+		pool->references != SIZE_MAX;
+}
+
+// Claim a waiting slot and give the new permit its own reference to the pool.
+static WvrtWorkerPermit *wvrt_pool_reserve_locked(WvrtWorkerPool *pool) {
+	if (!wvrt_pool_can_reserve(pool)) { return NULL; }
+	++pool->reserved;
+	++pool->references;
+	return pool;
+}
+
+// Reserve a waiting slot without taking any job data from the producer.
+WvrtWorkerPermit *wvrt_worker_pool_reserve(WvrtWorkerPool *pool) {
+	if (pool == NULL) { return NULL; }
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not lock pool admission");
+	WvrtWorkerPermit *permit = wvrt_pool_reserve_locked(pool);
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock pool admission");
+	return permit;
+}
+
+// Condition waits reacquire the mutex before cancellation runs their cleanup.
+static void wvrt_pool_unlock_admission(void *context) {
+	WvrtWorkerPool *pool = context;
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock waiting pool admission");
+}
+
+// Wait only while a queued frame can free capacity independently of the producer.
+WvrtWorkerPermit *wvrt_worker_pool_reserve_wait(WvrtWorkerPool *pool) {
+	if (pool == NULL) { return NULL; }
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not lock waiting pool admission");
+	WvrtWorkerPermit *permit;
+	pthread_cleanup_push(wvrt_pool_unlock_admission, pool);
+	// Full capacity held solely by unused permits requires the producer to act.
+	while (pool->accepting && pool->waiting != 0 &&
+		pool->references != SIZE_MAX && !wvrt_pool_can_reserve(pool)) {
+		wvrt_pool_check(pthread_cond_wait(&pool->admission, &pool->lock), "could not wait for pool capacity");
+	}
+	permit = wvrt_pool_reserve_locked(pool);
+	pthread_cleanup_pop(1);
+	return permit;
+}
+
+// An explicit close leaves outstanding reservations usable and closes once they have all been resolved.
+bool wvrt_worker_pool_close(WvrtWorkerPool *pool) {
+	if (pool == NULL) { return false; }
+	int previous = wvrt_pool_disable_cancellation();
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not lock worker pool shutdown");
+	bool closed = pool->reserved == 0;
+	// Wake admission waiters before draining work from a closed queue.
+	if (closed) {
+		pool->accepting = false;
+		wvrt_pool_check(pthread_cond_broadcast(&pool->admission), "could not signal closed admission");
+	}
+	bool join = wvrt_pool_stop_locked(pool);
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock worker pool shutdown");
+	if (join) { wvrt_pool_join(pool); }
+	(void)pthread_setcancelstate(previous, NULL);
+	return closed;
+}
+
+// Retire the public owner. Unused reservations keep the already admitted capacity live.
+void wvrt_worker_pool_drop(WvrtWorkerPool *pool) {
+	if (pool == NULL) { return; }
+	int previous = wvrt_pool_disable_cancellation();
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not retire worker pool owner");
+	pool->accepting = false;
+	wvrt_pool_check(pthread_cond_broadcast(&pool->admission), "could not signal retired admission");
+	bool join = wvrt_pool_stop_locked(pool);
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock retired worker pool");
+	if (join) { wvrt_pool_join(pool); }
+	wvrt_pool_release(pool);
+	(void)pthread_setcancelstate(previous, NULL);
+}
+
+// Cancel unused admission and finish a deferred shutdown if this was its last reservation.
+void wvrt_worker_permit_drop(WvrtWorkerPermit *pool) {
+	if (pool == NULL) { return; }
+	int previous = wvrt_pool_disable_cancellation();
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not release worker reservation");
+	--pool->reserved;
+	wvrt_pool_check(pthread_cond_signal(&pool->admission), "could not signal released admission");
+	bool join = wvrt_pool_stop_locked(pool);
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock released worker reservation");
+	if (join) { wvrt_pool_join(pool); }
+	wvrt_pool_release(pool);
+	(void)pthread_setcancelstate(previous, NULL);
+}
+
+// Convert one reservation into a queued frame and transfer its reference to the receipt.
+static void wvrt_pool_enqueue(WvrtWorkerPermit *pool, wvrt_worker_receipt *frame) {
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not enqueue pooled worker");
+	frame->pool = pool;
+	--pool->reserved;
+	size_t next = (pool->first + pool->waiting) % pool->capacity;
+	pool->queue[next] = frame;
+	++pool->waiting;
+	wvrt_pool_check(pthread_cond_signal(&pool->available), "could not signal pooled job");
+	bool join = wvrt_pool_stop_locked(pool);
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock queued worker");
+	if (join) { wvrt_pool_join(pool); }
+}
+
+// Retire a pooled receipt without joining its reusable worker thread.
+static const char *wvrt_pool_retire(wvrt_worker_receipt *worker, wvrt_array **result) {
+	WvrtWorkerPool *pool = worker->pool;
+	wvrt_pool_check(pthread_mutex_lock(&pool->lock), "could not lock pooled result");
+	// Publication and retirement of the last frame access share the pool mutex.
+	while (!atomic_load_explicit(&worker->done, memory_order_acquire)) {
+		wvrt_pool_check(pthread_cond_wait(&pool->completed, &pool->lock), "could not wait for pooled result");
+	}
+	*result = worker->result;
+	wvrt_pool_check(pthread_mutex_unlock(&pool->lock), "could not unlock pooled result");
+	free(worker);
+	wvrt_pool_release(pool);
+	return *result == NULL ? "joined worker exited without returning" : NULL;
+}
+
+// Initialize the frame before passing it to a thread or scheduler.
+static void wvrt_worker_prepare(wvrt_worker_receipt *worker, wvrt_array *(*handler)(wvrt_array *),
+	wvrt_array *job, WvrtWorkerSite site) {
 	worker->handler = handler;
 	worker->job = job;
 	worker->result = NULL;
 	worker->origin = site;
+	worker->pool = NULL;
 	atomic_init(&worker->done, false);
+}
+
+// Start a frame with either lexical storage in the joined call or heap storage in a receipt.
+static void wvrt_worker_start(wvrt_worker_receipt *worker, wvrt_array *(*handler)(wvrt_array *),
+	wvrt_array *job, WvrtWorkerSite site, bool submitted) {
+	wvrt_worker_prepare(worker, handler, job, site);
 	// An unsuccessful launch leaves both the job and the frame with the submitting thread.
 	if (pthread_create(&worker->thread, NULL, wvrt_worker_run, worker) != 0) {
 		if (submitted) { free(worker); }
@@ -819,6 +1096,7 @@ static void wvrt_worker_start(wvrt_worker_receipt *worker, wvrt_array *(*handler
 static const char *wvrt_worker_retire(wvrt_worker_receipt *worker, bool submitted, wvrt_array **result) {
 	*result = NULL;
 	if (worker == NULL) { return "cannot join an empty worker receipt"; }
+	if (worker->pool != NULL) { return wvrt_pool_retire(worker, result); }
 	const bool joined = pthread_join(worker->thread, NULL) == 0;
 	// Wait for publication if a failed join left the child running.
 	if (!joined) {
@@ -860,7 +1138,93 @@ static wvrt_array *wvrt_worker_finish(wvrt_worker_receipt *worker, WvrtWorkerSit
 	}
 	return wvrt_worker_deliver(result, previous_cancel);
 }
+#else
+// Targets without native threads report an unavailable pool through the open result.
+WvrtWorkerPool *wvrt_worker_pool_open(int32_t threads, int32_t capacity) {
+	(void)threads;
+	(void)capacity;
+	return NULL;
+}
+
+// There is no waiting capacity on targets without native threads.
+WvrtWorkerPermit *wvrt_worker_pool_reserve(WvrtWorkerPool *pool) {
+	(void)pool;
+	return NULL;
+}
+
+// Waiting cannot make reservation possible without a native thread pool.
+WvrtWorkerPermit *wvrt_worker_pool_reserve_wait(WvrtWorkerPool *pool) {
+	return wvrt_worker_pool_reserve(pool);
+}
+
+// A missing pool cannot be explicitly closed.
+bool wvrt_worker_pool_close(WvrtWorkerPool *pool) {
+	(void)pool;
+	return false;
+}
+
+// A lexical owner may contain the null result of open.
+void wvrt_worker_pool_drop(WvrtWorkerPool *pool) {
+	(void)pool;
+}
+
+// Null reservations need no cleanup.
+void wvrt_worker_permit_drop(WvrtWorkerPermit *permit) {
+	(void)permit;
+}
 #endif
+
+// Transfer the lexical pool or permit owner out of its original slot.
+WvrtWorkerPool *wvrt_worker_pool_take(WvrtWorkerPool **slot) {
+	WvrtWorkerPool *pool = *slot;
+	*slot = NULL;
+	return pool;
+}
+
+// Reject failed reservation before the generated submission evaluates its job operand.
+WvrtWorkerPermit *wvrt_worker_permit_take_at_span(WvrtWorkerPermit **slot,
+	int32_t file, int32_t start, int32_t end) {
+	if (*slot == NULL) { wvrt_trap_at_span(file, start, end, "cannot submit without a worker permit"); }
+	return wvrt_worker_pool_take(slot);
+}
+
+#ifdef WVRT_POSIX_WORKERS
+// Retire an enqueued receipt if cancellation interrupts its delivery to the producer.
+static void wvrt_pool_cancel_receipt(void *receipt) {
+	wvrt_worker_receipt_drop(receipt);
+}
+#endif
+
+// Consume the reservation and the already evaluated job, returning an ordinary worker receipt.
+wvrt_worker_receipt *wvrt_worker_spawn_on_at_span(wvrt_array *(*handler)(wvrt_array *),
+	WvrtWorkerPermit *permit, wvrt_array *job, int32_t file, int32_t start, int32_t end) {
+	// A native caller can bypass the generated reservation check.
+	if (permit == NULL) {
+		wvrt_array_drop(job);
+		wvrt_trap_at_span(file, start, end, "cannot submit without a worker permit");
+	}
+#ifdef WVRT_POSIX_WORKERS
+	const int previous = wvrt_pool_disable_cancellation();
+	wvrt_worker_receipt *worker = malloc(sizeof *worker);
+	// The failed submission still owns both operands and must release them.
+	if (worker == NULL) {
+		wvrt_array_drop(job);
+		wvrt_worker_permit_drop(permit);
+		wvrt_trap_at_span(file, start, end, "could not allocate pooled worker");
+	}
+	wvrt_worker_prepare(worker, handler, job, (WvrtWorkerSite){file, start, end});
+	wvrt_pool_enqueue(permit, worker);
+	pthread_cleanup_push(wvrt_pool_cancel_receipt, worker);
+	(void)pthread_setcancelstate(previous, NULL);
+	pthread_testcancel();
+	pthread_cleanup_pop(0);
+	return worker;
+#else
+	(void)handler;
+	wvrt_array_drop(job);
+	wvrt_trap_at_span(file, start, end, "could not start pooled worker");
+#endif
+}
 
 // Keep the joined call's frame on the stack until the thread has stopped using it.
 wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*handler)(wvrt_array *), wvrt_array *job,
