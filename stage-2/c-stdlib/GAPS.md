@@ -36,7 +36,7 @@ The current parser and renderer can read these forms structurally. The seed
 skips bridge members. Stage 2 resolves selected native integer aliases and
 record views and lowers checked record fields and call-scoped borrows.
 Further activation requires the declaration, type, selection, and lowering
-work below. [Seed bridge behavior](../../stage-1/README.md)
+work below. [Seed bridge behavior](../LANGUAGE-SUBSET.md#imports-and-c-headers)
 
 ## Active archive declarations
 
