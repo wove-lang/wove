@@ -80,8 +80,7 @@ builds exclude them.
 
 ## Literals
 
-Booleans are `(bool true)` and `(bool false)`. Integer types are `i8`, `u8`,
-`i16`, `u16`, `i32`, `u32`, `i64`, and `u64`. Give integer values an exact
+Booleans are `(bool true)` and `(bool false)`. Give integer values an exact
 type with a suffix (`-3i32`, `1_000u32`, `0xabcd_ef00u64`, `0b1100_0011u8`)
 or a type head (`(i32 -3)`). Place a separator between digits of the
 selected radix. Signed hexadecimal and binary values put the minus before
@@ -100,8 +99,16 @@ the decoded value.
 
 ## Integers and booleans
 
+| Width | Signed | Unsigned |
+| --- | --- | --- |
+| 8 bits | `i8` | `u8` |
+| 16 bits | `i16` | `u16` |
+| 32 bits | `i32` | `u32` |
+| 64 bits | `i64` | `u64` |
+
 Typed numeric operators use `type.operation`. In `(i32.add left right)`,
-`i32` specifies the exact operands and result. Each integer type supports the following operators.
+`i32` specifies the exact operands and result. The same integer operators
+are available at every listed width.
 
 | Operation | Words |
 | --- | --- |
