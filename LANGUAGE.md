@@ -734,8 +734,9 @@ Borrow the original field with `(borrow-shared (struct.get (local row) file))`,
 or borrow it mutably from a writable place. A native pointer-out initializer
 can populate an empty mutable field. A nonnull result belongs to the struct
 even when the initializer reports failure. Use
-`(move (struct.get (local row) file))` to transfer the field. Its sibling
-fields remain live. Scope cleanup releases each remaining present handle,
+`(move (struct.get (local row) file))` to transfer the field into a local
+or directly into a consuming C argument. Test a live field with
+`(owner.is-null (struct.get (local row) file))`. Its sibling fields remain live. Scope cleanup releases each remaining present handle,
 including handles in structs stored in an owned array.
 
 An exact `(shared-ref File)` parameter borrows a present handle. A consuming

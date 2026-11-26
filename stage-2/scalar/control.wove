@@ -292,6 +292,28 @@
 				(then (return (struct.get (array.load (local nodes) (local index)) parent))))
 			(return (local index))))
 
+	(struct TransferPlace (fields (target i32) (path i32)))
+
+	(fn owner_transfer_place
+		(:doc "Recover the original binding and field path from a move or consuming native argument.")
+		(params (expressions (shared-array ScalarExpression)) (row ScalarExpression))
+		(returns TransferPlace)
+		(body
+			(if
+				(:doc "Evaluating moves already carry the original slot identity.")
+				(u32.not-eq (struct.get (local row) kind) (call native_handle_consume_kind))
+				(then (return (struct.new TransferPlace
+					(target (struct.get (local row) target)) (path (struct.get (local row) projection))))))
+			(let place (struct.get (local row) first))
+			(let pointer (array.load (local expressions) (local place)))
+			(if
+				(:doc "A consumed field belongs to the local at the start of its projection.")
+				(u32.eq (struct.get (local pointer) kind) 52u32)
+				(then
+					(let root (array.load (local expressions) (struct.get (local pointer) projection)))
+					(return (struct.new TransferPlace (target (struct.get (local root) target)) (path (local place))))))
+			(return (struct.new TransferPlace (target (struct.get (local pointer) target)) (path -1i32)))))
+
 	(fn prior_owner_take
 		(:doc "Find an earlier evaluating owner transfer that overlaps this place on a continuing path.")
 		(params (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
@@ -304,22 +326,28 @@
 				(i32.lt (local cursor) (local site))
 				(body
 					(let row (array.load (local expressions) (local cursor)))
+					(let kind (struct.get (local row) kind))
 					(if
-						(:doc "A sibling field has a different path and is still available.")
-						(bool.and (call is_owner_take (struct.get (local row) kind))
-							(bool.and (i32.eq (struct.get (local row) target) (local target))
-								(bool.and (bool.or (bool.not (local whole_only)) (i32.ltz (struct.get (local row) projection)))
-									(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
-										(local place) (struct.get (local row) projection)))))
+						(:doc "Only evaluating moves and consuming bridge arguments can empty the original slot.")
+						(bool.or (call is_owner_take (local kind)) (u32.eq (local kind) (call native_handle_consume_kind)))
 						(then
+							(let moved (call owner_transfer_place (borrow-shared (local expressions)) (local row)))
+							(let path (struct.get (local moved) path))
 							(if
-								(:doc "Only a move that can run and reach this use affects its ownership.")
-								(bool.and (call conditional_transfer_reaches (borrow-shared (local nodes))
-									(borrow-shared (local expressions)) (local cursor) (local site))
-									(call has_path (call native_transfer_paths (borrow-shared (local nodes))
-										(borrow-shared (local statements)) (borrow-shared (local expressions))
-										(local cursor) (local statement) (bool false)) (local next_path)))
-								(then (return (call owner_transfer_site (borrow-shared (local nodes)) (local row) (local cursor)))))))
+								(:doc "A sibling field has a different path and is still available.")
+								(bool.and (i32.eq (struct.get (local moved) target) (local target))
+									(bool.and (bool.or (bool.not (local whole_only)) (i32.ltz (local path)))
+										(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
+											(local place) (local path))))
+								(then
+									(if
+										(:doc "Only a move that can run and reach this use affects its ownership.")
+										(bool.and (call conditional_transfer_reaches (borrow-shared (local nodes))
+											(borrow-shared (local expressions)) (local cursor) (local site))
+											(call has_path (call native_transfer_paths (borrow-shared (local nodes))
+												(borrow-shared (local statements)) (borrow-shared (local expressions))
+												(local cursor) (local statement) (bool false)) (local next_path)))
+										(then (return (call owner_transfer_site (borrow-shared (local nodes)) (local row) (local cursor)))))))))
 					(set (local cursor) (i32.inc (local cursor)))))
 			(return -1i32)))
 
@@ -349,11 +377,8 @@
 						(bool.or (u32.eq (struct.get (local row) kind) (call native_handle_consume_kind))
 							(call is_owner_take (struct.get (local row) kind)))
 						(then
-							(let-mut name (struct.get (local row) target))
-							(if
-								(:doc "A consuming bridge call keeps its local in the evaluated pointer operand.")
-								(u32.eq (struct.get (local row) kind) (call native_handle_consume_kind))
-								(then (set (local name) (struct.get (array.load (local expressions) (struct.get (local row) first)) target))))
+							(let moved (call owner_transfer_place (borrow-shared (local expressions)) (local row)))
+							(let name (struct.get (local moved) target))
 							(if
 								(:doc "Use the loop body as the scope reached by a continuing back edge.")
 								(bool.and (i32.lt (local name) (local loop))

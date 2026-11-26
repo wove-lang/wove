@@ -86,7 +86,8 @@ released by its eventual caller. The SQLite fixture also transfers a
 statement acquired through a native output argument. The Stream Merge
 fixture owns both bundled pointer types in nested structs stored in an
 owned array. A tracked fixture checks native pointer-out initialization of
-a field, partial moves, and cleanup of both removed and remaining rows.
+a field, null checks, direct consuming calls, partial moves, and cleanup
+of both removed and remaining rows.
 The tested calls use the existing bundled declarations. Caller-owned
 storage contracts such as spawn `Actions` and `Attributes` retain their
 local allocation and initialization rules.
