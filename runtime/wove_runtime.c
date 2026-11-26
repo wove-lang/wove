@@ -659,18 +659,39 @@ void wvrt_array_push_at_span(wvrt_array *wvrtbuffer, const void *wvrtvalue,
 	wvrtbuffer->wvrt_spare = 0;
 }
 
-// Copy the removed element out and keep the surviving elements in order.
+// Close an occupied slot without dropping owners moved into the surviving prefix.
+static void wvrt_array_erase(wvrt_array *wvrtbuffer, size_t wvrtindex) {
+	size_t wvrt_size = wvrtbuffer->wvrt_element_size;
+	size_t wvrt_tail = (size_t)wvrtbuffer->wvrt_length - wvrtindex - 1;
+	// The final slot falls outside the live prefix and is no longer owned by the array.
+	if (wvrt_tail != 0) {
+		unsigned char *wvrt_item = (unsigned char *)wvrtbuffer->wvrt_items + wvrtindex * wvrt_size;
+		memmove(wvrt_item, wvrt_item + wvrt_size, wvrt_tail * wvrt_size);
+	}
+	--wvrtbuffer->wvrt_length;
+	wvrtbuffer->wvrt_spare = 0;
+}
+
+// Copy the removed element into its result before shifting the tail.
 void wvrt_array_remove_at_span(wvrt_array *wvrtbuffer, int32_t wvrtindex, void *wvrtresult,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	size_t wvrt_index = wvrt_array_index_at_span(wvrtbuffer->wvrt_length, wvrtindex,
 		wvrtfile, wvrtstart, wvrtend);
 	size_t wvrt_size = wvrtbuffer->wvrt_element_size;
-	unsigned char *wvrt_item = (unsigned char *)wvrtbuffer->wvrt_items + wvrt_index * wvrt_size;
-	size_t wvrt_tail = (size_t)wvrtbuffer->wvrt_length - wvrt_index - 1;
+	const unsigned char *wvrt_item = (const unsigned char *)wvrtbuffer->wvrt_items + wvrt_index * wvrt_size;
 	memcpy(wvrtresult, wvrt_item, wvrt_size);
-	memmove(wvrt_item, wvrt_item + wvrt_size, wvrt_tail * wvrt_size);
-	--wvrtbuffer->wvrt_length;
-	wvrtbuffer->wvrt_spare = 0;
+	wvrt_array_erase(wvrtbuffer, wvrt_index);
+}
+
+// Transfer a populated row to its new owner. An unfilled slot has no owner to return.
+wvrt_array *wvrt_array_remove_row_at_span(wvrt_array *wvrtbuffer, int32_t wvrtindex,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	size_t wvrt_index = wvrt_array_index_at_span(wvrtbuffer->wvrt_length, wvrtindex,
+		wvrtfile, wvrtstart, wvrtend);
+	wvrt_array *wvrt_row = ((wvrt_array **)wvrtbuffer->wvrt_items)[wvrt_index];
+	if (wvrt_row == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "uninitialized byte row"); }
+	wvrt_array_erase(wvrtbuffer, wvrt_index);
+	return wvrt_row;
 }
 
 // Retire the live suffix while retaining the original allocation for reuse.

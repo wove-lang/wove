@@ -702,6 +702,16 @@ slice for the call and reports an unfilled slot at the indexed access.
 The vector owns its filled rows and can be returned through
 `(returns (owned-array (owned-array u8)))`.
 
+Start with zero rows and use `(array.push (local rows) (move (local row)))`
+to append an existing byte allocation. The explicit move invalidates the
+source place. `(array.remove (local rows) index)` returns the original owner,
+shifts the surviving row slots in order, and traps on an unfilled slot.
+`array.truncate` releases each populated row in the removed suffix and retains
+the vector's capacity. `array.try-reserve` leaves its rows, length, and
+capacity intact on failure. These operations require the writable owner
+and respect active loans of the vector.
+
+
 `(bool.and left right)` evaluates the right operand when the left is true.
 `(bool.or left right)` evaluates it when the left is false. Both operands
 are type-checked as `bool`. Each operand that runs does so once, with the
