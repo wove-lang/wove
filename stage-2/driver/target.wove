@@ -1,0 +1,237 @@
+(module native_clang_target
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Read target selection facts from the Clang frontend job selected by native options.")
+
+	(use wove-file "./clang.wove" (only clang_program))
+	(use wove-file "./platform.wove" (only native_selection))
+	(use wove-file "../io/process.wove" (only run_process_capture_merged))
+	(use wove-file "../source/target.wove" (only target_arch target_os default_selection (type SelectionContext)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
+	(use wove-file "../text/equal.wove" (only equal_bytes))
+
+	(let dry_run "-###\u0000-fno-color-diagnostics\u0000-x\u0000c\u0000-c\u0000--\u0000/dev/null\u0000")
+	(let frontend_job " \"-cc1\"")
+	(let triple_option "-triple")
+	(let macos_spelling "macosx")
+	(let arm64_spelling "arm64")
+	(let arm64e_spelling "arm64e")
+	(let x86_64h_spelling "x86_64h")
+
+	(struct TargetArgument (fields (start i32) (end i32)))
+
+	(fn scan_separator
+		(:doc "Find a delimiter or return the end of the bounded view.")
+		(params (bytes (shared-array u8)) (start i32) (separator u8)) (returns i32)
+		(body
+			(let-mut cursor (local start))
+			(while
+				(:doc "The next byte is loaded only inside the view.")
+				(bool.and (i32.lt (local cursor) (array.len (local bytes)))
+					(u8.not-eq (array.load (local bytes) (local cursor)) (local separator)))
+				(body (set (local cursor) (i32.inc (local cursor)))))
+			(return (local cursor))))
+
+	(fn deployment_number
+		(:doc "Encode one to three decimal version components in the source selector's deployment format.")
+		(params (version (shared-array u8))) (returns i32)
+		(body
+			(let-mut cursor 0i32)
+			(let-mut scale 10000i32)
+			(let-mut packed 0i64)
+			(while
+				(:doc "Each successful component contributes one fixed decimal place.")
+				(i32.gtz (local scale))
+				(body
+					(let end (call scan_separator (borrow-shared (local version)) (local cursor) 46u8))
+					(let number (call read_decimal_digits (borrow-shared (local version)) (local cursor) (local end) 214748364u32 7u32))
+					(let magnitude (int.convert i64 (struct.get (local number) magnitude)))
+					(if
+						(:doc "Reject malformed digits and components that overlap a more significant place.")
+						(bool.or (i32.ltz (struct.get (local number) digits))
+							(bool.and (i32.not-eq (local scale) 10000i32) (i64.lt 99i64 (local magnitude))))
+						(then (return -1i32)))
+					(set (local packed) (i64.add (local packed) (i64.mul (int.convert i64 (local scale)) (local magnitude))))
+					(if
+						(:doc "Missing minor and patch components contribute zero.")
+						(i32.eq (local end) (array.len (local version)))
+						(then
+							(if (i64.lt 2147483647i64 (local packed)) (then (return -1i32)))
+							(return (int.convert i32 (local packed)))))
+					(set (local scale) (i32.div (local scale) 100i32))
+					(set (local cursor) (i32.inc (local end)))))
+			(return -1i32)))
+
+	(fn frontend_arch
+		(:doc "Map the ABI-compatible Apple target spellings to the existing architecture codes.")
+		(params (architecture (shared-array u8))) (returns u8)
+		(body
+			(if
+				(:doc "Clang uses arm64 and arm64e for the Apple AArch64 targets.")
+				(bool.or (call equal_bytes (borrow-shared (local architecture)) (borrow-shared (local arm64_spelling)))
+					(call equal_bytes (borrow-shared (local architecture)) (borrow-shared (local arm64e_spelling))))
+				(then (return 1u8)))
+			(if
+				(:doc "The Haswell spelling still uses the x86-64 selection class.")
+				(call equal_bytes (borrow-shared (local architecture)) (borrow-shared (local x86_64h_spelling)))
+				(then (return 2u8)))
+			(return (call target_arch (borrow-shared (local architecture))))))
+
+	(fn parse_frontend_target
+		(:doc "Read the architecture and OS fields from the frontend triple. Only macOS supplies deployment here.")
+		(params (triple (shared-array u8))) (returns SelectionContext)
+		(body
+			(let arch_end (call scan_separator (borrow-shared (local triple)) 0i32 45u8))
+			(let vendor_end (call scan_separator (borrow-shared (local triple)) (i32.inc (local arch_end)) 45u8))
+			(if
+				(:doc "A complete triple has separate architecture, vendor, and OS components.")
+				(i32.not-lt (i32.inc (local vendor_end)) (array.len (local triple)))
+				(then (return (call default_selection 0u32))))
+			(let arch (call frontend_arch (borrow-shared (array.range (local triple) 0i32 (local arch_end)))))
+			(let os_start (i32.inc (local vendor_end)))
+			(let os_end (call scan_separator (borrow-shared (local triple)) (local os_start) 45u8))
+			(let width (array.len (local macos_spelling)))
+			(let macos_end (i32.add (local os_start) (local width)))
+			(if
+				(:doc "The frontend reports an Apple desktop target as macosx followed by its resolved version.")
+				(bool.and (i32.le (local macos_end) (local os_end))
+					(call same_bytes (borrow-shared (local triple)) (local os_start) (local macos_end)
+						(borrow-shared (local macos_spelling)) 0i32 (local width)))
+				(then (return (struct.new SelectionContext (mode 0u32) (os 2u8) (arch (local arch))
+					(deployment (call deployment_number (borrow-shared (array.range (local triple) (local macos_end) (local os_end)))))))))
+			(let os (call target_os (borrow-shared (array.range (local triple) (local os_start) (local os_end)))))
+			(return (struct.new SelectionContext (mode 0u32) (os (local os)) (arch (local arch)) (deployment -1i32)))))
+
+	(fn quoted_argument_end
+		(:doc "Find the closing quote of one dry-run argument.")
+		(params (line (shared-array u8)) (start i32)) (returns i32)
+		(body
+			(let length (array.len (local line)))
+			(let-mut cursor (local start))
+			(while
+				(:doc "Skip escaped bytes rather than treating any embedded quote as a delimiter.")
+				(i32.lt (local cursor) (local length))
+				(body
+					(let byte (array.load (local line) (local cursor)))
+					(if (u8.eq (local byte) 34u8) (then (return (local cursor))))
+					(if
+						(:doc "A backslash in a quoted job argument escapes the next byte.")
+						(u8.eq (local byte) 92u8)
+						(then (set (local cursor) (i32.inc (local cursor)))))
+					(set (local cursor) (i32.inc (local cursor)))))
+			(return (local length))))
+
+	(fn frontend_arguments
+		(:doc "Return the position after the executable and its exact -cc1 marker.")
+		(params (line (shared-array u8))) (returns i32)
+		(body
+			(let length (array.len (local line)))
+			(if
+				(:doc "Only job lines begin with a space and a quoted executable.")
+				(bool.or (i32.lt (local length) 2i32)
+					(bool.or (u8.not-eq (array.load (local line) 0i32) 32u8)
+						(u8.not-eq (array.load (local line) 1i32) 34u8)))
+				(then (return -1i32)))
+			(let executable_end (call quoted_argument_end (borrow-shared (local line)) 2i32))
+			(let marker_start (i32.inc (local executable_end)))
+			(let width (array.len (local frontend_job)))
+			(let marker_end (i32.add (local marker_start) (local width)))
+			(if
+				(:doc "A linker, assembler, or diagnostic line does not supply frontend facts.")
+				(bool.and (i32.lt (local marker_end) (local length))
+					(call same_bytes (borrow-shared (local line)) (local marker_start) (local marker_end)
+						(borrow-shared (local frontend_job)) 0i32 (local width)))
+				(then (return (local marker_end))))
+			(return -1i32)))
+
+	(fn last_frontend_triple
+		(:doc "Keep the last complete -triple operand in the frontend job, including forwarded overrides.")
+		(params (line (shared-array u8)) (first i32)) (returns TargetArgument)
+		(body
+			(let-mut cursor (local first))
+			(let-mut wants_triple (bool false))
+			(let-mut target (struct.new TargetArgument (start -1i32) (end -1i32)))
+			(let length (array.len (local line)))
+			(let width (array.len (local triple_option)))
+			(while
+				(:doc "Walk one complete quoted argument at a time past its leading space.")
+				(i32.lt (i32.inc (local cursor)) (local length))
+				(body
+					(if
+						(:doc "Reject a malformed argument boundary without interpreting its bytes.")
+						(bool.or (u8.not-eq (array.load (local line) (local cursor)) 32u8)
+							(u8.not-eq (array.load (local line) (i32.inc (local cursor))) 34u8))
+						(then (return (local target))))
+					(let start (i32.add (local cursor) 2i32))
+					(let end (call quoted_argument_end (borrow-shared (local line)) (local start)))
+					(if (i32.eq (local end) (local length)) (then (return (local target))))
+					(if
+						(:doc "The operand of a triple option replaces the earlier target. Other words can start a new option.")
+						(local wants_triple)
+						(then
+							(set (local target) (struct.new TargetArgument (start (local start)) (end (local end))))
+							(set (local wants_triple) (bool false)))
+						(else
+							(set (local wants_triple) (call same_bytes (borrow-shared (local line)) (local start) (local end)
+								(borrow-shared (local triple_option)) 0i32 (local width)))))
+					(set (local cursor) (i32.inc (local end)))))
+			(return (local target))))
+
+	(fn read_frontend_target
+		(:doc "Use the single frontend job in Clang's dry-run output. A multi-architecture job has no single selection.")
+		(params (output (shared-array u8))) (returns SelectionContext)
+		(body
+			(let-mut cursor 0i32)
+			(let-mut found (bool false))
+			(let-mut selection (call native_selection))
+			(while
+				(:doc "Restrict each match and its quoted triple to one job line.")
+				(i32.lt (local cursor) (array.len (local output)))
+				(body
+					(let end (call scan_separator (borrow-shared (local output)) (local cursor) 10u8))
+					(let line (borrow-shared (array.range (local output) (local cursor) (local end))))
+					(let arguments (call frontend_arguments (borrow-shared (local line))))
+					(if
+						(:doc "Only a complete frontend target argument can provide selection.")
+						(i32.not-ltz (local arguments))
+						(then
+							(let triple (call last_frontend_triple (borrow-shared (local line)) (local arguments)))
+							(let start (struct.get (local triple) start))
+							(if
+								(:doc "Count only frontend jobs that supplied an actual triple.")
+								(i32.not-ltz (local start))
+								(then
+									(if (local found) (then (return (call default_selection 0u32))))
+									(set (local selection) (call parse_frontend_target
+										(borrow-shared (array.range (local line) (local start) (struct.get (local triple) end)))))
+									(set (local found) (bool true))))))
+					(set (local cursor) (i32.inc (local end)))))
+			(return (local selection))))
+
+	(fn effective_selection
+		(:doc "Ask the chosen Clang to construct its C frontend job without compiling or reading the input.")
+		(:expect (tests "stage-2/cli/native/deployment.tsv") (issues "gh:wove-lang/wove:535"))
+		(params (options (shared-array u8))) (returns SelectionContext)
+		(body
+			(let amount (array.len (local options)))
+			(let extra (array.len (local dry_run)))
+			(if
+				(:doc "Reject incomplete packed options and preserve unknown deployment if the probe cannot run.")
+				(bool.or (i32.lt (i32.sub 2147483647i32 (local extra)) (local amount))
+					(bool.and (i32.gtz (local amount)) (u8.not-eq (array.load (local options) (i32.dec (local amount))) 0u8)))
+				(then (return (call native_selection))))
+			(let-mut arguments (array.alloc u8 (i32.add (local amount) (local extra))))
+			(let first (call append_bytes (borrow-shared (local options)) (borrow-mut (local arguments)) 0i32))
+			(let end (call append_bytes (borrow-shared (local dry_run)) (borrow-mut (local arguments)) (local first)))
+			(let program (call clang_program))
+			(let-mut output (array.alloc u8 262144i32))
+			(let capture (call run_process_capture_merged (borrow-shared (local program)) (borrow-shared (local arguments))
+				(borrow-mut (local output))))
+			(if
+				(:doc "Partial or unsuccessful output cannot establish frontend facts.")
+				(bool.or (i32.not-eqz (struct.get (local capture) status)) (struct.get (local capture) overflow))
+				(then (return (call native_selection))))
+			(return (call read_frontend_target (borrow-shared (array.range (local output) 0i32 (struct.get (local capture) length)))))))
+)
