@@ -20,6 +20,7 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 | --- | --- | --- |
 | Wrapping addition | `i32.add`, `u32.add` | All integer widths |
 | Wrapping subtraction | `i32.sub`, `u32.sub` | All integer widths |
+| Wrapping increment and decrement | `i32.inc`, `i32.dec`, `u32.inc`, `u32.dec` | All integer widths |
 | Wrapping multiplication | | All integer widths |
 | Checked arithmetic | | `add-checked`, `sub-checked`, and `mul-checked` at all integer widths |
 | Division and remainder | | `div` and `rem` at all integer widths |
@@ -32,8 +33,10 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 | Rotate right | | `u64.rotr` |
 | Boolean logic | `bool.and`, `bool.or`, `bool.not` | |
 
-- Integer arithmetic evaluates both operands once, from left to right.
+- Integer arithmetic evaluates each written operand once, from left to right.
   Their types and the result type must match the type named in the tag.
+  `(T.inc value)` and `(T.dec value)` add or subtract one with wrapping.
+  They return the new value and leave the operand unchanged.
   Checked arithmetic traps if the mathematical result is outside that type's
   range, including unsigned subtraction below zero. The diagnostic points
   to the operation head.
