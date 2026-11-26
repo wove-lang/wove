@@ -309,7 +309,8 @@ C11, C17, and C23 on both architectures. On glibc, `O_DIRECTORY`, `O_DIRECT`,
 | `F_GETNOSIGPIPE`, `F_SETNOSIGPIPE`, `F_NOCACHE`, `F_RDAHEAD` | Darwin uses a fixed query or an exact integer variadic operand. The fixture changes both file-cache controls and verifies SIGPIPE suppression through the setting and an `EPIPE` write. [XNU fcntl manual](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/fcntl.2) |
 | `filesec_get_property`, `filesec_query_property`, `filesec_set_property`, `filesec_unset_property` | Model the property-specific native payload, size, and ownership through the appropriate selector. |
 | GNU `f_owner_ex`, `F_GETOWN_EX`, `F_SETOWN_EX`, `F_OWNER_TID`, `F_OWNER_PID`, `F_OWNER_PGRP`, `F_OWNER_GID` | Preserve the exact glibc enum and process ID, the mutable query, and the shared setter. The fixture exercises the thread, process, and process-group modes and checks the older group spelling. [Linux fcntl owner commands](https://man7.org/linux/man-pages/man2/F_SETOWN_EX.2const.html) |
-| GNU `flock64`, `file_handle`, Darwin file-security and fcntl records | Preserve their native field layouts, applicable storage and ownership contracts, and the command-specific `fcntl` operands. |
+| GNU `flock64`, `F_GETLK64`, `F_SETLK64`, `F_SETLKW64` | Model the native layout with explicit `off64_t` fields and bind the three fixed `fcntl64` command shapes. The fixture exercises a conflicting range above 4 GiB, the returned offsets and owner, and reacquisition after release. |
+| GNU `file_handle`, Darwin file-security and fcntl records | Preserve their native field layouts, applicable storage and ownership contracts, and the command-specific `fcntl` operands. |
 
 ## Bundled time coverage
 
