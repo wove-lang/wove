@@ -91,6 +91,25 @@ can also declare an inline table with `array.new` or `array.repeat`.
 Its elements are exact scalar literals or constant constructors of a
 named Wove record. `array.load` can read the table directly.
 
+Stage 2 records can declare explicit type and `i32` constant parameters.
+
+```lisp
+(struct Block
+    (generic (type T) (const N i32))
+    (fields (items (array T N))))
+
+(struct.new (specialize Block u8 4i32)
+    (items (array.new (array u8 4) 1u8 2u8 3u8 4u8)))
+```
+
+In a record template, a type parameter can name a copyable field or fixed
+array element, and an `i32` constant parameter can set a fixed array extent.
+Apply the template explicitly in type positions and as the first operand of
+`struct.new`. Each argument must match its declared kind. Constant arguments
+are exactly typed `i32` literals. A specialization is identified by the
+defining record and its normalized arguments. Different arguments define
+distinct types even when their layouts match.
+
 In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
 A `(mut-ref T)` parameter can also borrow a writable place of an exact

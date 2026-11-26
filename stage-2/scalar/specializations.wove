@@ -1,0 +1,173 @@
+(module scalar_specializations
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Instantiate explicitly applied records in the checked layout table.
+
+	Use the active declaration walk and build nested applications first.
+	Leave original source nodes available for diagnostics and inspection.`)
+
+	(use wove-file "../source/generics.wove" (only has_specialization_head))
+	(use wove-file "../source/scan.wove" (only is_metadata_form (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts (type SelectedDeclaration)))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/enum_forms.wove" (only (value variants_list) (value enum_declaration)))
+	(use wove-file "./syntax.wove" (only entry_at entry_keyword (type EntryRead)))
+	(use wove-file "./records.wove" (only declaration_kind declaration_generic_list read_specialization_key find_specialization
+		specialization_alias specialization_layout specialized_field_array is_member_array intern_fixed_array
+		is_disabled_statement (type TypeScope) (type ScalarRecord)))
+
+	(fn is_application
+		(:doc "Recognize a specialization without treating a spelled field or parameter name as an operator.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32)) (returns bool)
+		(body
+			(if
+				(:doc "Only the explicit application spelling needs a context check.")
+				(bool.not (call has_specialization_head (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+				(then (return (bool false))))
+			(let parent (array.load (local nodes) (struct.get (local node) parent)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local parent)))
+			(let kind (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(if
+				(:doc "A declaration's parameter, field, or variant list contains user-defined labels.")
+				(bool.or (bool.or (u32.eq (local kind) 3u32) (u32.eq (local kind) 49u32))
+					(u32.eq (local kind) (local variants_list)))
+				(then
+					(let owner (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (local parent) parent)))
+					(if
+						(:doc "An individual field named fields or parameter named params is still a valid type context.")
+						(bool.or (bool.and (u32.eq (local kind) 3u32) (u32.eq (local owner) 1u32))
+							(bool.or (bool.and (u32.eq (local kind) 49u32) (u32.eq (local owner) 48u32))
+								(bool.and (u32.eq (local kind) (local variants_list)) (u32.eq (local owner) (local enum_declaration)))))
+						(then (return (bool false))))))
+			(if
+				(:doc "Only the first constructor operand denotes its type. The rest are initializer names.")
+				(u32.eq (local kind) 50u32)
+				(then (return (i32.eq (local index) (struct.get (local parts) operands)))))
+			(return (bool true))))
+
+	(fn register_specialization
+		(:doc "Intern a concrete nominal instance and every inline array shape it needs.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (mut-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (site i32) (next i32)) (returns EntryRead)
+		(body
+			(let node (array.load (local nodes) (local site)))
+			(let key (call read_specialization_key (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local site)))
+			(if
+				(:doc "Return the exact argument or application span before any layout is added.")
+				(u32.lt 0u32 (struct.get (local key) error))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local key) start))
+					(end (struct.get (local key) end)) (error (struct.get (local key) error)) (related -1i32)))))
+			(let known (call find_specialization (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local site) (local key)))
+			(if (i32.eq (local known) -2i32) (then (return (call entry_at (local node) -1i32 32u32))))
+			(if (i32.eq (local next) (array.len (local records))) (then (return (call entry_at (local node) -1i32 16u32))))
+			(if
+				(:doc "A repeated spelling links to the canonical record without emitting a second definition.")
+				(i32.lt -1i32 (local known))
+				(then
+					(array.store (local records) (local next) (call specialization_alias (local site) (local known)))
+					(return (call entry_at (local node) (i32.add (local next) 1i32) 0u32))))
+			(let layout (call specialization_layout (array.load (local records) (struct.get (local key) template))
+				(local key) (local site) (local scope)))
+			(array.store (local records) (local next) (local layout))
+			(let-mut field (struct.get (local layout) first))
+			(let-mut end (i32.add (local next) 1i32))
+			(while
+				(:doc "Resolve each dependent array once and reuse ordinary structural array identity.")
+				(i32.lt -1i32 (local field))
+				(body
+					(let member (array.load (local nodes) (local field)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+					(let type (array.load (local nodes) (struct.get (local parts) operands)))
+					(if
+						(:doc "Direct type arguments are resolved by the ordinary record dependency walk.")
+						(call is_member_array (borrow-shared (local source)) (borrow-shared (local nodes)) (local type))
+						(then
+							(let shape (call specialized_field_array (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local type)))
+							(if
+								(:doc "Keep an invalid concrete layout at its explicit application.")
+								(bool.or (u32.eq (struct.get (local shape) element) 0u32) (i32.lt (struct.get (local shape) extent) 0i32))
+								(then (return (call entry_at (local node) -1i32 23u32))))
+							(set (local end) (call intern_fixed_array (local shape) (borrow-mut (local records)) (local end)))
+							(if (i32.lt (local end) 0i32) (then (return (call entry_at (local node) -1i32 16u32))))))
+					(set (local field) (struct.get (local member) next_sibling))))
+			(return (call entry_at (local node) (local end) 0u32))))
+
+	(fn instantiate_declaration_types
+		(:doc "Check type applications from the leaves toward the root, excluding metadata and disabled groups.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (mut-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (declaration i32) (start i32)) (returns EntryRead)
+		(body
+			(let root (array.load (local nodes) (local declaration)))
+			(let-mut index (struct.get (local root) first_child))
+			(let-mut next (local start))
+			(while
+				(:doc "Visit the original tree in postorder and stop at the selected declaration boundary.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let node (array.load (local nodes) (local index)))
+					(let descend (bool.not (bool.or
+						(call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))
+						(call is_disabled_statement (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
+					(let child (struct.get (local node) first_child))
+					(if
+						(:doc "The first child may contain an argument application that must be interned first.")
+						(bool.and (local descend) (i32.lt -1i32 (local child)))
+						(then (set (local index) (local child)))
+						(else
+							(let-mut closing (local index))
+							(while
+								(:doc "Follow completed parents until a next sibling or the declaration boundary.")
+								(i32.lt -1i32 (local closing))
+								(body
+									(let closed (array.load (local nodes) (local closing)))
+									(if
+										(:doc "An inner application has now registered all its own arguments.")
+										(call is_application (borrow-shared (local source)) (borrow-shared (local nodes)) (local closed) (local closing))
+										(then
+											(let checked (call register_specialization (borrow-shared (local source)) (borrow-shared (local nodes))
+												(borrow-mut (local records)) (borrow-shared (local bindings)) (local scope) (local closing) (local next)))
+											(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
+											(set (local next) (struct.get (local checked) operand))))
+									(let sibling (struct.get (local closed) next_sibling))
+									(let parent (struct.get (local closed) parent))
+									(if
+										(:doc "A sibling continues the forward walk. The root itself is never an application.")
+										(bool.or (i32.lt -1i32 (local sibling)) (i32.eq (local parent) (local declaration)))
+										(then
+											(set (local index) (local sibling))
+											(set (local closing) -1i32))
+										(else (set (local closing) (local parent))))))))))
+			(return (call entry_at (local root) (local next) 0u32))))
+
+	(fn register_module_specializations
+		(:doc "Register applications only from active concrete declarations in this file.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declarations (shared-array SelectedDeclaration))
+			(count i32) (base i32) (scope TypeScope) (bindings (shared-array GraphBinding))
+			(records (mut-array ScalarRecord)) (start i32)) (returns EntryRead)
+		(body
+			(let-mut index 0i32)
+			(let-mut next (local start))
+			(while
+				(:doc "Template field layouts are checked with their arguments at an explicit use.")
+				(i32.lt (local index) (local count))
+				(body
+					(let declaration (struct.get (array.load (local declarations) (i32.add (local base) (local index))) node))
+					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local declaration)))
+					(if
+						(:doc "Exclude foreign declarations and defer the members of generic structs.")
+						(bool.or (bool.or (u32.eq (local kind) 1u32) (u32.eq (local kind) 15u32))
+							(bool.or (u32.eq (local kind) (local enum_declaration))
+								(bool.and (u32.eq (local kind) 48u32)
+									(i32.lt (call declaration_generic_list (borrow-shared (local source)) (borrow-shared (local nodes)) (local declaration)) 0i32))))
+						(then
+							(let checked (call instantiate_declaration_types (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-mut (local records)) (borrow-shared (local bindings)) (local scope) (local declaration) (local next)))
+							(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
+							(set (local next) (struct.get (local checked) operand))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(return (struct.new EntryRead (operand (local next)) (start 0i32) (end 0i32) (error 0u32) (related -1i32)))))
+)

@@ -341,6 +341,16 @@ with its declared type. A local stores the result by value, and
 `(struct.get (local tok) start)` reads a field with its exact type. Chain
 `struct.get` forms to reach nested fields.
 
+A copyable record can declare a `(generic (type T) (const N i32))` list
+between its name and fields. Use `(specialize Block u8 4i32)` in types
+and constructors. Type arguments name builtin scalars, Wove value types,
+or concrete record applications. Constant arguments are typed `i32`
+literals in decimal or hexadecimal. Fields can substitute a type directly
+or use type and constant parameters in a fixed array. Repeated arguments
+share one concrete layout across import aliases, and different argument
+values retain distinct defining identities even with equal fields.
+See [explicit record specialization](https://github.com/wove-lang/wove/issues/99).
+
 Use `(set (struct.get (local tok) start) (i32 8))` to assign a field of a
 `let-mut` local. The same form accepts a nested field path and writes
 through to the original local. The right-hand value must have the
