@@ -435,6 +435,23 @@ Return a fresh owner from a call or transfer an existing owner with
 `(return (move (local buffer)))`. A move ends the original binding's
 ownership. Completed call borrows allow a move.
 
+A Wove parameter such as `(params (job (owned-array u8)))` takes ownership
+of an array of the exact element type. Pass a fresh owner or move a named
+owner explicitly with `(move (local input))`. The callee owns the incoming
+array for its function body and releases it at exit unless it transfers
+ownership again.
+
+## Joined workers
+
+`(worker.spawn-join widen (move (local input)))` calls the named Wove
+function `widen` on a fresh thread and waits for its result. The handler
+takes one owned array and returns an owned array through a normal Wove
+return. Its input and output element types may differ. Arrays that contain
+borrowed or native data cannot cross the worker boundary. After a
+successful join, the caller owns the returned array. Thread creation and
+join failures report the source span of the worker expression. When
+linking emitted C directly on a POSIX host, pass `-pthread`.
+
 ## C interop
 
 Use a C header's bundled declarations or provide Wove signatures in
