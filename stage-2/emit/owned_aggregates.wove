@@ -8,7 +8,9 @@
 	(use wove-file "../scalar/records.wove" (only is_payload_enum is_array_owner is_owning_record record_index
 		member_value_type (type ScalarRecord)))
 	(use wove-file "./enums.wove" (only write_enum_ordinal))
-	(use wove-file "./owned_fields.wove" (only write_record_destructor_body))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/function_rows.wove" (only (type ScalarParameter)))
+	(use wove-file "./owned_fields.wove" (only write_owner_slot))
 	(use wove-file "./records.wove" (only write_member_name write_record_name))
 	(use wove-file "./runtime.wove" (only open_array_drop))
 	(use wove-file "./text.wove" (only c_byte c_literal_text write_local_name))
@@ -25,11 +27,13 @@
 	(let c_return_take "return wvrt_taken;}\n")
 	(let c_enum_drop_switch "switch(wvrt_value->wvrt_tag){")
 	(let c_enum_payload "wvrt_value->wvrt_payload.")
+	(let c_owner_field "wvrt_value->")
 	(let c_case "case ")
 	(let c_break "break;")
 	(let c_owner_close "}\n")
 	(let c_arg_address "(&")
 	(let c_drop_end ");")
+	(struct OwnedMember (fields (type u32) (ordinal i32)))
 
 	(fn write_owner_helper_name
 		(:doc "Derive a unique helper symbol from the exact nominal type and operation.")
@@ -58,20 +62,100 @@
 				(local take) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local function) 40u8 (local writing)))))
 
-	(fn write_aggregate_operation
-		(:doc "Take or drop the exact owning value through its original named slot.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
-			(target i32) (tree_base i32) (take bool) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+	(fn write_aggregate_take
+		(:doc "Move an exact aggregate through its original local or projected slot.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord) (row ScalarExpression)
+			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression)) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let function (call write_owner_helper_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
-				(local take) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
+				(bool true) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
+			(let argument (call c_literal_text (borrow-shared (local c_arg_address)) (borrow-mut (local output)) (local function) (local writing)))
+			(let place (call write_owner_slot (borrow-shared (local source)) (borrow-shared (local nodes)) (local row)
+				(borrow-shared (local parameters)) (borrow-shared (local expressions)) (local tree_base)
+				(borrow-mut (local output)) (local argument) (local name_prefix) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local place) 41u8 (local writing)))))
+
+	(fn write_aggregate_drop
+		(:doc "Drop an owning aggregate at the end of its named local's lifetime.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(target i32) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let function (call write_owner_helper_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(bool false) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
 			(let argument (call c_literal_text (borrow-shared (local c_arg_address)) (borrow-mut (local output)) (local function) (local writing)))
 			(let place (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local target) (local tree_base) (borrow-mut (local output)) (local argument) (local name_prefix) (local writing)))
-			(let close (call c_byte (borrow-mut (local output)) (local place) 41u8 (local writing)))
-			(if (local take) (then (return (local close))))
-			(return (call c_byte (borrow-mut (local output)) (local close) 59u8 (local writing)))))
+			(return (call c_literal_text (borrow-shared (local c_drop_end))
+				(borrow-mut (local output)) (local place) (local writing)))))
+
+	(fn write_member_drop
+		(:doc "Drop a checked owning member through the array runtime or its nominal destructor.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(type u32) (ordinal i32) (payload bool) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(if
+				(:doc "An aggregate helper takes the address of the original inline member.")
+				(call is_array_owner (local type))
+				(then (set (local cursor) (call open_array_drop (borrow-mut (local output)) (local cursor) (local writing))))
+				(else
+					(set (local cursor) (call open_owner_helper (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local records) (call record_index (local type))) (bool false)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 38u8 (local writing)))))
+			(if
+				(:doc "An active enum arm's storage is under the payload union.")
+				(local payload)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local c_enum_payload))
+					(borrow-mut (local output)) (local cursor) (local writing))))
+				(else (set (local cursor) (call c_literal_text (borrow-shared (local c_owner_field))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(let member (call write_member_name (borrow-shared (local source)) (local ordinal)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(return (call c_literal_text (borrow-shared (local c_drop_end))
+				(borrow-mut (local output)) (local member) (local writing)))))
+
+	(fn write_record_destructor_body
+		(:doc "Drop the remaining array owners and owning structs in reverse field declaration order.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (layout ScalarRecord)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut owned (array.alloc OwnedMember (struct.get (local layout) count)))
+			(let-mut field (struct.get (local layout) first))
+			(let-mut ordinal 0i32)
+			(let-mut count 0i32)
+			(while
+				(:doc "Retain each owning member's exact type and declaration ordinal.")
+				(i32.not-ltz (local field))
+				(body
+					(let member (array.load (local nodes) (local field)))
+					(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
+					(if
+						(:doc "Copyable fields have no cleanup operation.")
+						(bool.or (call is_array_owner (local type)) (call is_owning_record (borrow-shared (local records)) (local type)))
+						(then
+							(array.store (local owned) (local count) (struct.new OwnedMember (type (local type)) (ordinal (local ordinal))))
+							(set (local count) (i32.inc (local count)))))
+					(set (local ordinal) (i32.inc (local ordinal)))
+					(set (local field) (struct.get (local member) next_sibling))))
+			(let-mut cursor (local offset))
+			(while
+				(:doc "Moved fields are zeroed. The same destructor releases only the owners still present.")
+				(i32.gtz (local count))
+				(body
+					(set (local count) (i32.dec (local count)))
+					(let member (array.load (local owned) (local count)))
+					(set (local cursor) (call write_member_drop (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (struct.get (local member) type) (struct.get (local member) ordinal) (bool false)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(return (local cursor))))
 
 	(fn write_enum_destructor_body
 		(:doc "Dispatch cleanup on the active owning variant and leave all other union members untouched.")
@@ -91,30 +175,17 @@
 					(let variant (array.load (local nodes) (local member)))
 					(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local variant)))
-					(let array (call is_array_owner (local type)))
 					(if
 						(:doc "Only an active owner can name a member of the union.")
-						(bool.or (local array) (call is_owning_record (borrow-shared (local records)) (local type)))
+						(bool.or (call is_array_owner (local type)) (call is_owning_record (borrow-shared (local records)) (local type)))
 						(then
 							(let label (call c_literal_text (borrow-shared (local c_case))
 								(borrow-mut (local output)) (local cursor) (local writing)))
 							(let number (call write_enum_ordinal (local ordinal) (borrow-mut (local output)) (local label) (local writing)))
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local number) 58u8 (local writing)))
-							(if
-								(:doc "Arrays use the runtime destructor and aggregates use their defining helper.")
-								(local array)
-								(then (set (local cursor) (call open_array_drop (borrow-mut (local output)) (local cursor) (local writing))))
-								(else
-									(set (local cursor) (call open_owner_helper (borrow-shared (local source)) (borrow-shared (local nodes))
-										(array.load (local records) (call record_index (local type))) (bool false)
-										(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-									(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 38u8 (local writing)))))
-							(let place (call c_literal_text (borrow-shared (local c_enum_payload))
-								(borrow-mut (local output)) (local cursor) (local writing)))
-							(let field (call write_member_name (borrow-shared (local source)) (local ordinal)
-								(borrow-mut (local output)) (local place) (local name_prefix) (local writing)))
-							(let close (call c_literal_text (borrow-shared (local c_drop_end))
-								(borrow-mut (local output)) (local field) (local writing)))
+							(let close (call write_member_drop (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (local type) (local ordinal) (bool true)
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 							(set (local cursor) (call c_literal_text (borrow-shared (local c_break))
 								(borrow-mut (local output)) (local close) (local writing)))))
 					(set (local ordinal) (i32.inc (local ordinal)))
@@ -175,7 +246,7 @@
 					(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout)
 					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
 				(else (set (local cursor) (call write_record_destructor_body (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local layout) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+					(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(return (call c_literal_text (borrow-shared (local c_owner_close))
 				(borrow-mut (local output)) (local cursor) (local writing)))))
 
