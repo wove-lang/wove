@@ -82,6 +82,7 @@ def prepare_tool(root, clang, options, target):
 	env.pop("WOVE_CLANG_STATUS", None)
 	env.pop("WOVE_CLANG_LINK_TARGET", None)
 	env.pop("WOVE_CLANG_STDOUT", None)
+	env.pop("WOVE_CLANG_EXECUTABLE", None)
 	# Keep fixture-controlled AST outcomes local to this invocation.
 	for key in ("ast_status", "ast_output"):
 		name = "WOVE_CLANG_" + key.upper()

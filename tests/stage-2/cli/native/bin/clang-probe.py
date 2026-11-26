@@ -47,8 +47,8 @@ def main():
 			output.symlink_to(executable.name)
 		else:
 			output.write_bytes(b"partial native output")
-			# A successful simulated link marks its regular output executable.
-			if os.environ["WOVE_CLANG_STATUS"] == "0":
+			# Only an explicit fixture option makes the simulated output usable.
+			if os.environ.get("WOVE_CLANG_EXECUTABLE") == "1":
 				output.chmod(0o700)
 		# Only a fixture-supplied dependency is reported by a simulated frontend.
 		if "WOVE_CLANG_DEPENDENCY" in os.environ:
