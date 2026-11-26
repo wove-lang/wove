@@ -202,11 +202,15 @@ requires an existing `let-mut` binding and a value of that binding's exact
 type. Forward calls use checked prototypes, and nested calls evaluate from
 left to right.
 
-Stage 2 integer atoms such as `0x80u8`, `-0x80i8`, and
-`0xffffffffffffffffu64` use an exact integer suffix. Uppercase `0X` and
-uppercase hexadecimal digits also work. Signed magnitudes must fit the
-named type, and unsigned hexadecimal spellings have no leading minus.
-The form `(u8 0x80)` supplies the type before the hexadecimal magnitude.
+Stage 2 integer atoms use an exact type suffix, as in `1_000u32`,
+`0xabcd_1234_5678_ef00u64`, and `0b1100_0011u8`. Typed forms such as
+`(u8 0b1100_0011)` put the type before the magnitude. Prefixes `0x` and
+`0X` select hexadecimal, and `0b` and `0B` select binary. Hexadecimal
+digits can use either case. Each underscore must sit between two digits
+of the selected radix. Signed magnitudes must fit the named type, and
+binary and hexadecimal spellings with a leading minus require a signed
+type. The emitter writes binary values as hexadecimal C constants and
+omits separators from generated C.
 
 A single-quoted character such as `','` or `'\n'` is an `i32` byte value.
 Use one printable ASCII character or one escape. The supported escapes
@@ -345,7 +349,7 @@ A copyable record can declare a `(generic (type T) (const N i32))` list
 between its name and fields. Use `(specialize Block u8 4i32)` in types
 and constructors. Type arguments name builtin scalars, Wove value types,
 or concrete record applications. Constant arguments are typed `i32`
-literals in decimal or hexadecimal. Fields can substitute a type directly
+integer literals. Fields can substitute a type directly
 or use type and constant parameters in a fixed array. A field may also
 use a fully concrete specialization resolved in its defining module.
 Repeated arguments share one concrete layout across import aliases, and
@@ -485,7 +489,7 @@ can represent the full range, including `(u64 18446744073709551615)`.
 `u64.add` adds modulo 2^64. `u64.eq` and `u64.lt`
 compare two exact `u64` values and return `bool`.
 
-Native `i64` values use `int64_t`. Decimal and hexadecimal literals
+Native `i64` values use `int64_t`. All three integer radices
 cover the full signed range, including `-9223372036854775808i64` and
 `(i64 -0x8000000000000000)`. `i64.eq` and `i64.lt` compare exact signed
 operands. `i64.add`, `i64.sub`, and

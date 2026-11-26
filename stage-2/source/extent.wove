@@ -6,44 +6,20 @@
 	(use wove-file "./scan.wove" (only (type SourceNode) (value character_token)))
 	(use wove-file "./module.wove" (only form_parts))
 	(use wove-file "./types.wove" (only builtin_type_keyword is_builtin_integer))
-	(use wove-file "./literals.wove" (only integer_magnitude_start hex_digits_start integer_digits_end integer_scalar))
+	(use wove-file "./literals.wove" (only integer_atom integer_scalar read_integer_magnitude))
 	(use wove-file "../text/character.wove" (only decode_character))
-	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
-	(use wove-file "../text/hex.wove" (only hex_digit_value))
-
-	(fn hexadecimal_extent
-		(:doc "Accumulate significant hexadecimal digits after the signed i32 extent bound is proved.")
-		(params (source (shared-array u8)) (first i32) (end i32)) (returns i32)
-		(body
-			(let width (i32.sub (local end) (local first)))
-			(if
-				(:doc "An eight-digit nonnegative i32 begins with a nibble below eight.")
-				(bool.or (i32.lt 8i32 (local width))
-					(bool.and (i32.eq (local width) 8i32)
-						(i32.lt 7i32 (call hex_digit_value (array.load (local source) (local first))))))
-				(then (return -1i32)))
-			(let-mut value 0u32)
-			(let-mut cursor (local first))
-			(while
-				(:doc "The validated span contains only hexadecimal digits, and its magnitude fits i32.")
-				(i32.lt (local cursor) (local end))
-				(body
-					(let digit (int.convert u32 (call hex_digit_value (array.load (local source) (local cursor)))))
-					(set (local value) (u32.or (u32.shl (local value) 4i32) (local digit)))
-					(set (local cursor) (i32.add (local cursor) 1i32))))
-			(return (int.convert i32 (local value)))))
 
 	(fn normalized_extent
 		(:doc "Decode a checked nonnegative magnitude if it lies within the extent range.")
-		(params (source (shared-array u8)) (digits i32) (end i32) (hexadecimal bool)) (returns i32)
+		(params (source (shared-array u8)) (digits i32) (end i32) (radix i32)) (returns i32)
 		(body
+			(let magnitude (call read_integer_magnitude (borrow-shared (local source)) (local digits) (local end) (local radix)))
+			(let low (struct.get (local magnitude) low))
 			(if
-				(:doc "A checked spelling retains its radix after normalization.")
-				(local hexadecimal)
-				(then (return (call hexadecimal_extent (borrow-shared (local source)) (local digits) (local end)))))
-			(let decimal (call read_decimal_digits (borrow-shared (local source)) (local digits) (local end) 214748364u32 7u32))
-			(if (i32.lt (struct.get (local decimal) digits) 0i32) (then (return -1i32)))
-			(return (int.convert i32 (struct.get (local decimal) magnitude)))))
+				(:doc "An extent must fit in nonnegative i32 even when its initializer has a wider type.")
+				(bool.or (u32.lt 0u32 (struct.get (local magnitude) high)) (u32.lt 2147483647u32 (local low)))
+				(then (return -1i32)))
+			(return (int.convert i32 (local low)))))
 
 	(fn typed_extent_magnitude
 		(:doc "Apply the declared integer's own bounds before narrowing it to a nonnegative i32 size.")
@@ -60,7 +36,7 @@
 				(bool.or (i32.lt (local digits) 0i32) (struct.get (local spelling) negative))
 				(then (return -1i32)))
 			(return (call normalized_extent (borrow-shared (local source)) (local digits) (local end)
-				(struct.get (local spelling) hexadecimal)))))
+				(struct.get (local spelling) radix)))))
 
 	(fn suffixed_extent_value
 		(:doc "Resolve the integer suffix before interpreting the preceding magnitude.")
@@ -68,19 +44,11 @@
 		(body
 			(let start (struct.get (local node) start))
 			(let end (struct.get (local node) end))
-			(let-mut first (call integer_magnitude_start (borrow-shared (local source)) (local start)))
-			(let hexadecimal (call hex_digits_start (borrow-shared (local source)) (local start) (local end)))
-			(let-mut radix 10i32)
-			(if
-				(:doc "A hexadecimal prefix selects the larger radix for scanning the suffix boundary.")
-				(i32.lt -1i32 (local hexadecimal))
-				(then
-					(set (local first) (local hexadecimal))
-					(set (local radix) 16i32)))
-			(let suffix (call integer_digits_end (borrow-shared (local source)) (local first) (local end) (local radix)))
+			(let atom (call integer_atom (borrow-shared (local source)) (local start) (local end)))
+			(let suffix (struct.get (local atom) end))
 			(if
 				(:doc "A typed atom has both a magnitude and a suffix.")
-				(bool.or (i32.eq (local suffix) (local first)) (i32.eq (local suffix) (local end)))
+				(bool.or (i32.eq (local suffix) (struct.get (local atom) digits)) (i32.eq (local suffix) (local end)))
 				(then (return -1i32)))
 			(let type (call builtin_type_keyword (borrow-shared (local source)) (local suffix) (i32.sub (local end) (local suffix))))
 			(return (call typed_extent_magnitude (borrow-shared (local source)) (local start) (local suffix) (local type)))))
@@ -114,7 +82,7 @@
 				(i32.lt -1i32 (struct.get (local value) next_sibling))
 				(then (return -1i32)))
 			(if
-				(:doc "Integer constructors accept an unquoted magnitude in either radix.")
+				(:doc "Integer constructors accept an unquoted magnitude in any supported radix.")
 				(u32.eq (struct.get (local value) kind) 1u32)
 				(then (return (call typed_extent_magnitude (borrow-shared (local source))
 					(struct.get (local value) start) (struct.get (local value) end) (local type)))))
