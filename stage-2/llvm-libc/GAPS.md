@@ -184,7 +184,7 @@ in C11, C17, and C23 for each target.
 | --- | --- |
 | `isalnum`, `isalpha`, `isblank`, `iscntrl`, `isdigit`, `isgraph`, `islower`, `isprint`, `ispunct`, `isspace`, `isupper`, `isxdigit`, `tolower`, `toupper` | Both header sets provide these as `int(int)`. The shared declarations cover the ISO C classifiers and conversions. |
 | `isascii`, `toascii`, `_tolower`, `_toupper` | Both header sets expose these with the tested feature macros. The underscore-prefixed conversions use the argument-capturing C macro contract. |
-| `digittoint`, `ishexnumber`, `isideogram`, `isnumber`, `isphonogram`, `isrune`, `isspecial`, `ct_rune_t`, `rune_t` | Darwin extensions. The two aliases retain their header spelling and the wider rune inputs use `ct_rune_t`. |
+| `digittoint`, `ishexnumber`, `isideogram`, `isnumber`, `isphonogram`, `isrune`, `isspecial`, `ct_rune_t`, `rune_t` | Darwin extensions. The two aliases retain their header spellings. The seven functions have `int(int)` prototypes. |
 | `isctype` and `_ISupper`, `_ISlower`, `_ISalpha`, `_ISdigit`, `_ISxdigit`, `_ISspace`, `_ISprint`, `_ISgraph`, `_ISblank`, `_IScntrl`, `_ISpunct`, `_ISalnum` | glibc extensions with the tested GNU feature mode. The fixture checks each mask through `isctype`. |
 | `locale_t` and locale-taking classifiers and conversions | glibc exposes the POSIX `_l` forms in `<ctype.h>` and the GNU `isascii_l` and `toascii_l` macros. Darwin exposes locale variants through `<xlocale.h>` with `<ctype.h>` visible. The disabled group records both header contracts pending pointer-typedef ownership and typed nulls (#515) and resolution of the same owner across the acquisition and classifier headers (#516). |
 
