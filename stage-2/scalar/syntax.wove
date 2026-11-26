@@ -10,6 +10,8 @@
 	(use wove-file "../source/array_growth.wove" (only array_growth_keyword is_array_growth_statement))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion))
 	(use wove-file "../source/integer_checks.wove" (only read_integer_check))
+	(use wove-file "../source/integer_compare.wove" (only integer_comparison_keyword is_integer_comparison
+		comparison_operand_type comparison_is_zero comparison_symbol))
 	(use wove-file "../source/integer_ops.wove" (only read_integer_operator integer_operator))
 	(use wove-file "../source/float_ops.wove" (only float_operator_keyword is_float_operator float_operator_type
 		float_operator_slot float_operator_symbol))
@@ -44,8 +46,6 @@
 	(let wide_add_head "u64.add.wrapping")
 	(let u32_add_wrapping 174u32)
 	(let u32_sub_wrapping 175u32)
-	(let i32_eq_kind 194u32)
-	(let i32_lt_kind 195u32)
 
 	(fn keyword_matches
 		(:doc `Compare a checked atom to an immutable keyword spelling.`)
@@ -150,59 +150,6 @@
 						(i32.add.wrapping (local start) 3i32) 97u8 112u8 112u8)
 					(call is_three_bytes (borrow-shared (local source))
 						(i32.add.wrapping (local start) 6i32) 105u8 110u8 103u8))))))
-
-	(fn comparison_suffix
-		(:doc `Read an exact two-byte comparison mnemonic after its scalar prefix.`)
-		(params (source (shared-array u8)) (start i32) (equal u32))
-		(returns u32)
-		(body
-			(let first (array.load (local source) (local start)))
-			(let second (array.load (local source) (i32.add.wrapping (local start) 1i32)))
-			(if
-				(:doc "Recognize the equality suffix.")
-				(bool.and (u8.eq (local first) 101u8) (u8.eq (local second) 113u8))
-				(then (return (local equal))))
-			(if
-				(:doc "The less-than kind follows the equality kind for each scalar type.")
-				(bool.and (u8.eq (local first) 108u8) (u8.eq (local second) 116u8))
-				(then (return (u32.add.wrapping (local equal) 1u32))))
-			(return 0u32)))
-
-	(fn comparison_keyword
-		(:doc `Read a comparison keyword for an exact built-in integer type.`)
-		(params (source (shared-array u8)) (start i32) (width i32))
-		(returns u32)
-		(body
-			(if
-				(:doc "Byte comparisons are the only comparisons with a three-byte prefix.")
-				(bool.and (i32.eq (local width) 5i32)
-					(call is_three_bytes (borrow-shared (local source)) (local start) 117u8 56u8 46u8))
-				(then (return (call comparison_suffix (borrow-shared (local source))
-					(i32.add.wrapping (local start) 3i32) 26u32))))
-			(if
-				(:doc "Wide unsigned comparisons use their own consecutive codes.")
-				(bool.and (i32.eq (local width) 6i32)
-					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) 117u8 54u8 52u8)
-						(call is_head_byte (borrow-shared (local source)) (local start) 3i32 46u8)))
-				(then (return (call comparison_suffix (borrow-shared (local source))
-					(i32.add.wrapping (local start) 4i32) 84u32))))
-			(if
-				(:doc "Both word comparisons have six bytes and share the 32. spelling.")
-				(bool.or (bool.not (i32.eq (local width) 6i32))
-					(bool.not (call is_three_bytes (borrow-shared (local source))
-						(i32.add.wrapping (local start) 1i32) 51u8 50u8 46u8)))
-				(then (return 0u32)))
-			(let prefix (array.load (local source) (local start)))
-			(let mnemonic (i32.add.wrapping (local start) 4i32))
-			(if
-				(:doc "The i32 prefix selects signed comparisons.")
-				(u8.eq (local prefix) 105u8)
-				(then (return (call comparison_suffix (borrow-shared (local source)) (local mnemonic) (local i32_eq_kind)))))
-			(if
-				(:doc "The u32 prefix selects unsigned comparisons.")
-				(u8.eq (local prefix) 117u8)
-				(then (return (call comparison_suffix (borrow-shared (local source)) (local mnemonic) 28u32))))
-			(return 0u32)))
 
 	(fn wrapping_keyword
 		(:doc `Read the operation code from a complete signed or unsigned wrapping keyword.`)
@@ -465,14 +412,17 @@
 				(:doc "Float operators use the same eager operand planning as integer operators.")
 				(call is_float_operator (local kind))
 				(then (return (call floating_operator (local kind)))))
+			(if
+				(:doc "Integer comparisons share eager checking for their one or two written operands.")
+				(call is_integer_comparison (local kind))
+				(then
+					(let-mut arity 2i32)
+					(if (call comparison_is_zero (local kind)) (then (set (local arity) 1i32)))
+					(return (struct.new ScalarOperator (operand (call comparison_operand_type (local kind))) (result 12u32)
+						(symbol (call comparison_symbol (local kind))) (arity (local arity)) (short_circuit (bool false))))))
 			(let multiply (u32.eq (local kind) 75u32))
 			(let signed (bool.or (local multiply) (bool.or (u32.eq (local kind) 20u32) (u32.eq (local kind) 21u32))))
 			(let unsigned (bool.or (u32.eq (local kind) (local u32_add_wrapping)) (u32.eq (local kind) (local u32_sub_wrapping))))
-			(if
-				(:doc "int.eq learns its exact operand type from the written type argument.")
-				(u32.eq (local kind) 65u32)
-				(then (return (struct.new ScalarOperator (operand 0u32) (result 12u32)
-					(symbol 61u8) (arity 2i32) (short_circuit (bool false))))))
 			(if
 				(:doc "Wrapping arithmetic uses the same exact type for both operands and the result.")
 				(bool.or (local signed) (local unsigned))
@@ -530,36 +480,7 @@
 				(then (return (struct.new ScalarOperator (operand (struct.get (local integer) operand))
 					(result (struct.get (local integer) result)) (symbol (struct.get (local integer) symbol))
 					(arity 2i32) (short_circuit (bool false))))))
-			(let-mut operand 0u32)
-			(if
-				(:doc "The ordered pairs of comparison kinds share their operand type.")
-				(bool.or (u32.eq (local kind) (local i32_eq_kind)) (u32.eq (local kind) (local i32_lt_kind)))
-				(then (set (local operand) 5u32)))
-			(if
-				(:doc "Both byte comparisons require exact u8 operands.")
-				(bool.or (u32.eq (local kind) 26u32) (u32.eq (local kind) 27u32))
-				(then (set (local operand) 10u32)))
-			(if
-				(:doc "Both unsigned word comparisons require exact u32 operands.")
-				(bool.or (u32.eq (local kind) 28u32) (u32.eq (local kind) 29u32))
-				(then (set (local operand) 11u32)))
-			(if
-				(:doc "Wide comparisons require exact u64 operands.")
-				(bool.or (u32.eq (local kind) 84u32) (u32.eq (local kind) 85u32))
-				(then (set (local operand) 54u32)))
-			(if
-				(:doc "Other expression kinds have no binary operator.")
-				(u32.eq (local operand) 0u32)
-				(then (return (struct.new ScalarOperator (operand 0u32) (result 0u32) (symbol 0u8) (arity 0i32) (short_circuit (bool false))))))
-			(let-mut symbol 60u8)
-			(if
-				(:doc "The equality kind in each pair selects the equals symbol.")
-				(bool.or (u32.eq (local kind) (local i32_eq_kind))
-					(bool.or (u32.eq (local kind) 26u32)
-						(bool.or (u32.eq (local kind) 28u32) (u32.eq (local kind) 84u32))))
-				(then (set (local symbol) 61u8)))
-			(return (struct.new ScalarOperator (operand (local operand)) (result 12u32) (symbol (local symbol))
-				(arity 2i32) (short_circuit (bool false))))))
+			(return (struct.new ScalarOperator (operand 0u32) (result 0u32) (symbol 0u8) (arity 0i32) (short_circuit (bool false))))))
 
 	(fn borrow_keyword
 		(:doc `Read the explicit borrow keywords at their full widths.`)
@@ -681,8 +602,7 @@
 		local, and call. Return 10 through 14 for u8, u32, bool, true, and
 		false. Return 15 through 17 for let, let-mut, and set. The i64 type uses 18.
 		Return 20 and 21 for i32.add.wrapping and i32.sub.wrapping.
-		Return 22 through 25 for if, then, else, and while, and 26 through
-		29 for u8.eq, u8.lt, u32.eq, and u32.lt. Return 30 through 32 for
+		Return 22 through 25 for if, then, else, and while. Return 30 through 32 for
 		bool.and, bool.or, and bool.not, and 33 for int.convert. Return
 		34 through 37 for shared-array, borrow-shared, array.len, and
 		array.load. Return 38 through 40 for mut-array, borrow-mut, and
@@ -690,20 +610,21 @@
 		keywords use 43 and 44. The i16 and u16 types use 46 and 47.
 		The u32 wrapping operations use 174 and 175. Struct, fields, struct.new, and struct.get use
 		48, 49, 50, and 52. Void uses 59, embed uses 60, and i8 uses 61.
-		Typed integer equality uses 65. Return 66 through 69 for u32.and,
+		Return 66 through 69 for u32.and,
 		u32.or, u32.shl, and u32.shr.
 		Fixed-array types, lists, and repeats use 70 through 72. The planner
 		uses 73 and 74 for loads and stores resolved to fixed storage.
 		i32.mul.wrapping, i32.div, and i32.rem use 75 through 77. The u64 type uses 54.
-		84 through 86 select u64 equality, order, and wrapping addition.
+		Code 86 selects u64 wrapping addition.
 		87 through 90 select u64 masks and shifts, and 91 through 94 select u32 and u64 XOR and complement.
 		An owner null predicate uses 98, optional unwrap uses 101, native.alloc uses 103, and native.empty uses 198.
 		Integer byte conversions use 108 through 111, and typed checked conversions use 112.
 		Enum and match forms use 113 through 117. Break and continue use 144 and 145.
 		Signed i32 masks and shifts use 152 through 155.
-		The 16-bit comparison and wrapping operators use 180 through 187.
-		Recoverable integer checks use 188 through 193. i32.eq and i32.lt use 194 and 195.
-		i64 comparisons and wrapping arithmetic use 205 through 209.
+		The 16-bit wrapping operators use 182, 183, 186, and 187.
+		Recoverable integer checks use 188 through 193.
+		i64 wrapping arithmetic uses 207 through 209. Integer comparisons
+		use the encoded range from integer_compare.
 		Other nodes and absent indices return 0.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32))
 		(returns u32)
@@ -908,12 +829,6 @@
 							(call is_head_byte (borrow-shared (local source)) (local start) 4i32 101u8))))
 				(then (return 25u32)))
 			(if
-				(:doc "Match the typed native integer equality operator.")
-				(bool.and (i32.eq (local width) 6i32)
-					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) 105u8 110u8 116u8)
-						(call is_three_bytes (borrow-shared (local source)) (i32.add.wrapping (local start) 3i32) 46u8 101u8 113u8)))
-				(then (return 65u32)))
-			(if
 				(:doc "Match all eleven bytes of int.convert before reading its target.")
 				(bool.and (i32.eq (local width) 11i32)
 					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) 105u8 110u8 116u8)
@@ -934,7 +849,7 @@
 						(call is_three_bytes (borrow-shared (local source)) (local start) 109u8 111u8 118u8)
 						(call is_head_byte (borrow-shared (local source)) (local start) 3i32 101u8)))
 				(then (return 43u32)))
-			(let comparison (call comparison_keyword (borrow-shared (local source)) (local start) (local width)))
+			(let comparison (call integer_comparison_keyword (borrow-shared (local source)) (local start) (struct.get (local node) end)))
 			(if
 				(:doc "Return a complete comparison keyword before checking wrapping arithmetic.")
 				(u32.lt 0u32 (local comparison))

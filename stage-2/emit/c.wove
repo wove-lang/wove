@@ -56,6 +56,7 @@
 	(use wove-file "./integer_checks.wove" (only write_integer_check))
 	(use wove-file "../source/integer_checks.wove" (only is_integer_check))
 	(use wove-file "../source/types.wove" (only is_16bit_integer is_64bit_integer is_builtin_integer is_signed_builtin_integer (value i64_type)))
+	(use wove-file "../source/integer_compare.wove" (only comparison_is_zero comparison_is_negated))
 	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment c_cast c_i32_bias write_c_name
 			function_name_role write_temporary_name write_local_name write_local_place write_loop_label open_static_value write_static_bytes))
 
@@ -247,13 +248,16 @@
 							(u32.lt 0u32 (struct.get (call scalar_operator (local kind)) result)))))))))
 
 	(let i32_wrapped_bits_call "wvrt_i32_from_wrapped_bits(")
+	(let negated_comparison "!(")
+	(let discard_comparison_operand "((void)")
 
 	(fn write_operator
 		(:doc `Write an operator using already evaluated operands of its exact type.
 
 		Signed arithmetic uses a wide signed bias to return to the i32 range.
 		Signed masks operate on unsigned bits and reinterpret the result.
-		Binary operations on unsigned words keep their declared width.`)
+		Binary operations on unsigned words keep their declared width.
+		An integer predicate can supply typed zero or negate the comparison.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (expression ScalarExpression)
 			(operator ScalarOperator) (tree_base i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
@@ -267,13 +271,33 @@
 			(let signed_wrap (bool.and (local signed) (bool.not (local signed_mask))))
 			(let unsigned_word (u32.eq (local result) 11u32))
 			(let first (struct.get (local expression) first))
+			(let kind (struct.get (local expression) kind))
+			(let zero (call comparison_is_zero (local kind)))
+			(let negate (call comparison_is_negated (local kind)))
 			(if
 				(:doc "Emit the single checked operand after its negation or complement operator.")
-				(i32.eq (struct.get (local operator) arity) 1i32)
+				(bool.and (bool.not (local zero)) (i32.eq (struct.get (local operator) arity) 1i32))
 				(then
 					(let cursor (call c_byte (borrow-mut (local output)) (local offset) (local symbol) (local writing)))
 					(return (call write_temporary_name (borrow-shared (local source)) (local first) (local tree_base)
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(let operand_type (struct.get (local operator) operand))
+			(if
+				(:doc "Use the already evaluated value even when unsigned ordering has a constant result.")
+				(bool.and (local zero) (bool.and (bool.not (call is_signed_builtin_integer (local operand_type)))
+					(bool.or (u8.eq (local symbol) 60u8) (u8.eq (local symbol) 71u8))))
+				(then
+					(let-mut truth (u8.eq (local symbol) 71u8))
+					(if (local negate) (then (set (local truth) (bool.not (local truth)))))
+					(let-mut digit 48u8)
+					(if (local truth) (then (set (local digit) 49u8)))
+					(let-mut cursor (call c_literal_text (borrow-shared (local discard_comparison_operand))
+						(borrow-mut (local output)) (local offset) (local writing)))
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local first) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) (local digit) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 			(let second (struct.get (array.load (local nodes) (local first)) next_sibling))
 			(if
 				(:doc "Wrap i64 arithmetic in uint64_t before reinterpreting the result bits.")
@@ -287,6 +311,11 @@
 					(local symbol) (call is_signed_builtin_integer (local result))
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(let-mut cursor (local offset))
+			(if
+				(:doc "Negate the result of the ordinary comparison after evaluating its operands.")
+				(local negate)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local negated_comparison))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
 			(if
 				(:doc "Open both casts and widen the arithmetic with the signed bias.")
 				(local signed_wrap)
@@ -329,8 +358,15 @@
 					(bool.or (u8.eq (local symbol) 61u8) (u8.eq (local symbol) 33u8)))
 				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 61u8 (local writing)))))
 			(if (local signed_mask) (then (set (local cursor) (call c_cast (borrow-mut (local output)) (local cursor) 11u32 (local writing)))))
-			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local second) (local tree_base)
-				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "Use a zero of the operand type in place of an explicit second temporary.")
+				(local zero)
+				(then
+					(set (local cursor) (call c_cast (borrow-mut (local output)) (local cursor) (local operand_type) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 48u8 (local writing))))
+				(else
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local second) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Reduce to uint32_t before subtracting the signed bias.")
 				(local signed_wrap)
@@ -340,8 +376,8 @@
 					(set (local cursor) (call c_i32_bias (borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 			(if
-				(:doc "Close the unsigned reduction or signed bit reinterpretation.")
-				(bool.or (local unsigned_word) (local signed_mask))
+				(:doc "Close the unsigned reduction, signed bit reinterpretation, or negation.")
+				(bool.or (local negate) (bool.or (local unsigned_word) (local signed_mask)))
 				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 			(return (local cursor))))
 
