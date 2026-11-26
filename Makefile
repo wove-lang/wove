@@ -96,6 +96,7 @@ NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
 WORKER_FIXTURES := $(NATIVE_CLI_FIXTURES)/workers
 WORKER_RUNTIME := $(STAGE2)/workers/runtime.o
 WORKER_PROBE := $(STAGE2)/workers/failure
+WORKER_QUEUE_PROBE := $(STAGE2)/workers/queue-failure
 PROCESS_MODULES := stage-2/io/process.wove stage-2/io/temporary.wove stage-2/io/capture/descriptors.wove stage-2/io/capture/child.wove
 PROCESS_FIXTURES := tests/stage-2/process
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
@@ -235,18 +236,20 @@ test-stage-2-f80: $(NATIVE_COMPILER)
 # Run the Wove transfer fixtures and the host probe for thread API failures.
 test-stage-2-workers: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-workers: export WOVE_TEST_CFLAGS = $(CFLAGS)
-test-stage-2-workers: $(NATIVE_COMPILER) $(WORKER_PROBE)
+test-stage-2-workers: $(NATIVE_COMPILER) $(WORKER_PROBE) $(WORKER_QUEUE_PROBE)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(WORKER_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_PROBE)" "$(WORKER_FIXTURES)/failure.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_QUEUE_PROBE)" "$(WORKER_FIXTURES)/queue-failure.tsv"
 
 # Intercept thread creation and join in the runtime object used by the worker probe.
 $(WORKER_RUNTIME): $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -pthread -Dpthread_create=fixture_worker_create \
-		-Dpthread_join=fixture_worker_join -Dmalloc=fixture_worker_malloc -Dfree=fixture_worker_free -c "$<" -o "$@"
+		-Dpthread_join=fixture_worker_join -Dmalloc=fixture_worker_malloc -Dfree=fixture_worker_free \
+		-Dcalloc=fixture_worker_calloc -c "$<" -o "$@"
 
 # The probe can still call the original thread APIs when a case allows them.
-$(WORKER_PROBE): $(WORKER_FIXTURES)/failure.c $(WORKER_RUNTIME) $(RUNTIME_HEADER)
+$(WORKER_PROBE) $(WORKER_QUEUE_PROBE): $(STAGE2)/workers/%: $(WORKER_FIXTURES)/%.c $(WORKER_RUNTIME) $(RUNTIME_HEADER)
 	$(CLANG) -std=c11 $(CFLAGS) -pthread -I runtime $(filter-out %.h,$^) -o "$@"
 
 # Check generated metadata and version invalidation in an isolated build.

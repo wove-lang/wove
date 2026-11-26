@@ -42,6 +42,11 @@ void *fixture_worker_malloc(size_t size) {
 	return malloc(size);
 }
 
+/* Keep the shared C build recipe's backing storage allocation unchanged here. */
+void *fixture_worker_calloc(size_t count, size_t size) {
+	return calloc(count, size);
+}
+
 /* Count retirement of the receipt separately from its input and result. */
 void fixture_worker_free(void *pointer) {
 	/* The worker's other allocations are released independently. */
