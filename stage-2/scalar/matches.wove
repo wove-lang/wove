@@ -11,17 +11,56 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "./syntax.wove" (only entry_at entry_form is_scalar_name same_name (value for_bind) (type EntryRead)))
 	(use wove-file "./locals.wove" (only read_local_name))
-	(use wove-file "./records.wove" (only find_member member_value_type is_record_type record_index is_enum_layout (type ScalarRecord)))
-	(use wove-file "./flow.wove" (only block_statement (value case_payload_binding) (type ScalarStatement)))
+	(use wove-file "./records.wove" (only find_member member_value_type is_record_type record_index is_enum_layout is_owning_record is_array_owner (type ScalarRecord)))
+	(use wove-file "./flow.wove" (only block_statement statement_exit_state (value case_payload_binding) (value case_discard_binding) (type ScalarStatement)))
 
 	(use wove-file "./match_patterns.wove" (only is_match_fallback read_integer_pattern match_key has_match_key (type MatchKey)))
 	(use wove-file "./conditional.wove" (only copyable_choice_type))
 	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
 
+	(fn payload_binding
+		(:doc "Record a case-local name or hidden discard slot with its exact payload type.")
+		(params (arm i32) (name i32) (type u32) (discard bool))
+		(returns ScalarStatement)
+		(body
+			(let-mut kind (local case_payload_binding))
+			(if (local discard) (then (set (local kind) (local case_discard_binding))))
+			(return (struct.new ScalarStatement (kind (local kind)) (target (local name)) (value -1i32)
+				(type (local type)) (first (local arm)) (previous_owner -1i32) (falls_through (bool true))
+				(move_site -1i32) (paths 0u32) (previous_loan -1i32)))))
+
+	(fn payload_block
+		(:doc "Associate one captured payload or wildcard owner with the case body.")
+		(params (ordinal i32) (name i32) (first i32))
+		(returns ScalarStatement)
+		(body
+			(return (struct.new ScalarStatement (kind 0u32) (target (local ordinal)) (value (local name)) (type 0u32)
+				(first (local first)) (previous_owner -1i32) (falls_through (bool true))
+				(move_site -1i32) (paths 0u32) (previous_loan -1i32)))))
+
+	(fn enter_case_owner
+		(:doc "Link the active case payload or its hidden discard to the arm's owner chain.")
+		(params (records (shared-array ScalarRecord)) (statements (mut-array ScalarStatement)) (arm i32) (previous i32))
+		(returns i32)
+		(body
+			(let name (struct.get (array.load (local statements) (local arm)) value))
+			(if (i32.lt (local name) 0i32) (then (return (local previous))))
+			(let binding (array.load (local statements) (local name)))
+			(let type (struct.get (local binding) type))
+			(if
+				(:doc "Only a transferred owner needs destruction when the arm exits.")
+				(bool.not (bool.or (call is_array_owner (local type))
+					(call is_owning_record (borrow-shared (local records)) (local type))))
+				(then (return (local previous))))
+			(array.store (local statements) (local name)
+				(call statement_exit_state (local binding) (local name) (local previous) (bool true) 0u32))
+			(return (local name))))
+
 	(fn plan_case_body
-		(:doc `Record the arm's statement list and introduce an immutable copy of any named payload.`)
+		(:doc `Record the arm body and bind its active payload as an immutable local or hidden owner.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (block SourceNode)
-			(arm i32) (ordinal i32) (operand i32) (type u32) (statements (mut-array ScalarStatement)))
+			(arm i32) (ordinal i32) (operand i32) (type u32)
+			(records (shared-array ScalarRecord)) (statements (mut-array ScalarStatement)))
 		(returns EntryRead)
 		(body
 			(let first (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
@@ -47,18 +86,14 @@
 				(struct.get (local binder) next_sibling)))
 			(let-mut bound -1i32)
 			(if
-				(:doc "A discard introduces no name and needs no payload read.")
-				(bool.not (local discard))
+				(:doc "An owning discard still retains its payload until the arm exits.")
+				(bool.or (bool.not (local discard)) (bool.or (call is_array_owner (local type))
+					(call is_owning_record (borrow-shared (local records)) (local type))))
 				(then
 					(set (local bound) (local name))
 					(array.store (local statements) (local name)
-						(struct.new ScalarStatement (kind (local case_payload_binding)) (target (local name)) (value -1i32)
-							(type (local type)) (first (local arm)) (previous_owner -1i32) (falls_through (bool true))
-							(move_site -1i32) (paths 0u32) (previous_loan -1i32)))))
-			(array.store (local statements) (local arm)
-				(struct.new ScalarStatement (kind 0u32) (target (local ordinal)) (value (local bound)) (type 0u32)
-					(first (local body_start)) (previous_owner -1i32) (falls_through (bool true))
-					(move_site -1i32) (paths 0u32) (previous_loan -1i32)))
+						(call payload_binding (local arm) (local name) (local type) (local discard)))))
+			(array.store (local statements) (local arm) (call payload_block (local ordinal) (local bound) (local body_start)))
 			(return (call entry_at (local block) (local arm) 0u32))))
 
 	(fn integer_case_count
@@ -125,7 +160,7 @@
 								(struct.get (local layout) first) (local count) (local pattern)))
 							(set (local fallback) (i32.lt (struct.get (local variant) ordinal) 0i32))))
 					(if
-						(:doc "The wildcard ends the match and binds no payload.")
+						(:doc "The wildcard ends the match. Retain an owning subject for cleanup in its arm.")
 						(local fallback)
 						(then
 							(let next (struct.get (local block) next_sibling))
@@ -137,9 +172,16 @@
 								(:doc "An enum wildcard also needs at least one uncovered variant.")
 								(bool.and (bool.not (local integer)) (i32.eq (local covered) (local count)))
 								(then (return (call entry_at (local pattern) -1i32 24u32))))
-							(array.store (local statements) (local arm) (call block_statement
-								(call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand))
-								-1i32 -1i32 (bool true)))
+							(let body_start (call skip_disabled_siblings (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+							(let-mut hidden -1i32)
+							(if
+								(:doc "A hidden wildcard slot owns the captured enum and drops only its active variant.")
+								(call is_owning_record (borrow-shared (local records)) (local type))
+								(then
+									(set (local hidden) (local index))
+									(array.store (local statements) (local index)
+										(call payload_binding (local arm) (local index) (local type) (bool true)))))
+							(array.store (local statements) (local arm) (call payload_block -1i32 (local hidden) (local body_start)))
 							(return (call entry_at (local node) (local first) 0u32))))
 					(if
 						(:doc "Integer keys are compared by value, including across radices and leading-zero spellings.")
@@ -176,7 +218,8 @@
 								(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout)
 								(array.load (local nodes) (struct.get (local variant) row))))
 							(let checked (call plan_case_body (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local block) (local arm) (local ordinal) (local operand) (local payload) (borrow-mut (local statements))))
+								(local block) (local arm) (local ordinal) (local operand) (local payload)
+								(borrow-shared (local records)) (borrow-mut (local statements))))
 							(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))))
 					(set (local covered) (i32.add.wrapping (local covered) 1i32))
 					(set (local arm) (struct.get (local block) next_sibling))))
