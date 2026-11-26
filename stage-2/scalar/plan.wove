@@ -49,7 +49,7 @@
 		(value normalized_i32_literal) (value checked_i32_operand) (value checked_function_operand) (value checked_operation_operand) (value checked_bool_operand) (value checked_enum_operand)))
 	(use wove-file "./records.wove"
 		(only scope_at checked_enum_value is_generic_template is_callable_type callable_index callable_layout_shape (value callable_alias_kind) declaration_kind register_module_records register_module_record_arrays register_owned_rows order_record_layouts validate_record_array_fields value_type copyable_type owned_array_leaf_type is_owning_struct_element is_owning_record is_scoped_record read_parameter_type read_view_parameter_extent find_record pointer_owner_definition record_type record_index is_record_type
-			find_member member_value_type read_member_operand register_static_array find_fixed_array_type is_fixed_array is_enum_layout is_payload_enum is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
+			find_member member_value_type native_field_type read_member_operand register_static_array find_fixed_array_type is_fixed_array is_enum_layout is_payload_enum is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type owning_array_type array_owner_element array_slot_code owner_view_type read_owned_array_type byte_rows_owner_type is_native_integer native_integer_type find_native_node (type ScalarRecord)
 			is_native_record is_optional_record_borrow is_place_reference is_mutable_place_reference place_reference_type place_reference_target mutable_scalar_target record_receiver_type place_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
@@ -3275,10 +3275,11 @@
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_record_make
-		(:doc `Check a constructor's complete named field set and seed values in source order.
+		(:doc `Check named field initializers and seed their values in source order.
 
-		A checked initializer wrapper records the native field ordinal
-		and links to its exact scalar operand for evaluation.`)
+		Each checked initializer records its field position and points to
+		the operand evaluated for it. A native record can omit fields.`)
+		(:expect (tests "stage-2/cli/native/record-init.tsv") (issues "gh:wove-lang/wove:543"))
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
 			(name i32) (index i32) (file i32) (source_base i32) (expected u32) (scoped_initializer bool) (records (shared-array ScalarRecord))
 			(bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
@@ -3326,17 +3327,7 @@
 				(bool.and (struct.get (local layout) borrows_bytes) (bool.not (local scoped_initializer)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let first (struct.get (local spelling) next_sibling))
-			(if
-				(:doc "Zero-initialize the entire native type for a caller-provided out object.")
-				(call is_native_record (local layout))
-				(then
-					(if
-						(:doc "This native constructor takes only the record name.")
-						(i32.lt -1i32 (local first))
-						(then (return (call entry_at (array.load (local nodes) (local first)) -1i32 24u32))))
-					(array.store (local expressions) (local index)
-						(call expression_row 50u32 (local type) (local type_row) -1i32 0i32 0i32 (bool false)))
-					(return (call entry_at (local node) (local index) 0u32))))
+			(let native (call is_native_record (local layout)))
 			(let-mut initializer (local first))
 			(let-mut count 0i32)
 			(while
@@ -3368,9 +3359,22 @@
 								(then (return (call entry_at (local field_name) -1i32 33u32))))
 							(set (local earlier) (struct.get (array.load (local nodes) (local earlier)) next_sibling))))
 					(let value (struct.get (local checked) operand))
-					(let member_type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout)
-						(array.load (local nodes) (struct.get (local field) row))))
+					(let row (struct.get (local field) row))
+					(let-mut member_type 0u32)
+					(if
+						(:doc "Resolve native fields in their defining C bridge so aliases stay nominal.")
+						(local native)
+						(then
+							(set (local member_type) (call native_field_type (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (local layout) (local row)))
+							(if
+								(:doc "Only declared scalar fields can be initialized by name in a native record.")
+								(bool.not (bool.or (call is_builtin_scalar (local member_type)) (call is_native_integer (local member_type))))
+								(then (return (call entry_at (local field_name) -1i32 24u32)))))
+						(else
+							(set (local member_type) (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout)
+								(array.load (local nodes) (local row))))))
 					(array.store (local expressions) (local initializer)
 						(call expression_row 51u32 0u32 (local ordinal) (local value) 0i32 0i32 (bool false)))
 					(let-mut operand_kind 0u32)
@@ -3397,8 +3401,8 @@
 					(set (local count) (i32.inc (local count)))
 					(set (local initializer) (struct.get (local member) next_sibling))))
 			(if
-				(:doc "A missing member has no operand span, so identify the constructor.")
-				(i32.not-eq (local count) (struct.get (local layout) count))
+				(:doc "Wove layouts require every field. C aggregate initialization supplies zero for omitted native members.")
+				(bool.and (bool.not (local native)) (i32.not-eq (local count) (struct.get (local layout) count)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(array.store (local expressions) (local index)
 				(call expression_row 50u32 (local type) (local type_row) (local first) 0i32 0i32 (bool false)))
