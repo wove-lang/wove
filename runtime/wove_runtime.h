@@ -275,6 +275,13 @@ wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrt_table,
 wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrt_value, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
+typedef struct wvrt_worker_receipt wvrt_worker_receipt;
+// Launch a job and return the lexical owner of the still joinable thread.
+wvrt_worker_receipt *wvrt_worker_spawn_at_span(wvrt_array *(*handler)(wvrt_array *), wvrt_array *job,
+	int32_t file, int32_t start, int32_t end);
+wvrt_worker_receipt *wvrt_worker_receipt_take(wvrt_worker_receipt **slot);
+wvrt_array *wvrt_worker_join_at_span(wvrt_worker_receipt **slot, int32_t file, int32_t start, int32_t end);
+void wvrt_worker_receipt_drop(wvrt_worker_receipt *worker);
 // Transfer a job to a fresh thread, then deliver its owned result on the caller's thread.
 wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*wvrt_handler)(wvrt_array *), wvrt_array *wvrt_job,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

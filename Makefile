@@ -243,7 +243,7 @@ test-stage-2-workers: $(NATIVE_COMPILER) $(WORKER_PROBE)
 $(WORKER_RUNTIME): $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -pthread -Dpthread_create=fixture_worker_create \
-		-Dpthread_join=fixture_worker_join -c "$<" -o "$@"
+		-Dpthread_join=fixture_worker_join -Dmalloc=fixture_worker_malloc -Dfree=fixture_worker_free -c "$<" -o "$@"
 
 # The probe can still call the original thread APIs when a case allows them.
 $(WORKER_PROBE): $(WORKER_FIXTURES)/failure.c $(WORKER_RUNTIME) $(RUNTIME_HEADER)

@@ -745,81 +745,174 @@ void wvrt_array_drop(wvrt_array *wvrtbuffer) {
 	free(wvrtbuffer);
 }
 
-// The joinable thread owns the input as soon as creation succeeds.
+// A successful launch transfers the input to its handler until normal Wove return.
 #ifdef WVRT_POSIX_WORKERS
 typedef struct {
-	wvrt_array *(*wvrt_handler)(wvrt_array *);
-	wvrt_array *wvrt_job;
-	wvrt_array *wvrt_result;
-	atomic_bool wvrt_done;
-} WvrtJoinedWorker;
+	int32_t file;
+	int32_t start;
+	int32_t end;
+} WvrtWorkerSite;
+
+struct wvrt_worker_receipt {
+	wvrt_array *(*handler)(wvrt_array *);
+	wvrt_array *job;
+	wvrt_array *result;
+	atomic_bool done;
+	pthread_t thread;
+	WvrtWorkerSite origin;
+};
 
 // Publish the last frame access on both normal return and native thread exit.
-static void wvrt_joined_worker_done(void *wvrt_context) {
-	WvrtJoinedWorker *wvrt_frame = wvrt_context;
-	atomic_store_explicit(&wvrt_frame->wvrt_done, true, memory_order_release);
+static void wvrt_worker_done(void *context) {
+	wvrt_worker_receipt *worker = context;
+	atomic_store_explicit(&worker->done, true, memory_order_release);
 }
 
 // The generated handler consumes the job and returns its owned result by value.
-static void *wvrt_joined_worker_run(void *wvrt_context) {
-	WvrtJoinedWorker *wvrt_frame = wvrt_context;
-	pthread_cleanup_push(wvrt_joined_worker_done, wvrt_frame);
-	wvrt_frame->wvrt_result = wvrt_frame->wvrt_handler(wvrt_frame->wvrt_job);
+static void *wvrt_worker_run(void *context) {
+	wvrt_worker_receipt *worker = context;
+	pthread_cleanup_push(wvrt_worker_done, worker);
+	worker->result = worker->handler(worker->job);
 	pthread_cleanup_pop(1);
 	return NULL;
 }
 
-// Release a completed result when native cancellation interrupts its delivery.
-static void wvrt_joined_worker_cancel_delivery(void *wvrt_result) {
-	wvrt_array_drop(wvrt_result);
+// Drop a completed result when pending native cancellation interrupts delivery.
+static void wvrt_worker_cancel_delivery(void *result) {
+	wvrt_array_drop(result);
 }
-#endif
 
-// Keep the caller's frame live until the worker has returned or published its last access.
-wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*wvrt_handler)(wvrt_array *), wvrt_array *wvrt_job,
-	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
-#ifdef WVRT_POSIX_WORKERS
-	int wvrt_previous_cancel;
-	// Joining is a cancellation point. The input still belongs to this frame before creation.
-	if (pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &wvrt_previous_cancel) != 0) {
-		wvrt_array_drop(wvrt_job);
-		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not protect joined worker");
+// Exclude cancellation while joining or losing the only pointer to a live worker.
+static int wvrt_worker_protect(WvrtWorkerSite site, wvrt_array *job) {
+	int previous;
+	// A joined launch still owns its job here. A submitted receipt has no input to drop.
+	if (pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &previous) != 0) {
+		wvrt_array_drop(job);
+		wvrt_trap_at_span(site.file, site.start, site.end, "could not protect joined worker");
 	}
-	WvrtJoinedWorker wvrt_frame = {
-		.wvrt_handler = wvrt_handler, .wvrt_job = wvrt_job, .wvrt_result = NULL, .wvrt_done = false
-	};
-	pthread_t wvrt_thread;
-	// A failed launch never transferred ownership to the generated handler.
-	if (pthread_create(&wvrt_thread, NULL, wvrt_joined_worker_run, &wvrt_frame) != 0) {
-		wvrt_array_drop(wvrt_job);
-		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not start joined worker");
+	return previous;
+}
+
+// Start a frame with either lexical storage in the joined call or heap storage in a receipt.
+static void wvrt_worker_start(wvrt_worker_receipt *worker, wvrt_array *(*handler)(wvrt_array *),
+	wvrt_array *job, WvrtWorkerSite site, bool submitted) {
+	worker->handler = handler;
+	worker->job = job;
+	worker->result = NULL;
+	worker->origin = site;
+	atomic_init(&worker->done, false);
+	// An unsuccessful launch leaves both the job and the frame with the submitting thread.
+	if (pthread_create(&worker->thread, NULL, wvrt_worker_run, worker) != 0) {
+		if (submitted) { free(worker); }
+		wvrt_array_drop(job);
+		wvrt_trap_at_span(site.file, site.start, site.end,
+			submitted ? "could not start submitted worker" : "could not start joined worker");
 	}
-	// A failed join does not prove that the child has stopped using the frame.
-	if (pthread_join(wvrt_thread, NULL) != 0) {
-		// Wait for publication before reading and dropping the child's result.
-		while (!atomic_load_explicit(&wvrt_frame.wvrt_done, memory_order_acquire)) {
+}
+
+// Retire a worker exactly once, delivering its result or dropping it at scope exit.
+static wvrt_array *wvrt_worker_finish(wvrt_worker_receipt *worker, WvrtWorkerSite site,
+	int previous_cancel, bool submitted, bool deliver) {
+	const bool joined = pthread_join(worker->thread, NULL) == 0;
+	// Wait for publication if a failed join left the child running.
+	if (!joined) {
+		// The worker owns the frame until its final access has been published.
+		while (!atomic_load_explicit(&worker->done, memory_order_acquire)) {
 			(void)sched_yield();
 		}
-		wvrt_array_drop(wvrt_frame.wvrt_result);
-		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not join worker");
 	}
-	// Native thread exit cannot furnish the Wove result required by this call.
-	if (wvrt_frame.wvrt_result == NULL) {
-		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "joined worker exited without returning");
+	wvrt_array *result = worker->result;
+	if (submitted) { free(worker); }
+	// Even a failed join must release a result the handler produced.
+	if (!joined) {
+		wvrt_array_drop(result);
+		wvrt_trap_at_span(site.file, site.start, site.end, "could not join worker");
 	}
-	// A pending native cancellation must drop the result before unwinding the caller.
-	pthread_cleanup_push(wvrt_joined_worker_cancel_delivery, wvrt_frame.wvrt_result);
-	(void)pthread_setcancelstate(wvrt_previous_cancel, NULL);
+	// Native thread exit cannot furnish the result required by a Wove worker.
+	if (result == NULL) {
+		wvrt_trap_at_span(site.file, site.start, site.end, "joined worker exited without returning");
+	}
+	// Scope cleanup takes responsibility for an unclaimed result.
+	if (!deliver) {
+		wvrt_array_drop(result);
+		result = NULL;
+	}
+	pthread_cleanup_push(wvrt_worker_cancel_delivery, result);
+	(void)pthread_setcancelstate(previous_cancel, NULL);
 	pthread_testcancel();
 	pthread_cleanup_pop(0);
-	return wvrt_frame.wvrt_result;
+	return result;
+}
+#endif
+
+// Keep the joined call's frame on the stack until the thread has stopped using it.
+wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*handler)(wvrt_array *), wvrt_array *job,
+	int32_t file, int32_t start, int32_t end) {
+#ifdef WVRT_POSIX_WORKERS
+	const WvrtWorkerSite site = {file, start, end};
+	const int previous = wvrt_worker_protect(site, job);
+	wvrt_worker_receipt worker;
+	wvrt_worker_start(&worker, handler, job, site, false);
+	return wvrt_worker_finish(&worker, site, previous, false, true);
 #else
-	(void)wvrt_handler;
-	wvrt_array_drop(wvrt_job);
-	wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not start joined worker");
+	(void)handler;
+	wvrt_array_drop(job);
+	wvrt_trap_at_span(file, start, end, "could not start joined worker");
 #endif
 }
 
+// Transfer a job to a heap-backed frame whose lifetime extends beyond submission.
+wvrt_worker_receipt *wvrt_worker_spawn_at_span(wvrt_array *(*handler)(wvrt_array *), wvrt_array *job,
+	int32_t file, int32_t start, int32_t end) {
+#ifdef WVRT_POSIX_WORKERS
+	wvrt_worker_receipt *worker = malloc(sizeof *worker);
+	// Allocation failure leaves the evaluated input with the submitting scope.
+	if (worker == NULL) {
+		wvrt_array_drop(job);
+		wvrt_trap_at_span(file, start, end, "could not allocate submitted worker");
+	}
+	wvrt_worker_start(worker, handler, job, (WvrtWorkerSite){file, start, end}, true);
+	return worker;
+#else
+	(void)handler;
+	wvrt_array_drop(job);
+	wvrt_trap_at_span(file, start, end, "could not start submitted worker");
+#endif
+}
+
+// Clear the original lexical slot before handing its frame to a new owner.
+wvrt_worker_receipt *wvrt_worker_receipt_take(wvrt_worker_receipt **slot) {
+	wvrt_worker_receipt *worker = *slot;
+	*slot = NULL;
+	return worker;
+}
+
+// Consume the receipt and deliver its result at the explicit join site.
+wvrt_array *wvrt_worker_join_at_span(wvrt_worker_receipt **slot, int32_t file, int32_t start, int32_t end) {
+#ifdef WVRT_POSIX_WORKERS
+	const WvrtWorkerSite site = {file, start, end};
+	// A receipt with an empty slot has already transferred its frame.
+	if (*slot != NULL) {
+		const int previous = wvrt_worker_protect(site, NULL);
+		return wvrt_worker_finish(wvrt_worker_receipt_take(slot), site, previous, true, true);
+	}
+#else
+	(void)slot;
+#endif
+	wvrt_trap_at_span(file, start, end, "cannot join an empty worker receipt");
+}
+
+// An untouched lexical receipt waits and drops its result at the original submission site.
+void wvrt_worker_receipt_drop(wvrt_worker_receipt *worker) {
+#ifdef WVRT_POSIX_WORKERS
+	if (worker == NULL) { return; }
+	const WvrtWorkerSite site = worker->origin;
+	const int previous = wvrt_worker_protect(site, NULL);
+	(void)wvrt_worker_finish(worker, site, previous, true, false);
+#else
+	(void)worker;
+#endif
+}
 
 // Publish new capacity only after aligned allocation and copying the live prefix succeed.
 bool wvrt_array_try_reserve(wvrt_array *wvrtbuffer, int32_t wvrtcapacity) {
