@@ -58,10 +58,11 @@
 	(use wove-file "./value_types.wove" (only value_matches_type (value static_number)))
 	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
 	(use wove-file "../source/owned.wove" (only (value optional_none) (value optional_some) (value pending_optional_some)))
+	(use wove-file "./recoverable_growth.wove" (only read_push_outcome))
 	(use wove-file "./optional.wove" (only read_optional_result plan_optional_constructor finish_optional_some))
 	(use wove-file "./owners.wove" (only is_local_owner is_lexical_owner is_replaceable_owner is_worker_owner is_nullable_worker_owner owned_array_take_kind owned_field_loan_kind owned_aggregate_take_kind native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind native_handle_init_borrow_kind
-			is_optional_byte_owner_type optional_owner_payload optional_unwrap_kind (value worker_receipt_move_kind) (value worker_permit_move_kind)))
+			is_optional_owner optional_owner_type optional_owner_payload optional_unwrap_kind (value worker_receipt_move_kind) (value worker_permit_move_kind)))
 	(use wove-file "./native_owner_types.wove" (only is_native_owner native_owner_type native_owner_declaration))
 	(use wove-file "./fields.wove" (only read_field_projection plan_field_read check_owned_record_path))
 	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan indexed_owner_base expression_row
@@ -78,7 +79,7 @@
 		(value conditional_value) (value pending_conditional) (value pending_field_read) (value pending_array_read)))
 	(use wove-file "./control.wove" (only plan_control_blocks enclosing_loop sequence_paths predicate_literal control_paths prior_owner_take has_path repeats_loop consumption_on_back_edge))
 	(use wove-file "../source/array_growth.wove" (only is_array_growth is_array_growth_statement (value indexed_row_owner)
-		(value array_capacity_kind) (value array_push_kind) (value array_remove_kind) (value array_try_reserve_kind)))
+		(value array_capacity_kind) (value array_push_kind) (value array_remove_kind) (value array_try_reserve_kind) (value array_try_alloc_kind) (value array_try_extend_kind) (value array_try_push_kind)))
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates))
 	(use wove-file "./worker.wove" (only worker_arrays))
 	(use wove-file "./syntax.wove"
@@ -1083,7 +1084,7 @@
 					(if
 						(:doc "An evaluating move or consuming call has emptied the whole local slot.")
 						(bool.and (i32.ltz (local transfer))
-							(bool.or (bool.or (call is_native_owner (local actual)) (local worker)) (bool.or (bool.or (call is_array_owner (local actual)) (call is_optional_byte_owner_type (local actual)))
+							(bool.or (bool.or (call is_native_owner (local actual)) (local worker)) (bool.or (bool.or (call is_array_owner (local actual)) (call is_optional_owner (local actual)))
 								(call is_owning_record (borrow-shared (local records)) (local actual)))))
 						(then (set (local transfer) (call prior_owner_take (borrow-shared (local nodes)) (borrow-shared (local statements))
 							(borrow-shared (local expressions)) (struct.get (local declaration) target) -1i32 (bool true) (bool false) (local index) (local statement)))))
@@ -1787,7 +1788,7 @@
 				(local submitted)
 				(then (set (local actual) (local worker_receipt_type))))
 			(let owning_initializer (bool.and (u32.eq (local expected) 42u32)
-				(bool.or (local submitted) (bool.or (call is_array_owner (local actual)) (call is_optional_byte_owner_type (local actual))))))
+				(bool.or (local submitted) (bool.or (call is_array_owner (local actual)) (call is_optional_owner (local actual))))))
 			(if
 				(:doc "A call can introduce a fresh local owner or satisfy its exact expected result.")
 				(bool.not (bool.or (local owning_initializer) (call value_matches_type (local expected) (local actual))))
@@ -2354,7 +2355,7 @@
 				(bool.not (bool.and (u32.eq (struct.get (local pointer) kind) 6u32)
 					(bool.or (call is_native_owner (local actual))
 						(bool.and (bool.not (local consume))
-							(bool.or (call is_optional_byte_owner_type (local actual)) (call is_nullable_worker_owner (local actual)))))))
+							(bool.or (call is_optional_owner (local actual)) (call is_nullable_worker_owner (local actual)))))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(if
 				(:doc "A null test reads only the owner's pointer and returns a bool.")
@@ -2989,7 +2990,7 @@
 	(fn plan_allocation
 		(:doc `Check a local array allocation and seed its exact signed element count.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(element i32) (index i32) (expected u32) (caller ScalarFunction) (view_start i32)
+			(element i32) (index i32) (kind u32) (expected u32) (caller ScalarFunction) (view_start i32)
 			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
@@ -3020,7 +3021,16 @@
 						(bool.and (call is_record_type (local type))
 							(bool.not (call is_native_record (array.load (local records) (call record_index (local type)))))))))
 				(then (return (call entry_at (local element_node) -1i32 24u32))))
-			(let owner (call owning_array_type (borrow-shared (local records)) (local type)))
+			(let-mut owner (call owning_array_type (borrow-shared (local records)) (local type)))
+			(if
+				(:doc "Fallible allocation uses the same zero initialization for elements with copyable layouts.")
+				(u32.eq (local kind) (local array_try_alloc_kind))
+				(then
+					(if
+						(:doc "A recoverable allocator cannot expose partially initialized owning elements.")
+						(bool.or (call is_array_owner (local type)) (call is_owning_record (borrow-shared (local records)) (local type)))
+						(then (return (call entry_at (local element_node) -1i32 24u32))))
+					(set (local owner) (call optional_owner_type (local owner)))))
 			(if
 				(:doc "An owning field or other exact owner context must accept the allocation's exact type.")
 				(bool.not (bool.or (u32.eq (local expected) 42u32) (u32.eq (local expected) (local owner))))
@@ -3028,7 +3038,7 @@
 			(array.store (local expressions) (local count)
 				(call expression_row 0u32 5u32 -1i32 -1i32 0i32 0i32 (bool false)))
 			(array.store (local expressions) (local index)
-				(call runtime_expression 41u32 (local owner) (local node) (local count) (local caller) (local view_start)))
+				(call runtime_expression (local kind) (local owner) (local node) (local count) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_enum_make
@@ -3508,10 +3518,17 @@
 				(i32.ltz (local receiver))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let site (array.load (local nodes) (local receiver)))
-			(let operand (struct.get (local site) next_sibling))
+			(let-mut operand (struct.get (local site) next_sibling))
+			(let try_push (u32.eq (local kind) (local array_try_push_kind)))
+			(let try_extend (u32.eq (local kind) (local array_try_extend_kind)))
+			(let outcome (local operand))
+			(if
+				(:doc "A recoverable push names its outcome type before the input expression.")
+				(bool.and (local try_push) (i32.not-ltz (local outcome)))
+				(then (set (local operand) (struct.get (array.load (local nodes) (local outcome)) next_sibling))))
 			(let capacity (u32.eq (local kind) (local array_capacity_kind)))
 			(if
-				(:doc "The capacity query takes only a receiver. Updates take exactly one additional operand.")
+				(:doc "Require exactly the operands named by the growth form.")
 				(bool.or
 					(bool.or (bool.and (local capacity) (i32.lt -1i32 (local operand)))
 						(bool.and (bool.not (local capacity)) (i32.ltz (local operand))))
@@ -3553,11 +3570,35 @@
 			(let element (call array_owner_element (borrow-shared (local records)) (local type)))
 			(let row (call is_array_owner (local element)))
 			(let owning (call is_owning_struct_element (borrow-shared (local records)) (local element)))
-			(let push (u32.eq (local kind) (local array_push_kind)))
+			(let push (bool.or (u32.eq (local kind) (local array_push_kind)) (local try_push)))
 			(let remove (u32.eq (local kind) (local array_remove_kind)))
 			(let statement_form (call is_array_growth_statement (local kind)))
 			(let-mut result 5u32)
 			(let-mut operand_type 5u32)
+			(let-mut rejected -1i32)
+			(if
+				(:doc "Only a shared view of the exact copyable element can be copied into the destination.")
+				(local try_extend)
+				(then
+					(if
+						(:doc "An extension cannot duplicate an owner or scoped loan.")
+						(bool.or (call is_lexical_owner (borrow-shared (local records)) (local element))
+							(call is_scoped_record (borrow-shared (local records)) (local element)))
+						(then (return (call entry_at (local site) -1i32 24u32))))
+					(set (local result) 12u32)
+					(set (local operand_type) (call owner_view_type (local type) (bool false)))
+					(if (u32.eq (local operand_type) 34u32) (then (set (local operand_type) 35u32)))))
+			(if
+				(:doc "The outcome records the exact enum layout and the ordinal that returns the input.")
+				(local try_push)
+				(then
+					(let shape (call read_push_outcome (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local outcome) (local element) (borrow-shared (local records)) (borrow-shared (local bindings))
+						(call scope_at (struct.get (local caller) file) (struct.get (local caller) source_base))))
+					(set (local result) (struct.get (local shape) type))
+					(set (local rejected) (struct.get (local shape) rejected))
+					(if (u32.eqz (local result))
+						(then (return (call entry_at (array.load (local nodes) (local outcome)) -1i32 24u32))))))
 			(if (local remove) (then (set (local result) (local element))))
 			(if (u32.eq (local kind) (local array_try_reserve_kind)) (then (set (local result) 12u32)))
 			(if (local push) (then (set (local operand_type) (local element))))
@@ -3600,7 +3641,7 @@
 					(target (struct.get (local operation) target)) (first (local operand))
 					(start (struct.get (local operation) start)) (end (struct.get (local operation) end)) (negative (bool false))
 					(borrowed_owner (bool false)) (mutable_place (bool false)) (projection (local receiver))
-					(asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
+					(asset_start (local rejected)) (asset_end 0i32) (extent_check -1i32)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_expression
@@ -3796,8 +3837,9 @@
 				(bool.and (call is_worker_submission (local tag))
 					(bool.not (call local_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local statement))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(let allocation (bool.and (u32.eq (local tag) 41u32)
-				(bool.or (u32.eq (local expected) 42u32) (call is_array_owner (local expected)))))
+			(let allocation (bool.or (u32.eq (local tag) (local array_try_alloc_kind))
+				(bool.and (u32.eq (local tag) 41u32)
+					(bool.or (u32.eq (local expected) 42u32) (call is_array_owner (local expected))))))
 			(let embed (bool.and (u32.eq (local tag) 60u32)
 				(bool.or (u32.eq (local expected) 42u32) (u32.eq (local expected) (call array_owner_type 10u32)))))
 			(if
@@ -3839,7 +3881,7 @@
 				(:doc "An allocation creates an owner for a local, an owning field, or an owned result.")
 				(local allocation)
 				(then (return (call plan_allocation (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local operand) (local index) (local expected) (local caller) (local view_start)
+					(local node) (local operand) (local index) (local tag) (local expected) (local caller) (local view_start)
 					(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A local reference resolves among the caller's bindings visible at this statement.")
@@ -4171,7 +4213,7 @@
 			(if
 				(:doc "An evaluating move clears a source slot on the path where it runs. Rebindable locals need that behavior for later writes.")
 				(bool.or (bool.or (local take_local)
-					(bool.and (bool.not (local unwrap)) (call is_optional_byte_owner_type (local type))))
+					(bool.and (bool.not (local unwrap)) (call is_optional_owner (local type))))
 					(bool.and (local rebindable) (call local_initializer (borrow-shared (local source))
 						(borrow-shared (local nodes)) (local move) (local statement))))
 				(then
@@ -4180,7 +4222,7 @@
 						(:doc "An evaluating move must supply a supported owner of the required type.")
 						(bool.not (bool.and (bool.or (u32.eq (local expected) 42u32) (u32.eq (local result) (local expected)))
 							(bool.or (call is_native_owner (local result))
-								(bool.or (bool.or (call is_array_owner (local result)) (call is_optional_byte_owner_type (local result)))
+								(bool.or (bool.or (call is_array_owner (local result)) (call is_optional_owner (local result)))
 									(call is_owning_record (borrow-shared (local records)) (local result))))))
 						(then (return (call body_error (local caller) (struct.get (local move) start) (struct.get (local move) end) 24u32))))
 					(let target (struct.get (local binding) target))
@@ -4345,7 +4387,7 @@
 			(let returning_record (call is_owning_record (borrow-shared (local records)) (local expected)))
 			(let returning_owner (bool.or (call is_native_owner (local expected))
 				(bool.or (bool.or (call is_array_owner (local expected)) (local returning_record))
-					(call is_optional_byte_owner_type (local expected)))))
+					(call is_optional_owner (local expected)))))
 			(if
 				(:doc "A declaration initializer or owned return can perform a local ownership transfer.")
 				(bool.or (local returning_owner) (u32.eq (local expected) 42u32))
@@ -4381,7 +4423,7 @@
 										(borrow-shared (local functions)) (borrow-shared (local parameters))
 										(borrow-shared (local bindings)) (borrow-shared (local records))
 										(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start) (local view_start)))))))
-					(let fresh (bool.or (u32.eq (local tag) 9u32)
+					(let fresh (bool.or (bool.or (u32.eq (local tag) 9u32) (u32.eq (local tag) (local array_try_push_kind)))
 						(bool.or (bool.or (u32.eq (local tag) (local worker_spawn_join_kind)) (call is_worker_collect (local tag)))
 							(u32.eq (local tag) (local conditional_value)))))
 					(let construct (bool.or (u32.eq (local tag) (local array_remove_kind))
@@ -4392,8 +4434,9 @@
 								(bool.or (u32.eq (local tag) 41u32)
 									(bool.and (local assigning) (u32.eq (local tag) 60u32))))
 								(bool.or (bool.and (call is_native_owner (local expected)) (call is_native_owner_constructor (local tag)))
-									(bool.and (call is_optional_byte_owner_type (local expected))
-										(bool.or (u32.eq (local tag) (local optional_none)) (u32.eq (local tag) (local optional_some)))))))))
+									(bool.and (call is_optional_owner (local expected))
+										(bool.or (u32.eq (local tag) (local array_try_alloc_kind))
+											(bool.or (u32.eq (local tag) (local optional_none)) (u32.eq (local tag) (local optional_some))))))))))
 					(if
 						(:doc "An owned return needs a fresh value or a checked explicit transfer.")
 						(bool.and (u32.eqz (local initial_kind)) (bool.and (local returning_owner) (bool.not (bool.or (local fresh) (local construct)))))

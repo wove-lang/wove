@@ -409,9 +409,9 @@ and the replacement is installed. A live overlapping borrow prevents
 replacement. Assigning to a moved slot fills it without dropping a value.
 Every path that reaches a subsequent use must have a live value there.
 
-An ordinary Wove function can return `(optional (owned-array u8))`.
+An ordinary Wove function can return `(optional (owned-array T))`.
 Use `(optional.none (owned-array u8))` for absence and
-`(optional.some value)` for a fresh or explicitly moved byte owner.
+`(optional.some value)` for a fresh or explicitly moved array owner.
 A present empty array is distinct from absence. Forward an optional
 by returning a call or explicitly moving a local optional. Use
 `(owner.is-null (local result))` to check presence and
@@ -522,11 +522,26 @@ with no overlapping live loan.
 | `(array.truncate data length)` | Keep the first `length` live elements, with no capacity change. |
 | `(array.reserve data capacity)` | Ensure room for the requested `i32` capacity, trapping on failure. |
 | `(array.try-reserve data capacity)` | Return `false` for an invalid capacity or allocation failure, preserving the array. |
+| `(array.try-alloc T length)` | Allocate a zeroed array of copyable elements. Return an optional owner. |
+| `(array.try-extend data (borrow-shared source))` | Append an exact shared view of copyable elements. Return `bool`. |
+| `(array.try-push data Outcome value)` | Append an exact element or return it in the rejection variant of `Outcome`. |
 
 Push captures its value before changing storage, so it can append a
 copy of a live element from the same array. Reserving capacity leaves
 the logical length unchanged. Removal and truncation use the logical
 length for bounds and retain the reserved storage.
+
+`array.try-alloc` takes an exact `i32` length. A negative length,
+size overflow, or allocation failure returns absence. Zero length
+returns a present empty array when allocation succeeds.
+
+`array.try-extend` takes a nonoverlapping shared view. An empty view
+succeeds without allocating. Both recoverable append operations
+preserve the receiver's length, capacity, and live elements on failure.
+`array.try-push` takes a closed two-variant enum with one unit variant
+for success and one variant whose payload is the exact element type.
+Either declaration order works. An explicitly moved input belongs
+to the array on success and to the rejection variant on failure.
 
 An array of owned rows accepts
 `(array.push (local rows) (move (local row)))`. A successful push

@@ -30,10 +30,10 @@
 #define default_selection wv_seed_fn_100
 #define target_os wv_seed_fn_101
 #define target_arch wv_seed_fn_102
-#define inspect_callers wv_seed_fn_1138
-#define run_scalar_graph wv_seed_fn_1162
-#define discover_graph_tests wv_seed_fn_1171
-#define inspect_graph_expectations wv_seed_fn_1150
+#define inspect_callers wv_seed_fn_1142
+#define run_scalar_graph wv_seed_fn_1166
+#define discover_graph_tests wv_seed_fn_1175
+#define inspect_graph_expectations wv_seed_fn_1154
 
 typedef wv_seed_record_1 Token;
 typedef wv_seed_record_2 SourceDiagnostic;
@@ -55,13 +55,13 @@ typedef wv_seed_record_29 GraphSelector;
 typedef wv_seed_record_30 GraphResult;
 typedef wv_seed_record_85 CallSite;
 typedef wv_seed_record_40 SuppliedFile;
-typedef wv_seed_record_96 CallerInspection;
-typedef wv_seed_record_101 GraphOutput;
-typedef wv_seed_record_103 DiscoveredTest;
-typedef wv_seed_record_104 TestDiscovery;
-typedef wv_seed_record_97 ExpectationLink;
-typedef wv_seed_record_98 ExpectationResult;
-typedef wv_seed_record_99 ExpectationQuery;
+typedef wv_seed_record_97 CallerInspection;
+typedef wv_seed_record_102 GraphOutput;
+typedef wv_seed_record_104 DiscoveredTest;
+typedef wv_seed_record_105 TestDiscovery;
+typedef wv_seed_record_98 ExpectationLink;
+typedef wv_seed_record_99 ExpectationResult;
+typedef wv_seed_record_100 ExpectationQuery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 

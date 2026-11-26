@@ -518,7 +518,7 @@ void wvrt_c_storage_free(wvrt_c_storage *wvrt_storage) {
 }
 
 // Return failure to callers that must release foreign storage before reporting an allocation trap.
-static wvrt_array *wvrt_array_try_new(int32_t wvrtlength, size_t wvrtelement_size,
+wvrt_array *wvrt_array_try_new(int32_t wvrtlength, size_t wvrtelement_size,
 	size_t wvrtelement_alignment) {
 	if (wvrtlength < 0) { return NULL; }
 	/* Keep an aligned, non-null address even for empty arrays and slices. */
@@ -1376,22 +1376,49 @@ void wvrt_array_reserve_at_span(wvrt_array *wvrtbuffer, int32_t wvrtcapacity,
 	}
 }
 
+// Preserve the current allocation if it already covers the requested live extent.
+static bool wvrt_array_try_grow_to(wvrt_array *buffer, int32_t length) {
+	if (length <= buffer->wvrt_capacity) { return true; }
+	int32_t capacity = buffer->wvrt_capacity;
+	int32_t next = capacity > INT32_MAX / 2 ? INT32_MAX : capacity * 2;
+	if (next < length) { next = length; }
+	return wvrt_array_try_reserve(buffer, next);
+}
+
+// Copy the complete checked view only when there is room for all of it.
+bool wvrt_array_try_extend(wvrt_array *buffer, wvrt_slice source) {
+	if (source.wvrt_length == 0) { return true; }
+	int32_t length = buffer->wvrt_length;
+	size_t size = buffer->wvrt_element_size;
+	// Reject an unrepresentable length or a descriptor with a different element stride.
+	if (source.wvrt_length < 0 || source.wvrt_length > INT32_MAX - length ||
+		source.wvrt_element_size != size) {
+		return false;
+	}
+	int32_t next = length + source.wvrt_length;
+	if (!wvrt_array_try_grow_to(buffer, next)) { return false; }
+	memcpy((unsigned char *)buffer->wvrt_items + (size_t)length * size,
+		source.wvrt_items, (size_t)source.wvrt_length * size);
+	buffer->wvrt_length = next;
+	buffer->wvrt_spare = 0;
+	return true;
+}
+
 // Append a captured value, leaving the live prefix intact if storage cannot grow.
 static const char *wvrt_array_try_append(wvrt_array *buffer, const void *value) {
 	int32_t length = buffer->wvrt_length;
 	if (length == INT32_MAX) { return "array length overflow"; }
-	// Only allocate when the live prefix has filled the current storage.
-	if (length == buffer->wvrt_capacity) {
-		int32_t capacity = buffer->wvrt_capacity;
-		int32_t next = capacity > INT32_MAX / 2 ? INT32_MAX : capacity * 2;
-		if (next <= length) { next = length + 1; }
-		if (!wvrt_array_try_reserve(buffer, next)) { return "could not grow array"; }
-	}
+	if (!wvrt_array_try_grow_to(buffer, length + 1)) { return "could not grow array"; }
 	size_t size = buffer->wvrt_element_size;
 	memcpy((unsigned char *)buffer->wvrt_items + (size_t)length * size, value, size);
 	buffer->wvrt_length = length + 1;
 	buffer->wvrt_spare = 0;
 	return NULL;
+}
+
+// The caller keeps its captured value alive until a successful append.
+bool wvrt_array_try_push(wvrt_array *buffer, const void *value) {
+	return wvrt_array_try_append(buffer, value) == NULL;
 }
 
 // Append a value captured outside the array, growing geometrically when needed.
