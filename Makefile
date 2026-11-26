@@ -57,9 +57,11 @@ BASE16_SOURCES = stage-2/emit/text.wove stage-2/hashing/base16.wove $(C_IDENTIFI
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
 BLAKE2B_SOURCE := stage-2/hashing/blake2b.wove
+JSON_KEYWORDS_MODULE := stage-2/json/keywords.wove
 JSON_WRITER_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove \
-	$(UTF8_MODULE) $(BYTE_TEXT_MODULE) $(DECIMAL_WRITER)
-JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(UTF8_MODULE)
+	$(JSON_KEYWORDS_MODULE) $(UTF8_MODULE) $(BYTE_TEXT_MODULE) $(DECIMAL_WRITER)
+JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove \
+	$(JSON_KEYWORDS_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(UTF8_MODULE)
 JSON_FRAME_MODULE := stage-2/json/frame.wove
 JSON_FIXTURES := tests/stage-2/json
 JSON_CASES := $(JSON_FIXTURES)/cases.tsv
