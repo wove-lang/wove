@@ -38,7 +38,7 @@ SOURCE_TYPE_MODULE := stage-2/source/types.wove
 TEST_DISCOVERY_MODULE := stage-2/scalar/tests.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
 SOURCE_EXPECTATIONS := stage-2/source/expectations.wove
-SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/owned.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_markers.wove stage-2/source/c_names.wove stage-2/source/c_formals.wove stage-2/source/c_scope.wove stage-2/source/tree_copy.wove stage-2/source/c_arguments.wove stage-2/source/c_owners.wove stage-2/source/c_records.wove stage-2/source/c_snapshots.wove
+SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/owned.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_markers.wove stage-2/source/c_names.wove stage-2/source/c_formals.wove stage-2/source/c_scope.wove stage-2/source/c_dependencies.wove stage-2/source/c_dependency_paths.wove stage-2/source/tree_copy.wove stage-2/source/c_arguments.wove stage-2/source/c_owners.wove stage-2/source/c_records.wove stage-2/source/c_snapshots.wove
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_STANDARD_MODULE := stage-2/c/standard.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
@@ -177,6 +177,7 @@ test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-ha
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(BOOLEAN_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) stage-2/text/decimal_wide.wove stage-2/text/decimal_128.wove $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) $(PROCESS_MODULES) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
+	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/native_header_types/cases.tsv
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
 		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv tests/stage-2/expectations/cases.tsv tests/stage-2/fixed_record_arrays/cases.tsv tests/stage-2/scalar_refs/cases.tsv tests/stage-2/value_if/cases.tsv tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
 		tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \

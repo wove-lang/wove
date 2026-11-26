@@ -1,0 +1,145 @@
+(module source_c_dependency_paths
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Resolve active bridge-local C uses before building the combined provider tree.")
+
+	(use wove-file "./scan.wove" (only (type SourceNode) (type Token)))
+	(use wove-file "./module.wove" (only form_parts select_form))
+	(use wove-file "./imports.wove" (only read_import))
+	(use wove-file "./strings.wove" (only decode_string))
+	(use wove-file "./paths.wove" (only (type SuppliedFile)))
+	(use wove-file "./c_headers.wove" (only find_c_header (type HeaderMatch)))
+	(use wove-file "./c_dependencies.wove" (only first_bridge_operand next_bridge_use))
+	(use wove-file "./target.wove" (only (type SelectionContext)))
+
+	(struct BridgeUse
+		(fields (owner i32) (first i32) (start i32) (end i32)
+			(file i32) (node i32) (header_start i32) (header_end i32) (default_file i32) (default_node i32)))
+	(struct BridgeUses
+		(fields (count i32) (file i32) (start i32) (end i32) (error u32)))
+
+	(fn count_bridge_uses
+		(:doc "Bound the dependency plan by the direct uses in one original bridge.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bridge i32))
+		(returns i32)
+		(body
+			(if (i32.ltz (local bridge)) (then (return 0i32)))
+			(let first (call first_bridge_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local bridge)))
+			(let-mut row (call next_bridge_use (borrow-shared (local source)) (borrow-shared (local nodes)) (local first)))
+			(let-mut count 0i32)
+			(while
+				(:doc "Enter each direct use once, skipping other member forms.")
+				(i32.not-ltz (local row))
+				(body
+					(set (local count) (i32.inc (local count)))
+					(set (local row) (call next_bridge_use (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (array.load (local nodes) (local row)) next_sibling)))))
+			(return (local count))))
+
+	(fn required_header
+		(:doc "Resolve the provider for selected types or retain the source of an include-only key.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (owner i32)
+			(literal SourceNode) (selector i32) (context SelectionContext))
+		(returns HeaderMatch)
+		(body
+			(if
+				(:doc "An empty selection needs only its original include literal.")
+				(i32.ltz (local selector))
+				(then (return (struct.new HeaderMatch (file (local owner)) (node -1i32)
+					(start 0i32) (end 0i32) (error 0u32) (default_file -1i32) (default_node -1i32) (replace (bool false))))))
+			(let start (struct.get (local literal) start))
+			(let end (struct.get (local literal) end))
+			(let-mut bytes (array.alloc u8 (i32.sub (local end) (local start))))
+			(let key (call decode_string (borrow-shared (local arena))
+				(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
+				(borrow-mut (local bytes))))
+			(if
+				(:doc "A dependency key must decode before matching any provider.")
+				(u32.gtz (struct.get (local key) error))
+				(then
+					(let base (struct.get (array.load (local files) (local owner)) source_start))
+					(return (struct.new HeaderMatch (file (local owner)) (node -1i32)
+						(start (i32.sub (struct.get (local key) start) (local base)))
+						(end (i32.sub (struct.get (local key) end) (local base))) (error (struct.get (local key) error))
+						(default_file -1i32) (default_node -1i32) (replace (bool false))))))
+			(return (call find_c_header (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (array.range (local bytes) 0i32 (struct.get (local key) written))) (local context)))))
+
+	(fn scoped_uses
+		(:doc "Retain declared dependency order and diagnose invalid uses at their written source spans.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(scope HeaderMatch) (fallback i32) (context SelectionContext) (uses (mut-array BridgeUse)))
+		(returns BridgeUses)
+		(body
+			(let-mut count 0i32)
+			(let-mut bridge (struct.get (local scope) node))
+			(let-mut owner (struct.get (local scope) file))
+			(while
+				(:doc "Collect the primary and inherited bridge scopes in graph lookup order.")
+				(i32.not-ltz (local bridge))
+				(body
+					(let first (call first_bridge_operand (borrow-shared (local arena)) (borrow-shared (local nodes)) (local bridge)))
+					(let-mut row (call next_bridge_use (borrow-shared (local arena)) (borrow-shared (local nodes)) (local first)))
+					(while
+						(:doc "Only active explicit uses contribute a C include or a private type selector.")
+						(i32.not-ltz (local row))
+						(body
+							(let use (array.load (local nodes) (local row)))
+							(let parts (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local use)))
+							(let choice (call select_form (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(local use) (local parts) (bool true) (local context)))
+							(if
+								(:doc "Keep a malformed target guard at the affected use.")
+								(u32.gtz (struct.get (local choice) error))
+								(then (return (struct.new BridgeUses (count (local count)) (file (local owner))
+									(start (struct.get (local choice) start)) (end (struct.get (local choice) end))
+									(error (struct.get (local choice) error))))))
+							(if
+								(:doc "Read and resolve the active dependency before reading its selected names.")
+								(struct.get (local choice) active)
+								(then
+									(let read (call read_import (borrow-shared (local arena)) (borrow-shared (local nodes))
+										(local use) (struct.get (local parts) operands)))
+									(if
+										(:doc "Only C header providers have native declarations in a bridge.")
+										(bool.or (u32.gtz (struct.get (local read) error)) (u32.not-eq (struct.get (local read) provider) 8u32))
+										(then (return (struct.new BridgeUses (count (local count)) (file (local owner))
+											(start (struct.get (local read) start)) (end (struct.get (local read) end)) (error 26u32)))))
+									(let literal (array.load (local nodes) (struct.get (local read) first)))
+									(let start (struct.get (local literal) start))
+									(let end (struct.get (local literal) end))
+									(let selector (struct.get (local read) second))
+									(let header (call required_header (borrow-shared (local arena)) (borrow-shared (local files))
+										(local owner) (local literal) (local selector) (local context)))
+									(if
+										(:doc "A missing dependency provider points to the header key in its declaring bridge.")
+										(bool.and (i32.ltz (struct.get (local header) file)) (u32.eqz (struct.get (local header) error)))
+										(then (return (struct.new BridgeUses (count (local count)) (file (local owner))
+											(start (local start)) (end (local end)) (error 27u32)))))
+									(if
+										(:doc "A provider lookup error already names its own source file and view-relative span.")
+										(u32.gtz (struct.get (local header) error))
+										(then
+											(let file (struct.get (local header) file))
+											(let base (struct.get (array.load (local files) (local file)) source_start))
+											(return (struct.new BridgeUses (count (local count)) (file (local file))
+												(start (i32.add (local base) (struct.get (local header) start)))
+												(end (i32.add (local base) (struct.get (local header) end)))
+												(error (struct.get (local header) error))))))
+									(array.store (local uses) (local count) (struct.new BridgeUse (owner (local owner)) (first (local selector))
+										(start (local start)) (end (local end)) (file (struct.get (local header) file))
+										(node (struct.get (local header) node)) (header_start (struct.get (local header) start))
+										(header_end (struct.get (local header) end)) (default_file (struct.get (local header) default_file))
+										(default_node (struct.get (local header) default_node))))
+									(set (local count) (i32.inc (local count)))))
+							(set (local row) (call next_bridge_use (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(struct.get (local use) next_sibling)))))
+					(if
+						(:doc "Advance once to the bundled half of a project overlay when it exists.")
+						(i32.eq (local bridge) (struct.get (local scope) node))
+						(then
+							(set (local bridge) (local fallback))
+							(set (local owner) (struct.get (local scope) default_file)))
+						(else (set (local bridge) -1i32)))))
+			(return (struct.new BridgeUses (count (local count)) (file -1i32) (start 0i32) (end 0i32) (error 0u32)))))
+)

@@ -730,6 +730,14 @@ override an individual name. `(:pragma (bridge_replace))` selects only
 the project declarations. `(:pragma (c_optional))` requires a selected
 function to be present in the target header.
 
+A bridge can use a type from a different C header in its private signatures.
+Write `(use c-header "<locale.h>" (only (type Locale)))` inside the
+bridge, then use `(shared-ref Locale)` for a borrow. The name keeps the
+original type's Wove identity and C spelling. Select it from the defining
+header to use it outside the bridge. A bridge-local C use with an empty
+`(only)` list adds an include without importing a name. The compiler emits
+the required headers in the stated order before the bridge's own header.
+
 Use `(type Size (c-type "size_t"))` for a native integer alias and
 `(struct Stat (c-type "struct stat") (fields (st_size Offset)))` for a
 native record view. `(struct.new Stat)` gives zero-initialized native
