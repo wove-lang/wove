@@ -197,10 +197,14 @@ wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrt_value, int32_t wvrt_file
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
 wvrt_slice wvrt_slice_range_u8(const void *wvrt_items, int32_t wvrt_length,
 	int32_t wvrt_start, int32_t wvrt_end, wvrt_location wvrt_site);
+wvrt_slice wvrt_slice_range_at_span(wvrt_slice wvrt_view, int32_t wvrt_start, int32_t wvrt_end,
+	int32_t wvrt_file, int32_t wvrt_span_start, int32_t wvrt_span_end);
 wvrt_slice wvrt_slice_range_u8_at_span(wvrt_slice wvrt_view, int32_t wvrt_start, int32_t wvrt_end,
 	int32_t wvrt_file, int32_t wvrt_span_start, int32_t wvrt_span_end);
 wvrt_mut_slice wvrt_mut_slice_range_u8(void *wvrt_items, int32_t wvrt_length,
 	int32_t wvrt_start, int32_t wvrt_end, wvrt_location wvrt_site);
+wvrt_mut_slice wvrt_mut_slice_range_at_span(wvrt_mut_slice wvrt_view, int32_t wvrt_start, int32_t wvrt_end,
+	int32_t wvrt_file, int32_t wvrt_span_start, int32_t wvrt_span_end);
 wvrt_mut_slice wvrt_mut_slice_range_u8_at_span(wvrt_mut_slice wvrt_view, int32_t wvrt_start, int32_t wvrt_end,
 	int32_t wvrt_file, int32_t wvrt_span_start, int32_t wvrt_span_end);
 void wvrt_check_slice_extent_at_span(int32_t wvrt_length, int32_t wvrt_expected,

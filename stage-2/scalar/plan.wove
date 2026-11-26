@@ -37,7 +37,7 @@
 		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode c_handle_mut_mode is_c_exclusive_owner_mode
 		is_c_storage_mode is_c_storage_init_mode is_c_handle_init_mode is_c_consuming_mode))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
-	(use wove-file "../source/types.wove" (only void_type is_builtin_integer is_builtin_float is_builtin_scalar builtin_type_keyword reference_mode))
+	(use wove-file "../source/types.wove" (only void_type is_builtin_integer is_builtin_float is_builtin_numeric is_builtin_scalar builtin_type_keyword reference_mode))
 	(use wove-file "../source/float_ops.wove" (only float_literal_shape is_float_conversion (value float_literal)))
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
 	(use wove-file "./records.wove"
@@ -120,7 +120,7 @@
 							(borrow-shared (local records)) (borrow-shared (local bindings))
 							(struct.get (local scope) file) (struct.get (local scope) source_base) (local type_node)))))
 					(if
-						(:doc "A Wove helper can return an owned byte array or an owned array of byte rows.")
+						(:doc "A Wove helper can return an owned numeric array or an owned vector of byte rows.")
 						(u32.eq (local result) 0u32)
 						(then
 							(let type (array.load (local nodes) (local type_node)))
@@ -130,10 +130,11 @@
 								(i32.lt -1i32 (local element))
 								(then
 									(let element_type (array.load (local nodes) (local element)))
+									(let scalar (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element)))
 									(if
-										(:doc "An exact byte owner can transfer through a Wove helper.")
-										(u32.eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element)) 10u32)
-										(then (set (local result) (call array_owner_type 10u32)))
+										(:doc "A numeric owner can transfer through a helper with its exact element type.")
+										(call is_builtin_numeric (local scalar))
+										(then (set (local result) (call array_owner_type (local scalar))))
 										(else
 											(if
 												(:doc "An owned row vector can transfer with all its rows.")
@@ -566,7 +567,7 @@
 			(if
 				(:doc "A direct module literal can infer any supported numeric width.")
 				(u32.eq (local expected) (local static_number))
-				(then (return (bool.or (call is_builtin_integer (local actual)) (call is_builtin_float (local actual))))))
+				(then (return (call is_builtin_numeric (local actual)))))
 			(if
 				(:doc "An integer initializer or conversion operand can infer its width.")
 				(bool.or (u32.eq (local expected) 1u32) (u32.eq (local expected) 42u32))
@@ -1907,9 +1908,9 @@
 			(let target (struct.get (local resolved) target))
 			(let actual (struct.get (local resolved) type))
 			(if
-				(:doc "A range source is a byte owner or an existing byte view.")
+				(:doc "A range projects an owner or an existing view of runtime storage.")
 				(bool.and (local range_source)
-					(bool.not (bool.or (u32.eq (local actual) 41u32) (call is_byte_view_type (local actual)))))
+					(bool.not (bool.or (call is_array_owner (local actual)) (call is_readable_slice (local actual)))))
 				(then (return (call entry_at (local reference) -1i32 24u32))))
 			(if
 				(:doc "An inline array access uses the original checked value or place.")
@@ -1982,12 +1983,12 @@
 			(return (local checked))))
 
 	(fn plan_range_borrow
-		(:doc `Plan a byte range loan with an evaluated view and two exact i32 endpoints.
+		(:doc `Plan a numeric range loan with an evaluated view and two exact i32 endpoints.
 
 		The wrapper keeps the original loan identity for later arguments.
 		The child projection checks bounds after its operands have run.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (loan SourceNode)
-			(index i32) (projection i32) (caller ScalarFunction) (statement i32) (keyword u32) (scoped bool) (view_start i32)
+			(index i32) (projection i32) (caller ScalarFunction) (statement i32) (expectation u32) (view_start i32)
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
 			(expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
@@ -2016,19 +2017,18 @@
 					(bool.not (i32.lt (struct.get (array.load (local nodes) (local end)) next_sibling) 0i32)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let checked (call plan_named_view (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local loan) (local reference) (local receiver) (local caller) (local statement) (local keyword) (bool true)
+				(local loan) (local reference) (local receiver) (local caller) (local statement) (local expectation) (bool true)
 				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
 			(if
 				(:doc "Resolve and check the source before its endpoint expressions.")
 				(u32.lt 0u32 (struct.get (local checked) error))
 				(then (return (local checked))))
-			(let type (u32.sub.wrapping (local keyword) 1u32))
 			(let origin (array.load (local expressions) (local receiver)))
+			(let type (struct.get (local origin) type))
+			(let element (call slice_element_type (borrow-shared (local records)) (local type)))
 			(if
-				(:doc "Static storage can supply a call or iterator range without lending a local binding.")
-				(bool.and (local scoped)
-					(bool.and (u32.eq (struct.get (local origin) kind) 62u32)
-						(bool.not (call is_iteration_statement (borrow-shared (local source)) (borrow-shared (local nodes)) (local statement)))))
+				(:doc "The projected descriptor must lend numeric elements with their exact stride.")
+				(bool.not (bool.or (call is_builtin_numeric (local element)) (call is_native_integer (local element))))
 				(then (return (call entry_at (local reference) -1i32 24u32))))
 			(let-mut target (struct.get (local origin) target))
 			(if
@@ -2361,17 +2361,18 @@
 							(projection -1i32) (asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
 					(return (call entry_at (local node) (local index) 0u32))))
 			(if
-				(:doc "Use a checked byte range and evaluate both endpoints before handing the view to the callee.")
-				(bool.and (call is_reborrow_keyword (local expected)) (u32.eq (local tag) 44u32))
+				(:doc "Check both endpoints before handing the typed subrange to the callee.")
+				(bool.and (bool.or (call is_reborrow_keyword (local expected)) (call is_typed_slice (local expected)))
+					(u32.eq (local tag) 44u32))
 				(then (return (call plan_range_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local index) (local reference_index) (local caller) (local statement) (local keyword) (bool false) (local view_start)
+					(local node) (local index) (local reference_index) (local caller) (local statement) (local expected) (local view_start)
 					(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(return (call plan_named_view (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local reference) (local index) (local caller) (local statement) (local expected) (bool false)
 				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 
 	(fn plan_scoped_array_loan
-		(:doc `Check an immutable binding's explicit whole-array or byte-range loan.`)
+		(:doc `Check an immutable binding's explicit whole-array or numeric range loan.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
 			(index i32) (caller ScalarFunction) (statement i32) (view_start i32)
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
@@ -2387,14 +2388,14 @@
 			(let reference (array.load (local nodes) (local reference_index)))
 			(let origin (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local origin) head)))
-			(if
-				(:doc "Use the ordinary checked byte subrange lowering for scoped range descriptors.")
-				(u32.eq (local tag) 44u32)
-				(then (return (call plan_range_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local index) (local reference_index) (local caller) (local statement) (local keyword) (bool true) (local view_start)
-					(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(let-mut inferred (local infer_shared_array))
 			(if (u32.eq (local keyword) 39u32) (then (set (local inferred) (local infer_mut_array))))
+			(if
+				(:doc "A scoped subrange infers its element and keeps the written access mode.")
+				(u32.eq (local tag) 44u32)
+				(then (return (call plan_range_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local reference_index) (local caller) (local statement) (local inferred) (local view_start)
+					(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(return (call plan_named_view (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local reference) (local index) (local caller) (local statement) (local inferred) (bool false)
 				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
@@ -2596,9 +2597,9 @@
 				(call is_byte_owner_descriptor (borrow-shared (local source)) (borrow-shared (local nodes)) (local element_node))
 				(then (set (local type) (call array_owner_type 10u32))))
 			(if
-				(:doc "Only bytes, byte owners, Wove records, and native integers have supported allocation layouts.")
+				(:doc "Numeric values, byte owners, and Wove records have supported allocation layouts.")
 				(bool.not (bool.or (u32.eq (local type) (call array_owner_type 10u32))
-					(bool.or (bool.or (u32.eq (local type) 10u32) (call is_native_integer (local type)))
+					(bool.or (bool.or (call is_builtin_numeric (local type)) (call is_native_integer (local type)))
 						(bool.and (call is_record_type (local type))
 							(bool.not (call is_native_record (array.load (local records) (call record_index (local type)))))))))
 				(then (return (call entry_at (local element_node) -1i32 24u32))))

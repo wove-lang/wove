@@ -61,7 +61,7 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 | `(set (struct.get place field) value)` | Stage 2. Replace an exact field through a mutable Wove record local or reference, including along a nested field path. |
 | `(struct.new Type (field value) ...)` | Construct a record from typed field values in written order. |
 | `(struct.get value field)` | Read a field with its declared type. |
-| `(array.alloc T count)` | Allocate an owned, zeroed buffer of `u8` or a supported copyable record type. `count` is `i32`. |
+| `(array.alloc T count)` | Allocate an owned, zeroed buffer. Stage 2 supports numeric and copyable record elements. `count` is `i32`. |
 | `(move (local buffer))` | Transfer ownership of a local buffer or, in Stage 2, hand a present native owner to a consuming C call. |
 | `(owner.is-null (local file))` | Stage 2. Test whether a native owner holds a missing handle. |
 | `(embed "./payload.bin")` | Stage 2. Initialize a fresh owned byte buffer from a file relative to the defining module. |

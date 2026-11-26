@@ -613,11 +613,11 @@ static bool wvrt_slice_range_valid(int32_t wvrtlength, int32_t wvrtstart, int32_
 	return 0 <= wvrtstart && wvrtstart <= wvrtend && wvrtend <= wvrtlength;
 }
 
-// Project an already checked byte range onto the same backing storage.
-static wvrt_slice wvrt_slice_subrange(const void *wvrtitems, int32_t wvrtstart, int32_t wvrtend) {
-	const uint8_t *wvrt_base = wvrtitems;
-	if (wvrtstart != 0) { wvrt_base += (size_t)wvrtstart; }
-	return (wvrt_slice){wvrt_base, wvrtend - wvrtstart, sizeof(uint8_t)};
+// Project checked element bounds onto a shared view's original storage.
+static wvrt_slice wvrt_slice_subrange(wvrt_slice wvrtview, int32_t wvrtstart, int32_t wvrtend) {
+	const unsigned char *wvrt_base = wvrtview.wvrt_items;
+	if (wvrtstart != 0) { wvrt_base += (size_t)wvrtstart * wvrtview.wvrt_element_size; }
+	return (wvrt_slice){wvrt_base, wvrtend - wvrtstart, wvrtview.wvrt_element_size};
 }
 
 // Form a shared view relative to the first byte and retain the seed's line diagnostic.
@@ -627,24 +627,31 @@ wvrt_slice wvrt_slice_range_u8(const void *wvrtitems, int32_t wvrtlength,
 	if (!wvrt_slice_range_valid(wvrtlength, wvrtstart, wvrtend)) {
 		wvrt_trap(wvrtsite, "slice range out of bounds");
 	}
-	return wvrt_slice_subrange(wvrtitems, wvrtstart, wvrtend);
+	return wvrt_slice_subrange((wvrt_slice){wvrtitems, wvrtlength, sizeof(uint8_t)}, wvrtstart, wvrtend);
 }
 
-// Form a Stage 2 view with a diagnostic at the original range expression.
-wvrt_slice wvrt_slice_range_u8_at_span(wvrt_slice wvrtview, int32_t wvrtstart, int32_t wvrtend,
+// Form a shared element range with a diagnostic at the original range expression.
+wvrt_slice wvrt_slice_range_at_span(wvrt_slice wvrtview, int32_t wvrtstart, int32_t wvrtend,
 	int32_t wvrtfile, int32_t wvrtspan_start, int32_t wvrtspan_end) {
 	// Keep bounds failures ahead of pointer arithmetic and the callee.
 	if (!wvrt_slice_range_valid(wvrtview.wvrt_length, wvrtstart, wvrtend)) {
 		wvrt_trap_at_span(wvrtfile, wvrtspan_start, wvrtspan_end, "slice range out of bounds");
 	}
-	return wvrt_slice_subrange(wvrtview.wvrt_items, wvrtstart, wvrtend);
+	return wvrt_slice_subrange(wvrtview, wvrtstart, wvrtend);
 }
 
-// Project a checked mutable byte range while retaining the backing address.
-static wvrt_mut_slice wvrt_mut_slice_subrange(void *wvrtitems, int32_t wvrtstart, int32_t wvrtend) {
-	uint8_t *wvrt_base = wvrtitems;
-	if (wvrtstart != 0) { wvrt_base += (size_t)wvrtstart; }
-	return (wvrt_mut_slice){wvrt_base, wvrtend - wvrtstart, sizeof(uint8_t)};
+// Preserve the byte-range ABI and its unit element stride.
+wvrt_slice wvrt_slice_range_u8_at_span(wvrt_slice wvrtview, int32_t wvrtstart, int32_t wvrtend,
+	int32_t wvrtfile, int32_t wvrtspan_start, int32_t wvrtspan_end) {
+	wvrtview.wvrt_element_size = sizeof(uint8_t);
+	return wvrt_slice_range_at_span(wvrtview, wvrtstart, wvrtend, wvrtfile, wvrtspan_start, wvrtspan_end);
+}
+
+// Project checked element bounds onto a writable view's original storage.
+static wvrt_mut_slice wvrt_mut_slice_subrange(wvrt_mut_slice wvrtview, int32_t wvrtstart, int32_t wvrtend) {
+	unsigned char *wvrt_base = wvrtview.wvrt_items;
+	if (wvrtstart != 0) { wvrt_base += (size_t)wvrtstart * wvrtview.wvrt_element_size; }
+	return (wvrt_mut_slice){wvrt_base, wvrtend - wvrtstart, wvrtview.wvrt_element_size};
 }
 
 // Form a seed mutable view with a diagnostic at the range's original line.
@@ -654,17 +661,24 @@ wvrt_mut_slice wvrt_mut_slice_range_u8(void *wvrtitems, int32_t wvrtlength,
 	if (!wvrt_slice_range_valid(wvrtlength, wvrtstart, wvrtend)) {
 		wvrt_trap(wvrtsite, "slice range out of bounds");
 	}
-	return wvrt_mut_slice_subrange(wvrtitems, wvrtstart, wvrtend);
+	return wvrt_mut_slice_subrange((wvrt_mut_slice){wvrtitems, wvrtlength, sizeof(uint8_t)}, wvrtstart, wvrtend);
 }
 
-// Form a native mutable view with the original source span.
-wvrt_mut_slice wvrt_mut_slice_range_u8_at_span(wvrt_mut_slice wvrtview, int32_t wvrtstart, int32_t wvrtend,
+// Form a writable element range with the original source span.
+wvrt_mut_slice wvrt_mut_slice_range_at_span(wvrt_mut_slice wvrtview, int32_t wvrtstart, int32_t wvrtend,
 	int32_t wvrtfile, int32_t wvrtspan_start, int32_t wvrtspan_end) {
 	// Bounds failures precede pointer arithmetic and entry into the callee.
 	if (!wvrt_slice_range_valid(wvrtview.wvrt_length, wvrtstart, wvrtend)) {
 		wvrt_trap_at_span(wvrtfile, wvrtspan_start, wvrtspan_end, "slice range out of bounds");
 	}
-	return wvrt_mut_slice_subrange(wvrtview.wvrt_items, wvrtstart, wvrtend);
+	return wvrt_mut_slice_subrange(wvrtview, wvrtstart, wvrtend);
+}
+
+// Preserve the mutable byte-range ABI and its unit element stride.
+wvrt_mut_slice wvrt_mut_slice_range_u8_at_span(wvrt_mut_slice wvrtview, int32_t wvrtstart, int32_t wvrtend,
+	int32_t wvrtfile, int32_t wvrtspan_start, int32_t wvrtspan_end) {
+	wvrtview.wvrt_element_size = sizeof(uint8_t);
+	return wvrt_mut_slice_range_at_span(wvrtview, wvrtstart, wvrtend, wvrtfile, wvrtspan_start, wvrtspan_end);
 }
 
 // Check an element index in the signed slice length domain.
