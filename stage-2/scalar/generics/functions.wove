@@ -1,0 +1,276 @@
+(module function_specializations
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Resolve, deduplicate, and expand requested generic functions before signature and body checking.")
+
+	(use wove-file "../../source/generics.wove" (only function_generic_list with_generic_operand (value checked_function_operand)))
+	(use wove-file "../../source/module.wove" (only form_parts (type ModuleRead) (type SelectedDeclaration)))
+	(use wove-file "../../source/scan.wove" (only is_metadata_form (type SourceNode)))
+	(use wove-file "../../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../../source/graph.wove" (only find_binding (type GraphBinding) (type GraphModule)))
+	(use wove-file "../../emit/names.wove" (only function_identity))
+	(use wove-file "../trees.wove" (only graph_module_key (type ScalarTree)))
+	(use wove-file "../syntax.wove" (only is_scalar_name))
+	(use wove-file "../records.wove"
+		(only scope_at declaration_kind read_template_parameters next_layout_node is_disabled_statement
+			read_specialization_arguments same_specialization_arguments (type ScalarRecord) (type TypeScope)))
+	(use wove-file "../specializations.wove" (only register_clone_type_layouts))
+	(use wove-file "./workspace.wove" (only subtree_limit is_function_request original_tree_rows (value function_workspace_full)))
+	(use wove-file "./clone.wove" (only generic_parameter_count collect_concrete_operands clone_function_nodes (type ConcreteOperand)))
+
+	(struct FunctionInstance
+		(fields (original i32) (declaration i32) (end i32) (file i32)
+			(site i32) (site_file i32) (site_base i32) (identity u32)))
+	(struct FunctionExpansion
+		(fields (rows i32) (count i32) (records i32) (file i32) (start i32) (end i32) (error u32)))
+
+	(fn expansion_progress
+		(:doc "Return the populated prefix of cloned nodes, concrete functions, and value layouts.")
+		(params (rows i32) (count i32) (records i32)) (returns FunctionExpansion)
+		(body (return (struct.new FunctionExpansion (rows (local rows)) (count (local count))
+			(records (local records)) (file -1i32) (start 0i32) (end 0i32) (error 0u32)))))
+
+	(fn expansion_failure
+		(:doc "Save a diagnostic in the original file even when the checked node belongs to a clone.")
+		(params (scope TypeScope) (start i32) (end i32) (error u32)) (returns FunctionExpansion)
+		(body
+			(let base (struct.get (local scope) source_base))
+			(return (struct.new FunctionExpansion (rows 0i32) (count 0i32) (records 0i32)
+				(file (struct.get (local scope) file)) (start (i32.sub (local start) (local base)))
+				(end (i32.sub (local end) (local base))) (error (local error))))))
+
+	(fn application_failure
+		(:doc "Diagnose an invalid or unavailable explicit function target at its authored operand.")
+		(params (scope TypeScope) (node SourceNode) (error u32)) (returns FunctionExpansion)
+		(body (return (call expansion_failure (local scope) (struct.get (local node) start) (struct.get (local node) end) (local error)))))
+
+	(fn find_function_specialization
+		(:doc "Resolve an equal function identity to its concrete row after checking the original and all normalized arguments.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (site i32) (definition i32) (formal i32)
+			(identity u32) (instances (shared-array FunctionInstance)) (count i32)) (returns i32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Only already requested layouts can share or collide with the deterministic identity.")
+				(i32.lt (local index) (local count))
+				(body
+					(let prior (array.load (local instances) (local index)))
+					(if
+						(:doc "A base32 hash match still requires exact argument identity.")
+						(u32.eq (struct.get (local prior) identity) (local identity))
+						(then
+							(if
+								(:doc "Each instance belongs to one defining template.")
+								(bool.and (i32.eq (struct.get (local prior) original) (local definition))
+									(call same_specialization_arguments (borrow-shared (local arena)) (borrow-shared (local nodes))
+										(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local site)
+										(call scope_at (struct.get (local prior) site_file) (struct.get (local prior) site_base))
+										(struct.get (local prior) site) (local formal)))
+								(then (return (struct.get (local prior) declaration))))
+							(return -2i32)))
+					(set (local index) (i32.add (local index) 1i32))))
+			(return -1i32)))
+
+	(fn mark_application_target
+		(:doc "Give a checked call target its private concrete declaration row.")
+		(params (nodes (mut-array SourceNode)) (site i32) (declaration i32)) (returns void)
+		(body
+			(let node (array.load (local nodes) (local site)))
+			(array.store (local nodes) (local site)
+				(call with_generic_operand (local node) (local checked_function_operand) (int.convert u32 (local declaration))))))
+
+	(fn request_function
+		(:doc "Resolve one call application, then clone and register its concrete types on the first request.")
+		(params (arena (shared-array u8)) (nodes (mut-array SourceNode)) (records (mut-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (files (shared-array SuppliedFile)) (trees (shared-array ScalarTree))
+			(views (shared-array ModuleRead)) (scope TypeScope) (site i32) (instances (mut-array FunctionInstance))
+			(previous FunctionExpansion)) (returns FunctionExpansion)
+		(body
+			(let node (array.load (local nodes) (local site)))
+			(let parts (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node)))
+			(let name (struct.get (local parts) operands))
+			(if (i32.lt (local name) 0i32) (then (return (call application_failure (local scope) (local node) 23u32))))
+			(let spelling (array.load (local nodes) (local name)))
+			(if
+				(:doc "Only a function binding in the calling file can name a template.")
+				(bool.not (call is_scalar_name (borrow-shared (local arena)) (local spelling)))
+				(then (return (call application_failure (local scope) (local spelling) 23u32))))
+			(let bound (call find_binding (borrow-shared (local arena)) (borrow-shared (local arena))
+				(struct.get (local spelling) start) (struct.get (local spelling) end)
+				(borrow-shared (local bindings)) (array.len (local bindings))
+				(struct.get (local scope) file) (bool false) (struct.get (local scope) source_base) 0u32))
+			(if (i32.lt (local bound) 0i32) (then (return (call application_failure (local scope) (local spelling) 34u32))))
+			(let binding (array.load (local bindings) (local bound)))
+			(if
+				(:doc "Foreign and ordinary functions cannot be named by an explicit generic application.")
+				(bool.not (u32.eq (struct.get (local binding) provider) 3u32))
+				(then (return (call application_failure (local scope) (local spelling) 23u32))))
+			(let file (struct.get (local binding) file))
+			(let tree (array.load (local trees) (local file)))
+			(let input (array.load (local files) (local file)))
+			(let decl (i32.add (struct.get (local tree) base) (struct.get (local binding) declaration)))
+			(let template (array.load (local nodes) (local decl)))
+			(let generic (call function_generic_list (borrow-shared (local arena)) (borrow-shared (local nodes)) (local template)))
+			(if (i32.lt (local generic) 0i32) (then (return (call application_failure (local scope) (local spelling) 23u32))))
+			(let declared (call read_template_parameters (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local generic))))
+			(let definition_scope (call scope_at (local file) (struct.get (local input) source_start)))
+			(if
+				(:doc "A malformed parameter declaration is reported in the defining file.")
+				(u32.lt 0u32 (struct.get (local declared) error))
+				(then (return (call expansion_failure (local definition_scope) (struct.get (local declared) start)
+					(struct.get (local declared) end) (struct.get (local declared) error)))))
+			(let formal (struct.get (local declared) operand))
+			(let module (call graph_module_key (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(array.load (local views) (local file)) (local input) (struct.get (local tree) base)))
+			(let original_parts (call form_parts (borrow-shared (local arena)) (borrow-shared (local nodes)) (local template)))
+			(let original_name (array.load (local nodes) (struct.get (local original_parts) name)))
+			(let identity (call function_identity (borrow-shared (local arena)) (struct.get (local original_name) start)
+				(struct.get (local original_name) end) (local module)))
+			(let key (call read_specialization_arguments (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local site) -1i32
+				(local decl) (local formal) (local identity)))
+			(if
+				(:doc "Check kind, arity, and the exact value type before requesting a clone.")
+				(u32.lt 0u32 (struct.get (local key) error))
+				(then (return (call expansion_failure (local scope) (struct.get (local key) start)
+					(struct.get (local key) end) (struct.get (local key) error)))))
+			(let id (struct.get (local key) identity))
+			(let count (struct.get (local previous) count))
+			(let known (call find_function_specialization (borrow-shared (local arena)) (borrow-shared (local nodes)) (borrow-shared (local records))
+				(borrow-shared (local bindings)) (local scope) (local site) (local decl) (local formal) (local id)
+				(borrow-shared (local instances)) (local count)))
+			(if (i32.eq (local known) -2i32) (then (return (call application_failure (local scope) (local node) 32u32))))
+			(if
+				(:doc "Repeated requests and recursion with the same arguments reuse the original clone.")
+				(i32.lt -1i32 (local known))
+				(then
+					(call mark_application_target (borrow-mut (local nodes)) (local site) (local known))
+					(return (local previous))))
+			(let end (call subtree_limit (borrow-shared (local nodes)) (local decl)
+				(i32.add (struct.get (local tree) base) (struct.get (local tree) rows))))
+			(let size (i32.sub (local end) (local decl)))
+			(let cursor (struct.get (local previous) rows))
+			(if
+				(:doc "A clone is published only when the workspace can hold its entire subtree and signature.")
+				(bool.or (i32.eq (local count) (array.len (local instances)))
+					(i32.lt (i32.sub (array.len (local nodes)) (local cursor)) (local size)))
+				(then (return (call application_failure (local scope) (local node) (local function_workspace_full)))))
+			(let-mut arguments (array.alloc ConcreteOperand (call generic_parameter_count (borrow-shared (local nodes)) (local formal))))
+			(call collect_concrete_operands (borrow-shared (local arena)) (borrow-shared (local nodes)) (borrow-shared (local records))
+				(borrow-shared (local bindings)) (local scope) (local site) (local formal) (borrow-mut (local arguments)))
+			(call clone_function_nodes (borrow-shared (local arena)) (borrow-mut (local nodes)) (local decl) (local end)
+				(local generic) (local cursor) (borrow-shared (local arguments)))
+			(let limit (i32.add (local cursor) (local size)))
+			(array.store (local instances) (local count) (struct.new FunctionInstance (original (local decl))
+				(declaration (local cursor)) (end (local limit)) (file (local file))
+				(site (local site)) (site_file (struct.get (local scope) file)) (site_base (struct.get (local scope) source_base)) (identity (local id))))
+			(call mark_application_target (borrow-mut (local nodes)) (local site) (local cursor))
+			(let layouts (call register_clone_type_layouts (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-mut (local records)) (borrow-shared (local bindings)) (local definition_scope) (local cursor) (struct.get (local previous) records)))
+			(if
+				(:doc "Instantiated record and array types keep their original definition or operand span.")
+				(u32.lt 0u32 (struct.get (local layouts) error))
+				(then (return (struct.new FunctionExpansion (rows 0i32) (count 0i32) (records 0i32)
+					(file (struct.get (local layouts) file)) (start (struct.get (local layouts) start))
+					(end (struct.get (local layouts) end)) (error (struct.get (local layouts) error))))))
+			(return (call expansion_progress (local limit) (i32.add (local count) 1i32) (struct.get (local layouts) next)))))
+
+	(fn request_function_subtree
+		(:doc "Visit call targets in a selected function or clone without treating opaque syntax as executable.")
+		(params (arena (shared-array u8)) (nodes (mut-array SourceNode)) (records (mut-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (files (shared-array SuppliedFile)) (trees (shared-array ScalarTree))
+			(views (shared-array ModuleRead)) (scope TypeScope) (root i32) (instances (mut-array FunctionInstance))
+			(initial FunctionExpansion)) (returns FunctionExpansion)
+		(body
+			(let-mut next_row (struct.get (local initial) rows))
+			(let-mut next_function (struct.get (local initial) count))
+			(let-mut next_record (struct.get (local initial) records))
+			(let-mut index (struct.get (array.load (local nodes) (local root)) first_child))
+			(while
+				(:doc "Only selected syntax can request a concrete body.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let node (array.load (local nodes) (local index)))
+					(if
+						(:doc "Instantiated type operands already have their checked values.")
+						(call is_function_request (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node) (local index))
+						(then
+							(let checked (call request_function (borrow-shared (local arena)) (borrow-mut (local nodes)) (borrow-mut (local records))
+								(borrow-shared (local bindings)) (borrow-shared (local files)) (borrow-shared (local trees)) (borrow-shared (local views))
+								(local scope) (local index) (borrow-mut (local instances))
+								(call expansion_progress (local next_row) (local next_function) (local next_record))))
+							(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
+							(set (local next_row) (struct.get (local checked) rows))
+							(set (local next_function) (struct.get (local checked) count))
+							(set (local next_record) (struct.get (local checked) records))))
+					(let descend (bool.not (bool.or
+						(call is_metadata_form (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node))
+						(call is_disabled_statement (borrow-shared (local arena)) (borrow-shared (local nodes)) (local node)))))
+					(set (local index) (call next_layout_node (borrow-shared (local nodes)) (local index) (local root) (local descend)))))
+			(return (call expansion_progress (local next_row) (local next_function) (local next_record)))))
+
+	(fn expand_graph_functions
+		(:doc "Request instances from active concrete functions and visit each generated body at most once.")
+		(params (arena (shared-array u8)) (nodes (mut-array SourceNode)) (records (mut-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (files (shared-array SuppliedFile)) (trees (shared-array ScalarTree))
+			(modules (shared-array GraphModule)) (views (shared-array ModuleRead)) (selected (shared-array SelectedDeclaration))
+			(instances (mut-array FunctionInstance)) (start_record i32)) (returns FunctionExpansion)
+		(body
+			(let-mut next_row (call original_tree_rows (borrow-shared (local trees))))
+			(let-mut next_function 0i32)
+			(let-mut next_record (local start_record))
+			(let-mut file 0i32)
+			(while
+				(:doc "Read uses from the selected declarations, with each request rooted in its own file.")
+				(i32.lt (local file) (array.len (local files)))
+				(body
+					(if
+						(:doc "Inactive source does not create function instances.")
+						(struct.get (array.load (local modules) (local file)) active)
+						(then
+							(let base (struct.get (array.load (local trees) (local file)) base))
+							(let scope (call scope_at (local file) (struct.get (array.load (local files) (local file)) source_start)))
+							(let count (struct.get (array.load (local views) (local file)) count))
+							(let-mut index 0i32)
+							(while
+								(:doc "An unapplied template has no executable body to visit.")
+								(i32.lt (local index) (local count))
+								(body
+									(let decl (struct.get (array.load (local selected) (i32.add (local base) (local index))) node))
+									(if
+										(:doc "Ordinary functions can request concrete calls regardless of their source order.")
+										(bool.and (u32.eq (call declaration_kind (borrow-shared (local arena)) (borrow-shared (local nodes)) (local decl)) 1u32)
+											(i32.lt (call function_generic_list (borrow-shared (local arena)) (borrow-shared (local nodes))
+												(array.load (local nodes) (local decl))) 0i32))
+										(then
+											(let checked (call request_function_subtree (borrow-shared (local arena)) (borrow-mut (local nodes)) (borrow-mut (local records))
+												(borrow-shared (local bindings)) (borrow-shared (local files)) (borrow-shared (local trees)) (borrow-shared (local views))
+												(local scope) (local decl) (borrow-mut (local instances))
+												(call expansion_progress (local next_row) (local next_function) (local next_record))))
+											(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
+											(set (local next_row) (struct.get (local checked) rows))
+											(set (local next_function) (struct.get (local checked) count))
+											(set (local next_record) (struct.get (local checked) records))))
+									(set (local index) (i32.add (local index) 1i32))))))
+					(set (local file) (i32.add (local file) 1i32))))
+			(let-mut cursor 0i32)
+			(while
+				(:doc "A concrete body can request more applications. Same-key recursion already points to a published clone.")
+				(i32.lt (local cursor) (local next_function))
+				(body
+					(let instance (array.load (local instances) (local cursor)))
+					(let owner (struct.get (local instance) file))
+					(let scope (call scope_at (local owner) (struct.get (array.load (local files) (local owner)) source_start)))
+					(let checked (call request_function_subtree (borrow-shared (local arena)) (borrow-mut (local nodes)) (borrow-mut (local records))
+						(borrow-shared (local bindings)) (borrow-shared (local files)) (borrow-shared (local trees)) (borrow-shared (local views))
+						(local scope) (struct.get (local instance) declaration) (borrow-mut (local instances))
+						(call expansion_progress (local next_row) (local next_function) (local next_record))))
+					(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
+					(set (local next_row) (struct.get (local checked) rows))
+					(set (local next_function) (struct.get (local checked) count))
+					(set (local next_record) (struct.get (local checked) records))
+					(set (local cursor) (i32.add (local cursor) 1i32))))
+			(return (call expansion_progress (local next_row) (local next_function) (local next_record)))))
+)
