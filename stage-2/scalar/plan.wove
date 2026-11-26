@@ -56,6 +56,7 @@
 		(type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./function_refs.wove" (only register_function_references plan_function_reference))
 	(use wove-file "./value_types.wove" (only value_matches_type (value static_number)))
+	(use wove-file "./borrowed_results.wove" (only borrowed_result_view is_provenance_return invalid_return_origin))
 	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
 	(use wove-file "../source/owned.wove" (only (value optional_none) (value optional_some) (value pending_optional_some)))
 	(use wove-file "./recoverable_growth.wove" (only read_push_outcome))
@@ -65,7 +66,7 @@
 			is_optional_owner optional_owner_type optional_owner_payload optional_unwrap_kind (value worker_receipt_move_kind) (value worker_permit_move_kind)))
 	(use wove-file "./native_owner_types.wove" (only is_native_owner native_owner_type native_owner_declaration))
 	(use wove-file "./fields.wove" (only read_field_projection plan_field_read check_owned_record_path))
-	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan indexed_owner_base expression_row
+	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan indexed_owner_base expression_row borrowed_call_row
 		runtime_expression writable_place check_writable_field mutable_parameter_place call_loan_keyword inferred_array_loan
 		store_place_loan plan_owned_field_loan plan_scoped_field_loan read_borrow_source finish_indexed_array_loan
 		(value infer_shared_array) (value infer_mut_array) (value indirect_local_place) (value local_slice_view)
@@ -122,7 +123,7 @@
 		(returns ScalarSignature)
 		(body
 			(let head (call read_signature_head (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local node) (local first_field) (bool false)))
+				(local node) (local first_field) (bool false) (bool true)))
 			(let-mut result 0u32)
 			(if
 				(:doc "Only a checked head contains a result type operand to resolve.")
@@ -160,9 +161,24 @@
 								(:doc "Encode the defining handle independently of local aliases.")
 								(i32.not-ltz (local owner))
 								(then (set (local result) (call native_owner_type (local owner)))))))
+					(let borrowed (i32.not-ltz (struct.get (local head) from)))
 					(if
-						(:doc "A scoped record needs a local binding whose lifetime contains its loans.")
-						(call is_scoped_record (borrow-shared (local records)) (local result))
+						(:doc "An explicit provenance clause can resolve a Wove array view result.")
+						(bool.and (local borrowed) (u32.eqz (local result)))
+						(then (set (local result) (call borrowed_result_view (borrow-shared (local source))
+							(borrow-shared (local nodes)) (borrow-shared (local records)) (borrow-shared (local bindings))
+							(struct.get (local scope) file) (struct.get (local scope) source_base) (local type_node)))))
+					(if
+						(:doc "A scoped record requires an explicit source parameter before it can leave the function.")
+						(bool.and (bool.not (local borrowed))
+							(call is_scoped_record (borrow-shared (local records)) (local result)))
+						(then (set (local result) 0u32)))
+					(if
+						(:doc "A source contract applies to a view or a scoped record without owned storage.")
+						(bool.and (local borrowed)
+							(bool.not (bool.or (call is_readable_slice (local result))
+								(bool.and (call is_scoped_record (borrow-shared (local records)) (local result))
+									(bool.not (call is_owning_record (borrow-shared (local records)) (local result)))))))
 						(then (set (local result) 0u32)))
 					(if
 						(:doc "The C entry requires i32 in every compilation mode.")
@@ -457,6 +473,23 @@
 				(then (return (local checked))))
 			(let limit (struct.get (local checked) operand))
 			(let arity (i32.sub (local limit) (local next_param)))
+			(let provenance (struct.get (local signature) from))
+			(let-mut return_source -1i32)
+			(if
+				(:doc "Resolve the loan contract to an exact parameter in this Wove signature.")
+				(i32.not-ltz (local provenance))
+				(then
+					(let name (array.load (local nodes) (local provenance)))
+					(set (local return_source) (call find_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local name) (borrow-shared (local parameters)) (local next_param) (local limit)))
+					(if (i32.ltz (local return_source)) (then (return (call entry_at (local name) -1i32 23u32))))
+					(let type (struct.get (array.load (local parameters) (local return_source)) type))
+					(if
+						(:doc "The source must supply a view and an exclusive result requires exclusive access.")
+						(bool.or (bool.not (call is_readable_slice (local type)))
+							(bool.and (call is_writable_slice (struct.get (local signature) result))
+								(bool.not (call is_writable_slice (local type)))))
+						(then (return (call entry_at (local name) -1i32 23u32))))))
 			(if
 				(:doc "Diagnose a parameterless application entry at the declaration.")
 				(bool.and (local entry) (i32.eqz (local arity)))
@@ -479,7 +512,7 @@
 			(array.store (local functions) (local index)
 				(struct.new ScalarFunction (c_name_slot 0i32) (declaration (local declaration)) (origin (local origin)) (name (local name))
 					(params (local next_param)) (arity (local arity))
-					(result (struct.get (local signature) result)) (first_statement (struct.get (local signature) first_statement))
+					(result (struct.get (local signature) result)) (return_source (local return_source)) (first_statement (struct.get (local signature) first_statement))
 					(body (struct.get (local signature) body))
 					(identity (local identity)) (entry (local entry)) (c_strings 0i32) (c_vectors (bool false)) (c_extents 0i32) (c_macro (bool false)) (c_variadic 0i32) (c_nulls 0i32) (c_storage (bool false)) (c_handle_out (bool false))
 					(c_snapshot (bool false)) (c_snapshot_drop -1i32) (c_snapshot_field -1i32) (c_formals -1i32) (c_fixed (bool false))
@@ -1790,9 +1823,37 @@
 				(then (set (local actual) (local worker_receipt_type))))
 			(let owning_initializer (bool.and (u32.eq (local expected) 42u32)
 				(bool.or (local submitted) (bool.or (call is_array_owner (local actual)) (call is_optional_owner (local actual))))))
+			(let provenance (struct.get (local callee) return_source))
+			(let-mut loan_initializer (bool false))
+			(if
+				(:doc "A returned loan needs a scoped binding, or a forwarding return with its own source contract.")
+				(i32.not-ltz (local provenance))
+				(then
+					(set (local loan_initializer) (bool.and (u32.eq (local expected) 42u32)
+						(call local_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local statement))))
+					(if
+						(:doc "Array view bindings are immutable. A cursor can still update its ordinary fields.")
+						(bool.and (local loan_initializer) (call is_readable_slice (local actual)))
+						(then
+							(let binding (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
+								(array.load (local nodes) (local statement))))
+							(set (local loan_initializer) (u32.eq
+								(call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+									(struct.get (local binding) head)) 15u32))))
+					(if
+						(:doc "A nested borrowed result has no binding to hold its argument loan.")
+						(bool.not (bool.or (local loan_initializer)
+							(call is_provenance_return (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local node) (local caller) (local statement))))
+						(then (return (call entry_at (local node) -1i32 24u32))))
+					(if
+						(:doc "Forward the exact descriptor type so that access mode and the C result layout agree.")
+						(bool.and (bool.not (local loan_initializer)) (u32.not-eq (local expected) (local actual)))
+						(then (return (call entry_at (local node) -1i32 24u32))))))
 			(if
 				(:doc "A call can introduce a fresh local owner or satisfy its exact expected result.")
-				(bool.not (bool.or (local owning_initializer) (call value_matches_type (local expected) (local actual))))
+				(bool.not (bool.or (local loan_initializer)
+					(bool.or (local owning_initializer) (call value_matches_type (local expected) (local actual)))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let first (struct.get (local name) next_sibling))
 			(let-mut argument (local first))
@@ -1806,12 +1867,17 @@
 					(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
 					(set (local argument) (struct.get (local checked) operand))))
 			(let-mut formal (struct.get (local callee) params))
+			(let-mut returned_argument -1i32)
 			(let limit (i32.add (local formal) (struct.get (local callee) arity)))
 			(while
 				(:doc "Associate each actual argument with the corresponding formal in source order.")
 				(bool.and (i32.lt (local formal) (local limit)) (i32.not-ltz (local argument)))
 				(body
 					(let param (array.load (local parameters) (local formal)))
+					(if
+						(:doc "The result borrows this evaluated operand, regardless of the callee's local alias.")
+						(i32.eq (local formal) (local provenance))
+						(then (set (local returned_argument) (local argument))))
 					(let operand (array.load (local nodes) (local argument)))
 					(let mode (struct.get (local param) c_mode))
 					(let null (bool.and (call accepts_c_null (local mode))
@@ -1877,7 +1943,7 @@
 							(local node) (local caller) (local view_start)))
 					(return (call entry_at (local node) (local index) 0u32))))
 			(array.store (local expressions) (local index)
-				(call expression_row 3u32 (local actual) (local target) (local first) 0i32 0i32 (bool false)))
+				(call borrowed_call_row (local actual) (local target) (local first) (local returned_argument)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_operator
@@ -3662,6 +3728,23 @@
 					(borrow-shared (local functions)) (borrow-shared (local parameters))
 					(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-shared (local statements))
 					(borrow-mut (local expressions))))))
+			(let returning_view (bool.and (i32.not-ltz (struct.get (local caller) return_source))
+				(bool.and (call is_readable_slice (local expected))
+					(call is_provenance_return (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (local caller) (local statement)))))
+			(let-mut forwarding (bool false))
+			(let-mut view_type (local expected))
+			(if
+				(:doc "Borrowed view returns can explicitly reborrow or forward a checked call result.")
+				(local returning_view)
+				(then
+					(let form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(set (local forwarding) (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (local form) head)) 9u32))
+					(if
+						(:doc "The byte descriptor uses its adjacent keyword in the existing loan planner.")
+						(call is_byte_view_type (local expected))
+						(then (set (local view_type) (u32.inc (local expected)))))))
 			(let formal (struct.get (array.load (local expressions) (local index)) target))
 			(let native_argument (bool.and (call is_native_owner (local expected)) (i32.not-ltz (local formal))))
 			(let-mut mode (call c_value_mode))
@@ -3678,10 +3761,11 @@
 					(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "Resolve a call argument in its required reborrow mode and element type.")
-				(bool.or (bool.or (local native_argument) (call is_place_reference (local expected)))
-					(bool.or (call is_reborrow_keyword (local expected)) (call is_typed_slice (local expected))))
+				(bool.and (bool.not (local forwarding))
+					(bool.or (bool.or (local native_argument) (call is_place_reference (local expected)))
+						(bool.or (call is_reborrow_keyword (local view_type)) (call is_typed_slice (local view_type)))))
 				(then (return (call plan_view (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local index) (local caller) (local statement) (local expected) (local mode) (local view_start)
+					(local node) (local index) (local caller) (local statement) (local view_type) (local mode) (local view_start)
 					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 					(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
@@ -3861,7 +3945,10 @@
 				(:doc "Construct the record identified in the current file's type namespace.")
 				(local constructing)
 				(then
-					(let scoped_initializer (call local_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local statement)))
+					(let scoped_initializer (bool.or
+						(call local_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local statement))
+						(call is_provenance_return (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local node) (local caller) (local statement))))
 					(return (call plan_record_make (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local node) (local operand) (local index) (struct.get (local caller) file) (struct.get (local caller) source_base)
 						(local expected) (local scoped_initializer)
@@ -3900,7 +3987,9 @@
 								(bool.and (u32.not-eq (local expected) 53u32)
 									(bool.or (call is_array_owner (local type))
 										(bool.or (call is_owning_record (borrow-shared (local records)) (local type))
-											(call is_scoped_record (borrow-shared (local records)) (local type)))))))
+											(bool.and (call is_scoped_record (borrow-shared (local records)) (local type))
+												(bool.not (call is_provenance_return (borrow-shared (local source)) (borrow-shared (local nodes))
+													(local node) (local caller) (local statement)))))))))
 						(then (return (call entry_at (local node) -1i32 24u32))))
 					(return (local checked))))
 			(if
@@ -5081,6 +5170,19 @@
 				(:doc "Abort before publishing a binding whose value fails checking.")
 				(u32.gtz (struct.get (local checked) error))
 				(then (return (local checked))))
+			(if
+				(:doc "Check actual return provenance after all constructor fields and call operands have been planned.")
+				(bool.and (u32.eq (local kind) 7u32) (i32.not-ltz (struct.get (local caller) return_source)))
+				(then
+					(let invalid (call invalid_return_origin (borrow-shared (local nodes)) (borrow-shared (local statements))
+						(borrow-shared (local expressions)) (local value) (struct.get (local caller) return_source)))
+					(if
+						(:doc "A false source claim diagnoses the view or constructor field in the defining function.")
+						(i32.not-ltz (local invalid))
+						(then
+							(let origin (array.load (local nodes) (local invalid)))
+							(return (call body_error (local caller) (struct.get (local origin) start)
+								(struct.get (local origin) end) 24u32))))))
 			(let-mut type (local expected))
 			(if
 				(:doc "A checked expression can refine its expected type to its actual type.")

@@ -8,20 +8,22 @@
 	check. Test discovery only needs the literal void spelling.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "../source/module.wove" (only skip_disabled_siblings))
+	(use wove-file "../source/module.wove" (only form_parts skip_disabled_siblings validate_form_metadata))
 	(use wove-file "../source/functions.wove" (only collect_function_fields))
 	(use wove-file "../source/types.wove" (only void_type))
-	(use wove-file "./syntax.wove" (only entry_at entry_form entry_keyword (type EntryRead)))
+	(use wove-file "./syntax.wove" (only entry_at entry_form entry_keyword is_scalar_name keyword_matches (type EntryRead)))
 
-	(struct SignatureHead (fields (params i32) (type_node i32) (body i32) (start i32) (end i32) (error u32)))
-	(struct ScalarSignature (fields (params i32) (result u32) (first_statement i32) (start i32) (end i32) (error u32) (body i32)))
+	(struct SignatureHead (fields (params i32) (type_node i32) (from i32) (body i32) (start i32) (end i32) (error u32)))
+	(struct ScalarSignature (fields (params i32) (result u32) (from i32) (first_statement i32) (start i32) (end i32) (error u32) (body i32)))
+
+	(let from_word "from")
 
 	(fn signature_error
 		(:doc `Carry an original source diagnostic through the signature reader.`)
 		(params (error EntryRead))
 		(returns ScalarSignature)
 		(body
-			(return (struct.new ScalarSignature (params -1i32) (result 0u32) (first_statement -1i32) (body -1i32)
+			(return (struct.new ScalarSignature (params -1i32) (result 0u32) (from -1i32) (first_statement -1i32) (body -1i32)
 				(start (struct.get (local error) start)) (end (struct.get (local error) end))
 				(error (struct.get (local error) error))))))
 
@@ -30,14 +32,52 @@
 		(params (error EntryRead))
 		(returns SignatureHead)
 		(body
-			(return (struct.new SignatureHead (params -1i32) (type_node -1i32) (body -1i32)
+			(return (struct.new SignatureHead (params -1i32) (type_node -1i32) (from -1i32) (body -1i32)
 				(start (struct.get (local error) start)) (end (struct.get (local error) end))
 				(error (struct.get (local error) error))))))
+
+	(fn read_return_origin
+		(:doc "Read the one bare parameter name in a return provenance clause.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (returns SourceNode))
+		(returns EntryRead)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (struct.get (local parts) head))
+			(if
+				(:doc "An extra result operand without a from head preserves the returns form's diagnostic.")
+				(i32.ltz (local head))
+				(then (return (call entry_at (local returns) -1i32 23u32))))
+			(let tag (array.load (local nodes) (local head)))
+			(if
+				(:doc "Only the exact from keyword can introduce a provenance clause.")
+				(bool.or (u32.not-eq (struct.get (local tag) kind) 1u32)
+					(bool.not (call keyword_matches (borrow-shared (local source))
+						(struct.get (local tag) start) (struct.get (local tag) end) (borrow-shared (local from_word)))))
+				(then (return (call entry_at (local returns) -1i32 23u32))))
+			(let name (struct.get (local parts) operands))
+			(if
+				(:doc "A recognized provenance clause takes one name and must be the final result operand.")
+				(bool.or (bool.or (i32.ltz (local name)) (i32.not-ltz (struct.get (local node) next_sibling)))
+					(i32.not-ltz (struct.get (array.load (local nodes) (local name)) next_sibling)))
+				(then (return (call entry_at (local node) -1i32 23u32))))
+			(let metadata (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local parts)))
+			(if
+				(:doc "Keep the original misplaced metadata diagnostic.")
+				(u32.gtz (struct.get (local metadata) error))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local metadata) start))
+					(end (struct.get (local metadata) end)) (error (struct.get (local metadata) error)) (related -1i32)))))
+			(let spelling (array.load (local nodes) (local name)))
+			(if
+				(:doc "The source parameter uses the same name spelling as its declaration.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling)))
+				(then (return (call entry_at (local spelling) -1i32 23u32))))
+			(return (call entry_at (local spelling) (local name) 0u32))))
 
 	(fn read_signature_head
 		(:doc `Read the parameter and result forms, leaving result type resolution to the caller.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(first_field i32) (empty_params bool))
+			(first_field i32) (empty_params bool) (allow_from bool))
 		(returns SignatureHead)
 		(body
 			(let fields (call collect_function_fields (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -75,11 +115,27 @@
 				(then (return (call signature_head_error (local signature)))))
 			(let type_node (struct.get (local signature) operand))
 			(if
-				(:doc "The returns form takes exactly one type.")
-				(bool.or (i32.ltz (local type_node))
-					(i32.not-ltz (struct.get (array.load (local nodes) (local type_node)) next_sibling)))
+				(:doc "The returns form begins with exactly one type operand.")
+				(i32.ltz (local type_node))
 				(then (return (call signature_head_error (call entry_at (local returns) -1i32 23u32)))))
-			(return (struct.new SignatureHead (params (local first)) (type_node (local type_node))
+			(let provenance (struct.get (array.load (local nodes) (local type_node)) next_sibling))
+			(let-mut from -1i32)
+			(if
+				(:doc "Only ordinary Wove function results may name a source parameter.")
+				(i32.not-ltz (local provenance))
+				(then
+					(if
+						(:doc "Tests and callable signatures retain exactly one result operand.")
+						(bool.not (local allow_from))
+						(then (return (call signature_head_error (call entry_at (local returns) -1i32 23u32)))))
+					(let checked (call read_return_origin (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local nodes) (local provenance)) (local returns)))
+					(if
+						(:doc "Forward the malformed clause or name diagnostic.")
+						(u32.gtz (struct.get (local checked) error))
+						(then (return (call signature_head_error (local checked)))))
+					(set (local from) (struct.get (local checked) operand))))
+			(return (struct.new SignatureHead (params (local first)) (type_node (local type_node)) (from (local from))
 				(body (struct.get (local fields) body))
 				(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 0u32)))))
 
@@ -92,7 +148,7 @@
 			(if
 				(:doc "A malformed head keeps the first diagnostic from the shared form reader.")
 				(u32.gtz (struct.get (local head) error))
-				(then (return (struct.new ScalarSignature (params -1i32) (result 0u32)
+				(then (return (struct.new ScalarSignature (params -1i32) (result 0u32) (from -1i32)
 					(first_statement -1i32) (body -1i32)
 					(start (struct.get (local head) start)) (end (struct.get (local head) end))
 					(error (struct.get (local head) error))))))
@@ -119,7 +175,7 @@
 				(:doc "An empty body can only complete a void helper.")
 				(bool.and (i32.ltz (local first_statement)) (u32.not-eq (local result) (call void_type)))
 				(then (return (call signature_error (call entry_at (local body_node) -1i32 24u32)))))
-			(return (struct.new ScalarSignature (params (struct.get (local head) params)) (result (local result))
+			(return (struct.new ScalarSignature (params (struct.get (local head) params)) (result (local result)) (from (struct.get (local head) from))
 				(first_statement (local first_statement)) (body (local body))
 				(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 0u32)))))
 
@@ -129,7 +185,7 @@
 		(returns ScalarSignature)
 		(body
 			(let head (call read_signature_head (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local node) (local first_field) (bool true)))
+				(local node) (local first_field) (bool true) (bool false)))
 			(let type (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
 				(struct.get (local head) type_node)))
 			(let-mut result 0u32)
