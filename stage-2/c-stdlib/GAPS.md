@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 The fourteen Wove files mirror the archived directory at `8ac13c06`. They are
 standalone source for the bridge design. Each uses the current `c-header`
-provider. Native fixtures select members from `stdio.wove` and the Linux and macOS `Stat` views. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
+provider. Native fixtures select bundled members from `stdio.wove`, `math.wove`, and the Linux and macOS `Stat` views. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
 
 ## Source forms
 
@@ -48,7 +48,7 @@ work below. [Seed bridge behavior](../LANGUAGE-SUBSET.md#imports-and-c-headers)
 | `sys/wait.h` `IdType` and `time.h` `Clock` | `enum` with `c-type` and `members` | Bind the C enum or typedef and its selected header members with their native values and argument representation. |
 | `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdio.h`, `sys/stat.h`, `sys/wait.h`, and `unistd.h` constant declarations | `const` with an explicit type | Select guarded integer constants with their declared Wove types and check the C value and constant expression. Wider Wove widths remain needed for some `UTIME_NOW` and `UTIME_OMIT` alternatives. |
 | `errno.h` `errno`, `math.h` `signgam` and floating values, `stdio.h` standard streams, `unistd.h` `optind`, `opterr`, `optopt`, and `environ` | Typed `let` and `let-mut` | Read scalar lvalues and borrow standard streams live. Writable scalar bindings such as `errno` retain the original C lvalue. Read-only expression macros and copied snapshots have separate contracts. |
-| `math.h` native math families, including `__fabsf16` and the Darwin half-width guard | `f16` and native `long double` | Check and lower the remaining floating types in arguments, results, constants, and out pointees. Preserve target floating representation and narrowing behavior. |
+| `math.h` native floating aliases and Darwin half-width family | `float_t`, `double_t`, `long double`, and target-selected `f16` | Preserve the native floating representation in named aliases and out pointees. The Darwin half family still needs its feature and deployment contract. |
 | `dirent.h` raw reads and `fdclosedir`, guarded members in `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdlib.h`, `sys/stat.h`, and `unistd.h` | `(cfg (all …))`, `any`, `os`, `arch`, `os_min`, feature names | Source and scalar bridge selection accept a supplied OS, architecture, and deployment version. Remaining work includes host target discovery, feature selection, and additional member shapes. |
 | `fcntl.h` `fcntl_*` | `(const command i32 F_GETFD)` and `c-name` | Stage 2 supplies checked i32 header constants in the native fixed prefix. The Wove caller supplies only the ordinary operands. |
 | Native pointer parameters across the corpus, including `math.h` `frexp`, `fcntl.h` lock operations, and `time.h` `clock_gettime` | `shared-ref`, `mut-ref`, typed and byte slices | Lower declared native pointees and maintain borrow lifetimes through the call. Allow writable out parameters only through the applicable mutable views. |
@@ -71,10 +71,39 @@ verbatim disabled text. Counts below cover active declarations.
 | `c_macro` · 124 | `assert.h` `assert`, `math.h` macro functions and read-only macro values, `sys/stat.h` `S_IS*` and `S_TYPEIS*`, `sys/wait.h` wait status macros | Stage 2 captures arguments once before expanding value-returning macros such as `S_ISREG` and `S_TYPEISMQ`. Existing bridge types and argument contracts apply. Remaining work includes void results and additional object-like macro types. |
 | `c_null` · 1 | `stdlib.h` `realpath` | Stage 2 supports the allocating `realpath` slot. It requires literal `null` and passes C `NULL`. |
 | `c_nullable` · 12 | `signal.h` `sigprocmask`, `pthread_sigmask`, `psignal`, `spawn.h` `posix_spawn{,p}`, `stdio.h` `freopen`, `fflush`, `perror`, `sys/stat.h` `futimens`, `utimensat`, `sys/wait.h` `wait`, `waitpid` | Named mutable scalar references accept either an exclusive loan or explicit null. Native fixtures exercise both forms of `waitpid`. Nullable record and handle references, strings, and bounded arrays still need their own lowering. |
-| `c_optional` · 289 | `math.h` optional functions, constants, and globals. The `fromfp`, `ufromfp`, `fromfpx`, and `ufromfpx` families use `__STDC_VERSION_MATH_H__`. The `totalorder` and `totalordermag` families use `pointer_parameters`. | Select header members by name and declaration kind. Apply the requested feature macro or native pointer signature probe and diagnose a requested unavailable member during binding. |
+| `c_optional` · 289 | `math.h` optional functions, constants, and globals. The `fromfp`, `ufromfp`, `fromfpx`, and `ufromfpx` families use `__STDC_VERSION_MATH_H__`. The `totalorder` and `totalordermag` families use `pointer_parameters`. | Bare optional function markers probe for the selected native name and report an unavailable name at the import. Qualified markers need feature-macro or exact prototype queries. Optional constants and global values need their own availability checks. |
 | `c_owned` · 4 | `dirent.h` `Directory`, `stdio.h` `File`, `spawn.h` `Actions` and `Attributes` | The `c-header` provider supports pointer results as local owners with null preservation and lexical destruction. A `shared-ref` or `mut-ref` parameter can lend a present owned pointer for a call, with exclusive access for the mutable loan. A bare owner parameter consumes an explicit move. Storage owners allocate the exact C representation and track activation separately from the allocation. Nullable storage borrows and integer handles need further lowering. |
 | `c_snapshot` · 9 | `dirent.h` `readdir{,64}`, `stdio.h` `fgets`, `stdlib.h` `getenv`, `mkdtemp`, `realpath`, `string.h` `strerror`, `unistd.h` `mkdtemp` and `environ` | Stage 2 copies borrowed and allocating `cstr` function results and `cstrs` globals such as `environ`. Stage 2 also copies fixed inline `char` fields within their declared extent. The bundled `readdir` snapshots the terminated name returned by the native API, including extended entries. The archived `readdir64` extension needs named feature selection. |
 | `c_variadic` · 16 | `fcntl.h` `open`, `openat`, and `fcntl_*`, `stdio.h` `fprintf`, `printf`, and `snprintf` | Named and open tails verify the fixed prefix and result against the header and use native default promotions. The fixed-command `fcntl_getfd`, `fcntl_getfl`, and `fcntl_getown` queries use an empty tail. Fixtures cover those queries, typed `fcntl` updates and opening modes, and the three open stdio bindings. |
+
+## Bundled math coverage
+
+Both compiler inventories load the checked-in `<math.h>` provider. The
+installed fixture exercises these forms through the system header and
+library with Clang builtins disabled.
+
+| Contract | Exercised declarations |
+| --- | --- |
+| Built-in `f32` and `f64` parameters and results | `cos`, `sin`, `sqrt`, `cosf`, `hypot`, and `fma` |
+| Writable scalar references | `frexp` and `remquo` with `i32` outputs, and `modff` with an `f32` output |
+| Native integer and fixed C-string contracts | `llround` returns a native `long long`, and `nan` converts a shared byte view |
+| Macro calls and header values | `fpclassify`, `isfinite`, `FP_NAN`, `HUGE_VAL`, and `M_PI_2` |
+| Target selection | The Linux/macOS POSIX group exposes `j0`. Graph fixtures reject Darwin `__sinpi` under Linux and Linux `drem` under macOS at the requesting name. |
+
+The remaining signatures use several distinct native contracts:
+
+- `FloatEval`, `DoubleEval`, and `LongDouble` require native floating
+  aliases for `float_t`, `double_t`, and `long double`. This includes
+  the long-double function families, macros such as `HUGE_VALL`, and
+  writable outputs such as `modfl`. The underlying C type must follow
+  the selected target and header.
+- `totalorder*`, `totalordermag*`, and `getpayload*` require shared
+  scalar references. The qualified `pointer_parameters` marker and
+  the `__STDC_VERSION_MATH_H__` markers also need their respective
+  prototype and feature-macro checks.
+- The archived Darwin half declarations need the `math_darwin_half`
+  selection and minimum-deployment check before probing individual
+  optional symbols. Core `f16` already has a target admission check.
 
 ## Archived disabled material
 
