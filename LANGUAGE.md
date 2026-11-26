@@ -125,8 +125,12 @@ function at its call site.
 
 A type parameter supplies the exact types in the concrete signature and
 body. An `i32` constant parameter can size an array, supply a nested
-specialization argument, or be read with `local`. Equal arguments to the
-same defining function share one checked body across call sites.
+specialization argument, or be read with `local`. A `(const Enabled bool)`
+parameter accepts `(bool true)` or `(bool false)`. A function can read it
+with `(local Enabled)` or forward it as an argument to another
+specialization. Equal arguments to the same defining declaration share
+one specialization. Boolean arguments distinguish nominal record types
+even when their fields match.
 
 In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
