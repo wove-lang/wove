@@ -266,14 +266,20 @@ its active owners. When every case returns, the match satisfies the
 enclosing return requirement. Missing coverage reports code 78 at the
 match. Unknown or duplicate variants point at the case name.
 
-A variant can declare one copyable payload, as in
+A variant can declare one payload, as in
 `(enum Parsed (variants (Record Request) (Invalid)))`. Write
 `(enum.new Parsed Record value)` with the exact `Request` type. A case
-for that variant starts with `(case Record (bind request) ...)` to copy
-the payload into an immutable arm-local name. `(bind _)` discards the
-payload. The compiler emits these enums as a tag and a union and reads
+for that variant starts with `(case Record (bind request) ...)`. A copyable
+payload is copied into its immutable arm-local name. `(bind _)` discards it. The compiler emits these enums as a tag and a union and reads
 the selected member from the captured subject. Fieldless enums retain
 their ordinal representation.
+
+A variant can own a byte array or a named owning Wove value. Supply a
+fresh value or an explicit move to `enum.new`. A statement match
+consumes a fresh enum result or `(move (local input))` and transfers the
+active payload to its case binding. A bound payload follows local
+ownership rules, including transfers and cleanup on early returns.
+A discard or wildcard keeps any active ownership until its arm exits.
 
 A match can also dispatch on a built-in integer. A bare decimal or hex
 pattern takes the subject type. A suffix or literal form names the exact

@@ -95,11 +95,16 @@ scope. Cover all enum variants or use a final `(case _ ...)` for
 uncovered variants. In an enum that declares a variant named `_`, that
 spelling continues to select the declared variant.
 
-A variant can carry one copyable value. Declare it as `(Push i64)`, build it
+A variant can carry one value. Declare it as `(Push i64)`, build it
 with `(enum.new Instruction Push value)`, and match it with
 `(case Push (bind word) statements...)`. The payload must have the
-variant's exact declared type. The binding is an immutable copy scoped to
-that arm. Use `(bind _)` to discard the payload.
+variant's exact declared type. The immutable binding is scoped to that arm.
+A copyable payload is copied into its binding. Use `(bind _)` to discard it.
+
+An enum with an owning variant is an owner. A statement match can consume
+a fresh enum or an explicit `(move (local name))`. The selected arm owns
+the payload and drops it on exit unless it moves again. A discard or
+wildcard also releases any active owner at arm exit.
 
 A built-in integer match uses literal patterns and requires a final
 `(case _ ...)`. Bare decimal and hexadecimal patterns take the subject's

@@ -48,7 +48,7 @@
 			(u32.lt (local type) 268435456u32)))))
 
 	(fn is_owning_record
-		(:doc "Identify named Wove records that own byte-array fields.")
+		(:doc "Identify named Wove aggregates that own array storage.")
 		(params (records (shared-array ScalarRecord)) (type u32))
 		(returns bool)
 		(body
@@ -973,16 +973,21 @@
 		(returns u32)
 		(body
 			(if
-				(:doc "A direct owned byte field uses the normal owning array representation.")
-				(bool.and (struct.get (local layout) owns_arrays)
+				(:doc "A direct owned byte field or payload uses the normal owning array representation.")
+				(bool.and (bool.or (struct.get (local layout) owns_arrays) (call is_payload_enum (local layout)))
 					(call is_owned_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 				(then (return (call array_owner_type 10u32))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 			(let operand (struct.get (local parts) operands))
 			(if (i32.lt (local operand) 0i32) (then (return 0u32)))
-			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+			(let type (call value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings))
 				(struct.get (local layout) file) (struct.get (local layout) source_base) (local operand)))
+			(if
+				(:doc "An enum can transfer a named owner in its active payload slot.")
+				(bool.and (bool.not (call is_payload_enum (local layout)))
+					(call is_owning_record (borrow-shared (local records)) (local type)))
+				(then (return 0u32)))
 			(if
 				(:doc "Wove fields hold Wove-defined value types. Foreign aliases and record views have their own contracts.")
 				(bool.or (call is_native_integer (local type))
@@ -1289,18 +1294,65 @@
 			(array.store (local stack) (local depth)
 				(struct.new LayoutVisit (row (local row)) (field (local field)) (element (local element))))))
 
+	(fn layout_state
+		(:doc "Replace layout emission and ownership state without changing its defining identity.")
+		(params (entry ScalarRecord) (emitted i32) (owns bool))
+		(returns ScalarRecord)
+		(body
+			(return (struct.new ScalarRecord (name (struct.get (local entry) name)) (file (struct.get (local entry) file))
+				(identity (struct.get (local entry) identity)) (first (struct.get (local entry) first))
+				(count (struct.get (local entry) count)) (declaration (struct.get (local entry) declaration))
+				(native (struct.get (local entry) native)) (source_base (struct.get (local entry) source_base))
+				(emit_row (local emitted)) (owns_arrays (local owns))))))
+
 	(fn publish_layout
-		(:doc `Record which defining layout is emitted at this position while retaining all type identities.`)
+		(:doc "Record which defining layout is emitted at this position while retaining all type identities.")
 		(params (records (mut-array ScalarRecord)) (position i32) (row i32))
 		(returns void)
 		(body
 			(let entry (array.load (local records) (local position)))
 			(array.store (local records) (local position)
-				(struct.new ScalarRecord (name (struct.get (local entry) name)) (file (struct.get (local entry) file))
-					(identity (struct.get (local entry) identity)) (first (struct.get (local entry) first)) (count (struct.get (local entry) count))
-					(declaration (struct.get (local entry) declaration)) (native (struct.get (local entry) native))
-					(source_base (struct.get (local entry) source_base)) (emit_row (local row))
-					(owns_arrays (struct.get (local entry) owns_arrays))))))
+				(call layout_state (local entry) (local row) (struct.get (local entry) owns_arrays)))))
+
+	(fn finish_layout_ownership
+		(:doc "Classify owning enum payloads after dependencies are complete and verify member copyability.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
+			(records (mut-array ScalarRecord)) (row i32))
+		(returns LayoutCheck)
+		(body
+			(let layout (array.load (local records) (local row)))
+			(let ok (struct.new LayoutCheck (file -1i32) (start 0i32) (end 0i32) (error 0u32)))
+			(if
+				(:doc "Only ordinary Wove records and payload enums have typed value members.")
+				(bool.or (call is_fixed_array (local layout))
+					(bool.not (bool.or (i32.eq (struct.get (local layout) native) 0i32) (call is_payload_enum (local layout)))))
+				(then (return (local ok))))
+			(let-mut owns (struct.get (local layout) owns_arrays))
+			(let-mut field (struct.get (local layout) first))
+			(while
+				(:doc "Ownership of an inline dependency is known when the parent finishes.")
+				(i32.lt -1i32 (local field))
+				(body
+					(let member (array.load (local nodes) (local field)))
+					(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
+					(if
+						(:doc "An owning enum cannot be copied into a record or inline array member.")
+						(u32.eq (local type) 0u32)
+						(then
+							(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+							(if (i32.lt -1i32 (struct.get (local parts) operands))
+								(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+									(local layout) (local member) 23u32))))))
+					(if
+						(:doc "Any variant with an owner makes the full tagged value an owner.")
+						(bool.or (call is_array_owner (local type))
+							(call is_owning_record (borrow-shared (local records)) (local type)))
+						(then (set (local owns) (bool true))))
+					(set (local field) (struct.get (local member) next_sibling))))
+			(array.store (local records) (local row)
+				(call layout_state (local layout) (struct.get (local layout) emit_row) (local owns)))
+			(return (local ok))))
 
 	(fn walk_record_layouts
 		(:doc `Validate fields and order each complete value layout after its dependencies.
@@ -1340,6 +1392,9 @@
 								(:doc "Postorder publishes the original row after its dependencies.")
 								(bool.and (bool.not (local element)) (i32.lt (local field) 0i32))
 								(then
+									(let ownership (call finish_layout_ownership (borrow-shared (local source)) (borrow-shared (local nodes))
+										(borrow-shared (local bindings)) (borrow-mut (local records)) (local row)))
+									(if (u32.lt 0u32 (struct.get (local ownership) error)) (then (return (local ownership))))
 									(call publish_layout (borrow-mut (local records)) (local written) (local row))
 									(array.store (local marks) (local row) 2u8)
 									(set (local written) (i32.add.wrapping (local written) 1i32))
