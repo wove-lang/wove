@@ -20,6 +20,7 @@
 	(use wove-file "../source/c_dependencies.wove" (only connect_bridge_type))
 	(use wove-file "../emit/collisions.wove" (only assign_c_names))
 	(use wove-file "../source/c_scope.wove" (only connect_bridge_overlay declaring_c_bridge))
+	(use wove-file "./constants.wove" (only register_integer_constants))
 	(use wove-file "./trees.wove" (only source_span_owner graph_module_key (type ScalarTree)))
 	(use wove-file "../source/functions.wove" (only read_return_origin))
 	(use wove-file "../source/c_names.wove" (only c_function_opening))
@@ -272,13 +273,10 @@
 					(set (local index) (i32.inc (local index)))))))
 
 	(fn prepare_graph_file
-		(:doc `Build one measured source tree and register its defining type layouts.
-
-		Retain active declaration indices in the file's reserved tree range
-		so signature checking can follow selection order after all layouts exist.`)
-		(params (arena (shared-array u8)) (source (shared-array u8)) (input SuppliedFile) (tree ScalarTree)
-			(file i32) (active bool) (context SelectionContext) (flat (mut-array SourceNode)) (selected (mut-array SelectedDeclaration)) (views (mut-array ModuleRead))
-			(records (mut-array ScalarRecord)) (next_record i32) (bindings (shared-array GraphBinding)))
+		(:doc "Build one measured source tree and retain its active declarations for later graph-wide checking.")
+		(params (source (shared-array u8)) (source_base i32) (tree ScalarTree)
+			(file i32) (active bool) (context SelectionContext) (flat (mut-array SourceNode))
+			(selected (mut-array SelectedDeclaration)) (views (mut-array ModuleRead)))
 		(returns GraphSignatures)
 		(body
 			(let rows (struct.get (local tree) rows))
@@ -289,15 +287,14 @@
 			(if
 				(:doc "A provider contributes a tree only after it has been built successfully.")
 				(u32.gtz (struct.get (local built) error))
-				(then (return (call signatures_result 0i32 0i32 (local next_record) -1i32 (local file)
+				(then (return (call signatures_result 0i32 0i32 0i32 -1i32 (local file)
 					(struct.get (local built) start) (struct.get (local built) end) (struct.get (local built) error)))))
 			(let base (struct.get (local tree) base))
-			(let source_base (struct.get (local input) source_start))
 			(call copy_tree (borrow-shared (local nodes)) (borrow-mut (local flat)) (local base) (local source_base))
 			(if
 				(:doc "A bridge-only provider supplies its checked tree and contributes no local Wove declarations.")
 				(bool.not (local active))
-				(then (return (call signatures_result 0i32 0i32 (local next_record) -1i32 -1i32
+				(then (return (call signatures_result 0i32 0i32 0i32 -1i32 -1i32
 					0i32 0i32 0u32))))
 			(let-mut declarations (array.alloc SelectedDeclaration (local rows)))
 			(let module (call read_module_for_target (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -305,24 +302,51 @@
 			(if
 				(:doc "The source graph already checked admission, metadata, and selection for the same immutable bytes.")
 				(u32.gtz (struct.get (local module) error))
-				(then (return (call signatures_result 0i32 0i32 (local next_record) -1i32 (local file)
+				(then (return (call signatures_result 0i32 0i32 0i32 -1i32 (local file)
 					(struct.get (local module) start) (struct.get (local module) end) (struct.get (local module) error)))))
-			(let module_id (call graph_module_key (borrow-shared (local arena)) (borrow-shared (local flat))
-				(local module) (local input) (local base)))
-			(let layouts (call register_module_records (borrow-shared (local arena)) (borrow-shared (local flat))
-				(borrow-shared (local declarations)) (struct.get (local module) count) (local base) (local source_base)
-				(local file) (local module_id) (borrow-mut (local records)) (local next_record) (borrow-shared (local bindings))))
-			(if
-				(:doc "Translate any defining layout error back to the original file view.")
-				(u32.gtz (struct.get (local layouts) error))
-				(then (return (call signatures_result 0i32 0i32 (local next_record) -1i32 (local file)
-					(i32.sub (struct.get (local layouts) start) (local source_base))
-					(i32.sub (struct.get (local layouts) end) (local source_base)) (struct.get (local layouts) error)))))
 			(array.store (local views) (local file) (local module))
 			(call copy_selections (borrow-shared (local declarations)) (struct.get (local module) count)
 				(local base) (borrow-mut (local selected)))
-			(return (call signatures_result 0i32 0i32 (struct.get (local layouts) operand) -1i32 -1i32
+			(return (call signatures_result 0i32 0i32 0i32 -1i32 -1i32
 				0i32 0i32 0u32))))
+
+	(fn register_graph_module_records
+		(:doc "Register nominal and scalar fixed layouts in file order after resolving module constants.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(modules (shared-array GraphModule)) (trees (shared-array ScalarTree)) (bindings (shared-array GraphBinding))
+			(views (shared-array ModuleRead)) (selected (shared-array SelectedDeclaration)) (records (mut-array ScalarRecord)))
+		(returns GraphSignatures)
+		(body
+			(let-mut next 0i32)
+			(let-mut file 0i32)
+			(while
+				(:doc "Each file uses its own checked selections and definition namespace.")
+				(i32.lt (local file) (array.len (local files)))
+				(body
+					(if
+						(:doc "Only an active Wove module contributes nominal declarations.")
+						(struct.get (array.load (local modules) (local file)) active)
+						(then
+							(let base (struct.get (array.load (local trees) (local file)) base))
+							(let input (array.load (local files) (local file)))
+							(let source_base (struct.get (local input) source_start))
+							(let module (array.load (local views) (local file)))
+							(let count (struct.get (local module) count))
+							(let module_id (call graph_module_key (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(local module) (local input) (local base)))
+							(let checked (call register_module_records (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(borrow-shared (local selected))
+								(local count) (local base) (local source_base) (local file) (local module_id)
+								(borrow-mut (local records)) (local next) (borrow-shared (local bindings))))
+							(if
+								(:doc "Translate the layout diagnostic back to its original file coordinates.")
+								(u32.gtz (struct.get (local checked) error))
+								(then (return (call signatures_result 0i32 0i32 (local next) -1i32 (local file)
+									(i32.sub (struct.get (local checked) start) (local source_base))
+									(i32.sub (struct.get (local checked) end) (local source_base)) (struct.get (local checked) error)))))
+							(set (local next) (struct.get (local checked) operand))))
+					(set (local file) (i32.inc (local file)))))
+			(return (call signatures_result 0i32 0i32 (local next) -1i32 -1i32 0i32 0i32 0u32))))
 
 	(fn install_bridge_overlays
 		(:doc "Restore each resolved bridge pair in the shared graph tree before checking type dependencies.")
@@ -1001,14 +1025,13 @@
 	(fn prepare_graph
 		(:doc `Collect every defining layout before any reached function signature uses it.`)
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
-			(trees (shared-array ScalarTree)) (bindings (shared-array GraphBinding)) (root i32) (context SelectionContext) (nodes (mut-array SourceNode))
+			(trees (shared-array ScalarTree)) (bindings (mut-array GraphBinding)) (root i32) (context SelectionContext) (nodes (mut-array SourceNode))
 			(functions (mut-array ScalarFunction)) (parameters (mut-array ScalarParameter)) (records (mut-array ScalarRecord))
 			(statements (mut-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
 		(returns GraphSignatures)
 		(body
 			(let-mut selected (array.alloc SelectedDeclaration (array.len (local nodes))))
 			(let-mut views (array.alloc ModuleRead (array.len (local files))))
-			(let-mut next_record 0i32)
 			(let-mut file 0i32)
 			(while
 				(:doc "Use one layout per definition in the canonical file table.")
@@ -1020,18 +1043,37 @@
 						(i32.gtz (struct.get (local tree) rows))
 						(then
 							(let input (array.load (local files) (local file)))
-							(let checked (call prepare_graph_file (borrow-shared (local arena))
+							(let checked (call prepare_graph_file
 								(borrow-shared (array.range (local arena) (struct.get (local input) source_start)
 									(struct.get (local input) source_end)))
-								(local input) (local tree) (local file) (struct.get (array.load (local modules) (local file)) active) (local context)
-								(borrow-mut (local nodes)) (borrow-mut (local selected)) (borrow-mut (local views))
-								(borrow-mut (local records)) (local next_record) (borrow-shared (local bindings))))
+								(struct.get (local input) source_start) (local tree) (local file)
+								(struct.get (array.load (local modules) (local file)) active) (local context)
+								(borrow-mut (local nodes)) (borrow-mut (local selected)) (borrow-mut (local views))))
 							(if
-								(:doc "Stop at the originating file if a reached record layout is invalid.")
+								(:doc "Stop at the originating file if its tree or selection fails.")
 								(u32.gtz (struct.get (local checked) error))
-								(then (return (local checked))))
-							(set (local next_record) (struct.get (local checked) records))))
+								(then (return (local checked))))))
 					(set (local file) (i32.inc (local file)))))
+			(let constants (call register_integer_constants (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local files)) (borrow-shared (local trees)) (borrow-mut (local bindings))))
+			(if
+				(:doc "Report the constant's defining file and its original source-relative span.")
+				(u32.gtz (struct.get (local constants) error))
+				(then
+					(let origin (struct.get (local constants) file))
+					(let base (struct.get (array.load (local files) (local origin)) source_start))
+					(return (call signatures_result 0i32 0i32 0i32 -1i32 (local origin)
+						(i32.sub (struct.get (local constants) start) (local base))
+						(i32.sub (struct.get (local constants) end) (local base)) (struct.get (local constants) error)))))
+			(let module_records (call register_graph_module_records
+				(borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local nodes))
+				(borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings))
+				(borrow-shared (local views)) (borrow-shared (local selected)) (borrow-mut (local records))))
+			(if
+				(:doc "Fixed layouts may use any already evaluated constant in the file's namespace.")
+				(u32.gtz (struct.get (local module_records) error))
+				(then (return (local module_records))))
+			(let-mut next_record (struct.get (local module_records) records))
 			(call install_bridge_overlays (borrow-shared (local trees)) (borrow-shared (local bindings)) (borrow-mut (local nodes)))
 			(let native_count (call register_graph_native_types (borrow-shared (local arena))
 				(borrow-shared (local nodes)) (borrow-shared (local trees)) (borrow-shared (local bindings))

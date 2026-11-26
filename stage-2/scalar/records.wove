@@ -26,6 +26,7 @@
 	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
 	(use wove-file "../emit/names.wove" (only record_identity))
 	(use wove-file "./callable_types.wove" (only read_callable_type same_callable_parameters (type CallableShape)))
+	(use wove-file "./constants.wove" (only fold_i32 constant_check))
 	(use wove-file "./syntax.wove"
 		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type is_fixed_array_type_head
 			callable_keyword (value fn_type_kind)
@@ -314,15 +315,16 @@
 			(return 0u32)))
 
 	(fn array_extent_operand
-		(:doc "Keep the final bare extent operand after a checked element row.")
+		(:doc "Keep the final extent operand after a checked element row.")
 		(params (nodes (shared-array SourceNode)) (element i32)) (returns i32)
 		(body
 			(let index (struct.get (array.load (local nodes) (local element)) next_sibling))
 			(if (i32.ltz (local index)) (then (return -1i32)))
 			(let extent (array.load (local nodes) (local index)))
 			(if
-				(:doc "The full array shape ends with one bare size token.")
-				(bool.or (u32.not-eq (struct.get (local extent) kind) 1u32)
+				(:doc "The full array shape ends with one size token or constant expression.")
+				(bool.or (bool.and (u32.not-eq (struct.get (local extent) kind) 1u32)
+					(u32.not-eq (struct.get (local extent) kind) 40u32))
 					(i32.lt -1i32 (struct.get (local extent) next_sibling)))
 				(then (return -1i32)))
 			(return (local index))))
@@ -359,24 +361,49 @@
 			(if (i32.ltz (struct.get (local parsed) digits)) (then (return -1i32)))
 			(return (i32.from-u32 (struct.get (local parsed) magnitude)))))
 
-	(fn named_extent_site
-		(:doc "Use the size identifier when an otherwise well-shaped array has an invalid named extent.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(bindings (shared-array GraphBinding)) (file i32) (source_base i32)) (returns SourceNode)
+	(fn check_array_extent
+		(:doc "Check a literal, a visible immutable size, or an exact i32 computation as an extent.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
+			(index i32) (file i32) (source_base i32)) (returns EntryRead)
 		(body
+			(let site (array.load (local nodes) (local index)))
+			(let-mut count -1i32)
+			(if
+				(:doc "Preserve the expression diagnostic from inside an inline extent.")
+				(u32.eq (struct.get (local site) kind) 40u32)
+				(then
+					(let folded (call fold_i32 (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local bindings))
+						(local index) (local file) (local source_base)))
+					(if (u32.gtz (struct.get (local folded) error)) (then (return (call constant_check (local folded)))))
+					(let bits (struct.get (local folded) bits))
+					(if (u32.not-lt 2147483647u32 (local bits)) (then (set (local count) (i32.from-u32 (local bits))))))
+				(else
+					(set (local count) (call read_array_extent (borrow-shared (local source)) (local site)
+						(borrow-shared (local bindings)) (local file) (local source_base)))))
+			(if (i32.ltz (local count)) (then (return (call entry_at (local site) -1i32 23u32))))
+			(return (call entry_at (local site) (local count) 0u32))))
+
+	(fn invalid_array_type
+		(:doc "Keep the original extent error when a valid array shape fails at its size operand.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(bindings (shared-array GraphBinding)) (file i32) (source_base i32)) (returns EntryRead)
+		(body
+			(let invalid (call entry_at (local node) -1i32 23u32))
 			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) 70u32 23u32))
 			(let element (struct.get (local form) operand))
-			(if (i32.ltz (local element)) (then (return (local node))))
+			(if (i32.ltz (local element)) (then (return (local invalid))))
 			(let index (call array_extent_operand (borrow-shared (local nodes)) (local element)))
-			(if (i32.ltz (local index)) (then (return (local node))))
+			(if (i32.ltz (local index)) (then (return (local invalid))))
 			(let size (array.load (local nodes) (local index)))
 			(if
-				(:doc "Preserve the whole-type span if the name resolves and another part of the layout is invalid.")
-				(bool.and (call is_scalar_name (borrow-shared (local source)) (local size))
-					(i32.ltz (call read_array_extent (borrow-shared (local source)) (local size)
-						(borrow-shared (local bindings)) (local file) (local source_base))))
-				(then (return (local size))))
-			(return (local node))))
+				(:doc "Unnamed numeric sizes retain the existing whole-type diagnostic.")
+				(bool.or (call is_scalar_name (borrow-shared (local source)) (local size))
+					(u32.eq (struct.get (local size) kind) 40u32))
+				(then
+					(let checked (call check_array_extent (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local bindings)) (local index) (local file) (local source_base)))
+					(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))))
+			(return (local invalid))))
 
 	(fn record_array_element
 		(:doc "Resolve a named Wove record or explicit specialization in the array spelling's type namespace.")
@@ -450,8 +477,8 @@
 									(local element_node)))))))))
 			(let extent_node (call array_extent_operand (borrow-shared (local nodes)) (local element_node)))
 			(if (i32.ltz (local extent_node)) (then (return (local invalid))))
-			(let extent (call read_array_extent (borrow-shared (local source)) (array.load (local nodes) (local extent_node))
-				(borrow-shared (local bindings)) (local file) (local source_base)))
+			(let extent (struct.get (call check_array_extent (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (local extent_node) (local file) (local source_base)) operand))
 			(return (struct.new FixedArrayShape (element (local element)) (extent (local extent))))))
 
 	(fn fixed_array_type
@@ -568,10 +595,10 @@
 						(:doc "An invalid extent name points at the original identifier.")
 						(i32.ltz (struct.get (local shape) extent))
 						(then
-							(let site (call named_extent_site (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
+							(let problem (call invalid_array_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
 								(borrow-shared (local bindings)) (local file) (local source_base)))
-							(if (i32.lt (struct.get (local node) start) (struct.get (local site) start))
-								(then (return (call entry_at (local site) -1i32 23u32))))))
+							(if (i32.lt (struct.get (local node) start) (struct.get (local problem) start))
+								(then (return (local problem))))))
 					(set (local next) (call intern_fixed_array (local shape) (borrow-mut (local records)) (local next)))))
 			(if (i32.ltz (local next)) (then (return (call entry_at (local node) -1i32 16u32))))
 			(return (call entry_at (local node) (local next) 0u32))))
@@ -1876,14 +1903,8 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let size (call array_extent_operand (borrow-shared (local nodes)) (struct.get (local parts) operands)))
 			(if (i32.ltz (local size)) (then (return (call entry_at (local node) -1i32 0u32))))
-			(let site (array.load (local nodes) (local size)))
-			(let count (call read_array_extent (borrow-shared (local source)) (local site)
-				(borrow-shared (local bindings)) (local file) (local source_base)))
-			(if
-				(:doc "Point a negative or unavailable extent at the original size operand.")
-				(i32.ltz (local count))
-				(then (return (call entry_at (local site) -1i32 23u32))))
-			(return (call entry_at (local site) (local count) 0u32))))
+			(return (call check_array_extent (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (local size) (local file) (local source_base)))))
 
 	(fn read_member_operand
 		(:doc `Validate a named member form and return its single ordinary operand.`)
@@ -2025,8 +2046,9 @@
 	(fn substituted_extent
 		(:doc "Resolve a nonnegative array extent from the exact i32 argument or the original fixed size.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
-			(layout ScalarRecord) (node SourceNode)) (returns i32)
+			(layout ScalarRecord) (index i32)) (returns i32)
 		(body
+			(let node (array.load (local nodes) (local index)))
 			(let argument (call generic_parameter_argument (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local layout) (local node) 2u32))
 			(if (i32.eq (local argument) -2i32) (then (return -1i32)))
@@ -2038,8 +2060,9 @@
 						(array.load (local nodes) (local argument))) value))
 					(if (u32.lt 2147483647u32 (local value)) (then (return -1i32)))
 					(return (i32.from-u32 (local value)))))
-			(return (call read_array_extent (borrow-shared (local source)) (local node) (borrow-shared (local bindings))
-				(struct.get (local layout) file) (struct.get (local layout) source_base)))))
+			(return (struct.get (call check_array_extent (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (local index) (struct.get (local layout) file)
+				(struct.get (local layout) source_base)) operand))))
 
 	(fn specialized_field_array
 		(:doc "Read one inline array shape in the template's substituted namespace.")
@@ -2072,7 +2095,7 @@
 				(then (return (local invalid))))
 			(return (struct.new FixedArrayShape (element (local resolved))
 				(extent (call substituted_extent (borrow-shared (local source)) (borrow-shared (local nodes))
-					(borrow-shared (local bindings)) (local layout) (array.load (local nodes) (local extent))))))))
+					(borrow-shared (local bindings)) (local layout) (local extent)))))))
 
 	(fn register_specialized_arrays
 		(:doc "Intern fixed field layers using the concrete types and extents of one specialization.")
@@ -2521,8 +2544,8 @@
 	(fn register_module_records
 		(:doc `Register every active type in a file before any of its signatures are read.
 
-		A graph supplies the file's tree base and the next available record
-		row. Single-file checking starts both positions at zero.`)
+		The declaration table already holds arena-wide node indices. The
+		file base is used only when recording nominal identity.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
 			(declarations (shared-array SelectedDeclaration)) (count i32) (base i32) (source_base i32)
 			(file i32) (module u32) (records (mut-array ScalarRecord)) (start i32) (bindings (shared-array GraphBinding)))
@@ -2534,7 +2557,7 @@
 				(:doc "Use the selected declarations in source order to preserve layout diagnostics.")
 				(i32.lt (local index) (local count))
 				(body
-					(let form (i32.add (local base) (struct.get (array.load (local declarations) (local index)) node)))
+					(let form (struct.get (array.load (local declarations) (i32.add (local base) (local index))) node))
 					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
 					(if
 						(:doc "A named callable reuses the exact layout interned for its signature.")
@@ -2639,8 +2662,8 @@
 			(if
 				(:doc "Preserve the original type span for an invalid scalar, nominal element, or extent.")
 				(u32.eqz (local type))
-				(then (return (call entry_at (call named_extent_site (borrow-shared (local source))
-					(borrow-shared (local nodes)) (local node) (borrow-shared (local bindings)) (local file) (local source_base)) -1i32 23u32))))
+				(then (return (call invalid_array_type (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (borrow-shared (local bindings)) (local file) (local source_base)))))
 			(if
 				(:doc "Immutable module tables cannot be the defining storage of an owner.")
 				(call fixed_array_owns (borrow-shared (local records)) (local type))
