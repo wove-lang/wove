@@ -22,8 +22,8 @@ and returns. Use
 The conversion preserves values that fit and traps at the source line when a
 value is outside the selected type's range.
 
-`i32.add.wrapping`, `i32.sub.wrapping`, `u32.add.wrapping`, and
-`u32.sub.wrapping` compute modulo 2^32. Both operands and the result have
+`i32.add`, `i32.sub`, `u32.add`, and
+`u32.sub` compute modulo 2^32. Both operands and the result have
 the operation's named type.
 
 `u32.and`, `u32.or`, and `u32.xor` combine two `u32` words.

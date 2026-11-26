@@ -44,10 +44,10 @@ C_TYPE = {
 	MUT: "wvrt_mut_slice",
 }
 WRAPPING_OPS = {
-	"i32.add.wrapping": (I32, "wvrt_i32_add_wrapping"),
-	"i32.sub.wrapping": (I32, "wvrt_i32_sub_wrapping"),
-	"u32.add.wrapping": (U32, "wvrt_u32_add_wrapping"),
-	"u32.sub.wrapping": (U32, "wvrt_u32_sub_wrapping"),
+	"i32.add": (I32, "wvrt_i32_add_wrapping"),
+	"i32.sub": (I32, "wvrt_i32_sub_wrapping"),
+	"u32.add": (U32, "wvrt_u32_add_wrapping"),
+	"u32.sub": (U32, "wvrt_u32_sub_wrapping"),
 }
 BINARY_OPS = {
 	"u8.eq": (U8, BOOL, "=="),

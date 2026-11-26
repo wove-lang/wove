@@ -12,18 +12,20 @@ supports `i16`, `u16`, `i64`, and `u64`. Boolean literals are `(bool true)` and 
 
 ## Integers and booleans
 
-In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
+Typed numeric operators use `type.operation`, with hyphens inside compound
+operation names. In `(i32.add left right)`, the prefix selects the exact
+operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 
 | Operation | Both stages | Stage 2 additions |
 | --- | --- | --- |
-| Wrapping addition | `i32.add.wrapping`, `u32.add.wrapping` | `i16.add.wrapping`, `u16.add.wrapping`, `i64.add.wrapping`, `u64.add.wrapping` |
-| Wrapping subtraction | `i32.sub.wrapping`, `u32.sub.wrapping` | `i16.sub.wrapping`, `u16.sub.wrapping`, `i64.sub.wrapping` |
-| Wrapping multiplication | | `i32.mul.wrapping`, `i64.mul.wrapping` |
+| Wrapping addition | `i32.add`, `u32.add` | `i16.add`, `u16.add`, `i64.add`, `u64.add` |
+| Wrapping subtraction | `i32.sub`, `u32.sub` | `i16.sub`, `u16.sub`, `i64.sub` |
+| Wrapping multiplication | | `i32.mul`, `i64.mul` |
 | Division and remainder | | `i32.div`, `i32.rem` |
 | Equality | `u8.eq`, `i32.eq`, `u32.eq` | All integer widths and `(int.eq Type left right)` |
 | Ordering | `u8.lt`, `i32.lt`, `u32.lt` | `lt`, `le`, `gt`, and `ge` at all integer widths |
 | Compare with zero | | `eqz`, `ltz`, `lez`, `gtz`, and `gez` at all integer widths |
-| Negated comparison | | Insert `.not.` before an integer predicate, as in `u32.not.eq`, `i32.not.ltz`, or `int.not.eq` |
+| Negated comparison | | Prefix the predicate with `not-`, as in `u32.not-eq`, `i32.not-ltz`, or `int.not-eq` |
 | AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | `i32.and`, `i32.or`, `u64.and`, `u64.or`, `u64.xor`, `u64.not` |
 | Left and right shift | `u32.shl`, `u32.shr` | `i32.shl`, `i32.shr`, `u64.shl`, `u64.shr` |
 | Rotate right | | `u64.rotr` |
@@ -32,7 +34,7 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 - Comparisons return `bool` and evaluate each written operand once, from
   left to right. A zero predicate compares with zero of the selected type,
   including when the result is fixed by unsigned ordering. `int.eq` and
-  `int.not.eq` also accept a selected native integer alias as their exact
+  `int.not-eq` also accept a selected native integer alias as their exact
   type. `bool.and` and `bool.or` short-circuit.
 - A shift takes an `i32` count. Counts outside `[0, width)` trap. Left shifts
   keep the low bits of the declared width. Right shifts extend the sign for
@@ -45,7 +47,7 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 - `(int.convert Type value)` converts a fitting integer and traps on an
   out-of-range value. Stage 2 also supports conversions to and from native
   integer aliases. The seed accepts `(i32.from-u8 byte)` as well.
-- Stage 2 also accepts typed checked forms such as `(u8.from.u32 value)`.
+- Stage 2 also accepts typed checked forms such as `(u8.from-u32 value)`.
   The operand must have the exact source type named in the tag.
 - `(T.fits value)` returns whether an integer fits the built-in integer type
   `T`. Stage 2 evaluates the input once.
@@ -55,8 +57,8 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
   return `true` and store a representable result. Overflow or a zero
   divisor returns `false` and preserves the destination. Dividing a signed
   minimum by `-1` fails. Its remainder by `-1` succeeds with zero.
-- Stage 2 integer byte conversions use `T.to.le-bytes`, `T.to.be-bytes`,
-  `T.from.le-bytes`, and `T.from.be-bytes`. They use fixed-width
+- Stage 2 integer byte conversions use `T.to-le-bytes`, `T.to-be-bytes`,
+  `T.from-le-bytes`, and `T.from-be-bytes`. They use fixed-width
   two's-complement encodings for signed types. Encoding produces a fixed byte
   array, and decoding requires a shared byte view of exactly that width.
 
