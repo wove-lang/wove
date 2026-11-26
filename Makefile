@@ -38,6 +38,7 @@ SOURCE_MODULE_READER := stage-2/source/module.wove stage-2/source/target.wove st
 SOURCE_TYPE_MODULE := stage-2/source/types.wove
 TEST_DISCOVERY_MODULE := stage-2/scalar/tests.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
+SOURCE_EXPECTATIONS := stage-2/source/expectations.wove
 SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/owned.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_markers.wove stage-2/source/c_names.wove stage-2/source/c_formals.wove stage-2/source/c_scope.wove stage-2/source/tree_copy.wove stage-2/source/c_arguments.wove stage-2/source/c_owners.wove stage-2/source/c_records.wove stage-2/source/c_snapshots.wove
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_STANDARD_MODULE := stage-2/c/standard.wove
@@ -174,7 +175,7 @@ test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-ha
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) $(PROCESS_MODULES) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
-		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv tests/stage-2/fixed_record_arrays/cases.tsv tests/stage-2/scalar_refs/cases.tsv tests/stage-2/value_if/cases.tsv tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
+		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv tests/stage-2/expectations/cases.tsv tests/stage-2/fixed_record_arrays/cases.tsv tests/stage-2/scalar_refs/cases.tsv tests/stage-2/value_if/cases.tsv tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
 		tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \
 		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_arrays/cases.tsv tests/stage-2/numeric_arrays/cases.tsv tests/stage-2/native_dirent/cases.tsv tests/stage-2/native_handle_out/cases.tsv \
 		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_rows/cases.tsv tests/stage-2/native_vectors/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
@@ -293,7 +294,7 @@ test: stage-1 test-stage-2 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/
 
 # Track the imports active in each seed root.
 $(STAGE1)/wovec.c: $(COMPILER_ROOT) $(BOOTSTRAP_DRIVER_SOURCES) $(GRAPH_COMPILER_SOURCES) $(CLI_SOURCES) $(SEED)
-$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(GRAPH_COMPILER_SOURCES) $(SEED)
+$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(GRAPH_COMPILER_SOURCES) $(SEED)
 
 # Replace the generated C only after the seed succeeds.
 $(STAGE1)/wovec.c $(SOURCE_PROBE_C):
@@ -459,7 +460,7 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
-REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) $(BOOTSTRAP_DRIVER_SOURCES) $(BOOTSTRAP_RUNTIME) \
+REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) $(BOOTSTRAP_DRIVER_SOURCES) $(BOOTSTRAP_RUNTIME) \
 	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
 	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \

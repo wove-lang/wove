@@ -31,8 +31,9 @@
 #define target_os wv_seed_fn_100
 #define target_arch wv_seed_fn_101
 #define inspect_callers wv_seed_fn_827
-#define run_scalar_graph wv_seed_fn_843
-#define discover_graph_tests wv_seed_fn_851
+#define run_scalar_graph wv_seed_fn_853
+#define discover_graph_tests wv_seed_fn_861
+#define inspect_graph_expectations wv_seed_fn_841
 
 typedef wv_seed_record_1 Token;
 typedef wv_seed_record_2 SourceDiagnostic;
@@ -55,9 +56,12 @@ typedef wv_seed_record_32 GraphResult;
 typedef wv_seed_record_66 CallSite;
 typedef wv_seed_record_38 SuppliedFile;
 typedef wv_seed_record_75 CallerInspection;
-typedef wv_seed_record_77 GraphOutput;
-typedef wv_seed_record_79 DiscoveredTest;
-typedef wv_seed_record_80 TestDiscovery;
+typedef wv_seed_record_81 GraphOutput;
+typedef wv_seed_record_83 DiscoveredTest;
+typedef wv_seed_record_84 TestDiscovery;
+typedef wv_seed_record_77 ExpectationLink;
+typedef wv_seed_record_78 ExpectationResult;
+typedef wv_seed_record_79 ExpectationQuery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
@@ -985,13 +989,51 @@ static int finish_tests(wvrt_slice arena, wvrt_slice supplied, wvrt_slice module
 	return status;
 }
 
-// Resolve a supplied graph before exposing bindings, compiled C, callers, or tests.
+// Expose each original expectation link with its attachment and token coordinates.
+static int finish_expectations(wvrt_slice arena, wvrt_slice supplied, wvrt_slice modules, GraphResult graph,
+		ExpectationQuery query, const char *key, int32_t capacity) {
+	const wvrt_location site = {__FILE__, __LINE__, 1};
+	wvrt_array *storage = wvrt_array_new(capacity, sizeof(ExpectationLink), _Alignof(ExpectationLink), site);
+	const ExpectationResult result = inspect_graph_expectations(arena, supplied, modules, graph, query,
+		(wvrt_slice){key, (int32_t)strlen(key), sizeof(uint8_t)},
+		(wvrt_mut_slice){storage->wvrt_items, capacity, sizeof(ExpectationLink)});
+	const SuppliedFile *files = supplied.wvrt_items;
+	const uint8_t *bytes = arena.wvrt_items;
+	int fixture_status = EXIT_FAILURE;
+	// Print diagnostics in the defining file's original coordinate space.
+	if (result.wv_field_4 != 0) {
+		write_graph_error(arena, files, result.wv_field_4, result.wv_field_1, result.wv_field_2, result.wv_field_3, -1, -1);
+	} else {
+		printf("ok %" PRId32 "\n", result.wv_field_0);
+		const ExpectationLink *links = storage->wvrt_items;
+		// Keep the original token delimiters and any escapes in the displayed link.
+		for (int32_t index = 0; index < result.wv_field_0; ++index) {
+			const ExpectationLink link = links[index];
+			const uint8_t *source = bytes + files[link.wv_field_0].wv_field_3;
+			printf("expectation %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32
+					" %" PRId32 " %" PRId32 " %s %.*s ",
+				link.wv_field_0, link.wv_field_1, link.wv_field_2, link.wv_field_3, link.wv_field_4, link.wv_field_5,
+				link.wv_field_6, link.wv_field_7, link.wv_field_8 == 1 ? "issue" : "test",
+				(int)(link.wv_field_3 - link.wv_field_2), (const char *)source + link.wv_field_2);
+			fwrite(source + link.wv_field_6, 1, (size_t)(link.wv_field_7 - link.wv_field_6), stdout);
+			putchar('\n');
+		}
+		fixture_status = ferror(stdout) ? EXIT_FAILURE : EXIT_SUCCESS;
+	}
+	wvrt_array_drop(storage);
+	return fixture_status;
+}
+
+// Resolve a supplied graph before exposing bindings, compiled C, or inspection rows.
 static int graph_mode(int argc, char **argv, SelectionContext context) {
 	const bool private_helpers = strcmp(argv[1], "--emit-private-graph") == 0;
 	const bool emit = private_helpers || strcmp(argv[1], "--emit-graph") == 0;
 	const bool inspect = strcmp(argv[1], "--graph-callers") == 0;
 	const bool tests = strcmp(argv[1], "--graph-tests") == 0;
-	const int first_file = inspect ? 7 : (emit || tests) ? 5 : 4;
+	const bool expect_name = strcmp(argv[1], "--graph-expect") == 0;
+	const bool expect_link = strcmp(argv[1], "--graph-expect-link") == 0;
+	const bool expectations = expect_name || expect_link;
+	const int first_file = (inspect || expectations) ? 7 : (emit || tests) ? 5 : 4;
 	int32_t entry;
 	int32_t capacity;
 	int32_t output = 0;
@@ -999,13 +1041,16 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 	// The fixture supplies graph scratch capacity and an independent result limit for each consumer.
 	if (argc < first_file + 3 || (argc - first_file) % 3 != 0 ||
 			!read_offset(argv[2], &entry) || !read_offset(argv[3], &capacity) ||
-			((emit || inspect || tests) && !read_offset(argv[first_file - 1], &output)) ||
-			(inspect && !read_offset(argv[4], &query))) {
+			((emit || inspect || tests || expectations) && !read_offset(argv[first_file - 1], &output)) ||
+			((inspect || expect_name) && !read_offset(argv[4], &query)) ||
+			(expect_link && strcmp(argv[4], "issue") != 0 && strcmp(argv[4], "test") != 0)) {
 		fputs("usage: source_scan --graph ENTRY SCRATCH (IDENTITY PATH FILE)...\n"
 			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --emit-private-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n"
-			"       source_scan --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n", stderr);
+			"       source_scan --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n"
+			"       source_scan --graph-expect ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n"
+			"       source_scan --graph-expect-link ENTRY SCRATCH {issue|test} LINK CAPACITY (IDENTITY PATH FILE)...\n", stderr);
 		return EXIT_FAILURE;
 	}
 	int first_asset = first_file;
@@ -1049,6 +1094,12 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 	} else if (tests) {
 		status = finish_tests(arena, supplied,
 			(wvrt_slice){modules->wvrt_items, module_capacity, sizeof(GraphModule)}, result, output);
+	// Keep expectation inspection independent of scalar lowering and its call-site tables.
+	} else if (expectations) {
+		const uint32_t kind = expect_name ? 0 : strcmp(argv[4], "issue") == 0 ? 1 : 2;
+		status = finish_expectations(arena, supplied,
+			(wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)}, result,
+			(ExpectationQuery){kind, query}, argv[5], output);
 	} else if (emit || inspect) {
 		status = finish_graph(arena, supplied, (wvrt_slice){asset_storage->wvrt_items, asset_count, sizeof(SuppliedFile)},
 			(wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},
@@ -1184,7 +1235,8 @@ static int probe_command(int argc, char **argv) {
 	}
 	const bool graph = strcmp(argv[1], "--graph") == 0 || strcmp(argv[1], "--emit-graph") == 0 ||
 		strcmp(argv[1], "--emit-private-graph") == 0 ||
-		strcmp(argv[1], "--graph-callers") == 0 || strcmp(argv[1], "--graph-tests") == 0;
+		strcmp(argv[1], "--graph-callers") == 0 || strcmp(argv[1], "--graph-tests") == 0 ||
+		strcmp(argv[1], "--graph-expect") == 0 || strcmp(argv[1], "--graph-expect-link") == 0;
 	return graph ? graph_mode(argc, argv, context) : source_mode(argc, argv, context);
 }
 

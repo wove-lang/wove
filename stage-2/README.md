@@ -1223,6 +1223,25 @@ gives the output count, defining file identity, and file-relative span.
 The [scalar graph fixtures](../tests/stage-2/scalar_graphs.tsv) check the
 native result, defining symbols, repeated imports, and original call spans.
 
+## Expectation inspection
+
+Use `--graph-expect ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...`
+with the supplied-graph probe to read `:expect` links attached to a
+selected declaration by its declared name. `FILE` selects a virtual path
+row and may identify an alias of the same source file. Use
+`--graph-expect-link ENTRY SCRATCH issue LINK CAPACITY (IDENTITY PATH FILE)...`
+or replace `issue` with `test` to find the owners of an exact link value.
+A compact `gh:` reference and its full URL are distinct link spellings.
+
+Each link row gives the canonical file identity, file-local declaration
+row, and half-open byte spans for the name, attached `:expect` form, and
+link token. The row also reports the kind, name, and original token text.
+The reverse query visits active files in supplied table order and
+declarations in source order. A repeated link retains every occurrence.
+Capacity counts link rows. Metadata inside a body does not attach to its
+enclosing declaration. The [expectation fixtures](../tests/stage-2/expectations/cases.tsv)
+cover both query directions and original spans across files.
+
 ## Inline test discovery
 
 Use `--mode test --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...`
