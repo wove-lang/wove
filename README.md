@@ -18,7 +18,7 @@ agents. Its self-hosted compiler emits C.
 
 ## Language
 
-[Built-in quick reference](LANGUAGE.md) · [Stage 2 reference](stage-2/README.md)
+[Wove language reference](LANGUAGE.md)
 
 License options are [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE).
 

@@ -3,38 +3,127 @@ Copyright (c) 2026 wove contributors
 SPDX-License-Identifier: MIT OR Apache-2.0
 -->
 
-# Wove builtin quick reference
+# Wove language reference
 
-Spellings are case-sensitive. Decimal integer atoms carry their type, as in
-`-3i32` and `42u32`. The typed lists `(i32 -3)` and `(u32 42)` are
-equivalent. Both stages support `i8`, `u8`, `i32`, and `u32`. Stage 2 also
-supports `i16`, `u16`, `i64`, and `u64`. Boolean literals are `(bool true)` and `(bool false)`.
+## First program
+
+Wove source uses tagged forms. A file contains one named `module`. Each
+Wove function definition has a name and exactly one `params`, `returns`, and `body` form.
+Spell `(params)` for a zero-argument helper. Tags and names are case-sensitive.
+
+```lisp
+(module example
+    (struct ArgSpan (fields (start i32) (end i32)))
+
+    (fn twice (params (value i32)) (returns i32)
+        (body (return (i32.add (local value) (local value)))))
+
+    (fn main (params (bytes (shared-array u8)) (args (shared-array ArgSpan))) (returns i32)
+        (body (return (call twice 21i32)))))
+```
+
+Save this as `example.wove`, then build and run it.
+
+```sh
+wovec bin example.wove -o ./example
+./example
+```
+
+The program exits with status 42. From a compiler checkout, use
+`build/wovec` if `wovec` is outside your PATH.
+
+### Program entry
+
+The entry module's `main` takes a `(shared-array u8)` and a
+`(shared-array ArgSpan)` and returns `i32`. The span record can have any
+name and must contain `(start i32)` followed by `(end i32)`. The byte view
+concatenates the user arguments without terminators. Each span is
+half-open and indexes that view. The executable name is omitted. Empty
+arguments have equal endpoints, and no user arguments give two empty views.
+
+## Modules, imports, and metadata
+
+Select names from another Wove file explicitly. A relative path resolves
+from the importing file.
+
+```lisp
+(use wove-file "./scanner.wove"
+    (only scan (as scan_next next) (type Token) (value alphabet)))
+```
+
+A bare name selects a function or immutable value, preferring the
+function if both use the same name. `(type (as Token ScanToken))` and
+`(value (as alphabet digits))` rename explicit type and value selections.
+An empty `(only)` visits the provider without binding a name. Aliases
+retain the original declaration's identity and storage.
+
+A metadata entry uses a colon-prefixed tag such as `(:doc "text")`.
+Module and module-level `let` metadata follows the name as a contiguous
+prefix. Function metadata can appear anywhere after the name among its
+tagged fields. On other ordinary forms, use a contiguous prefix directly
+after the tag. A C bridge's prefix follows its header.
+
+```lisp
+(:expect (tests "examples/scan.wove") (issues "gh:owner/repo:42"))
+```
+
+The `:expect` groups are optional. Test paths are relative to `tests/`,
+and issues can also use full URLs. Use `(:pragma (cfg (os "linux")))`
+for a platform-selected declaration. Multiple `cfg` predicates must all
+pass. `(not predicate)` negates a selection. A `(decls ...)` group can
+apply selection to several declarations. A `disabled` group keeps its
+metadata and source forms while the compiler skips its contents.
+
+A function marked `(:pragma (test))` uses `(params)` and `(returns void)`.
+Test-mode selection admits test functions and `(cfg test)` helpers. Ordinary
+builds exclude them.
+
+## Literals
+
+Booleans are `(bool true)` and `(bool false)`. Give integer values an exact
+type with a suffix (`-3i32`, `1_000u32`, `0xabcd_ef00u64`, `0b1100_0011u8`)
+or a type head (`(i32 -3)`). Place a separator between digits of the
+selected radix. Signed hexadecimal and binary values put the minus before
+the radix prefix and must fit the named type.
+
+A single-quoted character such as `','` or `'\n'` is an `i32` byte value.
+Use printable ASCII or an escape. The escapes are `\0`, `\a`, `\b`,
+`\t`, `\n`, `\v`, `\f`, `\r`, `\'`, `\\`, and `\xNN` with two
+hexadecimal digits. Use `(u8 '\n')` or `(int.convert u8 '\n')` to obtain
+a `u8`.
+
+Double-quoted strings use JSON escapes. A single backtick delimits a raw,
+possibly multiline string. Inside a raw string, double a backtick to
+include it. Other characters are literal, and CRLF and CR become LF in
+the decoded value.
 
 ## Integers and booleans
 
-Typed numeric operators use `type.operation`, with hyphens inside compound
-operation names. In `(i32.add left right)`, the prefix selects the exact
-operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
-
-| Operation | Both stages | Stage 2 additions |
+| Width | Signed | Unsigned |
 | --- | --- | --- |
-| Wrapping addition | `i32.add`, `u32.add` | All integer widths |
-| Wrapping subtraction | `i32.sub`, `u32.sub` | All integer widths |
-| Wrapping increment and decrement | `i32.inc`, `i32.dec`, `u32.inc`, `u32.dec` | All integer widths |
-| Wrapping multiplication | | All integer widths |
-| Checked arithmetic | | `add-checked`, `sub-checked`, and `mul-checked` at all integer widths |
-| Division and remainder | | `div` and `rem` at all integer widths |
-| Recoverable arithmetic | | `try_add`, `try_sub`, `try_mul`, `try_div`, and `try_rem` at all integer widths |
-| Checked conversion and range test | Selected `T.from-S` pairs | `T.from-S` and `T.fits` for all integer type pairs |
-| Endian byte conversions | | `to-le-bytes`, `to-be-bytes`, `from-le-bytes`, and `from-be-bytes` at all integer widths |
-| Equality | `u8.eq`, `i32.eq`, `u32.eq` | All integer widths and `(int.eq Type left right)` |
-| Ordering | `u8.lt`, `i32.lt`, `u32.lt` | `lt`, `le`, `gt`, and `ge` at all integer widths |
-| Compare with zero | | `eqz`, `ltz`, `lez`, `gtz`, and `gez` at all integer widths |
-| Negated comparison | | Prefix the predicate with `not-`, as in `u32.not-eq`, `i32.not-ltz`, or `int.not-eq` |
-| AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | All integer widths |
-| Left and right shift | `u32.shl`, `u32.shr` | All integer widths |
-| Rotate left and right | | `rotl` and `rotr` at all integer widths |
-| Boolean logic | `bool.and`, `bool.or`, `bool.not` | |
+| 8 bits | `i8` | `u8` |
+| 16 bits | `i16` | `u16` |
+| 32 bits | `i32` | `u32` |
+| 64 bits | `i64` | `u64` |
+
+Typed numeric operators use `type.operation`. In `(i32.add left right)`,
+`i32` specifies the exact operands and result. The same integer operators
+are available at every listed width.
+
+| Operation | Words |
+| --- | --- |
+| Wrapping arithmetic | `add`, `sub`, `mul`, `inc`, `dec` |
+| Checked arithmetic | `add-checked`, `sub-checked`, `mul-checked` |
+| Division and remainder | `div`, `rem` |
+| Recoverable arithmetic | `try_add`, `try_sub`, `try_mul`, `try_div`, `try_rem` |
+| Comparisons | `eq`, `lt`, `le`, `gt`, `ge` |
+| Compare with zero | `eqz`, `ltz`, `lez`, `gtz`, `gez` |
+| Negated comparisons | Prefix any predicate with `not-`, as in `u32.not-eq` or `i32.not-ltz` |
+| Bitwise operations | `and`, `or`, `xor`, `not` |
+| Shifts and rotations | `shl`, `shr`, `rotl`, `rotr` |
+| Range and checked conversion | `T.fits`, `T.from-S`, `int.convert` |
+| Endian byte conversions | `to-le-bytes`, `to-be-bytes`, `from-le-bytes`, `from-be-bytes` |
+| Boolean logic | `bool.and`, `bool.or`, `bool.not` |
 
 - Integer arithmetic evaluates each written operand once, from left to right.
   Their types and the result type must match the type named in the tag.
@@ -64,23 +153,60 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
   the dividend. Both operations trap on zero divisors. Dividing a signed
   minimum by `-1` traps, and its remainder by `-1` is zero. Traps point to
   the full operation span.
-- `(int.convert Type value)` converts a fitting integer and traps on an
-  out-of-range value. Stage 2 also supports conversions to and from native
-  integer aliases. The seed accepts `(i32.from-u8 byte)` as well.
-- Stage 2 also accepts typed checked forms such as `(u8.from-u32 value)`.
-  The operand must have the exact source type named in the tag.
-- `(T.fits value)` returns whether an integer fits the built-in integer type
-  `T`. Stage 2 evaluates the input once.
+- `(int.convert Type value)` converts a fitting integer, including native
+  integer aliases, and traps on an out-of-range value. A typed checked form,
+  such as `(u8.from-u32 value)`, also requires the operand to have the exact
+  source type named in the tag.
+- `(T.fits value)` evaluates the input once and returns whether the integer
+  fits the built-in integer type `T`.
 - `(T.try_add left right (borrow-mut place))` and the corresponding
   `try_sub`, `try_mul`, `try_div`, and `try_rem` forms evaluate exact
   `T` values left to right, then borrow the writable `T` place. They
   return `true` and store a representable result. Overflow or a zero
   divisor returns `false` and preserves the destination. Dividing a signed
   minimum by `-1` fails. Its remainder by `-1` succeeds with zero.
-- Stage 2 integer byte conversions use `T.to-le-bytes`, `T.to-be-bytes`,
+- Integer byte conversions use `T.to-le-bytes`, `T.to-be-bytes`,
   `T.from-le-bytes`, and `T.from-be-bytes`. They use fixed-width
   two's-complement encodings for signed types. Encoding produces a fixed byte
   array, and decoding requires a shared byte view of exactly that width.
+
+## Floating point
+
+Wove uses native C `_Float16`, `float`, `double`, and `long double` for
+`f16`, `f32`, `f64`, and `f80` in locals, function signatures, struct fields,
+and C bridges. `f128` uses the Clang target's native binary128 type. Write a
+typed decimal as `(f16 -2.5)` or `-2.5f16`. A decimal needs digits before the
+point and in each written fraction or exponent. Clang rounds the original
+digits at the written width and preserves a negative sign on zero.
+
+Native `cc` and `bin` check the format using the selected Clang and its target
+options when the checked program uses `f16`, `f80`, or `f128`. The `f80`
+format requires a 64-bit `long double` significand and uses the target's
+native C size and alignment. For `f128`, the compiler uses `long double`
+with a 113-bit significand if available and otherwise uses Clang's
+`__float128` extension. Decimal literals use the matching C suffix. On
+unsupported targets the compiler reports a source diagnostic before emitting C.
+
+Use width-qualified `add`, `sub`, `mul`, `div`, and unary `neg` for native
+floating arithmetic. The `eq`, `not-eq`, `lt`, `le`, `gt`, and `ge` operators
+take two values of the named width and return `bool`. Eager operands evaluate
+once from left to right.
+
+Use `(f32.from-bits word)` and `(f32.to-bits value)` to copy the representation
+between `f32` and `u32`. The matching `f16` and `f64` forms use `u16` and `u64`,
+respectively. These operations retain signed zero and NaN payloads. For example, an STL coordinate read from
+little-endian bytes can widen with `(f64.from-f32 (f32.from-bits (local word)))`.
+
+The same `<destination>.from-<source>` syntax handles checked numeric conversions
+involving floats. Floating-to-integer conversions truncate toward zero and
+trap at the conversion span if the result cannot fit, including for NaN and
+infinity. `f32.from-f64` keeps native rounding, subnormals, and nonfinite
+values, and traps on finite values outside the binary32 range. Conversions
+to `f16` round at binary16 precision, preserve signed zero and nonfinite
+values, and trap on finite values outside `[-65504, 65504]`. Conversions
+from `f80` and `f128` check the original value before rounding directly
+to the destination format or truncating to an integer. Both formats
+represent all signed and unsigned integers of up to 64 bits exactly.
 
 ## Values and storage
 
@@ -89,21 +215,23 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 | `(local name)` | Read a local, parameter, or visible immutable module binding. |
 | `(call name args...)` | Call a visible function. Arguments evaluate left to right. |
 | `(set (local name) value)` | Replace a mutable local with a value of its exact type. |
-| `(set (struct.get place field) value)` | Stage 2. Replace an exact field through a mutable Wove record local or reference, including along a nested field path. |
+| `(set (struct.get place field) value)` | Replace an exact field through a mutable Wove record local or reference, including along a nested field path. |
 | `(struct.new Type (field value) ...)` | Construct a record from typed field values in written order. |
 | `(struct.get value field)` | Read a field with its declared type. |
-| `(array.alloc T count)` | Allocate an owned, zeroed buffer. Stage 2 supports numeric and copyable record elements. `count` is `i32`. |
-| `(move (local buffer))` | Transfer ownership of a local buffer or, in Stage 2, hand a present native owner to a consuming C call. |
-| `(owner.is-null (local file))` | Stage 2. Test whether a native owner holds a missing handle. |
-| `(embed "./payload.bin")` | Stage 2. Initialize a fresh owned byte buffer from a file relative to the defining module. |
+| `(array.alloc T count)` | Allocate an owned, zeroed buffer with an `i32` element count. |
+| `(move (local buffer))` | Transfer ownership of a local buffer or hand a present native owner to a consuming C call. |
+| `(owner.is-null (local file))` | Test whether a native owner holds a missing handle. |
 
-A quoted string in an immutable module binding is a `(shared-array u8)` view.
-Its length counts the decoded bytes. A Stage 2 immutable module binding
-can also declare an inline table with `array.new` or `array.repeat`.
+A module-level `let` can hold an immutable scalar, a string, or an inline
+table. A quoted string gives a `(shared-array u8)` view whose length counts
+the decoded bytes. Declare an inline table with `array.new` or `array.repeat`.
 Its elements are exact scalar literals or constant constructors of a
 named Wove record. `array.load` can read the table directly.
 
-Stage 2 records can declare explicit type and `i32` constant parameters.
+### Generics
+
+Records and functions can declare explicit type, `i32` constant, and
+`bool` constant parameters.
 
 ```lisp
 (struct Block
@@ -117,12 +245,11 @@ Stage 2 records can declare explicit type and `i32` constant parameters.
 In a record template, a type parameter can name a copyable field or fixed
 array element, and an `i32` constant parameter can set a fixed array extent.
 Apply the template explicitly in type positions and as the first operand of
-`struct.new`. Each argument must match its declared kind. Constant arguments
-are exactly typed `i32` literals. A specialization is identified by the
-defining record and its normalized arguments. Different arguments define
-distinct types even when their layouts match.
+`struct.new`. Each argument must match its declared kind. A specialization
+is identified by its defining record and normalized arguments. Different
+arguments define distinct types even when their layouts match.
 
-Stage 2 functions can also have explicit generic parameters. Place the
+Functions can also have explicit generic parameters. Place the
 `generic` list before the ordinary signature fields and specialize the
 function at its call site.
 
@@ -144,22 +271,65 @@ specialization. Equal arguments to the same defining declaration share
 one specialization. Boolean arguments distinguish nominal record types
 even when their fields match.
 
-In Stage 2, `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
+### Records and ownership
+
+A struct defines a nominal type. Copyable fields can hold scalars,
+fixed arrays, and other records. `struct.new` supplies each field once.
+Fields evaluate in the written order and must match their declared types.
+
+`(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
 A `(mut-ref T)` parameter can also borrow a writable place of an exact
 built-in scalar type. In the callee, `(local name)` reads the scalar and
 `(set (local name) value)` updates the caller's storage.
 
-In Stage 2, `(if condition (then value) (else value))` can be used as a
-value. The condition must be `bool`, and both arms must contain exactly one
-expression of the same type. The condition runs once and only the selected arm
-runs. A conditional record or fixed array supports direct reads. A value arm
-can produce a fresh owner. Transferring an existing binding still follows the
-usual move rules.
+A function with `(returns void)` can use `(return)` or finish its body.
+Call it as a statement. A value-returning function must return its declared
+type on every path. `let` creates a binding and `let-mut` makes it writable.
+A local name comes into scope after its initializer.
+
+A record with an owning field is itself an owner. Move a whole local
+record with `(move (local grid))` or one field with
+`(move (struct.get (local grid) cells))`. Sibling fields survive a field
+move. A whole-record move or borrow requires all owning fields to be
+present. Remaining owners drop in reverse declaration order on scope exit. A
+return evaluates its result before cleanup.
+
+An `(embed "./payload.bin")` initializer resolves relative to its defining
+module and gives a fresh owner with the file's original bytes on each
+evaluation. The compiled program carries the payload.
+
+## Control flow
+
+Statement `(if condition (then ...) (else ...))` takes a `bool` and runs
+only the chosen block. Omit `else` to fall through on false.
+`(while condition (body ...))` checks a `bool` before each iteration and
+starts a fresh body scope each time.
+
+A value `(if condition (then value) (else value))` requires one
+expression of the same exact type in each arm. It evaluates only the
+chosen expression. An arm can produce a fresh owner or move an existing one.
+
+| Iteration | Form |
+| --- | --- |
+| Half-open range | `(for (bind i) (range start end) (body ...))` |
+| Read array elements | `(for (bind item) (borrow-shared (local data)) (body ...))` |
+| Write array elements | `(for (bind item) (borrow-mut (local data)) (body ...))` |
+| Consume owned byte rows | `(for (bind item) (move (local rows)) (body ...))` |
+
+Range bounds have the same type, `i32` or `u64`. They evaluate once, from
+left to right. An array loop can use `(bind index item)` for a zero-based
+`i32` index relative to its view. Shared iteration copies each element.
+Mutable iteration gives a writable place. Consuming iteration transfers
+each row to the loop body.
+
+`(break)` and `(continue)` act on the innermost loop. They release owners
+in the scopes they leave. Exiting consuming iteration also releases any
+unvisited rows.
 
 ## Enums
 
-Stage 2 uses `(enum Status (variants (Ok) (IoError) (Invalid)))` to
+Use `(enum Status (variants (Ok) (IoError) (Invalid)))` to
 declare a nominal, copyable type. `(enum.new Status Ok)` constructs one
 variant of that type. `(match value (case Ok statements...) ...)`
 evaluates its subject once and runs only the selected case in its own
@@ -199,14 +369,15 @@ expression supplies the result.
 | `(array.store data index value)` | Write an exact element value through a mutable view or into writable array storage. |
 | `(borrow-shared (local data))` | Lend read access to the whole array for a call. |
 | `(borrow-mut (local data))` | Lend exclusive write access to the whole array for a call. |
-| `(borrow-shared (array.range (local data) start end))` | Lend a half-open byte range of a named owner or view. |
-| `(borrow-mut (array.range (local data) start end))` | Lend a half-open byte range from a mutable owner or exclusive view. |
+| `(borrow-shared (array.range (local data) start end))` | Lend a half-open range of a named owner or view. |
+| `(borrow-mut (array.range (local data) start end))` | Lend a half-open range from a mutable owner or exclusive view. |
 
-Indexes and range endpoints are exact `i32` values. Received views count
-and index elements relative to their own bounds. Bounds violations trap.
+Indexes and range endpoints are exact `i32` values. The compiler checks
+`0 <= start <= end <= length` for a range. The view counts and indexes
+elements relative to its own bounds. Equal endpoints give an empty view.
 A call loan lasts through later arguments and the call.
 
-Stage 2 growable arrays use a named owner or a field of a named place
+Growable arrays use a named owner or a field of a named place
 as their receiver. Mutation requires writable storage with no overlapping
 live loan.
 
@@ -230,8 +401,12 @@ transfers the original byte owner to the vector. Removing a populated
 row transfers it to the result, and removing an unfilled slot traps.
 Truncation drops the owners in the removed suffix immediately.
 
+`array.alloc` supports numeric elements and copyable records. An
+`(owned-array (owned-array u8))` can also hold owned byte rows. Fill a
+slot with `array.store` and a fresh or moved owner. Replacing a slot drops
+its previous row.
 
-Stage 2 fixed arrays keep their elements inline and copy by value. Use
+Fixed arrays keep their elements inline and copy by value. Use
 `(array T extent)` for a builtin scalar or copyable Wove record `T`.
 The extent is a nonnegative decimal or an immutable module integer.
 
@@ -242,13 +417,112 @@ The extent is a nonnegative decimal or an immutable module integer.
 - `(array.store (struct.get (local state) block) index value)` writes into
   an inline array field of a writable record.
 
-Stage 2 can borrow fixed integer arrays as matching slices. Supported element
-types are `i8`, `u8`, `i32`, `u32`, and `u64`.
-A fixed integer array field can also lend a matching slice
-with `(borrow-shared (struct.get (local state) block))` or the mutable form.
-Sibling field paths can lend independently. A whole-record loan overlaps
-all of its fields.
-A Stage 2 function with result type `(owned-array u8)` can return a moved
-local with `(return (move (local buffer)))` or return a fresh owned call result.
+A fixed integer array or record field can lend a matching `shared-array` or
+`mut-array` view. Sibling field paths can lend independently. A whole-record
+loan overlaps all of its fields. To borrow a range from a fixed array, first
+bind a view of the whole array.
 
-[Seed reference](stage-1/README.md) · [Stage 2 reference](stage-2/README.md)
+`(let view (borrow-shared (local data)))` binds a view for the enclosing
+block. A shared loan permits source reads. An exclusive loan also excludes
+reads through the source. Mutable views can write their underlying elements.
+Reborrows follow the same rules for their immediate parent view.
+
+A parameter can require an exact count, as in `(shared-array u8 4)`. An
+argument whose length is unknown at compile time is checked before later
+arguments run. The usual range bounds still apply.
+
+Return a fresh owner from a call or transfer an existing owner with
+`(return (move (local buffer)))`. A move ends the original binding's
+ownership. Completed call borrows allow a move.
+
+A Wove parameter such as `(params (job (owned-array u8)))` takes ownership
+of an array of the exact element type. Pass a fresh owner or move a named
+owner explicitly with `(move (local input))`. The callee owns the incoming
+array for its function body and releases it at exit unless it transfers
+ownership again.
+
+## Joined workers
+
+`(worker.spawn-join widen (move (local input)))` calls the named Wove
+function `widen` on a fresh thread and waits for its result. The handler
+takes one owned array and returns an owned array through a normal Wove
+return. Its input and output element types may differ. Arrays that contain
+borrowed or native data cannot cross the worker boundary. After a
+successful join, the caller owns the returned array. Thread creation and
+join failures report the source span of the worker expression. When
+linking emitted C directly on a POSIX host, pass `-pthread`.
+
+## C interop
+
+Use a C header's bundled declarations or provide Wove signatures in
+`(bridge c-header "<header.h>" ...)`. A project header can use a quoted
+path such as `"./project.h"`. Select functions, types, or values explicitly,
+just as with a Wove module.
+
+```lisp
+(bridge c-header "<stdlib.h>"
+    (fn absolute (params (value i32)) (returns i32) (c-name "abs")))
+(use c-header "<stdlib.h>" (only absolute))
+```
+
+A bridge function has `params` and `returns` with no body. `c-name`
+overrides the native symbol. Arguments are checked against the Wove
+signature and evaluated once from left to right. The C header verifies
+the native signature. A project bridge adds to a bundled header and can
+override an individual name. `(:pragma (bridge_replace))` selects only
+the project declarations. `(:pragma (c_optional))` requires a selected
+function to be present in the target header.
+
+Use `(type Size (c-type "size_t"))` for a native integer alias and
+`(struct Stat (c-type "struct stat") (fields (st_size Offset)))` for a
+native record view. `(struct.new Stat)` gives zero-initialized native
+storage. Pass `shared-ref` or `mut-ref` arguments with an explicit borrow.
+Bridge `const` exposes an integer constant, `let` reads a C value, and
+`let-mut` also accepts a `set` on the imported C lvalue.
+
+Attach native contracts to the relevant declaration with `:pragma`.
+
+| Directive | Contract |
+| --- | --- |
+| `(c_macro)` | Bind a C macro with an exact signature or value type. Macro arguments evaluate once. |
+| `(c_cstr parameter ...)` | Copy byte views into NUL-terminated C strings and reject embedded NUL. Mutable views copy back their original length. |
+| `(c_cstr_raw parameter ...)` | Copy all bytes, including embedded NUL, before adding a terminator. |
+| `(c_cstrs parameter ...)` | Copy shared byte rows into a null-terminated array of C-string pointers. Reject embedded NUL. |
+| `(c_bytes data count)` or `(c_bytes data size count)` | Borrow bytes after checking the requested count or product fits the view. |
+| `(c_array data count)` | Borrow an integer slice after checking its element count. Use a literal or a named integer parameter. |
+| `(c_variadic first_tail_parameter)` | Declare one typed call shape. Clang applies native promotions to the variadic arguments. |
+| `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
+| `(c_nullable parameter)` | Accept either a mutable scalar reference or literal `null` for the supported slot. |
+
+A fixed C argument such as `(const command i32 F_SETFL)` supplies the
+header constant automatically. In the Wove call, pass only the remaining
+arguments.
+
+A pointer-backed resource uses a destructor contract.
+
+```lisp
+(type (:pragma (c_owned (drop fclose))) File (c-type "FILE *"))
+```
+
+A `File` result owns the native handle. Cleanup calls the destructor once
+for each present handle. Test presence with `(owner.is-null (local file))`.
+An exact `(shared-ref File)` parameter borrows a present handle. A consuming
+parameter of type `File` takes `(move (local file))` and makes the C callee
+responsible for cleanup, including when the call reports an error.
+`(let stderr (shared-ref File))` can expose a read-only library-owned handle.
+
+Use `(c_init output)` on a mutable owner-reference parameter for C
+initializers. For pointer handles, declare a mutable local with
+`(native.empty Database)`, then lend its empty slot to C. Any nonnull output
+belongs to the local even when the call fails. For contracts declared
+with `(c_owned (drop destroy) storage)`, use `(native.alloc Actions)`.
+A successful initializer activates the object. Cleanup destroys active
+objects and releases their storage.
+
+`(c_snapshot cstr)` copies a returned C string into
+`(optional (owned-array u8))`. Add `(drop free)` to release the original,
+or `(field name)` to copy a bounded inline character array. A null
+result stays absent. After testing presence, use
+`(move (optional.unwrap (local result)))` to extract the byte owner.
+`(c_snapshot cstrs)` on a read-only native table copies it into an
+`(owned-array (owned-array u8))`.
