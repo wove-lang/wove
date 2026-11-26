@@ -540,6 +540,39 @@ releases the collected results and retires the remaining receipts before
 reporting the join span. An implicit cleanup failure reports the failing
 worker's original submission span.
 
+## Bounded worker pools
+
+`(worker.open-pool threads capacity)` takes two positive `i32` values.
+The pool starts a fixed number of reusable threads. Its capacity counts jobs
+waiting to start and reserved slots together. Running jobs free their waiting
+slots. A failed open produces an empty owner.
+
+`(worker.try-reserve (local pool))` attempts to claim one slot without waiting.
+`(worker.reserve-wait (local pool))` can wait for a queued job to start. It
+returns an empty permit when admission is closed or all capacity is held by
+unused permits. Test a pool or permit for an empty owner with `owner.is-null`.
+
+```lisp
+(let pool (worker.open-pool 4i32 8i32))
+(let permit (worker.reserve-wait (local pool)))
+(if (owner.is-null (local permit))
+    (then (return 1i32)))
+(let receipt (worker.spawn-on digest_batch (move (local permit)) (move (local batch))))
+(let results (worker.join (local receipt)))
+```
+
+Open, reserve, and submit directly into local bindings. Reserving leaves the
+job with its caller. Submission moves a valid permit before evaluating the job
+and returns a receipt of the same type as `worker.spawn` for that handler.
+Join a pooled receipt directly or move it into a matching receipt queue.
+Leaving the scope of an unused permit releases its slot.
+
+`(worker.try-close (local pool))` drains accepted jobs and joins the threads.
+It returns false while any permit is outstanding and leaves admission open.
+Leaving the scope of the pool closes admission. Existing permits can still
+submit or release their slots, and resolving the last permit then drains
+the pool. Receipts can be collected after either kind of closure.
+
 ## C interop
 
 Use a C header's bundled declarations or provide Wove signatures in
