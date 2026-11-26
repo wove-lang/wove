@@ -409,6 +409,16 @@ and the replacement is installed. A live overlapping borrow prevents
 replacement. Assigning to a moved slot fills it without dropping a value.
 Every path that reaches a subsequent use must have a live value there.
 
+An ordinary Wove function can return `(optional (owned-array u8))`.
+Use `(optional.none (owned-array u8))` for absence and
+`(optional.some value)` for a fresh or explicitly moved byte owner.
+A present empty array is distinct from absence. Forward an optional
+by returning a call or explicitly moving a local optional. Use
+`(owner.is-null (local result))` to check presence and
+`(move (optional.unwrap (local result)))` to extract the original owner.
+Unwrapping an absent value traps. Scope cleanup drops any payload
+that remains owned by the optional.
+
 On scope exit, remaining owners drop in reverse declaration order.
 A struct drops its remaining owning fields in reverse field order,
 including owners inside nested structs and arrays. A return evaluates
