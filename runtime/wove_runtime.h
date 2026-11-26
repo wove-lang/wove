@@ -392,7 +392,18 @@ typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 	wvrt_worker_receipt *wvrt_worker_spawn_record_at_span(wvrt_record_worker handler, wvrt_array *job, \
 		int32_t file, int32_t start, int32_t end); \
 	wvrt_array *wvrt_worker_spawn_join_record_at_span(wvrt_record_worker handler, wvrt_array *job, \
-		int32_t file, int32_t start, int32_t end);
+		int32_t file, int32_t start, int32_t end); \
+	wvrt_array *wvrt_worker_join_all_records_at_span(wvrt_array **queue, size_t stride, size_t alignment, \
+		size_t value_offset, void (*drop)(void *), int32_t file, int32_t start, int32_t end);
+
+// Copyable results use their normal inline C layout in the collected array.
+#define WVRT_WORKER_JOIN_RECORDS(type, queue, file, start, end) \
+	wvrt_worker_join_all_records_at_span((queue), sizeof(type), _Alignof(type), 0, NULL, (file), (start), (end))
+
+// Owning results use the same live slot and destructor as other owning record arrays.
+#define WVRT_WORKER_JOIN_OWNED_RECORDS(slot, queue, file, start, end) \
+	wvrt_worker_join_all_records_at_span((queue), sizeof(slot), _Alignof(slot), offsetof(slot, wvrt_value), \
+		slot##_drop, (file), (start), (end))
 
 // Use the ordinary record destructor through the runtime's erased drop callback.
 #define WVRT_DEFINE_WORKER_DROP(type, drop) \

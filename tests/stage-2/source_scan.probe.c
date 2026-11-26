@@ -30,10 +30,10 @@
 #define default_selection wv_seed_fn_102
 #define target_os wv_seed_fn_103
 #define target_arch wv_seed_fn_104
-#define inspect_callers wv_seed_fn_1229
-#define run_scalar_graph wv_seed_fn_1253
-#define discover_graph_tests wv_seed_fn_1262
-#define inspect_graph_expectations wv_seed_fn_1241
+#define inspect_callers wv_seed_fn_1231
+#define run_scalar_graph wv_seed_fn_1255
+#define discover_graph_tests wv_seed_fn_1264
+#define inspect_graph_expectations wv_seed_fn_1243
 
 typedef wv_seed_record_1 Token;
 typedef wv_seed_record_2 SourceDiagnostic;
