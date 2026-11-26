@@ -26,7 +26,7 @@
 	(use wove-file "../text/character.wove" (only decode_character))
 	(use wove-file "../source/extent.wove" (only normalized_extent))
 	(use wove-file "../source/literals.wove" (only integer_atom))
-	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token) (value character_token)))
+	(use wove-file "../source/scan.wove" (only is_metadata_form (type SourceNode) (type Token) (value character_token)))
 	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../source/module.wove" (only form_parts skip_disabled_siblings validate_form_metadata (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -46,11 +46,13 @@
 	(use wove-file "../source/generics.wove" (only has_specialization_head generic_i32_value is_checked_constant_operand
 		(value normalized_i32_literal) (value checked_i32_operand) (value checked_function_operand) (value checked_bool_operand)))
 	(use wove-file "./records.wove"
-		(only scope_at is_generic_template declaration_kind register_module_records register_module_record_arrays register_owned_rows order_record_layouts value_type copyable_type is_owning_record is_scoped_record read_parameter_type read_view_parameter_extent find_record record_type record_index is_record_type
+		(only scope_at is_generic_template next_layout_node is_disabled_statement is_callable_type callable_index
+			callable_layout_shape find_callable_type intern_callable_layout layout_count declaration_kind register_module_records register_module_record_arrays register_owned_rows order_record_layouts value_type copyable_type is_owning_record is_scoped_record read_parameter_type read_view_parameter_extent find_record record_type record_index is_record_type
 			find_member member_value_type read_member_operand register_static_array find_fixed_array_type fixed_array_type named_extent_site is_fixed_array is_enum_layout is_payload_enum is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type owning_array_type array_owner_element array_slot_code read_owned_array_type byte_rows_owner_type is_native_integer native_integer_type find_native_node (type ScalarRecord)
 			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target mutable_scalar_target record_receiver_type place_borrow_kind))
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
+	(use wove-file "./callable_types.wove" (only callable_type_error callable_parameter_type (type CallableShape)))
 	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
 	(use wove-file "./owners.wove" (only is_local_owner is_lexical_owner is_worker_owner owned_array_take_kind owned_field_loan_kind owned_aggregate_take_kind is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind native_handle_init_borrow_kind native_owner_declaration
@@ -68,7 +70,7 @@
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates))
 	(use wove-file "./worker.wove" (only worker_arrays))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form is_direct_call is_worker_launch (value worker_spawn_join_kind)
+		(only entry_keyword entry_at entry_form callable_keyword (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch (value worker_spawn_join_kind)
 			(value worker_spawn_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
@@ -637,7 +639,8 @@
 				(:doc "A local initializer can infer any supported copyable value or native owner.")
 				(bool.and (u32.eq (local expected) 42u32)
 					(bool.or (bool.or (u32.eq (local actual) 12u32) (call is_builtin_float (local actual)))
-						(bool.or (call is_record_type (local actual)) (call is_native_owner (local actual)))))
+						(bool.or (call is_callable_type (local actual))
+							(bool.or (call is_record_type (local actual)) (call is_native_owner (local actual))))))
 				(then (return (bool true))))
 			(if
 				(:doc "A direct module literal can infer any supported numeric width.")
@@ -1775,6 +1778,176 @@
 			(array.store (local expressions) (local index)
 				(call worker_expression (local kind) (local result) (struct.get (local owner) target) -1i32 0i32
 					(local node) (local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn read_function_reference
+		(:doc "Resolve a bare fn-ref operand in the current module's function namespace.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(caller ScalarFunction) (functions (shared-array ScalarFunction)) (bindings (shared-array GraphBinding)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local fn_ref_kind) 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let operand (struct.get (local form) operand))
+			(if (i32.ltz (local operand)) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let name (array.load (local nodes) (local operand)))
+			(if
+				(:doc "An extra operand or a non-bare name cannot identify a concrete function.")
+				(bool.or (i32.not-ltz (struct.get (local name) next_sibling))
+					(bool.not (call is_scalar_name (borrow-shared (local source)) (local name))))
+				(then (return (call entry_at (local name) -1i32 24u32))))
+			(let target (call resolve_call_target (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local bindings)) (local caller) (local name)))
+			(if (i32.ltz (local target)) (then (return (call entry_at (local name) -1i32 34u32))))
+			(let callee (array.load (local functions) (local target)))
+			(if
+				(:doc "Only a Wove body with the ordinary Wove ABI has a callable address.")
+				(bool.or (struct.get (local callee) entry) (i32.ltz (struct.get (local callee) body)))
+				(then (return (call entry_at (local name) -1i32 24u32))))
+			(return (call entry_at (local name) (local target) 0u32))))
+
+	(fn function_reference_shape
+		(:doc "Read the scalar callable signature of a previously checked Wove definition.")
+		(params (nodes (shared-array SourceNode)) (callee ScalarFunction) (parameters (shared-array ScalarParameter)))
+		(returns CallableShape)
+		(body
+			(let result (struct.get (local callee) result))
+			(let invalid (call callable_type_error (call entry_at (array.load (local nodes) (struct.get (local callee) name)) -1i32 24u32)))
+			(if
+				(:doc "The initial function-value ABI has a scalar or void result.")
+				(bool.not (bool.or (call is_builtin_scalar (local result)) (u32.eq (local result) (call void_type))))
+				(then (return (local invalid))))
+			(let base (struct.get (local callee) params))
+			(let end (i32.add (local base) (struct.get (local callee) arity)))
+			(let-mut index (local base))
+			(let-mut first -1i32)
+			(if
+				(:doc "The original parameter form supplies the first named formal.")
+				(i32.lt (local base) (local end))
+				(then
+					(let parameter (array.load (local parameters) (local base)))
+					(set (local first) (struct.get (array.load (local nodes) (struct.get (local parameter) name)) parent))))
+			(while
+				(:doc "Only scalar formals can be passed through the initial function-value ABI.")
+				(i32.lt (local index) (local end))
+				(body
+					(let parameter (array.load (local parameters) (local index)))
+					(if (bool.not (call is_builtin_scalar (struct.get (local parameter) type))) (then (return (local invalid))))
+					(set (local index) (i32.inc (local index)))))
+			(return (struct.new CallableShape (first (local first)) (result (local result))
+				(named (bool true)) (start 0i32) (end 0i32) (error 0u32)))))
+
+	(fn register_function_references
+		(:doc "Intern inferred signatures before checking a definition's body. Defer diagnostics to the value planner.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(bindings (shared-array GraphBinding)) (records (mut-array ScalarRecord)))
+		(returns void)
+		(body
+			(let root (struct.get (local caller) body))
+			(let-mut index (struct.get (array.load (local nodes) (local root)) first_child))
+			(while
+				(:doc "Discover references only in ordinary, enabled syntax within the body.")
+				(i32.not-ltz (local index))
+				(body
+					(let node (array.load (local nodes) (local index)))
+					(let head (struct.get (local node) first_child))
+					(let descend (bool.and (i32.not-ltz (local head))
+						(bool.not (bool.or (call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))
+							(call is_disabled_statement (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))))))
+					(if
+						(:doc "Only actual fn-ref forms can introduce inferred signatures.")
+						(bool.and (local descend)
+							(u32.eq (call callable_keyword (borrow-shared (local source)) (array.load (local nodes) (local head))) (local fn_ref_kind)))
+						(then
+							(let reference (call read_function_reference (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local node) (local caller) (borrow-shared (local functions)) (borrow-shared (local bindings))))
+							(if
+								(:doc "Malformed or unresolved targets are still checked in source order by the planner.")
+								(u32.eqz (struct.get (local reference) error))
+								(then
+									(let callee (array.load (local functions) (struct.get (local reference) operand)))
+									(let shape (call function_reference_shape (borrow-shared (local nodes)) (local callee) (borrow-shared (local parameters))))
+									(let next (call layout_count (borrow-shared (local records))))
+									(let registered (call intern_callable_layout (borrow-shared (local source)) (borrow-shared (local nodes))
+										(borrow-mut (local records)) (local shape) (local next)))
+									(if
+										(:doc "Further distinct signatures cannot fit; the planner reports their own spans.")
+										(i32.ltz (local registered))
+										(then (return)))))))
+					(set (local index) (call next_layout_node (borrow-shared (local nodes)) (local index) (local root) (local descend)))))))
+
+	(fn plan_function_reference
+		(:doc "Produce a copyable value with the defining Wove function's exact signature.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(caller ScalarFunction) (index i32) (expected u32) (functions (shared-array ScalarFunction))
+			(parameters (shared-array ScalarParameter)) (bindings (shared-array GraphBinding))
+			(records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let reference (call read_function_reference (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local caller) (borrow-shared (local functions)) (borrow-shared (local bindings))))
+			(if (u32.gtz (struct.get (local reference) error)) (then (return (local reference))))
+			(let target (struct.get (local reference) operand))
+			(let shape (call function_reference_shape (borrow-shared (local nodes)) (array.load (local functions) (local target))
+				(borrow-shared (local parameters))))
+			(if
+				(:doc "Unsupported signatures report at the referenced name in the caller.")
+				(u32.gtz (struct.get (local shape) error))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local reference) start))
+					(end (struct.get (local reference) end)) (error 24u32) (related -1i32)))))
+			(let type (call find_callable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local shape)))
+			(if (u32.eqz (local type)) (then (return (call entry_at (local node) -1i32 16u32))))
+			(if
+				(:doc "Passing or replacing a function value requires exact parameters and result.")
+				(bool.not (call value_matches_type (local expected) (local type)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local fn_ref_kind) (local type) (local target) -1i32 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_indirect_call
+		(:doc "Resolve the callable local before checking arguments in signature order.")
+		(:expect (tests "stage-2/cli/native/function_values/cases.tsv") (issues "gh:wove-lang/wove:475"))
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(caller ScalarFunction) (index i32) (operand i32) (expected u32) (statement i32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let target (array.load (local nodes) (local operand)))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local target) 8u32 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local target) (struct.get (local form) operand) 42u32 (local operand) (local caller) (local statement)
+				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements))
+				(borrow-mut (local expressions))))
+			(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
+			(let type (struct.get (array.load (local expressions) (local operand)) type))
+			(if (bool.not (call is_callable_type (local type))) (then (return (call entry_at (local target) -1i32 24u32))))
+			(let shape (call callable_layout_shape (array.load (local records) (call callable_index (local type)))))
+			(let result (struct.get (local shape) result))
+			(if
+				(:doc "Use the same exact result check as for a direct call.")
+				(bool.not (call value_matches_type (local expected) (local result)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let-mut argument (struct.get (local target) next_sibling))
+			(let-mut formal (struct.get (local shape) first))
+			(while
+				(:doc "Each actual gets the corresponding exact scalar expectation before descent.")
+				(i32.not-ltz (local formal))
+				(body
+					(if (i32.ltz (local argument)) (then (return (call entry_at (local node) -1i32 35u32))))
+					(let type (call callable_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local formal) (struct.get (local shape) named)))
+					(array.store (local expressions) (local argument)
+						(call expression_row 0u32 (local type) -1i32 -1i32 0i32 0i32 (bool false)))
+					(set (local argument) (struct.get (array.load (local nodes) (local argument)) next_sibling))
+					(set (local formal) (struct.get (array.load (local nodes) (local formal)) next_sibling))))
+			(if (i32.not-ltz (local argument)) (then (return (call entry_at (array.load (local nodes) (local argument)) -1i32 35u32))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local indirect_call_kind) (local result) -1i32 (local operand) 0i32 0i32 (bool false)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_call
@@ -3926,6 +4099,13 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
 			(if
+				(:doc "A function reference yields the checked defining function's address.")
+				(u32.eq (local tag) (local fn_ref_kind))
+				(then (return (call plan_function_reference (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local caller) (local index) (local expected) (borrow-shared (local functions))
+					(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))
+					(borrow-mut (local expressions))))))
+			(if
 				(:doc "A value if has a boolean predicate and two expression arms.")
 				(u32.eq (local tag) (local conditional_value))
 				(then (return (call plan_conditional (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -4110,6 +4290,20 @@
 											(call is_scoped_record (borrow-shared (local records)) (local type)))))))
 						(then (return (call entry_at (local node) -1i32 24u32))))
 					(return (local checked))))
+			(if
+				(:doc "A local call target is evaluated as a function value before its arguments.")
+				(bool.and (u32.eq (local tag) 9u32) (i32.not-ltz (local operand)))
+				(then
+					(let target (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local nodes) (local operand))))
+					(if
+						(:doc "Generic applications and named calls follow the direct path.")
+						(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+							(struct.get (local target) head)) 8u32)
+						(then (return (call plan_indirect_call (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local node) (local caller) (local index) (local operand) (local expected) (local statement)
+							(borrow-shared (local parameters)) (borrow-shared (local records))
+							(borrow-shared (local statements)) (borrow-mut (local expressions))))))))
 			(if
 				(:doc "A call resolves in the selected function table.")
 				(bool.or (local worker) (u32.eq (local tag) 9u32))
@@ -5373,7 +5567,7 @@
 		only on success. Use zero view start for an arena of whole source files.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord)) (statements (mut-array ScalarStatement))
+			(bindings (shared-array GraphBinding)) (records (mut-array ScalarRecord)) (statements (mut-array ScalarStatement))
 			(expressions (mut-array ScalarExpression)) (sites (mut-array CallSite)) (view_start i32))
 		(returns BodyPlan)
 		(body
@@ -5389,6 +5583,9 @@
 						(:doc "Foreign signatures contribute call targets while their bodies come from C.")
 						(i32.not-ltz (struct.get (local definition) body))
 						(then
+							(call register_function_references (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local definition) (borrow-shared (local functions)) (borrow-shared (local parameters))
+								(borrow-shared (local bindings)) (borrow-mut (local records)))
 							(let checked (call plan_function_body (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local definition) (borrow-shared (local functions))
 								(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))

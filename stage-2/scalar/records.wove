@@ -22,8 +22,10 @@
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor))
 	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
 	(use wove-file "../emit/names.wove" (only record_identity))
+	(use wove-file "./callable_types.wove" (only read_callable_type same_callable_parameters (type CallableShape)))
 	(use wove-file "./syntax.wove"
 		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type is_fixed_array_type_head
+			callable_keyword (value fn_type_kind)
 			(type EntryRead) (type FixedArrayShape)))
 
 	(struct
@@ -34,7 +36,9 @@
 		They keep their first variant and count in the same positions
 		as a record's fields. A specialization records its original argument
 		site and namespace. A repeated site has a non-emitting alias row with name -2.
-		An owning array element has a non-emitting row with name -3 and its exact type in first.`)
+		An owning array element has a non-emitting row with name -3 and its exact type in first.
+		A callable layout stores the first formal in first, its scalar or
+		void result in argument_file, and its formal shape in argument_base.`)
 		ScalarRecord
 		(fields (name i32) (file i32) (identity u32) (first i32) (count i32)
 			(declaration i32) (native i32) (source_base i32) (emit_row i32) (owns_arrays bool) (borrows_bytes bool)
@@ -58,6 +62,104 @@
 		(returns bool)
 		(body (return (bool.and (u32.not-lt (local type) 64u32)
 			(u32.lt (local type) 268435456u32)))))
+
+	(let callable_layout_name -4i32)
+	(let callable_type_base 805306368u32)
+	(let callable_type_limit 1073741824u32)
+
+	(fn is_callable_type
+		(:doc "Recognize the structural signature interval above the supported array element codes.")
+		(params (type u32)) (returns bool)
+		(body
+			(return (bool.and (u32.not-lt (local type) (local callable_type_base))
+				(u32.lt (local type) (local callable_type_limit))))))
+
+	(fn is_callable_layout
+		(:doc "Distinguish a function-pointer signature from data layouts in the shared table.")
+		(params (layout ScalarRecord)) (returns bool)
+		(body (return (i32.eq (struct.get (local layout) name) (local callable_layout_name)))))
+
+	(fn callable_index
+		(:doc "Get the interned signature row for a checked function value.")
+		(params (type u32)) (returns i32)
+		(body (return (i32.from-u32 (u32.sub (local type) (local callable_type_base))))))
+
+	(fn callable_layout_shape
+		(:doc "Recover the signature's first formal, exact result, and parameter spelling form.")
+		(params (layout ScalarRecord)) (returns CallableShape)
+		(body
+			(return (struct.new CallableShape (first (struct.get (local layout) first))
+				(result (u32.from-i32 (struct.get (local layout) argument_file)))
+				(named (i32.gtz (struct.get (local layout) argument_base))) (start 0i32) (end 0i32) (error 0u32)))))
+
+	(fn find_callable_type
+		(:doc "Reuse the same type code for every structurally identical checked signature.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(shape CallableShape))
+		(returns u32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Only populated callable rows can match this signature.")
+				(i32.lt (local index) (array.len (local records)))
+				(body
+					(let layout (array.load (local records) (local index)))
+					(if (i32.eqz (struct.get (local layout) name)) (then (return 0u32)))
+					(if
+						(:doc "Check the exact result and ordered scalar parameters.")
+						(bool.and (call is_callable_layout (local layout))
+							(i32.eq (struct.get (local layout) argument_file) (i32.from-u32 (struct.get (local shape) result))))
+						(then
+							(let candidate (call callable_layout_shape (local layout)))
+							(if
+								(:doc "A named declaration and an inline signature can denote the same type.")
+								(call same_callable_parameters (borrow-shared (local source)) (borrow-shared (local nodes)) (local candidate) (local shape))
+								(then (return (u32.add (local callable_type_base) (u32.from-i32 (local index))))))))
+					(set (local index) (i32.inc (local index)))))
+			(return 0u32)))
+
+	(fn intern_callable_layout
+		(:doc "Append one canonical signature when no existing layout matches it.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (mut-array ScalarRecord))
+			(shape CallableShape) (next i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "Leave invalid signatures for the originating formal or reference to diagnose.")
+				(bool.or (u32.gtz (struct.get (local shape) error))
+					(u32.gtz (call find_callable_type (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local records)) (local shape))))
+				(then (return (local next))))
+			(if
+				(:doc "Check both the supplied table and the type-code interval before appending.")
+				(bool.or (i32.not-lt (local next) (array.len (local records))) (i32.not-lt (local next) 268435456i32))
+				(then (return -1i32)))
+			(let-mut named 0i32)
+			(if (struct.get (local shape) named) (then (set (local named) 1i32)))
+			(array.store (local records) (local next)
+				(struct.new ScalarRecord (name (local callable_layout_name)) (file -1i32)
+					(identity (u32.from-i32 (local next))) (first (struct.get (local shape) first)) (count 0i32)
+					(declaration -1i32) (native -3i32) (source_base 0i32) (emit_row (local next))
+					(owns_arrays (bool false)) (borrows_bytes (bool false)) (generic -1i32) (specialization -1i32)
+					(argument_file (i32.from-u32 (struct.get (local shape) result))) (argument_base (local named)) (alias_of -1i32)))
+			(return (i32.inc (local next)))))
+
+	(fn layout_count
+		(:doc "Find the populated prefix of the zero-initialized layout table.")
+		(params (records (shared-array ScalarRecord))) (returns i32)
+		(body
+			(let-mut low 0i32)
+			(let-mut high (array.len (local records)))
+			(while
+				(:doc "Narrow to the first unused layout slot.")
+				(i32.lt (local low) (local high))
+				(body
+					(let middle (i32.add (local low) (i32.from-u32 (u32.shr (u32.from-i32 (i32.sub (local high) (local low))) 1i32))))
+					(if
+						(:doc "Every populated entry precedes the zeroed tail.")
+						(i32.eqz (struct.get (array.load (local records) (local middle)) name))
+						(then (set (local high) (local middle)))
+						(else (set (local low) (i32.inc (local middle)))))))
+			(return (local low))))
 
 	(fn is_owning_record
 		(:doc "Identify named Wove aggregates that own array storage.")
@@ -343,6 +445,14 @@
 						(then
 							(let spelling (array.load (local nodes) (local head)))
 							(if
+								(:doc "The first layout pass also interns written function parameter signatures.")
+								(bool.and (bool.not (local record_elements))
+									(u32.eq (call callable_keyword (borrow-shared (local source)) (local spelling)) (local fn_type_kind)))
+								(then
+									(let shape (call read_callable_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+									(set (local next) (call intern_callable_layout (borrow-shared (local source)) (borrow-shared (local nodes))
+										(borrow-mut (local records)) (local shape) (local next)))))
+							(if
 								(:doc "An explicit array type supplies its element and extent.")
 								(call is_fixed_array_type_head (borrow-shared (local source)) (local spelling))
 								(then
@@ -508,7 +618,7 @@
 		(returns bool)
 		(body
 			(return (bool.or (u32.eq (local type) 41u32)
-				(bool.and (u32.not-lt (local type) 536870912u32) (u32.lt (local type) 1073741824u32))))))
+				(bool.and (u32.not-lt (local type) 536870912u32) (u32.lt (local type) (local callable_type_base)))))))
 
 	(fn array_owner_type
 		(:doc `Encode an owning array with the checked allocation's exact element type.`)
@@ -1288,6 +1398,21 @@
 				(u32.gtz (local value))
 				(then (return (call entry_at (local node) (i32.from-u32 (local value)) 0u32))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(if
+				(:doc "Only ordinary Wove functions can take an inline Wove callable signature.")
+				(bool.and (local wove) (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+					(struct.get (local parts) head)) (local fn_type_kind)))
+				(then
+					(let shape (call read_callable_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(if
+						(:doc "A malformed signature retains the specific type or field span.")
+						(u32.gtz (struct.get (local shape) error))
+						(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local shape) start))
+							(end (struct.get (local shape) end)) (error (struct.get (local shape) error)) (related -1i32)))))
+					(let type (call find_callable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local shape)))
+					(if (u32.eqz (local type)) (then (return (call entry_at (local node) -1i32 16u32))))
+					(return (call entry_at (local node) (i32.from-u32 (local type)) 0u32))))
 			(let mode (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
 			(if
 				(:doc "Wove function parameters resolve named reference targets in their own file.")
