@@ -288,8 +288,8 @@ with the same signature.
 
 ### Generics
 
-Records and functions can declare explicit type, `i32` constant, and
-`bool` constant parameters.
+Records and functions can declare explicit type parameters and constant
+parameters of type `i32`, `bool`, or a fieldless enum.
 
 ```lisp
 (struct Block
@@ -325,9 +325,26 @@ body. An `i32` constant parameter can size an array, supply a nested
 specialization argument, or be read with `local`. A `(const Enabled bool)`
 parameter accepts `(bool true)` or `(bool false)`. A function can read it
 with `(local Enabled)` or forward it as an argument to another
-specialization. Equal arguments to the same defining declaration share
-one specialization. Boolean arguments distinguish nominal record types
-even when their fields match.
+specialization.
+
+```lisp
+(enum Mode (variants (Fast) (Safe)))
+
+(struct State (generic (const M Mode)) (fields (cursor i32)))
+
+(fn choose (generic (const M Mode)) (params) (returns Mode)
+    (body (return (local M))))
+
+(call (specialize choose (enum.new Mode Fast)))
+```
+
+An enum constant parameter resolves its declared type in the template's
+defining module. Its argument must name a variant of that exact enum, and
+every variant in the enum must be fieldless. A function can read the value
+with `(local M)` or pass `M` directly to another specialization.
+Equal arguments to the same defining declaration share one specialization,
+including when different import aliases name the same enum. Different
+variants distinguish nominal record types even when their fields match.
 
 ### Records and ownership
 
