@@ -38,6 +38,8 @@ outside `[0, 32)` traps at the shift's source line.
 Write boolean literals as `(bool true)` or `(bool false)`. Equality and
 less-than forms such as `(u8.eq (local byte) (u8 40))` and `(i32.lt (i32 -1)
 (i32 0))` take two operands of the named integer type and return `bool`.
+For `u8`, `i32`, and `u32`, `not-eq` and `not-lt` negate the corresponding
+comparison with the same operands evaluated once from left to right.
 
 `(bool.and left right)` and `(bool.or left right)` evaluate the left
 operand first. They evaluate the right operand once when the left operand is
