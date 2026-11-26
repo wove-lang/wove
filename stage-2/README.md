@@ -238,7 +238,7 @@ visible Wove record type. Record fields can themselves use constant
 constructors. The compiler checks every selected initializer, including
 bindings with no uses. A referenced table gets one `static const` C
 definition. A repeated initializer uses one C range designator, accepted
-by Clang and GCC, so the initializer text stays compact as the extent
+by Clang, so the initializer text stays compact as the extent
 grows. `array.load` reads the original table at a checked `i32` index
 and copies only the selected element. Stage 1 keeps its integer and
 quoted-byte module initializer subset.
