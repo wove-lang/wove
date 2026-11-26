@@ -481,6 +481,13 @@ operands. `i64.add.wrapping`, `i64.sub.wrapping`, and
 [wide decimal writers](text/decimal_wide.wove) append either word type
 to a bounded byte view and preserve any prefix written before exhaustion.
 
+Every built-in integer type supports `eq`, `lt`, `le`, `gt`, and `ge`
+with exact operands and a `bool` result. Append `z` to compare one value
+with typed zero, as in `(i16.ltz value)`. Insert `.not.` to negate a
+comparison, as in `(u32.not.eq left right)` or `(u32.not.eqz value)`.
+Each operand runs once in source order, including for unsigned predicates
+such as `u32.gez` whose result is fixed by the type.
+
 Both unsigned word widths support `and`, `or`, `xor`, and `not`
 with a type prefix such as `u64.xor`. The first three forms take two
 words of the named type. Complement takes one. Shifts such as

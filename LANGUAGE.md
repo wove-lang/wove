@@ -20,15 +20,20 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 | Wrapping subtraction | `i32.sub.wrapping`, `u32.sub.wrapping` | `i16.sub.wrapping`, `u16.sub.wrapping`, `i64.sub.wrapping` |
 | Wrapping multiplication | | `i32.mul.wrapping`, `i64.mul.wrapping` |
 | Division and remainder | | `i32.div`, `i32.rem` |
-| Equality | `u8.eq`, `i32.eq`, `u32.eq` | `i16.eq`, `u16.eq`, `i64.eq`, `u64.eq`, `(int.eq Type left right)` |
-| Less than | `u8.lt`, `i32.lt`, `u32.lt` | `i16.lt`, `u16.lt`, `i64.lt`, `u64.lt` |
+| Equality | `u8.eq`, `i32.eq`, `u32.eq` | All integer widths and `(int.eq Type left right)` |
+| Ordering | `u8.lt`, `i32.lt`, `u32.lt` | `lt`, `le`, `gt`, and `ge` at all integer widths |
+| Compare with zero | | `eqz`, `ltz`, `lez`, `gtz`, and `gez` at all integer widths |
+| Negated comparison | | Insert `.not.` before an integer predicate, as in `u32.not.eq`, `i32.not.ltz`, or `int.not.eq` |
 | AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | `i32.and`, `i32.or`, `u64.and`, `u64.or`, `u64.xor`, `u64.not` |
 | Left and right shift | `u32.shl`, `u32.shr` | `i32.shl`, `i32.shr`, `u64.shl`, `u64.shr` |
 | Rotate right | | `u64.rotr` |
 | Boolean logic | `bool.and`, `bool.or`, `bool.not` | |
 
-- Comparisons return `bool`. `int.eq` also accepts a selected native integer
-  alias as its exact type. `bool.and` and `bool.or` short-circuit.
+- Comparisons return `bool` and evaluate each written operand once, from
+  left to right. A zero predicate compares with zero of the selected type,
+  including when the result is fixed by unsigned ordering. `int.eq` and
+  `int.not.eq` also accept a selected native integer alias as their exact
+  type. `bool.and` and `bool.or` short-circuit.
 - A shift takes an `i32` count. Counts outside `[0, width)` trap. Left shifts
   keep the low bits of the declared width. Right shifts extend the sign for
   signed integers and fill with zeros for unsigned integers.
