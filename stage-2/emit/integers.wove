@@ -1,12 +1,14 @@
 (module emit_integers
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Write checked integer leaves in C for both expressions and static initializers.")
+	(:doc "Write integer values and exact-width integer arithmetic in C.")
 
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/literals.wove" (only (value hex_literal_format)))
 	(use wove-file "../source/types.wove" (only (value i64_type)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
-	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_hex_byte write_temporary_name))
+	(use wove-file "./runtime.wove" (only close_runtime_call))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_type_text c_hex_byte write_temporary_name))
 
 	(let hex_prefix "0x")
 	(let signed_hex_suffix "ll")
@@ -20,6 +22,57 @@
 	(let i64_constant "INT64_C(")
 	(let negative_i64_open "(-INT64_C(1)-(int64_t)(")
 	(let negative_i64_close "ull-1ull))")
+
+	(let wrapping_open "wvrt_int_wrapping(")
+	(let checked_open "wvrt_int_checked(")
+	(let add_builtin "__builtin_add_overflow,")
+	(let sub_builtin "__builtin_sub_overflow,")
+	(let mul_builtin "__builtin_mul_overflow,")
+
+	(fn write_integer_arithmetic
+		(:doc "Call an exact-result overflow builtin on the two operands already captured in source order.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (expression ScalarExpression)
+			(symbol u8) (checked bool) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Only a trapping operation needs its source location.")
+				(local checked)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local checked_open))
+					(borrow-mut (local output)) (local cursor) (local writing))))
+				(else (set (local cursor) (call c_literal_text (borrow-shared (local wrapping_open))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(if
+				(:doc "Select the builtin that corresponds to the checked arithmetic opcode.")
+				(u8.eq (local symbol) 43u8)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local add_builtin))
+					(borrow-mut (local output)) (local cursor) (local writing))))
+				(else
+					(if
+						(:doc "Subtraction and multiplication use their exact-result builtins.")
+						(u8.eq (local symbol) 45u8)
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local sub_builtin))
+							(borrow-mut (local output)) (local cursor) (local writing))))
+						(else (set (local cursor) (call c_literal_text (borrow-shared (local mul_builtin))
+							(borrow-mut (local output)) (local cursor) (local writing)))))))
+			(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor)
+				(struct.get (local expression) type) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
+			(let left (struct.get (local expression) first))
+			(let right (struct.get (array.load (local nodes) (local left)) next_sibling))
+			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local left)
+				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
+			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local right)
+				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "Report overflow at the original file and operation head.")
+				(local checked)
+				(then (return (call close_runtime_call (borrow-mut (local output)) (local cursor)
+					(struct.get (local expression) target) (struct.get (local expression) start)
+					(struct.get (local expression) end) (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 
 	(fn write_i64_wrapping
 		(:doc `Perform the operation on unsigned bits and recover the corresponding signed word.`)

@@ -1,87 +1,93 @@
 (module source_integer_ops
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Map wide integer wrapping spellings to exact binary signatures.`)
+	(:doc `Read exact-width wrapping and checked addition, subtraction, and multiplication.
 
-	(use wove-file "./types.wove" (only builtin_type_keyword is_16bit_integer (value i16_type) (value u16_type) (value i64_type)))
+	The opcode range reserves eight slots per six-bit builtin type code.
+	Slots zero through two wrap. Slots four through six trap on overflow.`)
+
+	(use wove-file "./types.wove" (only builtin_type_keyword is_builtin_integer))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/match.wove" (only is_byte_at is_three_bytes))
 
-	(struct IntegerOperator (fields (operand u32) (result u32) (symbol u8)))
+	(struct IntegerOperator (fields (operand u32) (symbol u8)))
 
-	(let first_i16_operator 180u32)
-	(let first_u16_operator 184u32)
-	(let first_i64_operator 205u32)
-	(let add_head ".add")
-	(let subtract_head ".sub")
-	(let multiply_head ".mul")
+	(let arithmetic_base 3072u32)
+	(let arithmetic_limit 3584u32)
+	(let trapping_flag 4u32)
+	(let checked_suffix "-checked")
+	(let arithmetic_symbols "+-*")
 
 	(fn read_integer_operator
-		(:doc `Accept a complete integer prefix and an operation suffix supported by that width.`)
+		(:doc "Match an exact integer type and operation. The low bits encode the operation and overflow mode.")
 		(params (source (shared-array u8)) (start i32) (end i32))
 		(returns u32)
 		(body
 			(let width (i32.sub (local end) (local start)))
+			(let-mut name_width (local width))
+			(let-mut flags 0u32)
 			(if
-				(:doc "The supported wrapping arithmetic tags have a fixed width.")
-				(bool.not (i32.eq (local width) 7i32))
+				(:doc "A longer name must end in the complete checked suffix.")
+				(i32.lt 7i32 (local width))
+				(then
+					(if (bool.or (i32.lt (local width) 14i32) (i32.lt 15i32 (local width))) (then (return 0u32)))
+					(set (local name_width) (i32.sub (local width) (array.len (local checked_suffix))))
+					(if
+						(:doc "Verify the suffix within the written head before classifying the shorter name.")
+						(bool.not (call same_bytes (borrow-shared (local source))
+							(i32.add (local start) (local name_width)) (local end)
+							(borrow-shared (local checked_suffix)) 0i32 (array.len (local checked_suffix))))
+						(then (return 0u32)))
+					(set (local flags) (local trapping_flag))))
+			(let prefix (i32.sub (local name_width) 4i32))
+			(if
+				(:doc "Both accepted type widths end in a dot followed by a three-byte operator.")
+				(bool.not (bool.and (bool.or (i32.eq (local prefix) 2i32) (i32.eq (local prefix) 3i32))
+					(call is_byte_at (borrow-shared (local source)) (local start) (local prefix) 46u8)))
 				(then (return 0u32)))
-			(let type (call builtin_type_keyword (borrow-shared (local source)) (local start) 3i32))
-			(let wide (u32.eq (local type) (local i64_type)))
-			(if (bool.not (bool.or (local wide) (call is_16bit_integer (local type)))) (then (return 0u32)))
-			(let suffix (i32.add (local start) 3i32))
-			(let-mut base (local first_i16_operator))
-			(if (u32.eq (local type) (local u16_type)) (then (set (local base) (local first_u16_operator))))
-			(if (local wide) (then (set (local base) (local first_i64_operator))))
+			(let type (call builtin_type_keyword (borrow-shared (local source)) (local start) (local prefix)))
+			(if (bool.not (call is_builtin_integer (local type))) (then (return 0u32)))
+			(let mnemonic (i32.add (local start) (i32.add (local prefix) 1i32)))
+			(let base (u32.add (local arithmetic_base) (u32.or (u32.shl (local type) 3i32) (local flags))))
 			(if
-				(:doc "Wrapping addition retains the operand type.")
-				(call same_bytes (borrow-shared (local source)) (local suffix) (local end)
-					(borrow-shared (local add_head)) 0i32 (array.len (local add_head)))
+				(:doc "Addition occupies slot zero.")
+				(call is_three_bytes (borrow-shared (local source)) (local mnemonic) 97u8 100u8 100u8)
+				(then (return (local base))))
+			(if
+				(:doc "Subtraction occupies slot one.")
+				(call is_three_bytes (borrow-shared (local source)) (local mnemonic) 115u8 117u8 98u8)
+				(then (return (u32.add (local base) 1u32))))
+			(if
+				(:doc "Multiplication occupies slot two.")
+				(call is_three_bytes (borrow-shared (local source)) (local mnemonic) 109u8 117u8 108u8)
 				(then (return (u32.add (local base) 2u32))))
-			(if
-				(:doc "Wrapping subtraction retains the operand type.")
-				(call same_bytes (borrow-shared (local source)) (local suffix) (local end)
-					(borrow-shared (local subtract_head)) 0i32 (array.len (local subtract_head)))
-				(then (return (u32.add (local base) 3u32))))
-			(if
-				(:doc "The signed 64-bit group also has wrapping multiplication.")
-				(bool.and (local wide) (call same_bytes (borrow-shared (local source)) (local suffix) (local end)
-					(borrow-shared (local multiply_head)) 0i32 (array.len (local multiply_head))))
-				(then (return (u32.add (local base) 4u32))))
 			(return 0u32)))
 
+	(fn is_integer_arithmetic
+		(:doc "Check the opcode range assigned to typed addition, subtraction, and multiplication.")
+		(params (kind u32))
+		(returns bool)
+		(body (return (bool.and (bool.not (u32.lt (local kind) (local arithmetic_base)))
+			(u32.lt (local kind) (local arithmetic_limit))))))
+
+	(fn is_checked_integer_operator
+		(:doc "Identify the arithmetic operations that retain their source head for a runtime trap.")
+		(params (kind u32))
+		(returns bool)
+		(body (return (bool.and (call is_integer_arithmetic (local kind))
+			(u32.eq (u32.and (local kind) (local trapping_flag)) (local trapping_flag))))))
+
 	(fn integer_operator
-		(:doc `Decode a checked opcode as an exact wrapping arithmetic signature.`)
+		(:doc "Recover the common operand and result type and the arithmetic symbol from an opcode.")
 		(params (kind u32))
 		(returns IntegerOperator)
 		(body
-			(let wide (bool.and (bool.not (u32.lt (local kind) (local first_i64_operator)))
-				(u32.lt (local kind) (u32.add (local first_i64_operator) 5u32))))
 			(if
-				(:doc "Only the 16-bit groups and the signed 64-bit group have a signature here.")
-				(bool.and (bool.not (local wide))
-					(bool.or (u32.lt (local kind) (local first_i16_operator))
-						(bool.not (u32.lt (local kind) (u32.add (local first_u16_operator) 4u32)))))
-				(then (return (struct.new IntegerOperator (operand 0u32) (result 0u32) (symbol 0u8)))))
-			(let-mut type (local i16_type))
-			(let-mut base (local first_i16_operator))
-			(if
-				(:doc "Each group uses the same slots for addition and subtraction.")
-				(bool.not (u32.lt (local kind) (local first_u16_operator)))
-				(then
-					(set (local type) (local u16_type))
-					(set (local base) (local first_u16_operator))))
-			(if
-				(:doc "The higher opcode group describes i64 operands.")
-				(local wide)
-				(then
-					(set (local type) (local i64_type))
-					(set (local base) (local first_i64_operator))))
-			(let slot (u32.sub (local kind) (local base)))
-			(if
-				(:doc "Skip the old comparison slots while retaining the wrapping opcodes.")
-				(u32.lt (local slot) 2u32)
-				(then (return (struct.new IntegerOperator (operand 0u32) (result 0u32) (symbol 0u8)))))
-			(let-mut symbol 43u8)
-			(if (u32.eq (local slot) 3u32) (then (set (local symbol) 45u8)))
-			(if (u32.eq (local slot) 4u32) (then (set (local symbol) 42u8)))
-			(return (struct.new IntegerOperator (operand (local type)) (result (local type)) (symbol (local symbol)))))))
+				(:doc "Unrelated expression kinds have no arithmetic signature.")
+				(bool.not (call is_integer_arithmetic (local kind)))
+				(then (return (struct.new IntegerOperator (operand 0u32) (symbol 0u8)))))
+			(let type (u32.shr (u32.sub (local kind) (local arithmetic_base)) 3i32))
+			(let slot (int.convert i32 (u32.and (local kind) 3u32)))
+			(return (struct.new IntegerOperator (operand (local type))
+				(symbol (array.load (local arithmetic_symbols) (local slot)))))))
+)

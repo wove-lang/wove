@@ -1022,6 +1022,11 @@ int32_t wvrt_i32_sub_wrapping(int32_t wvrtleft, int32_t wvrtright) {
 	return wvrt_i32_from_wrapped_bits(wvrt_u32_sub_wrapping((uint32_t)wvrtleft, (uint32_t)wvrtright));
 }
 
+// Report integer arithmetic overflow at the checked source operation.
+_Noreturn void wvrt_int_arithmetic_trap(int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer arithmetic overflow");
+}
+
 // Compute a signed quotient or remainder only after checking the Wove range.
 int32_t wvrt_i32_divide_at_span(int32_t wvrtleft, int32_t wvrtright, bool wvrtremainder,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
@@ -1032,7 +1037,7 @@ int32_t wvrt_i32_divide_at_span(int32_t wvrtleft, int32_t wvrtright, bool wvrtre
 	// Handle the signed minimum without invoking either C operator on this pair.
 	if (wvrtleft == INT32_MIN && wvrtright == -1) {
 		if (wvrtremainder) { return 0; }
-		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer arithmetic overflow");
+		wvrt_int_arithmetic_trap(wvrtfile, wvrtstart, wvrtend);
 	}
 	return wvrtremainder ? wvrtleft % wvrtright : wvrtleft / wvrtright;
 }
