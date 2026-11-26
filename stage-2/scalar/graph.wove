@@ -16,6 +16,7 @@
 	(use wove-file "../source/imports.wove" (only import_keyword))
 	(use wove-file "../source/c_snapshots.wove" (only read_c_snapshot))
 	(use wove-file "../source/tree_copy.wove" (only copy_tree))
+	(use wove-file "../source/c_owners.wove" (only read_c_type c_owner_uses_typedef))
 	(use wove-file "../source/c_scope.wove" (only connect_bridge_overlay declaring_c_bridge))
 	(use wove-file "./trees.wove" (only source_span_owner graph_module_key (type ScalarTree)))
 	(use wove-file "../source/c_names.wove" (only c_function_opening))
@@ -343,6 +344,20 @@
 								(i32.add (local default_base) (struct.get (local binding) default_node)))))
 					(set (local index) (i32.inc (local index)))))))
 
+	(fn native_type_needs_layout
+		(:doc "Record direct types, copyable results, and pointer typedef results requiring C checks.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (binding GraphBinding) (declaration i32))
+		(returns bool)
+		(body
+			(if
+				(:doc "Direct type selections and unowned types already have layout rows.")
+				(bool.or (i32.ltz (struct.get (local binding) drop_start))
+					(u32.eq (struct.get (local binding) namespace) 1u32))
+				(then (return (bool true))))
+			(let alias (call read_c_type (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local declaration))))
+			(return (call c_owner_uses_typedef (borrow-shared (local arena)) (borrow-shared (local nodes)) (local alias)))))
+
 	(fn register_graph_native_types
 		(:doc `Collect the native value types required by direct selections and C signatures.`)
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (trees (shared-array ScalarTree))
@@ -364,16 +379,19 @@
 							(let base (struct.get (array.load (local trees) (local file)) base))
 							(let alias (struct.get (local binding) native_type))
 							(if
-								(:doc "Direct type imports preserve pointer owner identity alongside copyable native layouts.")
-								(bool.and (i32.gtz (local alias))
-									(bool.or (i32.ltz (struct.get (local binding) drop_start))
-										(u32.eq (struct.get (local binding) namespace) 1u32)))
+								(:doc "Preserve native types selected directly or needed by a function's result.")
+								(i32.gtz (local alias))
 								(then
 									(let owner (struct.get (local binding) native_file))
 									(let type_base (struct.get (array.load (local trees) (local owner)) base))
-									(set (local next) (call remember_native_type (borrow-shared (local arena))
-										(borrow-shared (local nodes)) (local owner) (local type_base)
-										(i32.add (local type_base) (local alias)) (borrow-mut (local records)) (local next)))))
+									(let type_row (i32.add (local type_base) (local alias)))
+									(if
+										(:doc "An implicit pointer typedef also needs its C contract checked.")
+										(call native_type_needs_layout (borrow-shared (local arena)) (borrow-shared (local nodes))
+											(local binding) (local type_row))
+										(then (set (local next) (call remember_native_type (borrow-shared (local arena))
+											(borrow-shared (local nodes)) (local owner) (local type_base)
+											(local type_row) (borrow-mut (local records)) (local next)))))))
 							(if
 								(:doc "Inspect each C function's parameter types just once per defining declaration.")
 								(call first_bridge_binding (borrow-shared (local bindings)) (local index) (local binding))

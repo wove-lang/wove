@@ -7,7 +7,7 @@
 	the native pointer, and caller-owned storage uses a lifetime wrapper.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
-	(use wove-file "../source/c_owners.wove" (only read_c_owner (type COwnerRead)))
+	(use wove-file "../source/c_owners.wove" (only read_c_owner c_owner_uses_typedef (type COwnerRead)))
 	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../scalar/owners.wove" (only native_storage_init_borrow_kind))
 	(use wove-file "../scalar/native_owner_types.wove" (only is_native_owner native_owner_declaration))
@@ -59,16 +59,71 @@
 			(return (call c_span (borrow-shared (local decoded)) 0i32 (struct.get (local value) written)
 				(borrow-mut (local output)) (local offset) (local writing)))))
 
+	(fn write_native_destructor_name
+		(:doc "Write the original C destructor symbol from the resource contract.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (owner COwnerRead)
+			(output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let drop (array.load (local nodes) (struct.get (local owner) drop)))
+			(return (call c_span (borrow-shared (local source)) (struct.get (local drop) start) (struct.get (local drop) end)
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
 	(fn write_native_destructor
-		(:doc `Write the original C destructor symbol for this exact resource type.`)
+		(:doc "Write the cleanup callee. A checked typedef calls the same function verified by its C assertion.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (type u32)
 			(output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let owner (call native_owner_contract (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
-			(let drop (array.load (local nodes) (struct.get (local owner) drop)))
-			(return (call c_span (borrow-shared (local source)) (struct.get (local drop) start) (struct.get (local drop) end)
-				(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Legacy explicit pointer and storage contracts retain their original call spelling.")
+				(bool.not (call c_owner_uses_typedef (borrow-shared (local source)) (borrow-shared (local nodes)) (local owner)))
+				(then (return (call write_native_destructor_name (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local owner) (borrow-mut (local output)) (local offset) (local writing)))))
+			(let opening (call c_byte (borrow-mut (local output)) (local offset) 40u8 (local writing)))
+			(let symbol (call write_native_destructor_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local owner) (borrow-mut (local output)) (local opening) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local symbol) 41u8 (local writing)))))
+
+	(let pointer_typedef_open "WVRT_CHECK_C_POINTER_TYPEDEF(")
+	(let pointer_owner_open "WVRT_CHECK_C_POINTER_OWNER(")
+	(let pointer_check_close ");\n")
+
+	(fn write_c_pointer_typedef_check
+		(:doc "Verify a fixed operand's native pointer typedef after the header has been included.")
+		(params (source (shared-array u8)) (literal SourceNode) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local pointer_typedef_open))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let type (call write_native_type (borrow-shared (local source)) (local literal)
+				(borrow-mut (local output)) (local open) (local writing)))
+			(return (call c_literal_text (borrow-shared (local pointer_check_close))
+				(borrow-mut (local output)) (local type) (local writing)))))
+
+	(fn write_c_pointer_owner_checks
+		(:doc "Verify the native pointer typedef and exact destructor after including the header.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32)
+			(output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let owner (call read_c_owner (borrow-shared (local source)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local declaration))))
+			(if
+				(:doc "Explicit pointer spellings retain the existing C emission path.")
+				(bool.not (call c_owner_uses_typedef (borrow-shared (local source)) (borrow-shared (local nodes)) (local owner)))
+				(then (return (local offset))))
+			(let open (call c_literal_text (borrow-shared (local pointer_owner_open))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let native (call write_native_type (borrow-shared (local source))
+				(array.load (local nodes) (struct.get (local owner) native))
+				(borrow-mut (local output)) (local open) (local writing)))
+			(let separator (call c_byte (borrow-mut (local output)) (local native) 44u8 (local writing)))
+			(let drop (call write_native_destructor_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local owner) (borrow-mut (local output)) (local separator) (local writing)))
+			(return (call c_literal_text (borrow-shared (local pointer_check_close))
+				(borrow-mut (local output)) (local drop) (local writing)))))
 
 	(let c_handle_check "wvrt_check_c_handle(")
 	(let c_storage_access "wvrt_c_storage_access(")
