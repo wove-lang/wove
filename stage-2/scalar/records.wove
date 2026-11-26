@@ -25,8 +25,9 @@
 		(:doc `One registered value layout or native type.
 
 		A fixed array has a negative name, element type in first, and
-		extent in count. An enum has native -1 and keeps its first
-		variant and count in the same positions as a record's fields.`)
+		extent in count. Unit and payload enums have native -1 and -2.
+		They keep their first variant and count in the same positions
+		as a record's fields.`)
 		ScalarRecord
 		(fields (name i32) (file i32) (identity u32) (first i32) (count i32)
 			(declaration i32) (native i32) (source_base i32) (emit_row i32)))
@@ -59,10 +60,17 @@
 		(body (return (i32.lt (struct.get (local layout) name) 0i32))))
 
 	(fn is_enum_layout
-		(:doc `Recognize a nominal fieldless enum in the shared type table.`)
+		(:doc `Recognize either nominal enum layout in the shared type table.`)
 		(params (layout ScalarRecord))
 		(returns bool)
-		(body (return (i32.eq (struct.get (local layout) native) -1i32))))
+		(body (return (bool.or (i32.eq (struct.get (local layout) native) -1i32)
+			(i32.eq (struct.get (local layout) native) -2i32)))))
+
+	(fn is_payload_enum
+		(:doc `Identify an enum containing at least one payload variant.`)
+		(params (layout ScalarRecord))
+		(returns bool)
+		(body (return (i32.eq (struct.get (local layout) native) -2i32))))
 
 	(fn find_fixed_array_type
 		(:doc `Find the one structural type for the exact scalar element and extent.`)
@@ -891,16 +899,18 @@
 			(return (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) operands)))))
 
 	(fn member_value_type
-		(:doc `Resolve a Wove field in the type namespace of its defining record.`)
+		(:doc `Resolve a Wove field or payload in the type namespace of its defining layout.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
 			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
 			(layout ScalarRecord) (member SourceNode))
 		(returns u32)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+			(let operand (struct.get (local parts) operands))
+			(if (i32.lt (local operand) 0i32) (then (return 0u32)))
 			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings))
-				(struct.get (local layout) file) (struct.get (local layout) source_base) (struct.get (local parts) operands)))
+				(struct.get (local layout) file) (struct.get (local layout) source_base) (local operand)))
 			(if
 				(:doc "Wove fields hold Wove-defined value types. Foreign aliases and record views have their own contracts.")
 				(bool.or (call is_native_integer (local type))
@@ -930,15 +940,15 @@
 					(set (local ordinal) (i32.add.wrapping (local ordinal) 1i32))))
 			(return (struct.new ScalarMember (ordinal -1i32) (row -1i32)))))
 
-	(fn read_unit_variant
-		(:doc `Accept only a named form without payload operands.`)
+	(fn read_enum_variant
+		(:doc `Read a named variant and its optional single payload type operand.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
 		(returns EntryRead)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let head (struct.get (local parts) head))
 			(if
-				(:doc "The first significant child names a unit variant.")
+				(:doc "The first significant child names the variant.")
 				(bool.or (i32.lt (local head) 0i32)
 					(bool.not (call is_scalar_name (borrow-shared (local source)) (array.load (local nodes) (local head)))))
 				(then (return (call entry_at (local node) -1i32 22u32))))
@@ -950,20 +960,22 @@
 					(end (struct.get (local metadata) end)) (error (struct.get (local metadata) error)) (related -1i32)))))
 			(let payload (struct.get (local parts) operands))
 			(if
-				(:doc "Report the first unsupported payload operand directly.")
-				(i32.lt -1i32 (local payload))
-				(then (return (call entry_at (array.load (local nodes) (local payload)) -1i32 22u32))))
-			(return (call entry_at (local node) (local head) 0u32))))
+				(:doc "Only one payload type operand can follow a variant name.")
+				(bool.and (i32.lt -1i32 (local payload))
+					(i32.lt -1i32 (struct.get (array.load (local nodes) (local payload)) next_sibling)))
+				(then (return (call entry_at (array.load (local nodes)
+					(struct.get (array.load (local nodes) (local payload)) next_sibling)) -1i32 22u32))))
+			(return (call entry_at (local node) (local payload) 0u32))))
 
 	(fn read_type_member
-		(:doc `Check a field type or a unit variant according to the enclosing declaration.`)
+		(:doc `Check a field or variant form according to the enclosing declaration.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (enumeration bool))
 		(returns EntryRead)
 		(body
 			(if
-				(:doc "A unit variant has only its name, while a struct field needs a type.")
+				(:doc "A variant can omit its payload type. A struct field needs a type.")
 				(local enumeration)
-				(then (return (call read_unit_variant (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
+				(then (return (call read_enum_variant (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
 			(return (call read_member_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
 
 	(fn register_nominal_type
@@ -1045,6 +1057,10 @@
 						(:doc "Malformed member forms retain the offending span.")
 						(u32.lt 0u32 (struct.get (local checked) error))
 						(then (return (local checked))))
+					(if
+						(:doc "A single payload variant chooses tagged-union storage for the whole enum.")
+						(bool.and (local enumeration) (i32.lt -1i32 (struct.get (local checked) operand)))
+						(then (set (local native) -2i32)))
 					(let field_name (array.load (local nodes) (struct.get (local member) first_child)))
 					(let prior (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local first) (local count) (local field_name)))
@@ -1079,8 +1095,8 @@
 					(let form (i32.add.wrapping (local base) (struct.get (array.load (local declarations) (local index)) node)))
 					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
 					(if
-						(:doc "Checked function and struct declarations can mention anonymous fixed layouts.")
-						(bool.or (u32.eq (local kind) 1u32) (u32.eq (local kind) 48u32))
+						(:doc "Checked function, struct, and enum declarations can mention anonymous fixed layouts.")
+						(bool.or (u32.eq (local kind) (local enum_declaration)) (bool.or (u32.eq (local kind) 1u32) (u32.eq (local kind) 48u32)))
 						(then
 							(let arrays (call register_fixed_arrays (borrow-shared (local source)) (borrow-shared (local nodes))
 								(local form) (borrow-mut (local records)) (local next) (borrow-shared (local bindings)) (local file) (local source_base)))
@@ -1159,15 +1175,16 @@
 				(end (i32.sub.wrapping (struct.get (local spelling) end) (local base))) (error (local error))))))
 
 	(fn enter_layout
-		(:doc `Mark a layout active and push its first Wove field for dependency checking.`)
+		(:doc `Mark a layout active and push its first Wove member for dependency checking.`)
 		(params (row i32) (layout ScalarRecord) (depth i32)
 			(marks (mut-array u8)) (stack (mut-array LayoutVisit)))
 		(returns void)
 		(body
 			(let-mut field -1i32)
 			(if
-				(:doc "Only named Wove records can depend on another Wove value layout.")
-				(bool.and (bool.not (call is_fixed_array (local layout))) (i32.eq (struct.get (local layout) native) 0i32))
+				(:doc "Named Wove records and payload enums can embed another value layout.")
+				(bool.and (bool.not (call is_fixed_array (local layout)))
+					(bool.or (i32.eq (struct.get (local layout) native) 0i32) (call is_payload_enum (local layout))))
 				(then (set (local field) (struct.get (local layout) first))))
 			(array.store (local marks) (local row) 1u8)
 			(array.store (local stack) (local depth) (struct.new LayoutVisit (row (local row)) (field (local field))))))
@@ -1231,10 +1248,15 @@
 									(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 										(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
 									(if
-										(:doc "Reject a field that has no visible Wove value type.")
+										(:doc "A unit variant can omit its type. Other members require a visible copyable layout.")
 										(u32.eq (local type) 0u32)
-										(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
-											(local layout) (local member) 23u32))))
+										(then
+											(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+											(if
+												(:doc "Missing operands were allowed only for unit variants.")
+												(i32.lt -1i32 (struct.get (local parts) operands))
+												(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+													(local layout) (local member) 23u32))))))
 									(array.store (local stack) (local depth)
 										(struct.new LayoutVisit (row (local row)) (field (struct.get (local member) next_sibling))))
 									(if

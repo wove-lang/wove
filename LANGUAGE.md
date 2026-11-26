@@ -85,13 +85,19 @@ runs. A conditional record or fixed array supports direct reads. A value arm
 can produce a fresh owner. Transferring an existing binding still follows the
 usual move rules.
 
-## Fieldless enums
+## Enums
 
 Stage 2 uses `(enum Status (variants (Ok) (IoError) (Invalid)))` to
 declare a nominal, copyable type. `(enum.new Status Ok)` constructs one
 variant of that type. `(match value (case Ok statements...) ...)` is a
 statement that evaluates its subject once, requires one case for every
 variant, and runs only the selected case in its own scope.
+
+A variant can carry one copyable value. Declare it as `(Push i64)`, build it
+with `(enum.new Instruction Push value)`, and match it with
+`(case Push (bind word) statements...)`. The payload must have the
+variant's exact declared type. The binding is an immutable copy scoped to
+that arm. Use `(bind _)` to discard the payload.
 
 ## Arrays, slices, and borrows
 
