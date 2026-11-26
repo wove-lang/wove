@@ -14,7 +14,8 @@
 	(use wove-file "../json/reader.wove" (only (type JsonNode) json_decode_string))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
-	(use wove-file "./fields.wove" (only clang_field clang_inner (value clang_name_key) (value clang_value_key)))
+	(use wove-file "./fields.wove"
+		(only clang_field clang_inner (value clang_field_key_capacity) (value clang_name_key) (value clang_value_key)))
 	(use wove-file "./index.wove" (only (type ClangIndex) (type ClangDeclaration) clang_declaration))
 
 	(struct ProbeValue (fields (error u32) (start i32) (end i32)))
@@ -54,7 +55,8 @@
 				(then (return (bool false))))
 			(let decoded (call json_decode_string (borrow-shared (local source))
 				(i32.add (local base) (struct.get (local value) start))
-				(i32.add (local base) (struct.get (local value) end)) (borrow-mut (local scratch))))
+				(i32.add (local base) (struct.get (local value) end))
+				(borrow-mut (array.range (local scratch) 0i32 (array.len (local name))))))
 			(return (bool.and (u32.eq (struct.get (local decoded) error) 0u32)
 				(call same_bytes (borrow-shared (local scratch)) 0i32 (struct.get (local decoded) written)
 					(borrow-shared (local name)) 0i32 (array.len (local name)))))))
@@ -67,18 +69,21 @@
 
 	(fn folded_probe_value
 		(:doc "Follow at most sixteen expression wrappers to the member's folded string value.")
-		(params (source (shared-array u8)) (base i32) (nodes (shared-array JsonNode)) (member i32))
+		(params (source (shared-array u8)) (base i32) (nodes (shared-array JsonNode)) (member i32)
+			(scratch (mut-array u8)))
 		(returns ProbeValue)
 		(body
 			(let constant (array.load (local nodes) (local member)))
-			(let-mut expression (call clang_inner (borrow-shared (local source)) (local base) (borrow-shared (local nodes)) (local member)))
+			(let-mut expression (call clang_inner (borrow-shared (local source)) (local base) (borrow-shared (local nodes))
+				(local member) (borrow-mut (local scratch))))
 			(let-mut depth 0i32)
 			(while
 				(:doc "As in the archive, only the first expression child can supply the selected constant.")
 				(bool.and (bool.not (i32.lt (local expression) 0i32)) (i32.lt (local depth) 17i32))
 				(body
 					(let selected (call clang_field (borrow-shared (local source)) (local base)
-						(borrow-shared (local nodes)) (local expression) (borrow-shared (local clang_value_key))))
+						(borrow-shared (local nodes)) (local expression) (borrow-shared (local clang_value_key))
+						(borrow-mut (local scratch))))
 					(if
 						(:doc "A reported value must be a nonempty JSON string.")
 						(bool.not (i32.lt (local selected) 0i32))
@@ -93,7 +98,7 @@
 								(then (return (call probe_span 0u32 (local start) (local end)))))
 							(return (call probe_span 18u32 (local start) (local end)))))
 					(set (local expression) (call clang_inner (borrow-shared (local source)) (local base)
-						(borrow-shared (local nodes)) (local expression)))
+						(borrow-shared (local nodes)) (local expression) (borrow-mut (local scratch))))
 					(set (local depth) (i32.add (local depth) 1i32))))
 			(return (call probe_span 18u32
 				(i32.add (local base) (struct.get (local constant) start))
@@ -111,20 +116,27 @@
 				(:doc "An absent enum is reported at the indexed document span.")
 				(i32.lt (local enum) 0i32)
 				(then (return (call probe_span 16u32 (local base) (struct.get (local index) end)))))
-			(let-mut row (call clang_inner (borrow-shared (local source)) (local base) (borrow-shared (local nodes)) (local enum)))
-			(let-mut scratch (array.alloc u8 (array.len (local name))))
+			(let-mut capacity (array.len (local name)))
+			(if
+				(:doc "One buffer must fit both the requested member name and the fixed AST field keys.")
+				(i32.lt (local capacity) (local clang_field_key_capacity))
+				(then (set (local capacity) (local clang_field_key_capacity))))
+			(let-mut scratch (array.alloc u8 (local capacity)))
+			(let-mut row (call clang_inner (borrow-shared (local source)) (local base) (borrow-shared (local nodes))
+				(local enum) (borrow-mut (local scratch))))
 			(while
 				(:doc "Select only a direct, exact member name without decoding unrelated values.")
 				(bool.not (i32.lt (local row) 0i32))
 				(body
 					(let label (call clang_field (borrow-shared (local source)) (local base)
-						(borrow-shared (local nodes)) (local row) (borrow-shared (local clang_name_key))))
+						(borrow-shared (local nodes)) (local row) (borrow-shared (local clang_name_key))
+						(borrow-mut (local scratch))))
 					(if
 						(:doc "Use the first matching member of the selected enum.")
 						(call probe_name_matches (borrow-shared (local source)) (local base) (borrow-shared (local nodes)) (local label)
 							(borrow-shared (local name)) (borrow-mut (local scratch)))
 						(then (return (call folded_probe_value (borrow-shared (local source)) (local base)
-							(borrow-shared (local nodes)) (local row)))))
+							(borrow-shared (local nodes)) (local row) (borrow-mut (local scratch))))))
 					(let child (array.load (local nodes) (local row)))
 					(set (local row) (struct.get (local child) next_sibling))))
 			(return (call probe_span 17u32 (struct.get (local selected) start) (struct.get (local selected) end)))))
