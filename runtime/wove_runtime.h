@@ -197,6 +197,16 @@ void wvrt_check_c_array(wvrt_slice wvrt_view, size_t wvrt_element_size, int64_t 
 		wvrt_check_c_array((view), (element_size), wvrt_extent, (file), (start), (end)); \
 	})
 
+// Clang classifies pointer expressions as 5, including pointers to incomplete types.
+#define WVRT_CHECK_C_POINTER_TYPEDEF(type) \
+	_Static_assert(__builtin_classify_type((type)0) == 5, "Wove C native pointer typedef required")
+
+// Infer the ignored return type and check the destructor's full parameter list.
+#define WVRT_CHECK_C_POINTER_OWNER(type, drop) \
+	WVRT_CHECK_C_POINTER_TYPEDEF(type); \
+	_Static_assert(_Generic(&(drop), __typeof__((drop)((type)0)) (*)(type): 1, default: 0), \
+		"Wove C pointer typedef destructor does not match its owner type")
+
 void wvrt_check_c_handle(const volatile void *wvrt_handle, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_check_c_handle_empty(const volatile void *wvrt_handle, int32_t wvrt_file,
