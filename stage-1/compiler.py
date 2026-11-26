@@ -50,6 +50,7 @@ WRAPPING_OPS = {
 	"u32.add": (U32, "wvrt_u32_add_wrapping"),
 	"u32.sub": (U32, "wvrt_u32_sub_wrapping"),
 }
+STEP_OPS = {"inc": "add", "dec": "sub"}
 BINARY_OPS = {
 	"u8.eq": (U8, BOOL, "=="),
 	"u8.not-eq": (U8, BOOL, "!="),
@@ -754,16 +755,22 @@ class FunctionEmitter:
 				f"{index.c}, {self.site(node.line)})"
 			)
 
-		wrapping = WRAPPING_OPS.get(expr.tag)
+		prefix, _, predicate = expr.tag.partition(".")
+		step = STEP_OPS.get(predicate)
+		wrapping = WRAPPING_OPS.get(f"{prefix}.{step}" if step is not None else expr.tag)
 		# Evaluate exact-type operands in order before performing wrapping arithmetic.
 		if wrapping is not None:
 			kind, helper = wrapping
+			# A unary step uses the existing arithmetic helper with an implicit one.
+			if step is not None:
+				operand, = form(expr, arity=1).operands
+				value = self.typed(operand, kind)
+				return self.temporary(kind, f"{helper}({value.c}, 1)")
 			left, right = form(expr, arity=2).operands
 			first = self.typed(left, kind)
 			second = self.typed(right, kind)
 			return self.temporary(kind, f"{helper}({first.c}, {second.c})")
 
-		prefix, _, predicate = expr.tag.partition(".")
 		zero_comparison = ZERO_PREDICATES.get(predicate)
 		# Reuse the same typed operators when a zero operand is implicit.
 		if zero_comparison is not None:
