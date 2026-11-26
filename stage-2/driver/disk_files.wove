@@ -7,13 +7,14 @@
 	to reuse an immutable snapshot reached through any other spelling.`)
 
 	(use wove-file "./protection.wove" (only protected_input report_input_collision (type BuildProtection)))
-	(use wove-file "./paths.wove" (only join_file_path))
-	(use wove-file "./files.wove" (only canonical_path file_stamp read_source_file same_file_stamp (type FileStamp)))
-	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "./paths.wove" (only join_file_path directory_width))
+	(use wove-file "./files.wove" (only canonical_path empty_path file_stamp read_source_file same_file_stamp (type FileStamp)))
+	(use wove-file "../source/paths.wove" (only append_component (type SuppliedFile)))
 	(use wove-file "../source/scan.wove" (only (type Token)))
 	(use wove-file "../source/strings.wove" (only decode_string (type DecodeResult)))
 	(use wove-file "../source/graph.wove" (only (type GraphResult) (type DiskEdge)))
 	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
 
 	(struct DiskFile (fields (source SuppliedFile) (stamp FileStamp)))
 	(struct DiskSpace (fields (bytes i32) (files i32) (edges i32)))
@@ -56,7 +57,7 @@
 		(body
 			(array.store (local edges) (local index)
 				(struct.new DiskEdge (file (struct.get (local request) file)) (start (struct.get (local request) start))
-					(target (local provider))))))
+					(target (local provider)) (path_start 0i32) (path_end 0i32) (error_start 0i32) (error_end 0i32) (error 0u32)))))
 
 	(fn empty_view
 		(:doc `An empty path owner represents a failed canonical lookup.`)
@@ -174,4 +175,111 @@
 						(i32.add.wrapping (local edge) 1i32)) 0i32 0i32 0u32 (bool false)))))
 			(return (call load_new_disk_file (borrow-shared (local canonical)) (local stamp) (local used) (local request)
 				(borrow-mut (local arena)) (borrow-mut (local files)) (borrow-mut (local edges))))))
+	(fn failed_path_suffix
+		(:doc "Join the physical prefix and unresolved suffix. Retain parent components beyond the first failed lookup.")
+		(params (prefix (shared-array u8)) (suffix (shared-array u8)))
+		(returns (owned-array u8))
+		(body
+			(let width (array.len (local prefix)))
+			(let tail (array.len (local suffix)))
+			(if
+				(:doc "An unrepresentable diagnostic key simply cannot be deduplicated.")
+				(i32.lt (i32.sub.wrapping 2147483647i32 (local width)) (local tail))
+				(then (return (call empty_path))))
+			(let-mut bytes (array.alloc u8 (i32.add.wrapping (local width) (local tail))))
+			(let-mut end 0i32)
+			(if
+				(:doc "The first suffix separator also supplies the slash of a physical root prefix.")
+				(bool.not (i32.eq (local width) 1i32))
+				(then (set (local end) (call append_bytes (borrow-shared (local prefix)) (borrow-mut (local bytes)) 0i32))))
+			(let-mut cursor 0i32)
+			(while
+				(:doc "Only redundant separators and single dots are interchangeable in the unresolved suffix.")
+				(i32.lt (local cursor) (local tail))
+				(body
+					(let start (local cursor))
+					(while
+						(:doc "Read the current component up to the next slash.")
+						(bool.and (i32.lt (local cursor) (local tail))
+							(bool.not (u8.eq (array.load (local suffix) (local cursor)) 47u8)))
+						(body (set (local cursor) (i32.add.wrapping (local cursor) 1i32))))
+					(let length (i32.sub.wrapping (local cursor) (local start)))
+					(if
+						(:doc "A nonempty component other than a dot stays in the diagnostic key.")
+						(bool.and (i32.lt 0i32 (local length))
+							(bool.not (bool.and (i32.eq (local length) 1i32)
+								(u8.eq (array.load (local suffix) (local start)) 46u8))))
+						(then (set (local end) (call append_component (borrow-shared (local suffix))
+							(local start) (local cursor) (borrow-mut (local bytes)) (local end)))))
+					(if (i32.lt (local cursor) (local tail)) (then (set (local cursor) (i32.add.wrapping (local cursor) 1i32))))))
+			(let-mut exact (array.alloc u8 (local end)))
+			(let copied (call append_bytes (borrow-shared (array.range (local bytes) 0i32 (local end))) (borrow-mut (local exact)) 0i32))
+			(return (move (local exact)))))
+
+	(fn disk_failure_key
+		(:doc "Identify a failed disk target by its physical ancestor and remaining path components.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (edge DiskEdge))
+		(returns (owned-array u8))
+		(body
+			(let importer (array.load (local files) (struct.get (local edge) file)))
+			(let start (struct.get (local edge) path_start))
+			(let end (struct.get (local edge) path_end))
+			(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+			(let parsed (call decode_use_path (borrow-shared (local arena)) (local importer) (local start)
+				(local end) (borrow-mut (local decoded))))
+			(if (u32.lt 0u32 (struct.get (local parsed) error)) (then (return (call empty_path))))
+			(let joined (call join_disk_path (borrow-shared (local arena)) (local importer)
+				(borrow-shared (array.range (local decoded) 0i32 (struct.get (local parsed) written)))))
+			(let length (array.len (local joined)))
+			(let file (call canonical_path (borrow-shared (local joined))))
+			(if (i32.lt 0i32 (array.len (local file))) (then (return (move (local file)))))
+			(let-mut limit (local length))
+			(while
+				(:doc "Resolve the longest existing ancestor through the same filesystem rules as an ordinary import.")
+				(i32.lt 0i32 (local limit))
+				(body
+					(let directory (call directory_width (borrow-shared (array.range (local joined) 0i32 (local limit)))))
+					(if (i32.lt (local directory) 2i32) (then (set (local limit) 0i32)))
+					(if
+						(:doc "The root itself needs no additional canonical prefix in the key.")
+						(i32.lt 1i32 (local directory))
+						(then
+							(set (local limit) (i32.sub.wrapping (local directory) 1i32))
+							(let parent (call canonical_path (borrow-shared (array.range (local joined) 0i32 (local limit)))))
+							(if
+								(:doc "The suffix still contains the separator before its first unresolved component.")
+								(i32.lt 0i32 (array.len (local parent)))
+								(then (return (call failed_path_suffix (borrow-shared (local parent))
+									(borrow-shared (array.range (local joined) (local limit) (local length)))))))))))
+			(let empty (array.alloc u8 0i32))
+			(return (call failed_path_suffix (borrow-shared (local empty)) (borrow-shared (local joined))))))
+
+	(fn duplicate_disk_failure
+		(:doc "Report the first importing span for the same unavailable source, even through a different relative spelling.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (edges (shared-array DiskEdge)) (current i32))
+		(returns bool)
+		(body
+			(let key (call disk_failure_key (borrow-shared (local arena)) (borrow-shared (local files))
+				(array.load (local edges) (local current))))
+			(let width (array.len (local key)))
+			(if (i32.eq (local width) 0i32) (then (return (bool false))))
+			(let-mut index 0i32)
+			(while
+				(:doc "The disk request cache follows the same Wove-edge walk as final binding.")
+				(i32.lt (local index) (local current))
+				(body
+					(let earlier (array.load (local edges) (local index)))
+					(if
+						(:doc "Only an earlier unavailable source competes for this diagnostic.")
+						(u32.eq (struct.get (local earlier) error) 27u32)
+						(then
+							(let prior (call disk_failure_key (borrow-shared (local arena)) (borrow-shared (local files)) (local earlier)))
+							(if
+								(:doc "Equal physical prefixes and unresolved components represent one failed source.")
+								(call same_bytes (borrow-shared (local key)) 0i32 (local width)
+									(borrow-shared (local prior)) 0i32 (array.len (local prior)))
+								(then (return (bool true))))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (bool false))))
+
 )

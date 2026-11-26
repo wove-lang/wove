@@ -1373,8 +1373,12 @@ Ordinary `cc` and `bin` builds take one explicit UTF-8 source path and
 require an output target with a basename. `cc --check` accepts one or
 more explicit UTF-8 source paths and checks each entry's imports, embeds,
 and C availability without creating output. It checks entries in operand
-order, continues after an entry fails, and exits successfully only if
-every entry passes. A check ignores any supplied `-o`.
+order and continues after an entry fails. Within a disk import graph,
+it reports primary import failures in traversal order and continues
+checking independent files. A failed shared provider reports once.
+Files that depend on a failed input are excluded from subsequent
+semantic checks. The command exits successfully only if every entry
+passes. A check ignores any supplied `-o`.
 The `cc` command and ordinary `bin` builds write
 `main.c` below `<target-parent>/.wovec-cache/<profile>/<target-name>/bin/`.
 To compile retained C manually when it uses runtime operations, use

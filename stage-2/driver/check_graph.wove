@@ -1,0 +1,186 @@
+(module native_check_graph
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Check the surviving portion of a disk graph after independent failures.
+
+	File rows and byte ranges keep their defining identities in every attempt.
+	Failed modules and files that depend on them never enter another plan.`)
+
+	(use wove-file "./availability.wove" (only check_optional_c_functions))
+	(use wove-file "./graph.wove" (only report_availability report_entry_emission copy_graph_bindings))
+	(use wove-file "./graph_emit.wove" (only emit_entry_graph))
+	(use wove-file "./protection.wove" (only (type BuildProtection)))
+	(use wove-file "../source/graph.wove" (only fail_graph_file (type GraphModule) (type GraphBinding) (type DiskEdge) (type GraphResult)))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+
+	(fn failed_file
+		(:doc "Negative sentinels represent no defining file.")
+		(params (modules (shared-array GraphModule)) (file i32))
+		(returns bool)
+		(body
+			(return (bool.and (i32.lt -1i32 (local file))
+				(struct.get (array.load (local modules) (local file)) failed)))))
+
+	(fn fail_if_needed
+		(:doc "Block one importer after a failed dependency, returning whether its state changed.")
+		(params (modules (mut-array GraphModule)) (file i32))
+		(returns bool)
+		(body
+			(let module (array.load (local modules) (local file)))
+			(if (struct.get (local module) failed) (then (return (bool false))))
+			(call fail_graph_file (borrow-mut (local modules)) (local file) (struct.get (local module) next_use))
+			(return (bool true))))
+
+	(fn failed_binding_target
+		(:doc "A native binding can depend on multiple physical provider files through overlays.")
+		(params (modules (shared-array GraphModule)) (row GraphBinding))
+		(returns bool)
+		(body
+			(return (bool.or (call failed_file (borrow-shared (local modules)) (struct.get (local row) file))
+				(bool.and (u32.eq (struct.get (local row) provider) 8u32)
+					(bool.or (call failed_file (borrow-shared (local modules)) (struct.get (local row) header_file))
+						(bool.or (call failed_file (borrow-shared (local modules)) (struct.get (local row) native_file))
+							(call failed_file (borrow-shared (local modules)) (struct.get (local row) default_file)))))))))
+
+	(fn propagate_failed_inputs
+		(:doc "Remove all transitive dependents of a failed file before retrying the graph plan.")
+		(params (modules (mut-array GraphModule)) (edges (shared-array DiskEdge)) (bindings (shared-array GraphBinding)))
+		(returns void)
+		(body
+			(let-mut changed (bool true))
+			(while
+				(:doc "Only newly blocked files can make the next pass find another dependent.")
+				(local changed)
+				(body
+					(set (local changed) (bool false))
+					(let-mut edge 0i32)
+					(while
+						(:doc "Even an import with an empty selection depends on the provider.")
+						(i32.lt (local edge) (array.len (local edges)))
+						(body
+							(let item (array.load (local edges) (local edge)))
+							(if
+								(:doc "Keep an unrelated sibling eligible even if its importer failed.")
+								(call failed_file (borrow-shared (local modules)) (struct.get (local item) target))
+								(then (set (local changed) (bool.or (call fail_if_needed (borrow-mut (local modules))
+									(struct.get (local item) file)) (local changed)))))
+							(set (local edge) (i32.add.wrapping (local edge) 1i32))))
+					(let-mut binding 0i32)
+					(while
+						(:doc "Follow defining-file dependencies that do not have a Wove-file edge.")
+						(i32.lt (local binding) (array.len (local bindings)))
+						(body
+							(let row (array.load (local bindings) (local binding)))
+							(if
+								(:doc "A dependent C binding also needs its original providers.")
+								(call failed_binding_target (borrow-shared (local modules)) (local row))
+								(then (set (local changed) (bool.or (call fail_if_needed (borrow-mut (local modules))
+									(struct.get (local row) owner)) (local changed)))))
+							(set (local binding) (i32.add.wrapping (local binding) 1i32))))))))
+
+	(fn select_check_modules
+		(:doc "Leave a zeroed slot for each failed file so the planner does not parse or check it again.")
+		(params (modules (shared-array GraphModule)) (selected (mut-array GraphModule)))
+		(returns void)
+		(body
+			(let-mut file 0i32)
+			(while
+				(:doc "The selected view retains the canonical file indices.")
+				(i32.lt (local file) (array.len (local selected)))
+				(body
+					(let module (array.load (local modules) (local file)))
+					(if
+						(:doc "Only valid reached modules contribute declaration trees.")
+						(bool.not (struct.get (local module) failed))
+						(then (array.store (local selected) (local file) (local module))))
+					(set (local file) (i32.add.wrapping (local file) 1i32))))))
+
+	(fn select_check_bindings
+		(:doc "Copy the surviving binding prefix in its original order.")
+		(params (modules (shared-array GraphModule)) (bindings (shared-array GraphBinding)) (selected (mut-array GraphBinding)))
+		(returns i32)
+		(body
+			(let-mut index 0i32)
+			(let-mut count 0i32)
+			(while
+				(:doc "Every binding owned by a failed file has already lost its semantic context.")
+				(i32.lt (local index) (array.len (local bindings)))
+				(body
+					(let row (array.load (local bindings) (local index)))
+					(if
+						(:doc "Only names from surviving owners are visible to this plan.")
+						(bool.not (call failed_file (borrow-shared (local modules)) (struct.get (local row) owner)))
+						(then
+							(array.store (local selected) (local count) (local row))
+							(set (local count) (i32.add.wrapping (local count) 1i32))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (local count))))
+
+	(fn check_resolved_disk_graph
+		(:doc "Report semantic failures and retry only while at least one new file can be excluded.")
+		(:expect (tests "stage-2/cli/native/check.tsv") (issues "gh:wove-lang/wove:364"))
+		(params (path (shared-array u8)) (canonical (shared-array u8)) (probe_options (shared-array u8))
+			(protection BuildProtection) (target_index i32) (resolved GraphResult) (arena (shared-array u8))
+			(files (shared-array SuppliedFile)) (edges (shared-array DiskEdge)) (modules (mut-array GraphModule))
+			(scratch (shared-array GraphBinding)) (human bool))
+		(returns i32)
+		(body
+			(let prefix (struct.get (local resolved) bindings))
+			(let-mut originals (array.alloc GraphBinding (local prefix)))
+			(call copy_graph_bindings (borrow-shared (local scratch)) (borrow-mut (local originals)))
+			(let empty (array.alloc u8 0i32))
+			(let-mut status 0i32)
+			(if
+				(:doc "Resolve transitive dependencies before the first plan if import resolution already reported a failure.")
+				(call failed_file (borrow-shared (local modules)) 0i32)
+				(then
+					(set (local status) 1i32)
+					(call propagate_failed_inputs (borrow-mut (local modules)) (borrow-shared (local edges))
+						(borrow-shared (local originals)))))
+			(while
+				(:doc "An entirely healthy graph still needs only one ordinary check plan.")
+				(bool true)
+				(body
+					(let-mut selected (array.alloc GraphModule (array.len (local files))))
+					(let-mut filtered (array.alloc GraphBinding (local prefix)))
+					(let uses (call select_check_bindings (borrow-shared (local modules)) (borrow-shared (local originals))
+						(borrow-mut (local filtered))))
+					(let-mut bindings (array.alloc GraphBinding (local uses)))
+					(call copy_graph_bindings (borrow-shared (local filtered)) (borrow-mut (local bindings)))
+					(call select_check_modules (borrow-shared (local modules)) (borrow-mut (local selected)))
+					(let available (call check_optional_c_functions (borrow-shared (local arena))
+						(borrow-shared (local files)) (borrow-shared (local bindings))
+						(borrow-shared (local canonical)) (borrow-shared (local probe_options)) (borrow-shared (local empty))))
+					(let-mut failed -1i32)
+					(if
+						(:doc "A failed optional import keeps the existing diagnostic and source span.")
+						(u32.lt 0u32 (struct.get (local available) error))
+						(then
+							(set (local status) (call report_availability (borrow-shared (local path)) (borrow-shared (local arena))
+								(borrow-shared (local files)) (local available) (local human)))
+							(set (local failed) (struct.get (local available) file)))
+						(else
+							(let checked (call emit_entry_graph (borrow-shared (local path)) (borrow-shared (local canonical))
+								(borrow-shared (local empty)) (borrow-shared (local empty)) (local protection) (local target_index)
+								(bool true) (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local selected))
+								(borrow-shared (local bindings)) (local resolved) (local human)))
+							(if
+								(:doc "A successful residual plan preserves the status of every earlier failure.")
+								(u32.eq (struct.get (local checked) error) 0u32)
+								(then
+									(if (i32.eq (local status) 0i32) (then (return (struct.get (local checked) status))))
+									(return (local status))))
+							(set (local status) (call report_entry_emission (borrow-shared (local path)) (borrow-shared (local arena))
+								(borrow-shared (local files)) (local checked) (local human)))
+							(set (local failed) (struct.get (local checked) file))))
+					(if
+						(:doc "Capacity or global host errors may have no removable defining file.")
+						(bool.or (i32.lt (local failed) 0i32) (bool.not (i32.lt (local failed) (array.len (local files)))))
+						(then (return (local status))))
+					(if
+						(:doc "A retry must remove at least one new file.")
+						(bool.not (call fail_if_needed (borrow-mut (local modules)) (local failed)))
+						(then (return (local status))))
+					(call propagate_failed_inputs (borrow-mut (local modules)) (borrow-shared (local edges))
+						(borrow-shared (local originals)))))))
+)
