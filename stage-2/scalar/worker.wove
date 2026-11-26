@@ -1,7 +1,7 @@
 (module scalar_worker
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Check that the arrays transferred to and from a joined worker contain only Wove-owned data.")
+	(:doc "Check the exact Wove values transferred to and from named workers.")
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
@@ -11,7 +11,7 @@
 		(type ScalarRecord)))
 
 	(fn worker_payload
-		(:doc "Visit the checked layout graph and reject borrowed or native values reachable through an array.")
+		(:doc "Visit the checked layout graph and reject borrowed or native values reachable from a worker endpoint.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
 			(bindings (shared-array GraphBinding)) (type u32) (visited (mut-array u8)))
 		(returns bool)
@@ -69,19 +69,59 @@
 					(set (local field) (struct.get (local member) next_sibling))))
 			(return (bool true))))
 
-	(fn worker_arrays
-		(:doc "Require a nonnullable owned array at each endpoint and check their contained types independently of element width.")
+	(fn is_worker_record
+		(:doc "An ordinary record endpoint uses a named Wove struct with its real by-value ABI.")
+		(params (records (shared-array ScalarRecord)) (type u32))
+		(returns bool)
+		(body
+			(if (bool.not (call is_record_type (local type))) (then (return (bool false))))
+			(let layout (array.load (local records) (call record_index (local type))))
+			(return (bool.and (i32.gtz (struct.get (local layout) name))
+				(i32.eqz (struct.get (local layout) native))))))
+
+	(fn worker_endpoint
+		(:doc "The dedicated thread path also admits named Wove structs.")
+		(params (records (shared-array ScalarRecord)) (type u32) (allow_records bool))
+		(returns bool)
+		(body
+			(return (bool.or (call is_array_owner (local type))
+				(bool.and (local allow_records) (call is_worker_record (borrow-shared (local records)) (local type)))))))
+
+	(fn worker_signature
+		(:doc "Check both exact endpoints and reject every reachable foreign value or borrow.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
-			(bindings (shared-array GraphBinding)) (job u32) (result u32))
+			(bindings (shared-array GraphBinding)) (job u32) (result u32) (allow_records bool))
 		(returns bool)
 		(body
 			(if
-				(:doc "The joined worker ABI takes and returns one owned array descriptor.")
-				(bool.not (bool.and (call is_array_owner (local job)) (call is_array_owner (local result))))
+				(:doc "Pools and receipt queues keep their existing array endpoints.")
+				(bool.not (bool.and
+					(call worker_endpoint (borrow-shared (local records)) (local job) (local allow_records))
+					(call worker_endpoint (borrow-shared (local records)) (local result) (local allow_records))))
 				(then (return (bool false))))
 			(let-mut visited (array.alloc u8 (array.len (local records))))
 			(return (bool.and (call worker_payload (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local job) (borrow-mut (local visited)))
 				(call worker_payload (borrow-shared (local source)) (borrow-shared (local nodes))
 					(borrow-shared (local records)) (borrow-shared (local bindings)) (local result) (borrow-mut (local visited)))))))
+
+	(fn worker_receipt_result
+		(:doc "Record launches reserve the negative form of the exact result code for single-receipt collection.")
+		(params (job u32) (result u32))
+		(returns i32)
+		(body
+			(let code (i32.from-u32 (local result)))
+			(if
+				(:doc "Only array-to-array receipts remain eligible for an array receipt queue.")
+				(bool.and (call is_array_owner (local job)) (call is_array_owner (local result)))
+				(then (return (local code))))
+			(return (i32.sub 0i32 (local code)))))
+
+	(fn worker_result_type
+		(:doc "Recover the exact value type from a single receipt or an array queue.")
+		(params (code i32))
+		(returns u32)
+		(body
+			(if (i32.ltz (local code)) (then (return (u32.from-i32 (i32.sub 0i32 (local code))))))
+			(return (u32.from-i32 (local code)))))
 )

@@ -40,6 +40,9 @@
 	(use wove-file "./c_vectors.wove" (only write_c_vector_snapshot))
 	(use wove-file "./c_values.wove" (only has_c_values write_c_value_name))
 	(use wove-file "./bindings.wove" (only write_binding_name write_module_bindings))
+	(use wove-file "./function_names.wove" (only write_function_name))
+	(use wove-file "./workers.wove" (only write_worker_adapters open_record_worker_call write_worker_adapter_name
+		open_worker_pack write_worker_drop_argument open_worker_unpack is_record_worker_launch))
 	(use wove-file "./owners.wove" (only native_owner_contract write_native_destructor write_native_handle_borrow))
 	(use wove-file "./owner_assignment.wove" (only write_owner_assignment))
 	(use wove-file "./owned_fields.wove" (only write_array_take write_native_slot_take write_native_handle_out_capture write_native_handle_slot write_owner_transfer write_owned_field_loan))
@@ -48,7 +51,7 @@
 	(use wove-file "../c/arguments.wove" (only c_null_argument_kind))
 	(use wove-file "../source/owned.wove" (only (value optional_none) (value optional_some)))
 	(use wove-file "./c_snapshots.wove" (only write_optional_unwrap))
-	(use wove-file "./c_arguments.wove" (only write_c_argument_call c_symbol_text))
+	(use wove-file "./c_arguments.wove" (only write_c_argument_call))
 	(use wove-file "./c_prototype.wove" (only write_c_prototype_check))
 	(use wove-file "./c_formals.wove" (only fixed_c_needs_prototype cross_header_owner_needs_prototype write_fixed_c_checks))
 	(use wove-file "../scalar/flow.wove" (only after_block is_loop is_loop_exit (value break_statement) (value for_statement) (value for_source_owner) (value for_element_assignment) (type ScalarStatement) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment)
@@ -70,8 +73,8 @@
 	(use wove-file "../source/integer_checks.wove" (only is_integer_check))
 	(use wove-file "../source/types.wove" (only is_16bit_integer is_64bit_integer is_128bit_integer is_builtin_integer is_signed_builtin_integer (value i64_type) (value i128_type) (value f128_type) (value worker_receipt_type) (value worker_queue_type) (value worker_pool_type) (value worker_permit_type)))
 	(use wove-file "../source/integer_compare.wove" (only comparison_is_zero comparison_is_negated))
-	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment c_cast c_i32_bias write_declaration_name
-			function_name_role write_temporary_name write_local_name write_local_place write_loop_label open_static_value write_static_bytes))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment c_cast c_i32_bias
+			write_temporary_name write_local_name write_local_place write_loop_label open_static_value write_static_bytes))
 	(use wove-file "./collisions.wove" (only assign_c_names))
 	(use wove-file "../scalar/generics/functions.wove" (only (type FunctionInstance)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
@@ -84,22 +87,6 @@
 	(let c_loop_label_end ":;")
 
 	(let signed_wide_cast "(int64_t)")
-
-	(fn write_function_name
-		(:doc `Write the native bridge symbol or a stable name for a Wove function.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction)
-			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
-		(body
-			(let name (array.load (local nodes) (struct.get (local function) name)))
-			(if
-				(:doc "A C bridge call uses the spelling declared in its native header.")
-				(i32.ltz (struct.get (local function) body))
-				(then (return (call c_symbol_text (borrow-shared (local source)) (local name)
-					(borrow-mut (local output)) (local offset) (local writing)))))
-			(return (call write_declaration_name (borrow-mut (local output)) (local offset) (local writing) (local name_prefix) (call function_name_role)
-				(struct.get (local function) identity) (struct.get (local function) c_name_slot) (borrow-shared (local source))
-				(struct.get (local name) start) (struct.get (local name) end)))))
 
 	(fn write_scalar
 		(:doc `Write one checked leaf as a literal, binding reference, or slice reborrow.`)
@@ -1100,8 +1087,20 @@
 				(bool.or (call is_worker_collect (local kind))
 					(bool.or (bool.or (u32.eq (local kind) (local worker_receipt_move_kind))
 						(u32.eq (local kind) (local worker_permit_move_kind))) (u32.eq (local kind) (local worker_push_kind))))
-				(then (return (call write_worker_slot_operation (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+				(then
+					(let result (struct.get (local expression) type))
+					(let boxed (bool.and (u32.eq (local kind) (local worker_join_kind)) (call is_record_type (local result))))
+					(let-mut cursor (local offset))
+					(if
+						(:doc "A joined record takes ownership from its one-value transport.")
+						(local boxed)
+						(then (set (local cursor) (call open_worker_unpack (borrow-shared (local source)) (borrow-shared (local nodes))
+							(array.load (local records) (call record_index (local result)))
+							(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+					(set (local cursor) (call write_worker_slot_operation (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local expression) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(if (local boxed) (then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+					(return (local cursor))))
 			(if
 				(:doc "An evaluating move clears the original owner slot before passing the pointer onward.")
 				(u32.eq (local kind) (call owned_array_take_kind))
@@ -1233,7 +1232,16 @@
 					(local expression) (local tree_base) (borrow-shared (local parameters)) (borrow-shared (local expressions)) (borrow-mut (local output))
 					(local offset) (local name_prefix) (local writing)))))
 			(let worker (call is_worker_launch (local kind)))
+			(let adapted (call is_record_worker_launch (local expression)))
+			(let result (struct.get (local expression) type))
+			(let boxed_result (bool.and (local adapted) (call is_record_type (local result))))
 			(let-mut cursor (local offset))
+			(if
+				(:doc "A synchronous result is unboxed at the launch expression.")
+				(local boxed_result)
+				(then (set (local cursor) (call open_worker_unpack (borrow-shared (local source)) (borrow-shared (local nodes))
+					(array.load (local records) (call record_index (local result)))
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(let-mut first (struct.get (local expression) first))
 			(if
 				(:doc "An indirect call invokes the captured pointer and starts its arguments after the target.")
@@ -1250,34 +1258,43 @@
 						(then (return (call write_temporary_name (borrow-shared (local source)) (local value_index) (local tree_base)
 							(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 					(if
-						(:doc "Pass the statically checked Wove handler as the thread helper's first operand.")
-						(local worker)
+						(:doc "A record worker runs through a private adapter with the exact Wove signature.")
+						(local adapted)
 						(then
+							(set (local cursor) (call open_record_worker_call (local kind)
+								(borrow-mut (local output)) (local cursor) (local writing)))
+							(set (local cursor) (call write_worker_adapter_name (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local callee) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
+						(else
 							(if
-								(:doc "A pooled submission passes its captured permit before the job.")
-								(u32.eq (local kind) (local worker_spawn_on_kind))
-								(then (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_on_call))
-									(borrow-mut (local output)) (local cursor) (local writing))))
-								(else
+								(:doc "Pass the statically checked Wove handler as the thread helper's first operand.")
+								(local worker)
+								(then
 									(if
-										(:doc "An independent launch returns a receipt instead of collecting the job's result.")
-										(u32.eq (local kind) (local worker_spawn_kind))
-										(then (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_call))
+										(:doc "A pooled submission passes its captured permit before the job.")
+										(u32.eq (local kind) (local worker_spawn_on_kind))
+										(then (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_on_call))
 											(borrow-mut (local output)) (local cursor) (local writing))))
-										(else (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_join_call))
-											(borrow-mut (local output)) (local cursor) (local writing)))))))))
-					(let verified (call cross_header_owner_needs_prototype (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local parameters)) (local callee)))
-					(if
-						(:doc "A checked direct C invocation must call the function used by the prototype assertion.")
-						(local verified)
-						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 40u8 (local writing)))))
-					(set (local cursor) (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local callee) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-					(if
-						(:doc "Close the verified callee before opening its argument list.")
-						(local verified)
-						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))))
+										(else
+											(if
+												(:doc "An independent launch returns a receipt instead of collecting the job's result.")
+												(u32.eq (local kind) (local worker_spawn_kind))
+												(then (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_call))
+													(borrow-mut (local output)) (local cursor) (local writing))))
+												(else (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_join_call))
+													(borrow-mut (local output)) (local cursor) (local writing)))))))))
+							(let verified (call cross_header_owner_needs_prototype (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local parameters)) (local callee)))
+							(if
+								(:doc "A checked direct C invocation must call the function used by the prototype assertion.")
+								(local verified)
+								(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 40u8 (local writing)))))
+							(set (local cursor) (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local callee) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(if
+								(:doc "Close the verified callee before opening its argument list.")
+								(local verified)
+								(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))))))
 			(if
 				(:doc "The worker's job follows the handler. Other calls open their argument list here.")
 				(local worker)
@@ -1293,6 +1310,16 @@
 						(i32.not-eq (local first) (local index))
 						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))))
 					(let row (array.load (local expressions) (local index)))
+					(let type (struct.get (local row) type))
+					(let boxed_job (bool.and (local adapted) (call is_record_type (local type))))
+					(if
+						(:doc "Pack a record only after its normal argument evaluation and any ownership transfer.")
+						(local boxed_job)
+						(then
+							(set (local cursor) (call open_worker_pack (borrow-shared (local source)) (borrow-shared (local nodes))
+								(array.load (local records) (call record_index (local type)))
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 40u8 (local writing)))))
 					(if
 						(:doc "Use the temporary if evaluation captured this argument before a later operand.")
 						(bool.or (bool.or (local indirect) (i32.lt -1i32 (struct.get (local row) extent_check)))
@@ -1305,13 +1332,27 @@
 						(else (set (local cursor) (call write_scalar
 							(borrow-shared (local source)) (borrow-shared (local nodes)) (local row) (local tree_base)
 							(borrow-shared (local parameters)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+					(if
+						(:doc "A failed box allocation or launch drops a transferred job at its source site.")
+						(local boxed_job)
+						(then
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))
+							(set (local cursor) (call write_worker_drop_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+								(array.load (local records) (call record_index (local type)))
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(set (local cursor) (call close_runtime_call (borrow-mut (local output)) (local cursor)
+								(struct.get (local expression) asset_start) (struct.get (local expression) start) (struct.get (local expression) end)
+								(local writing)))))
 					(set (local index) (struct.get (array.load (local nodes) (local index)) next_sibling))))
 			(if
 				(:doc "Attach the original site to thread creation and join diagnostics.")
 				(local worker)
-				(then (return (call close_runtime_call (borrow-mut (local output)) (local cursor)
-					(struct.get (local expression) asset_start) (struct.get (local expression) start) (struct.get (local expression) end)
-					(local writing)))))
+				(then
+					(set (local cursor) (call close_runtime_call (borrow-mut (local output)) (local cursor)
+						(struct.get (local expression) asset_start) (struct.get (local expression) start) (struct.get (local expression) end)
+						(local writing)))
+					(if (local boxed_result) (then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+					(return (local cursor))))
 			(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 
 	(fn write_temporary_declaration
@@ -2363,6 +2404,9 @@
 							(borrow-shared (local records)) (borrow-shared (local parameters)) (local function)
 							(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 					(set (local index) (i32.inc (local index)))))
+			(set (local cursor) (call write_worker_adapters (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local functions)) (borrow-shared (local expressions))
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(set (local index) 0i32)
 			(while
 				(:doc "Every selected declaration receives one definition with the verified signature.")

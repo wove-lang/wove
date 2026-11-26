@@ -383,6 +383,36 @@ static inline void wvrt_inline_array_slot_drop(wvrt_array **slot) {
 
 typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 
+// Declare record transport only in translation units that emit or implement its adapters.
+#define WVRT_DECLARE_RECORD_WORKERS() \
+	typedef wvrt_array *(*wvrt_record_worker)(wvrt_array *job, int32_t file, int32_t start, int32_t end); \
+	wvrt_array *wvrt_worker_pack_at_span(void *value, size_t size, size_t alignment, \
+		void (*drop)(void *), int32_t file, int32_t start, int32_t end); \
+	void wvrt_worker_unpack(wvrt_array *box, void *value); \
+	wvrt_worker_receipt *wvrt_worker_spawn_record_at_span(wvrt_record_worker handler, wvrt_array *job, \
+		int32_t file, int32_t start, int32_t end); \
+	wvrt_array *wvrt_worker_spawn_join_record_at_span(wvrt_record_worker handler, wvrt_array *job, \
+		int32_t file, int32_t start, int32_t end);
+
+// Use the ordinary record destructor through the runtime's erased drop callback.
+#define WVRT_DEFINE_WORKER_DROP(type, drop) \
+	static inline void wvrt_worker_drop_##type(void *value) { drop((type *)value); }
+
+// Evaluate the incoming value once and move it into the worker transport.
+#define WVRT_WORKER_PACK(type, value, drop, file, start, end) \
+	__extension__ ({ \
+		type wvrt_worker_packed = (value); \
+		wvrt_worker_pack_at_span(&wvrt_worker_packed, sizeof(type), _Alignof(type), (drop), (file), (start), (end)); \
+	})
+
+// Restore the exact result type and dispose of its transport without dropping moved fields.
+#define WVRT_WORKER_UNPACK(type, box) \
+	__extension__ ({ \
+		type wvrt_worker_unpacked; \
+		wvrt_worker_unpack((box), &wvrt_worker_unpacked); \
+		wvrt_worker_unpacked; \
+	})
+
 // A single producer owns admission. Each permit reserves one waiting slot and keeps the pool live.
 typedef struct WvrtWorkerPool WvrtWorkerPool;
 typedef struct WvrtWorkerPool WvrtWorkerPermit;
