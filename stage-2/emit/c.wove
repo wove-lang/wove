@@ -48,9 +48,10 @@
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment)))
 	(use wove-file "../scalar/loans.wove" (only is_local_slice_view (value indirect_local_place) (value local_slice_projection) (value scoped_field_loan) (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies checked_function_count (type ScalarFunction) (type ScalarParameter) (type CallSite)))
-	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword word_count_type is_fixed_access is_fixed_initializer native_alloc_kind native_empty_kind (type ScalarOperator) (value i32_shr_kind) (value u64_rotr_kind)))
+	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword is_fixed_access is_fixed_initializer native_alloc_kind native_empty_kind (type ScalarOperator)))
+	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates word_moves_right word_mask_type))
 	(use wove-file "./runtime.wove"
-		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_checked_word_binary open_slice_access open_slice_range open_shared_projection write_slice_length close_runtime_call write_site_number
+		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_word_rotate write_word_width open_checked_word_binary open_slice_access open_slice_range open_shared_projection write_slice_length close_runtime_call write_site_number
 			open_slice_offset write_slice_items open_array_allocation open_array_copy open_array_drop open_array_borrow))
 	(use wove-file "../source/integer_ops.wove" (only is_integer_arithmetic is_checked_integer_operator is_integer_step
 		is_integer_division is_integer_remainder))
@@ -278,8 +279,7 @@
 					(local expression) (local symbol) (local trapping) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(let signed (u32.eq (local result) 5u32))
-			(let signed_mask (bool.and (local signed)
-				(bool.or (u8.eq (local symbol) 38u8) (u8.eq (local symbol) 124u8))))
+			(let signed_mask (bool.and (local signed) (u32.gtz (call word_mask_type (local kind)))))
 			(let signed_wrap (bool.and (local signed) (bool.not (local signed_mask))))
 			(let unsigned_word (u32.eq (local result) 11u32))
 			(let first (struct.get (local expression) first))
@@ -317,7 +317,7 @@
 					(local tree_base) (local symbol) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Use unsigned arithmetic before narrowing back to the requested 16-bit type.")
-				(call is_16bit_integer (local result))
+				(bool.and (call is_16bit_integer (local result)) (call is_integer_arithmetic (local kind)))
 				(then (return (call write_16bit_wrapping (borrow-shared (local source)) (local first) (local second) (local tree_base)
 					(local symbol) (call is_signed_builtin_integer (local result))
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
@@ -401,8 +401,10 @@
 			(let left (struct.get (local expression) first))
 			(let right (struct.get (array.load (local nodes) (local left)) next_sibling))
 			(let kind (struct.get (local expression) kind))
+			(let type (struct.get (local expression) type))
+			(let division (call is_integer_division (local kind)))
 			(let open (call open_checked_word_binary (borrow-mut (local output)) (local offset)
-				(call is_integer_division (local kind)) (struct.get (local expression) type) (local writing)))
+				(local division) (local type) (local writing)))
 			(let first (call write_temporary_name (borrow-shared (local source)) (local left) (local tree_base)
 				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(let comma (call c_byte (borrow-mut (local output)) (local first) 44u8 (local writing)))
@@ -412,48 +414,74 @@
 			(let-mut flag 48u8)
 			(if
 				(:doc "The alternate operation is remainder or arithmetic shift right.")
-				(bool.or (call is_integer_remainder (local kind)) (u32.eq (local kind) (local i32_shr_kind)))
+				(bool.or (call is_integer_remainder (local kind))
+					(bool.and (bool.not (local division)) (call word_moves_right (local kind))))
 				(then (set (local flag) 49u8)))
-			(let flag_end (call c_byte (borrow-mut (local output)) (local flag_start) (local flag) (local writing)))
-			(return (call close_runtime_call (borrow-mut (local output)) (local flag_end)
+			(let-mut end (call c_byte (borrow-mut (local output)) (local flag_start) (local flag) (local writing)))
+			(if
+				(:doc "A generic signed shift also receives the declared word width.")
+				(bool.and (bool.not (local division)) (u32.not-eq (local type) 5u32))
+				(then (set (local end) (call write_word_width
+					(borrow-mut (local output)) (local end) (local type) (local writing)))))
+			(return (call close_runtime_call (borrow-mut (local output)) (local end)
 				(struct.get (local expression) target) (struct.get (local expression) start)
 				(struct.get (local expression) end) (local writing)))))
 
-	(let rotate_right_call "wvrt_u64_rotr_at_span(")
-
-	(fn write_counted_word
-		(:doc `Shift or rotate the evaluated word using the checked count and its source span.`)
+	(fn write_word_rotation
+		(:doc "Rotate the captured word and report an invalid count at its original operand span.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (expression ScalarExpression)
 			(tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let word (struct.get (local expression) first))
 			(let count (struct.get (array.load (local nodes) (local word)) next_sibling))
+			(let type (struct.get (local expression) type))
+			(let right (call word_moves_right (struct.get (local expression) kind)))
+			(let direct (bool.and (u32.eq (local type) 54u32) (local right)))
+			(let open (call open_word_rotate (borrow-mut (local output)) (local offset) (local type) (local direct) (local writing)))
+			(let value (call write_temporary_name (borrow-shared (local source)) (local word) (local tree_base)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let comma (call c_byte (borrow-mut (local output)) (local value) 44u8 (local writing)))
+			(let-mut end (call write_temporary_name (borrow-shared (local source)) (local count) (local tree_base)
+				(borrow-mut (local output)) (local comma) (local name_prefix) (local writing)))
+			(if
+				(:doc "The generic runtime entries take the direction and the original type width.")
+				(bool.not (local direct))
+				(then
+					(let direction (call c_byte (borrow-mut (local output)) (local end) 44u8 (local writing)))
+					(let-mut flag 48u8)
+					(if (local right) (then (set (local flag) 49u8)))
+					(set (local end) (call c_byte (borrow-mut (local output)) (local direction) (local flag) (local writing)))
+					(set (local end) (call write_word_width
+						(borrow-mut (local output)) (local end) (local type) (local writing)))))
+			(return (call close_runtime_call (borrow-mut (local output)) (local end)
+				(struct.get (local expression) target) (struct.get (local expression) start)
+				(struct.get (local expression) end) (local writing)))))
+
+	(fn write_counted_word
+		(:doc "Shift or rotate the evaluated word using the checked count and its source span.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (expression ScalarExpression)
+			(tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
 			(let kind (struct.get (local expression) kind))
+			(if
+				(:doc "A rotation uses exact-width bits in either direction.")
+				(call word_rotates (local kind))
+				(then (return (call write_word_rotation (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(let type (struct.get (local expression) type))
 			(if
 				(:doc "The runtime implements signed bit reduction and sign extension.")
-				(u32.eq (local type) 5u32)
+				(call is_signed_builtin_integer (local type))
 				(then (return (call write_checked_word_binary (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
-			(if
-				(:doc "The rotate helper checks its count and handles a zero rotation.")
-				(u32.eq (local kind) (local u64_rotr_kind))
-				(then
-					(let open (call c_literal_text (borrow-shared (local rotate_right_call))
-						(borrow-mut (local output)) (local offset) (local writing)))
-					(let value (call write_temporary_name (borrow-shared (local source)) (local word) (local tree_base)
-						(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
-					(let comma (call c_byte (borrow-mut (local output)) (local value) 44u8 (local writing)))
-					(let count_end (call write_temporary_name (borrow-shared (local source)) (local count) (local tree_base)
-						(borrow-mut (local output)) (local comma) (local name_prefix) (local writing)))
-					(return (call close_runtime_call (borrow-mut (local output)) (local count_end)
-						(struct.get (local expression) target) (struct.get (local expression) start)
-						(struct.get (local expression) end) (local writing)))))
+			(let word (struct.get (local expression) first))
+			(let count (struct.get (array.load (local nodes) (local word)) next_sibling))
 			(let-mut symbol 60u8)
 			(if
 				(:doc "A logical right shift uses the unsigned left operand with C's right shift.")
-				(bool.or (u32.eq (local kind) 69u32) (u32.eq (local kind) 90u32))
+				(call word_moves_right (local kind))
 				(then (set (local symbol) 62u8)))
 			(let narrow (call c_cast (borrow-mut (local output)) (local offset) (local type) (local writing)))
 			(let open (call c_byte (borrow-mut (local output)) (local narrow) 40u8 (local writing)))
@@ -463,8 +491,13 @@
 			(let operator (call c_byte (borrow-mut (local output)) (local value) (local symbol) (local writing)))
 			(let after_operator (call c_byte (borrow-mut (local output)) (local operator) (local symbol) (local writing)))
 			(let check (call open_word_shift_count (borrow-mut (local output)) (local after_operator) (local type) (local writing)))
-			(let count_end (call write_temporary_name (borrow-shared (local source)) (local count) (local tree_base)
+			(let-mut count_end (call write_temporary_name (borrow-shared (local source)) (local count) (local tree_base)
 				(borrow-mut (local output)) (local check) (local name_prefix) (local writing)))
+			(if
+				(:doc "Narrow unsigned counts are checked at the declared width before the widened C shift.")
+				(bool.and (u32.not-eq (local type) 11u32) (u32.not-eq (local type) 54u32))
+				(then (set (local count_end) (call write_word_width
+					(borrow-mut (local output)) (local count_end) (local type) (local writing)))))
 			(let end (call close_runtime_call (borrow-mut (local output)) (local count_end)
 				(struct.get (local expression) target) (struct.get (local expression) start)
 				(struct.get (local expression) end) (local writing)))

@@ -404,6 +404,8 @@ int32_t wvrt_int_to_i32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_star
 uint32_t wvrt_int_to_u32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_i32_from_wrapped_bits(uint32_t wvrt_bits);
 int64_t wvrt_i64_from_wrapped_bits(uint64_t wvrt_bits);
+int64_t wvrt_signed_shift_at_span(int64_t wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t width, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_i32_shift_at_span(int32_t wvrt_value, int32_t wvrt_count, bool wvrt_right,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_i32_add_wrapping(int32_t wvrt_left, int32_t wvrt_right);
@@ -413,8 +415,14 @@ int32_t wvrt_i32_divide_at_span(int32_t wvrt_left, int32_t wvrt_right, bool wvrt
 uint32_t wvrt_u32_add_wrapping(uint32_t wvrt_left, uint32_t wvrt_right);
 uint32_t wvrt_u32_sub_wrapping(uint32_t wvrt_left, uint32_t wvrt_right);
 int32_t wvrt_u32_shift_count(int32_t wvrt_count, wvrt_location wvrt_site);
+int32_t wvrt_shift_count_at_span(int32_t wvrt_count, int32_t width,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_u32_shift_count_at_span(int32_t wvrt_count, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_u64_shift_count_at_span(int32_t wvrt_count, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+uint64_t wvrt_rotate_at_span(uint64_t wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t width, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+int64_t wvrt_signed_rotate_at_span(int64_t wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t width, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 uint64_t wvrt_u64_rotr_at_span(uint64_t wvrt_value, int32_t wvrt_count,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 

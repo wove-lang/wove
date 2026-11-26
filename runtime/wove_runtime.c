@@ -1077,7 +1077,7 @@ int32_t wvrt_u32_shift_count(int32_t wvrtcount, wvrt_location wvrtsite) {
 }
 
 // Validate a native shift count and keep the original file and span.
-static int32_t wvrt_shift_count_at_span(int32_t wvrtcount, int32_t width,
+int32_t wvrt_shift_count_at_span(int32_t wvrtcount, int32_t width,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	// Both signed and width failures point at the full shift operation.
 	if (!wvrt_valid_shift_count(wvrtcount, width)) {
@@ -1096,15 +1096,43 @@ int32_t wvrt_u64_shift_count_at_span(int32_t wvrtcount, int32_t wvrtfile, int32_
 	return wvrt_shift_count_at_span(wvrtcount, 64, wvrtfile, wvrtstart, wvrtend);
 }
 
-// Rotate a full unsigned word while preserving the count operand's location.
-uint64_t wvrt_u64_rotr_at_span(uint64_t wvrtvalue, int32_t wvrtcount,
-	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	// Both component shifts must stay strictly below the word width.
-	if (!wvrt_valid_shift_count(wvrtcount, 64)) {
+// Mask to a declared width between eight and 64 bits.
+static uint64_t wvrt_word_mask(int32_t width) {
+	return UINT64_MAX >> (64 - width);
+}
+
+// Interpret already masked bits using only representable signed casts.
+static int64_t wvrt_signed_word(uint64_t bits, uint64_t mask) {
+	if (bits <= (mask >> 1)) { return (int64_t)bits; }
+	return -INT64_C(1) - (int64_t)(mask - bits);
+}
+
+// Rotate the exact-width bits and report invalid counts at the count operand.
+uint64_t wvrt_rotate_at_span(uint64_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t width, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Reject invalid counts before either component shift.
+	if (!wvrt_valid_shift_count(wvrtcount, width)) {
 		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "rotate count out of range");
 	}
-	if (wvrtcount == 0) { return wvrtvalue; }
-	return (wvrtvalue >> wvrtcount) | (wvrtvalue << (64 - wvrtcount));
+	const uint64_t mask = wvrt_word_mask(width);
+	const uint64_t bits = wvrtvalue & mask;
+	if (wvrtcount == 0) { return bits; }
+	const int32_t right = wvrtright ? wvrtcount : width - wvrtcount;
+	return ((bits >> right) | (bits << (width - right))) & mask;
+}
+
+// Recover a signed result from the same rotated bit pattern.
+int64_t wvrt_signed_rotate_at_span(int64_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t width, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	const uint64_t bits = wvrt_rotate_at_span((uint64_t)wvrtvalue, wvrtcount, wvrtright,
+		width, wvrtfile, wvrtstart, wvrtend);
+	return wvrt_signed_word(bits, wvrt_word_mask(width));
+}
+
+// Preserve the direct right-rotate entry for a full unsigned word.
+uint64_t wvrt_u64_rotr_at_span(uint64_t wvrtvalue, int32_t wvrtcount,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_rotate_at_span(wvrtvalue, wvrtcount, true, 64, wvrtfile, wvrtstart, wvrtend);
 }
 
 // Interpret wrapped bits as a signed value using only in-range signed casts.
@@ -1119,21 +1147,29 @@ int64_t wvrt_i64_from_wrapped_bits(uint64_t wvrtbits) {
 	return -INT64_C(1) - (int64_t)(UINT64_MAX - wvrtbits);
 }
 
-// Shift a signed 32-bit word using a checked count and unsigned bit operations.
-int32_t wvrt_i32_shift_at_span(int32_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
-	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	wvrtcount = wvrt_shift_count_at_span(wvrtcount, 32, wvrtfile, wvrtstart, wvrtend);
-	// Retain exactly the low 32 bits of a left shift.
+// Shift an exact-width signed value using unsigned bits and in-range signed casts.
+int64_t wvrt_signed_shift_at_span(int64_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t width, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrtcount = wvrt_shift_count_at_span(wvrtcount, width, wvrtfile, wvrtstart, wvrtend);
+	// Reduce a left shift to its declared width before interpreting its sign bit.
 	if (!wvrtright) {
-		uint32_t bits = (uint32_t)((uint64_t)(uint32_t)wvrtvalue << wvrtcount);
-		return wvrt_i32_from_wrapped_bits(bits);
+		const uint64_t mask = wvrt_word_mask(width);
+		const uint64_t bits = ((uint64_t)wvrtvalue << wvrtcount) & mask;
+		return wvrt_signed_word(bits, mask);
 	}
 	// Shift the complemented magnitude to extend the sign of a negative word.
 	if (wvrtvalue < 0) {
-		uint32_t inverted = (uint32_t)(-1 - wvrtvalue);
-		return -1 - (int32_t)(inverted >> wvrtcount);
+		const uint64_t inverted = (uint64_t)(-INT64_C(1) - wvrtvalue);
+		return -INT64_C(1) - (int64_t)(inverted >> wvrtcount);
 	}
-	return (int32_t)((uint32_t)wvrtvalue >> wvrtcount);
+	return (int64_t)((uint64_t)wvrtvalue >> wvrtcount);
+}
+
+// Preserve the direct 32-bit shift entry used by generated C.
+int32_t wvrt_i32_shift_at_span(int32_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return (int32_t)wvrt_signed_shift_at_span(wvrtvalue, wvrtcount, wvrtright, 32,
+		wvrtfile, wvrtstart, wvrtend);
 }
 
 // Add in the modulo domain and return the corresponding signed value.

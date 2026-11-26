@@ -1,0 +1,147 @@
+(module source_integer_bits
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Read exact-width masks, shifts, and rotations.")
+
+	(use wove-file "./types.wove" (only builtin_type_keyword is_builtin_integer))
+	(use wove-file "../text/match.wove" (only is_byte_at is_three_bytes))
+
+	(let word_base 3712u32)
+	(let word_limit 4224u32)
+	(let complement_slot 3u32)
+	(let shift_left_slot 4u32)
+	(let shift_right_slot 5u32)
+	(let rotate_left_slot 6u32)
+	(let rotate_right_slot 7u32)
+	(let mask_symbols "&|^~")
+
+	(fn read_word_slot
+		(:doc "Identify a complete operation suffix after the checked type and dot.")
+		(params (source (shared-array u8)) (suffix i32) (width i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "Rotations have the complete rot prefix and a direction byte.")
+				(i32.eq (local width) 4i32)
+				(then
+					(if
+						(:doc "Reject any other prefix before testing the final byte.")
+						(bool.not (call is_three_bytes (borrow-shared (local source)) (local suffix) 114u8 111u8 116u8))
+						(then (return -1i32)))
+					(if
+						(:doc "The l suffix rotates left.")
+						(call is_byte_at (borrow-shared (local source)) (local suffix) 3i32 108u8)
+						(then (return (i32.from-u32 (local rotate_left_slot)))))
+					(if
+						(:doc "The r suffix rotates right.")
+						(call is_byte_at (borrow-shared (local source)) (local suffix) 3i32 114u8)
+						(then (return (i32.from-u32 (local rotate_right_slot)))))
+					(return -1i32)))
+			(if
+				(:doc "Only or has two bytes.")
+				(i32.eq (local width) 2i32)
+				(then
+					(if
+						(:doc "Require both bytes before accepting or.")
+						(bool.and (call is_byte_at (borrow-shared (local source)) (local suffix) 0i32 111u8)
+							(call is_byte_at (borrow-shared (local source)) (local suffix) 1i32 114u8))
+						(then (return 1i32)))
+					(return -1i32)))
+			(if (i32.not-eq (local width) 3i32) (then (return -1i32)))
+			(if
+				(:doc "The four eager masks occupy slots zero through three.")
+				(call is_three_bytes (borrow-shared (local source)) (local suffix) 97u8 110u8 100u8)
+				(then (return 0i32)))
+			(if
+				(:doc "XOR shares the two-operand mask shape.")
+				(call is_three_bytes (borrow-shared (local source)) (local suffix) 120u8 111u8 114u8)
+				(then (return 2i32)))
+			(if
+				(:doc "Complement is the only unary mask.")
+				(call is_three_bytes (borrow-shared (local source)) (local suffix) 110u8 111u8 116u8)
+				(then (return (i32.from-u32 (local complement_slot)))))
+			(if
+				(:doc "Both shifts use a separate count operand.")
+				(call is_three_bytes (borrow-shared (local source)) (local suffix) 115u8 104u8 108u8)
+				(then (return (i32.from-u32 (local shift_left_slot)))))
+			(if
+				(:doc "The right shift slot selects sign extension or zero fill by type.")
+				(call is_three_bytes (borrow-shared (local source)) (local suffix) 115u8 104u8 114u8)
+				(then (return (i32.from-u32 (local shift_right_slot)))))
+			(return -1i32)))
+
+	(fn word_bit_keyword
+		(:doc "Match the whole tag and encode the builtin type and operator slot in the opcode.")
+		(params (source (shared-array u8)) (start i32) (end i32))
+		(returns u32)
+		(body
+			(let width (i32.sub (local end) (local start)))
+			(if (bool.or (i32.lt (local width) 5i32) (i32.lt 8i32 (local width))) (then (return 0u32)))
+			(let-mut prefix 3i32)
+			(if
+				(:doc "The byte types have two bytes before the dot.")
+				(call is_byte_at (borrow-shared (local source)) (local start) 2i32 46u8)
+				(then (set (local prefix) 2i32)))
+			(if
+				(:doc "Require a separator at the end of the candidate type.")
+				(bool.not (call is_byte_at (borrow-shared (local source)) (local start) (local prefix) 46u8))
+				(then (return 0u32)))
+			(let type (call builtin_type_keyword (borrow-shared (local source)) (local start) (local prefix)))
+			(if (bool.not (call is_builtin_integer (local type))) (then (return 0u32)))
+			(let suffix (i32.add (local start) (i32.inc (local prefix))))
+			(let slot (call read_word_slot (borrow-shared (local source)) (local suffix) (i32.sub (local end) (local suffix))))
+			(if (i32.ltz (local slot)) (then (return 0u32)))
+			(return (u32.add (local word_base)
+				(u32.or (u32.shl (local type) 3i32) (u32.from-i32 (local slot)))))))
+
+	(fn word_type
+		(:doc "Recover the six-bit type code from the reserved word opcode range.")
+		(params (kind u32))
+		(returns u32)
+		(body
+			(if
+				(:doc "An unrelated expression has no word type.")
+				(bool.or (u32.lt (local kind) (local word_base)) (u32.not-lt (local kind) (local word_limit)))
+				(then (return 0u32)))
+			(return (u32.shr (u32.sub (local kind) (local word_base)) 3i32))))
+
+	(fn word_mask_type
+		(:doc "Return the exact integer type of a mask or complement, or zero.")
+		(params (kind u32))
+		(returns u32)
+		(body
+			(if
+				(:doc "The low four slots have same-type operand rules.")
+				(u32.not-lt (local complement_slot) (u32.and (local kind) 7u32))
+				(then (return (call word_type (local kind)))))
+			(return 0u32)))
+
+	(fn word_mask_symbol
+		(:doc "Get the C operator for a checked mask or complement.")
+		(params (kind u32))
+		(returns u8)
+		(body (return (array.load (local mask_symbols) (i32.from-u32 (u32.and (local kind) 3u32))))))
+
+	(fn word_count_type
+		(:doc "Return the exact type of a shift or rotate word, or zero.")
+		(params (kind u32))
+		(returns u32)
+		(body
+			(if
+				(:doc "The two shifts and two rotations take counts.")
+				(u32.not-lt (u32.and (local kind) 7u32) (local shift_left_slot))
+				(then (return (call word_type (local kind)))))
+			(return 0u32)))
+
+	(fn word_rotates
+		(:doc "Check whether a counted word operation is a rotation.")
+		(params (kind u32))
+		(returns bool)
+		(body (return (u32.not-lt (u32.and (local kind) 7u32) (local rotate_left_slot)))))
+
+	(fn word_moves_right
+		(:doc "Read the direction of a counted word operation. The odd slots move right.")
+		(params (kind u32))
+		(returns bool)
+		(body (return (u32.not-eqz (u32.and (local kind) 1u32)))))
+)
