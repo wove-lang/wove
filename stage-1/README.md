@@ -40,6 +40,9 @@ less-than forms such as `(u8.eq (local byte) (u8 40))` and `(i32.lt (i32 -1)
 (i32 0))` take two operands of the named integer type and return `bool`.
 For `u8`, `i32`, and `u32`, `not-eq` and `not-lt` negate the corresponding
 comparison with the same operands evaluated once from left to right.
+The unary `eqz`, `ltz`, and `gtz` predicates and their `not-` forms
+compare the named integer type with zero. The single operand evaluates once,
+including when unsigned ordering fixes the result.
 
 `(bool.and left right)` and `(bool.or left right)` evaluate the left
 operand first. They evaluate the right operand once when the left operand is
