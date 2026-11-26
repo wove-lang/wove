@@ -202,6 +202,23 @@ wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrt_table,
 wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrt_value, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
+bool wvrt_array_try_reserve(wvrt_array *wvrt_buffer, int32_t wvrt_capacity);
+void wvrt_array_reserve_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_capacity,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+void wvrt_array_push_at_span(wvrt_array *wvrt_buffer, const void *wvrt_value,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+void wvrt_array_remove_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_index, void *wvrt_result,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+void wvrt_array_truncate_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_length,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+// Return the removed value with its exact element type, including aggregate types.
+#define wvrt_array_remove_value(type, owner, index, file, start, end) \
+	__extension__ ({ \
+		type wvrt_removed; \
+		wvrt_array_remove_at_span((owner), (index), &wvrt_removed, (file), (start), (end)); \
+		wvrt_removed; \
+	})
 wvrt_slice wvrt_slice_range_u8(const void *wvrt_items, int32_t wvrt_length,
 	int32_t wvrt_start, int32_t wvrt_end, wvrt_location wvrt_site);
 wvrt_slice wvrt_slice_range_at_span(wvrt_slice wvrt_view, int32_t wvrt_start, int32_t wvrt_end,

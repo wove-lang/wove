@@ -608,6 +608,83 @@ void wvrt_array_drop(wvrt_array *wvrtbuffer) {
 	free(wvrtbuffer);
 }
 
+// Publish new capacity only after aligned allocation and copying the live prefix succeed.
+bool wvrt_array_try_reserve(wvrt_array *wvrtbuffer, int32_t wvrtcapacity) {
+	if (wvrtcapacity < 0) { return false; }
+	if (wvrtcapacity <= wvrtbuffer->wvrt_capacity) { return true; }
+	size_t wvrt_size = wvrtbuffer->wvrt_element_size;
+	void *wvrt_storage = wvrt_calloc((size_t)wvrtcapacity, wvrt_size,
+		wvrtbuffer->wvrt_element_alignment);
+	if (wvrt_storage == NULL) { return false; }
+	memcpy(wvrt_storage, wvrtbuffer->wvrt_items, (size_t)wvrtbuffer->wvrt_length * wvrt_size);
+	free(wvrtbuffer->wvrt_items);
+	wvrtbuffer->wvrt_items = wvrt_storage;
+	wvrtbuffer->wvrt_capacity = wvrtcapacity;
+	wvrtbuffer->wvrt_spare = 0;
+	return true;
+}
+
+// Trap at the written reserve operation if its requested capacity cannot be provided.
+void wvrt_array_reserve_at_span(wvrt_array *wvrtbuffer, int32_t wvrtcapacity,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Distinguish a negative requested capacity from an allocation failure.
+	if (wvrtcapacity < 0) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "array capacity cannot be negative");
+	}
+	// The checked reserve leaves the original descriptor intact on failure.
+	if (!wvrt_array_try_reserve(wvrtbuffer, wvrtcapacity)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not grow array");
+	}
+}
+
+// Append a value captured outside the array, growing geometrically when needed.
+void wvrt_array_push_at_span(wvrt_array *wvrtbuffer, const void *wvrtvalue,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	int32_t wvrt_length = wvrtbuffer->wvrt_length;
+	// Check the largest representable length before adding the new element.
+	if (wvrt_length == INT32_MAX) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "array length overflow");
+	}
+	// Only allocate when the live prefix has filled the current storage.
+	if (wvrt_length == wvrtbuffer->wvrt_capacity) {
+		int32_t wvrt_capacity = wvrtbuffer->wvrt_capacity;
+		int32_t wvrt_next = wvrt_capacity > INT32_MAX / 2 ? INT32_MAX : wvrt_capacity * 2;
+		if (wvrt_next <= wvrt_length) { wvrt_next = wvrt_length + 1; }
+		wvrt_array_reserve_at_span(wvrtbuffer, wvrt_next, wvrtfile, wvrtstart, wvrtend);
+	}
+	size_t wvrt_size = wvrtbuffer->wvrt_element_size;
+	memcpy((unsigned char *)wvrtbuffer->wvrt_items + (size_t)wvrt_length * wvrt_size,
+		wvrtvalue, wvrt_size);
+	wvrtbuffer->wvrt_length = wvrt_length + 1;
+	wvrtbuffer->wvrt_spare = 0;
+}
+
+// Copy the removed element out and keep the surviving elements in order.
+void wvrt_array_remove_at_span(wvrt_array *wvrtbuffer, int32_t wvrtindex, void *wvrtresult,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	size_t wvrt_index = wvrt_array_index_at_span(wvrtbuffer->wvrt_length, wvrtindex,
+		wvrtfile, wvrtstart, wvrtend);
+	size_t wvrt_size = wvrtbuffer->wvrt_element_size;
+	unsigned char *wvrt_item = (unsigned char *)wvrtbuffer->wvrt_items + wvrt_index * wvrt_size;
+	size_t wvrt_tail = (size_t)wvrtbuffer->wvrt_length - wvrt_index - 1;
+	memcpy(wvrtresult, wvrt_item, wvrt_size);
+	memmove(wvrt_item, wvrt_item + wvrt_size, wvrt_tail * wvrt_size);
+	--wvrtbuffer->wvrt_length;
+	wvrtbuffer->wvrt_spare = 0;
+}
+
+// Retire the live suffix while retaining the original allocation for reuse.
+void wvrt_array_truncate_at_span(wvrt_array *wvrtbuffer, int32_t wvrtlength,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Only a prefix of the current live extent can remain after truncation.
+	if (wvrtlength < 0 || wvrtlength > wvrtbuffer->wvrt_length) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "array truncation out of bounds");
+	}
+	wvrt_array_drop_range(wvrtbuffer, wvrtlength, wvrtbuffer->wvrt_length);
+	wvrtbuffer->wvrt_length = wvrtlength;
+	wvrtbuffer->wvrt_spare = 0;
+}
+
 // Check the signed endpoints before deriving either the byte offset or the length.
 static bool wvrt_slice_range_valid(int32_t wvrtlength, int32_t wvrtstart, int32_t wvrtend) {
 	return 0 <= wvrtstart && wvrtstart <= wvrtend && wvrtend <= wvrtlength;

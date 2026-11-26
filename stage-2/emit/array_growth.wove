@@ -1,0 +1,108 @@
+(module emit_array_growth
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Emit array growth calls on the original allocation descriptor after evaluating the operand.`)
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/array_growth.wove" (only (value array_capacity_kind) (value array_push_kind)
+		(value array_remove_kind) (value array_truncate_kind) (value array_reserve_kind) (value array_try_reserve_kind)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression) (value indirect_local_place)))
+	(use wove-file "../scalar/plan.wove" (only (type ScalarParameter)))
+	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "./records.wove" (only write_value_type write_field_place))
+	(use wove-file "./runtime.wove" (only close_runtime_call))
+	(use wove-file "./text.wove" (only c_byte c_literal_text write_temporary_name write_local_place))
+
+	(let capacity_member ")->wvrt_capacity")
+	(let push_call "wvrt_array_push_at_span(")
+	(let remove_call "wvrt_array_remove_value(")
+	(let truncate_call "wvrt_array_truncate_at_span(")
+	(let reserve_call "wvrt_array_reserve_at_span(")
+	(let try_reserve_call "wvrt_array_try_reserve(")
+
+	(fn write_growth_receiver
+		(:doc `Read the owner pointer directly from its checked local or field place.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
+			(parameters (shared-array ScalarParameter)) (place i32) (tree_base i32) (output (mut-array u8))
+			(offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let owner (array.load (local expressions) (local place)))
+			(if
+				(:doc "A projected field can be rooted in either a local record or an existing record reference.")
+				(u32.eq (struct.get (local owner) kind) 52u32)
+				(then (return (call write_field_place (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local expressions)) (borrow-shared (local parameters)) (local place) (local tree_base)
+					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(return (call write_local_place (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local owner) target) (local tree_base)
+				(i32.eq (struct.get (local owner) projection) (local indirect_local_place))
+				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+
+	(fn open_growth_call
+		(:doc `Select the runtime operation that matches the checked growth tag.`)
+		(params (kind u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "An append passes the address of its captured value.")
+				(u32.eq (local kind) (local array_push_kind))
+				(then (return (call c_literal_text (borrow-shared (local push_call)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Removal opens a typed expression backed by the runtime operation.")
+				(u32.eq (local kind) (local array_remove_kind))
+				(then (return (call c_literal_text (borrow-shared (local remove_call)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Truncation retains the current allocation.")
+				(u32.eq (local kind) (local array_truncate_kind))
+				(then (return (call c_literal_text (borrow-shared (local truncate_call)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "The trapping reservation carries the original source location.")
+				(u32.eq (local kind) (local array_reserve_kind))
+				(then (return (call c_literal_text (borrow-shared (local reserve_call)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local try_reserve_call)) (borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_array_growth
+		(:doc `Write the growth call or capacity query. Mutation starts after the operand is captured.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(expression ScalarExpression) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let kind (struct.get (local expression) kind))
+			(let place (struct.get (local expression) projection))
+			(if
+				(:doc "Capacity reads the descriptor directly without changing its bounds.")
+				(u32.eq (local kind) (local array_capacity_kind))
+				(then
+					(let open (call c_byte (borrow-mut (local output)) (local offset) 40u8 (local writing)))
+					(let owner (call write_growth_receiver (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local expressions)) (borrow-shared (local parameters)) (local place) (local tree_base)
+						(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+					(return (call c_literal_text (borrow-shared (local capacity_member)) (borrow-mut (local output)) (local owner) (local writing)))))
+			(let-mut cursor (call open_growth_call (local kind) (borrow-mut (local output)) (local offset) (local writing)))
+			(if
+				(:doc "The removal expression returns the exact element type supplied to its result slot.")
+				(u32.eq (local kind) (local array_remove_kind))
+				(then
+					(set (local cursor) (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (struct.get (local expression) type)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))))
+			(set (local cursor) (call write_growth_receiver (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local expressions)) (borrow-shared (local parameters)) (local place) (local tree_base)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
+			(if
+				(:doc "Pass a detached element copy so reallocating the array cannot invalidate the source.")
+				(u32.eq (local kind) (local array_push_kind))
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 38u8 (local writing)))))
+			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (struct.get (local expression) first)
+				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "A fallible reserve reports allocation failure as its result.")
+				(u32.eq (local kind) (local array_try_reserve_kind))
+				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+			(return (call close_runtime_call (borrow-mut (local output)) (local cursor)
+				(struct.get (local expression) target) (struct.get (local expression) start)
+				(struct.get (local expression) end) (local writing))))))

@@ -134,6 +134,24 @@ Indexes and range endpoints are exact `i32` values. Received views count
 and index elements relative to their own bounds. Bounds violations trap.
 A call loan lasts through later arguments and the call.
 
+Stage 2 growable arrays with copyable elements use an owner as their
+receiver. Use a named owner or a field of a named place. Mutation
+requires writable storage with no overlapping live loan.
+
+| Form | Meaning |
+| --- | --- |
+| `(array.capacity data)` | Read the reserved element count as `i32`. |
+| `(array.push data value)` | Append one value of the exact element type, growing as needed. |
+| `(array.remove data index)` | Return the element at an `i32` index and shift later elements left. |
+| `(array.truncate data length)` | Keep the first `length` live elements, with no capacity change. |
+| `(array.reserve data capacity)` | Ensure room for the requested `i32` capacity, trapping on failure. |
+| `(array.try-reserve data capacity)` | Return `false` for an invalid capacity or allocation failure, preserving the array. |
+
+Push captures its value before changing storage, so it can append a
+copy of a live element from the same array. Reserving capacity leaves
+the logical length unchanged. Removal and truncation use the logical
+length for bounds and retain the reserved storage.
+
 Stage 2 fixed arrays keep their elements inline and copy by value. Use
 `(array T extent)` for a builtin scalar or copyable Wove record `T`.
 The extent is a nonnegative decimal or an immutable module integer.
