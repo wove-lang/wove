@@ -1,0 +1,309 @@
+(module source_expectations
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc `Read issue and test provenance directly from selected Wove declarations.
+
+	The source tree retains attachment and the exact written link.
+	Reverse lookup compares the decoded link bytes. Results retain a
+	file-local declaration row and the original name, expectation, and link spans.`)
+
+	(use wove-file "./scan.wove" (only check_source_form build_source_tree (type SourceNode) (type Token)))
+	(use wove-file "./module.wove" (only form_parts next_form_metadata read_module_for_target (type SelectedDeclaration) (type FormParts)))
+	(use wove-file "./imports.wove" (only import_keyword))
+	(use wove-file "./strings.wove" (only decode_string))
+	(use wove-file "./graph.wove" (only graph_selection is_wove_definition (type GraphModule) (type GraphResult)))
+	(use wove-file "./paths.wove" (only (type SuppliedFile)))
+	(use wove-file "./target.wove" (only (type SelectionContext)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct
+		(:doc "A separate row for one written link, with every byte span relative to its defining file.")
+		ExpectationLink
+		(fields (file i32) (declaration i32) (name_start i32) (name_end i32)
+			(expectation_start i32) (expectation_end i32) (link_start i32) (link_end i32) (kind u32)))
+
+	(struct ExpectationResult (fields (count i32) (file i32) (start i32) (end i32) (error u32)))
+	(struct ExpectationQuery (fields (kind u32) (path i32)))
+	(struct ExpectationOwner (fields (file i32) (declaration i32) (name_start i32) (name_end i32)))
+
+	(let expectation_tag ":expect")
+	(let issues_tag "issues")
+	(let tests_tag "tests")
+
+	(fn expectation_result
+		(:doc "Return the initialized result prefix and any originating source diagnostic.")
+		(params (count i32) (file i32) (start i32) (end i32) (error u32))
+		(returns ExpectationResult)
+		(body
+			(return (struct.new ExpectationResult (count (local count)) (file (local file)) (start (local start))
+				(end (local end)) (error (local error))))))
+
+	(fn span_matches
+		(:doc "Compare a source span with the complete spelling supplied by a query or known tag.")
+		(params (source (shared-array u8)) (node SourceNode) (key (shared-array u8)))
+		(returns bool)
+		(body
+			(return (call same_bytes (borrow-shared (local source)) (struct.get (local node) start)
+				(struct.get (local node) end) (borrow-shared (local key)) 0i32 (array.len (local key))))))
+
+	(fn expectation_group_kind
+		(:doc "Classify direct issues and tests groups. Other expectation payloads remain opaque.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (group SourceNode))
+		(returns u32)
+		(body
+			(if (bool.not (u32.eq (struct.get (local group) kind) 40u32)) (then (return 0u32)))
+			(let head (array.load (local nodes) (struct.get (local group) first_child)))
+			(if
+				(:doc "Mark the link kind by the complete group head.")
+				(call span_matches (borrow-shared (local source)) (local head) (borrow-shared (local issues_tag)))
+				(then (return 1u32)))
+			(if
+				(:doc "A test link occupies a separate query namespace from an issue.")
+				(call span_matches (borrow-shared (local source)) (local head) (borrow-shared (local tests_tag)))
+				(then (return 2u32)))
+			(return 0u32)))
+
+	(fn collect_expectation_link
+		(:doc "Record an original string token if it matches the reverse key or belongs to a forward declaration.")
+		(params (source (shared-array u8)) (owner ExpectationOwner) (entry SourceNode) (link SourceNode)
+			(group u32) (query u32) (key (shared-array u8)) (count i32) (output (mut-array ExpectationLink)))
+		(returns ExpectationResult)
+		(body
+			(let file (struct.get (local owner) file))
+			(let start (struct.get (local link) start))
+			(let end (struct.get (local link) end))
+			(if
+				(:doc "Only declared string operands are provenance links.")
+				(bool.not (u32.eq (struct.get (local link) kind) 2u32))
+				(then (return (call expectation_result (local count) (local file) 0i32 0i32 0u32))))
+			(if
+				(:doc "Compare the link value exactly, without rewriting compact references, URLs, or paths.")
+				(u32.lt 0u32 (local query))
+				(then
+					(let-mut decoded (array.alloc u8 (i32.sub.wrapping (local end) (local start))))
+					(let match (call decode_string (borrow-shared (local source))
+						(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
+						(borrow-mut (local decoded))))
+					(if
+						(:doc "A malformed escape keeps its precise file-relative span.")
+						(u32.lt 0u32 (struct.get (local match) error))
+						(then (return (call expectation_result (local count) (local file) (struct.get (local match) start)
+							(struct.get (local match) end) (struct.get (local match) error)))))
+					(if
+						(:doc "A different link does not consume a result row.")
+						(bool.not (call same_bytes (borrow-shared (local decoded)) 0i32 (struct.get (local match) written)
+							(borrow-shared (local key)) 0i32 (array.len (local key))))
+						(then (return (call expectation_result (local count) (local file) 0i32 0i32 0u32))))))
+			(if
+				(:doc "A short destination retains the initialized prefix and points to the first omitted link.")
+				(bool.not (i32.lt (local count) (array.len (local output))))
+				(then (return (call expectation_result (local count) (local file) (local start) (local end) 16u32))))
+			(array.store (local output) (local count)
+				(struct.new ExpectationLink (file (local file)) (declaration (struct.get (local owner) declaration))
+					(name_start (struct.get (local owner) name_start)) (name_end (struct.get (local owner) name_end))
+					(expectation_start (struct.get (local entry) start)) (expectation_end (struct.get (local entry) end))
+					(link_start (local start)) (link_end (local end)) (kind (local group))))
+			(return (call expectation_result (i32.add.wrapping (local count) 1i32) (local file) 0i32 0i32 0u32))))
+
+	(fn collect_expectation_group
+		(:doc "Visit each link in the selected group, retaining duplicate occurrences and their distinct spans.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (owner ExpectationOwner)
+			(entry SourceNode) (group SourceNode) (kind u32) (query u32) (key (shared-array u8))
+			(first i32) (output (mut-array ExpectationLink)))
+		(returns ExpectationResult)
+		(body
+			(let head (array.load (local nodes) (struct.get (local group) first_child)))
+			(let-mut index (struct.get (local head) next_sibling))
+			(let-mut count (local first))
+			(while
+				(:doc "Only direct operands belong to this group.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let node (array.load (local nodes) (local index)))
+					(let result (call collect_expectation_link (borrow-shared (local source)) (local owner) (local entry)
+						(local node) (local kind) (local query) (borrow-shared (local key)) (local count) (borrow-mut (local output))))
+					(if (u32.lt 0u32 (struct.get (local result) error)) (then (return (local result))))
+					(set (local count) (struct.get (local result) count))
+					(set (local index) (struct.get (local node) next_sibling))))
+			(return (call expectation_result (local count) (struct.get (local owner) file) 0i32 0i32 0u32))))
+
+	(fn collect_expectation_entry
+		(:doc "Read one directly attached expectation in its written group order.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (owner ExpectationOwner)
+			(entry SourceNode) (query u32) (key (shared-array u8)) (first i32) (output (mut-array ExpectationLink)))
+		(returns ExpectationResult)
+		(body
+			(let head (array.load (local nodes) (struct.get (local entry) first_child)))
+			(let-mut index (struct.get (local head) next_sibling))
+			(let-mut count (local first))
+			(while
+				(:doc "A reverse query only visits groups of the requested kind.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let group (array.load (local nodes) (local index)))
+					(let kind (call expectation_group_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local group)))
+					(if
+						(:doc "Skip other metadata without descending into its payload.")
+						(bool.and (u32.lt 0u32 (local kind))
+							(bool.or (u32.eq (local query) 0u32) (u32.eq (local query) (local kind))))
+						(then
+							(let result (call collect_expectation_group (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local owner) (local entry) (local group) (local kind) (local query) (borrow-shared (local key))
+								(local count) (borrow-mut (local output))))
+							(if (u32.lt 0u32 (struct.get (local result) error)) (then (return (local result))))
+							(set (local count) (struct.get (local result) count))))
+					(set (local index) (struct.get (local group) next_sibling))))
+			(return (call expectation_result (local count) (struct.get (local owner) file) 0i32 0i32 0u32))))
+
+	(fn collect_declaration_expectations
+		(:doc "Find direct expectation attachments using the same metadata sibling view as module and function readers.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (owner ExpectationOwner)
+			(parts FormParts) (query u32) (key (shared-array u8)) (first i32) (output (mut-array ExpectationLink)))
+		(returns ExpectationResult)
+		(body
+			(let-mut index (struct.get (local parts) metadata))
+			(let-mut count (local first))
+			(while
+				(:doc "Function metadata can appear between ordinary fields without changing the attachment.")
+				(i32.lt -1i32 (local index))
+				(body
+					(let entry (array.load (local nodes) (local index)))
+					(let head (array.load (local nodes) (struct.get (local entry) first_child)))
+					(if
+						(:doc "Only a directly attached expect entry describes this declaration.")
+						(call span_matches (borrow-shared (local source)) (local head) (borrow-shared (local expectation_tag)))
+						(then
+							(let result (call collect_expectation_entry (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local owner) (local entry) (local query) (borrow-shared (local key)) (local count) (borrow-mut (local output))))
+							(if (u32.lt 0u32 (struct.get (local result) error)) (then (return (local result))))
+							(set (local count) (struct.get (local result) count))))
+					(set (local index) (call next_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local parts) (local entry)))))
+			(return (call expectation_result (local count) (struct.get (local owner) file) 0i32 0i32 0u32))))
+
+	(fn collect_file_declarations
+		(:doc "Visit selected module definitions in source order and recognize the written names in their defining file.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declarations (shared-array SelectedDeclaration))
+			(length i32) (file i32) (query u32) (key (shared-array u8)) (first i32) (output (mut-array ExpectationLink)))
+		(returns ExpectationResult)
+		(body
+			(let-mut index 0i32)
+			(let-mut count (local first))
+			(let-mut found (bool false))
+			(while
+				(:doc "The selected rows flatten active groups and leave inactive definitions out of the result.")
+				(i32.lt (local index) (local length))
+				(body
+					(let declaration (struct.get (array.load (local declarations) (local index)) node))
+					(let node (array.load (local nodes) (local declaration)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let tag (call import_keyword (borrow-shared (local source)) (array.load (local nodes) (struct.get (local parts) head))))
+					(if
+						(:doc "Only named Wove definitions own expectations in this graph view.")
+						(call is_wove_definition (local tag))
+						(then
+							(let-mut name_index (struct.get (local parts) name))
+							(if (u32.eq (local tag) 7u32) (then (set (local name_index) (struct.get (local parts) operands))))
+							(let name (array.load (local nodes) (local name_index)))
+							(if
+								(:doc "A forward lookup selects the declaration's spelling. Reverse lookup visits every definition.")
+								(bool.or (u32.lt 0u32 (local query))
+									(call span_matches (borrow-shared (local source)) (local name) (borrow-shared (local key))))
+								(then
+									(set (local found) (bool true))
+									(let result (call collect_declaration_expectations (borrow-shared (local source)) (borrow-shared (local nodes))
+										(struct.new ExpectationOwner (file (local file)) (declaration (local declaration))
+											(name_start (struct.get (local name) start)) (name_end (struct.get (local name) end)))
+										(local parts) (local query) (borrow-shared (local key)) (local count) (borrow-mut (local output))))
+									(if (u32.lt 0u32 (struct.get (local result) error)) (then (return (local result))))
+									(set (local count) (struct.get (local result) count))))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(if
+				(:doc "An existing declaration with no links succeeds with zero rows. An unknown name points to the module.")
+				(bool.and (u32.eq (local query) 0u32) (bool.not (local found)))
+				(then
+					(let module (array.load (local nodes) (struct.get (array.load (local nodes) 0i32) first_child)))
+					(return (call expectation_result (local count) (local file) (struct.get (local module) start)
+						(struct.get (local module) end) 36u32))))
+			(return (call expectation_result (local count) (local file) 0i32 0i32 0u32))))
+
+	(fn inspect_expectation_file
+		(:doc "Rebuild the file-local source rows and apply the graph's exact declaration selection.")
+		(params (source (shared-array u8)) (file i32) (context SelectionContext)
+			(query u32) (key (shared-array u8)) (first i32) (output (mut-array ExpectationLink)))
+		(returns ExpectationResult)
+		(body
+			(let checked (call check_source_form (borrow-shared (local source))))
+			(if
+				(:doc "Keep lexical and structural failures in the original view.")
+				(u32.lt 0u32 (struct.get (local checked) error))
+				(then (return (call expectation_result (local first) (local file) (struct.get (local checked) start)
+					(struct.get (local checked) end) (struct.get (local checked) error)))))
+			(let rows (int.convert i32 (struct.get (local checked) rows)))
+			(let-mut nodes (array.alloc SourceNode (local rows)))
+			(let built (call build_source_tree (borrow-shared (local source)) (local checked) (borrow-mut (local nodes))))
+			(let-mut declarations (array.alloc SelectedDeclaration (local rows)))
+			(let module (call read_module_for_target (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local built) (local context) (borrow-mut (local declarations))))
+			(if
+				(:doc "Stop if a module cannot be selected with the stored graph context.")
+				(u32.lt 0u32 (struct.get (local module) error))
+				(then (return (call expectation_result (local first) (local file) (struct.get (local module) start)
+					(struct.get (local module) end) (struct.get (local module) error)))))
+			(return (call collect_file_declarations (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local declarations)) (struct.get (local module) count) (local file)
+				(local query) (borrow-shared (local key)) (local first) (borrow-mut (local output))))))
+
+	(fn inspect_graph_expectations
+		(:doc `Read expectations from a resolved source graph.
+
+		Kind 0 uses path and a declared name for forward lookup. Kinds 1
+		and 2 use a link value for reverse issue and test lookup. Reverse
+		rows follow canonical file table order and source order in each file.
+		Each result keeps the original token so tools can display the written
+		spelling or decode the link for navigation. Capacity counts link rows.`)
+		(:expect (tests "stage-2/expectations/cases.tsv") (issues "gh:wove-lang/wove:102"))
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
+			(graph GraphResult) (query ExpectationQuery) (key (shared-array u8)) (output (mut-array ExpectationLink)))
+		(returns ExpectationResult)
+		(body
+			(let kind (struct.get (local query) kind))
+			(let context (call graph_selection (local graph)))
+			(if
+				(:doc "Forward lookup resolves the supplied path to one defining file.")
+				(u32.eq (local kind) 0u32)
+				(then
+					(let path (struct.get (local query) path))
+					(if
+						(:doc "An invalid path has no originating source span.")
+						(bool.or (i32.lt (local path) 0i32) (bool.not (i32.lt (local path) (array.len (local files)))))
+						(then (return (call expectation_result 0i32 -1i32 0i32 0i32 36u32))))
+					(let file (struct.get (array.load (local files) (local path)) identity))
+					(let input (array.load (local files) (local file)))
+					(if
+						(:doc "An unseen file is outside the resolved graph.")
+						(u32.eq (struct.get (array.load (local modules) (local file)) state) 0u32)
+						(then (return (call expectation_result 0i32 -1i32 0i32 0i32 36u32))))
+					(return (call inspect_expectation_file
+						(borrow-shared (array.range (local arena) (struct.get (local input) source_start) (struct.get (local input) source_end)))
+						(local file) (local context) (local kind) (borrow-shared (local key)) 0i32 (borrow-mut (local output))))))
+			(let-mut file 0i32)
+			(let-mut count 0i32)
+			(while
+				(:doc "The graph marks each reached canonical identity once. Path aliases and excluded modules add no rows.")
+				(i32.lt (local file) (array.len (local files)))
+				(body
+					(let module (array.load (local modules) (local file)))
+					(if
+						(:doc "Inspect only active modules in this resolved graph.")
+						(struct.get (local module) active)
+						(then
+							(let input (array.load (local files) (local file)))
+							(let result (call inspect_expectation_file
+								(borrow-shared (array.range (local arena) (struct.get (local input) source_start) (struct.get (local input) source_end)))
+								(local file) (local context) (local kind) (borrow-shared (local key)) (local count) (borrow-mut (local output))))
+							(if (u32.lt 0u32 (struct.get (local result) error)) (then (return (local result))))
+							(set (local count) (struct.get (local result) count))))
+					(set (local file) (i32.add.wrapping (local file) 1i32))))
+			(return (call expectation_result (local count) -1i32 0i32 0i32 0u32))))
+)
