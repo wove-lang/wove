@@ -19,9 +19,10 @@ Write `i8`, `u8`, `i32`, and `u32` literals as suffixed atoms such as
 `0x` or `0X`. A hexadecimal minus precedes the prefix and requires a
 signed type. The seed checks the range of each literal and preserves its
 exact type through bindings, parameters, calls, and returns. Use
-`(int.convert i32 (local byte))` to explicitly convert between seed integers.
-The conversion preserves values that fit and traps at the source line when a
-value is outside the selected type's range.
+`(i32.from-u8 (local byte))` to name both exact integer types, or
+`(int.convert i32 (local byte))` to infer the source type from its operand.
+Both spellings preserve representable values and trap at the source line when
+the operand is outside the destination type's range.
 
 `i32.add`, `i32.sub`, `u32.add`, and
 `u32.sub` compute modulo 2^32. Both operands and the result have

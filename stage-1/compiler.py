@@ -644,28 +644,33 @@ class FunctionEmitter:
 		if expr.tag in SCALAR_LIMITS:
 			return read_integer_literal(expr)
 
-		# Check the selected type's range before casting the result to its C type.
-		if expr.tag == "int.convert":
-			target, operand = form(expr, arity=2).operands
-			kind = identifier(target)
-			# The target must name a seed integer type.
-			if kind not in SCALAR_LIMITS:
-				raise SourceError(node.line)
-			value = self.expression(operand)
-			# Conversion takes an integer value from any of the seed scalar types.
-			if value.kind not in SCALAR_LIMITS:
-				raise SourceError(node.line)
+		# Match the complete typed alias using only the seed's current integer types.
+		destination, separator, origin = expr.tag.partition(".from-")
+		typed_conversion = bool(separator and destination in SCALAR_LIMITS and origin in SCALAR_LIMITS)
+		if expr.tag == "int.convert" or typed_conversion:
+			# Both spellings evaluate the same single operand and use the same range limits.
+			if typed_conversion:
+				operand, = form(expr, arity=1).operands
+				kind = destination
+				value = self.typed(operand, origin)
+			else:
+				target, operand = form(expr, arity=2).operands
+				kind = identifier(target)
+				# Check the destination before evaluating the operand.
+				if kind not in SCALAR_LIMITS:
+					raise SourceError(node.line)
+				value = self.expression(operand)
+				# The generic spelling accepts any seed integer as its source.
+				if value.kind not in SCALAR_LIMITS:
+					raise SourceError(node.line)
+			# Retain the seed's existing direct widening lowering for this alias.
+			if expr.tag == "i32.from-u8":
+				return self.temporary(I32, f"(int32_t){value.c}")
 			low, high = SCALAR_LIMITS[kind]
 			return self.temporary(
 				kind, f"({C_TYPE[kind]})wvrt_int_convert({value.c}, {low}, {high}, "
 				f"{self.site(node.line)})"
 			)
-
-		# Widen an unsigned byte so it can be used in an i32 expression or index.
-		if expr.tag == "i32.from-u8":
-			target, = form(expr, arity=1).operands
-			value = self.typed(target, U8)
-			return self.temporary(I32, f"(int32_t){value.c}")
 
 		# A record construction produces a new value of its declared type.
 		if expr.tag == "struct.new":
