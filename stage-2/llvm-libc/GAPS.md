@@ -205,6 +205,9 @@ descriptor access through `dirfd`, ownership consumption through
 `closedir`, and a `telldir` position passed back to `seekdir`. They also
 verify that `rewinddir` returns to the first entry and that `readdir`
 snapshots remain valid after another call and after closing the stream.
+The borrowed-entry fixture reads the native fields and copies the name
+while the stream is borrowed. It compares native and large-file records
+on glibc and checks Darwin's seek offset and name length.
 
 Clang exposed the same selected members in C11, C17, and C23 on arm64 and
 x86-64 with the macOS 27.2 SDK and Debian glibc 2.41. The audit used the
@@ -217,7 +220,7 @@ remaining SDK differences are listed below.
 | `DT_UNKNOWN`, `DT_FIFO`, `DT_CHR`, `DT_DIR`, `DT_BLK`, `DT_REG`, `DT_LNK`, `DT_SOCK`, `DT_WHT`, `IFTODT`, `DTTOIF` | Darwin and glibc expose these under the driver's feature flags. The fixture checks each type against its mode bits, including permission-bit masking. |
 | `MAXNAMLEN`, `DIRBLKSIZ` | The fixture checks the name limit on both SDKs and the Darwin-only block size. |
 | `DIR`, `opendir`, `fdopendir`, `closedir`, `dirfd`, `readdir`, `rewinddir`, `seekdir`, `telldir` | The provider owns `DIR *` and returns copied entry names. Installed fixtures exercise stream creation, descriptor transfer, navigation, and snapshot ownership. |
-| `struct dirent`, `struct dirent64`, `ino_t`, `ino64_t`, `size_t`, `ssize_t` | Raw entry binding is pending a nullable native record borrow. [Compiler prerequisite #531](https://github.com/wove-lang/wove/issues/531). Darwin's 64-bit record has `d_seekoff`, `d_namlen`, and a 1024-byte `d_name`. The audited glibc records have `d_off` and a 256-byte declared name field that can be followed by additional name bytes in a returned entry. Both expose `d_ino`, `d_reclen`, and `d_type`. |
+| `struct dirent`, `struct dirent64`, `ino_t`, `ino64_t`, `readdir_entry`, `readdir64_entry`, `entry_name`, `entry64_name` | The optional record borrows the stream exclusively, preserving EOF and error as a null result. Both records expose `d_ino`, `d_reclen`, and `d_type`. Darwin also exposes `d_seekoff` and `d_namlen`, while glibc exposes `d_off`. The explicit name accessors snapshot the terminated `d_name`, including bytes beyond the nominal glibc field extent. [Compiler prerequisite #531](https://github.com/wove-lang/wove/issues/531) |
 | `readdir64`, `getdents64`, `getdirentries`, `getdirentries64` | The 64-bit Linux provider snapshots the wide name before the stream can reuse it. It checks byte or element counts and keeps the raw read results and native position outputs. The emitted fixture builds against glibc in all audited C modes. Darwin redirects its `getdirentries` declaration to an unavailable symbol under the current 64-bit inode ABI, as confirmed by a link with the macOS 27.2 SDK. [glibc directory reads](https://sourceware.org/glibc/manual/latest/html_node/Low_002dlevel-Directory-Access.html) |
 | `fdclosedir` | The macOS SDK declares it starting at deployment 26.4. The installed driver does not yet supply a deployment version to the provider selector. |
 | `readdir_r`, `readdir64_r` | Deprecated interfaces require storage sized for the native name limit and return a nullable alias into caller storage. |
@@ -248,7 +251,7 @@ header's `errno` macro.
 The GNU `program_invocation_name` and `program_invocation_short_name`
 globals are writable `char *` lvalues. They remain documented in the
 provider pending a contract for reassigning native string pointers with
-explicit lifetimes. [glibc program names](https://sourceware.org/glibc/manual/latest/html_node/Error-Messages.html)
+explicit lifetimes. [Compiler prerequisite #532](https://github.com/wove-lang/wove/issues/532) · [glibc program names](https://sourceware.org/glibc/manual/latest/html_node/Error-Messages.html)
 
 ## Bundled math coverage
 
