@@ -1,0 +1,293 @@
+(module scalar_fixed
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Check fixed-array initializers, loans, and indexed access to inline storage.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "./flow.wove" (only (type ScalarStatement) (value fixed_shared_loan) (value fixed_mut_loan)))
+	(use wove-file "./function_rows.wove" (only (type ScalarFunction)))
+	(use wove-file "./loans.wove" (only (type ScalarExpression) expression_row runtime_expression writable_place
+		check_writable_field fixed_access_base has_conflicting_loan))
+	(use wove-file "./records.wove" (only (type ScalarRecord) fixed_array_type named_extent_site
+		record_index is_fixed_array is_record_type record_receiver_type is_array_owner is_place_reference
+		place_reference_type place_reference_target is_writable_slice slice_element_code owner_view_type))
+	(use wove-file "./syntax.wove" (only (type EntryRead) entry_at entry_keyword is_reborrow_keyword
+		(value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_borrow)
+		(value fixed_owner_store) (value pending_exact_move) (value fixed_take_request)))
+	(use wove-file "./value_types.wove" (only value_matches_type))
+
+	(fn plan_fixed_slice_loan
+		(:doc `Lend a fixed array in its original local or projected storage.`)
+		(params (nodes (shared-array SourceNode)) (reference SourceNode) (index i32) (statement i32)
+			(expected u32) (array_type u32) (binding ScalarExpression) (place i32)
+			(records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "Only registered fixed layouts provide an inline array view.")
+				(bool.not (call is_record_type (local array_type)))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let-mut type (local expected))
+			(if
+				(:doc "Byte borrow keywords are adjacent to their corresponding descriptor type codes.")
+				(call is_reborrow_keyword (local expected))
+				(then (set (local type) (u32.dec (local expected)))))
+			(let layout (array.load (local records) (call record_index (local array_type))))
+			(let writable (call is_writable_slice (local type)))
+			(if
+				(:doc "A whole inline view needs copyable elements laid out like the requested slice.")
+				(bool.or (bool.or (bool.not (call is_fixed_array (local layout))) (struct.get (local layout) owns_arrays))
+					(bool.or (i32.not-eq (struct.get (local layout) first) (i32.from-u32 (call slice_element_code (local type))))
+						(bool.and (local writable) (bool.not (call writable_place (local binding))))))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let target (struct.get (local binding) target))
+			(let local_binding (u32.eq (struct.get (local binding) kind) 6u32))
+			(if
+				(:doc "Earlier arguments retain their overlapping loans until the call returns.")
+				(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions)) (borrow-shared (local statements))
+					(local index) (local statement) (local target) (local local_binding) (local place) (local writable))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let-mut kind (local fixed_shared_loan))
+			(if (local writable) (then (set (local kind) (local fixed_mut_loan))))
+			(array.store (local expressions) (local index)
+				(struct.new ScalarExpression (kind (local kind)) (type (local type)) (target (local target))
+					(first -1i32) (start (struct.get (local layout) count)) (end 0i32) (negative (bool false))
+					(borrowed_owner (local local_binding)) (mutable_place (bool false)) (projection (local place))
+					(asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
+			(return (call entry_at (local reference) (local index) 0u32))))
+
+	(fn plan_fixed_initializer
+		(:doc `Seed the typed list or the one repeated value from an exact array layout.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (kind u32) (first i32) (expected u32) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)) (bindings (shared-array GraphBinding)) (file i32) (source_base i32))
+		(returns EntryRead)
+		(body
+			(if (i32.ltz (local first)) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let spelling (array.load (local nodes) (local first)))
+			(let type (call fixed_array_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local spelling) (borrow-shared (local bindings)) (local file) (local source_base)))
+			(if
+				(:doc "The initializer spells its exact element and extent even when its type is inferred.")
+				(u32.eqz (local type))
+				(then (return (call entry_at (call named_extent_site (borrow-shared (local source))
+					(borrow-shared (local nodes)) (local spelling) (borrow-shared (local bindings)) (local file) (local source_base)) -1i32 23u32))))
+			(return (call seed_fixed_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local index)
+				(local kind) (local spelling) (local type) (local expected)
+				(borrow-shared (local records)) (borrow-mut (local expressions))))))
+
+	(fn seed_fixed_initializer
+		(:doc `Apply a resolved fixed layout to the children of a list or repeat.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32) (kind u32)
+			(spelling SourceNode) (type u32) (expected u32) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "The enclosing use must accept the complete structural type.")
+				(bool.not (call value_matches_type (local expected) (local type)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let layout (array.load (local records) (call record_index (local type))))
+			(let element (u32.from-i32 (struct.get (local layout) first)))
+			(let owning (struct.get (local layout) owns_arrays))
+			(if
+				(:doc "Repeating any owning element would duplicate its storage.")
+				(bool.and (local owning) (u32.eq (local kind) 72u32))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let values (struct.get (local spelling) next_sibling))
+			(let-mut operand (local values))
+			(let-mut remaining (struct.get (local layout) count))
+			(if (u32.eq (local kind) 72u32) (then (set (local remaining) 1i32)))
+			(while
+				(:doc "Seed elements left to right and require the exact operand count.")
+				(bool.and (i32.gtz (local remaining)) (i32.lt -1i32 (local operand)))
+				(body
+					(let-mut operand_kind 0u32)
+					(if
+						(:doc "A fixed owning initializer takes the exact source owner once.")
+						(local owning)
+						(then
+							(let child (array.load (local nodes) (local operand)))
+							(let form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local child)))
+							(if
+								(:doc "Explicit moves use the ordinary evaluating transfer checks.")
+								(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+									(struct.get (local form) head)) 43u32)
+								(then (set (local operand_kind) (local pending_exact_move))))))
+					(array.store (local expressions) (local operand)
+						(call expression_row (local operand_kind) (local element) -1i32 -1i32 0i32 0i32 (bool false)))
+					(set (local operand) (struct.get (array.load (local nodes) (local operand)) next_sibling))
+					(set (local remaining) (i32.dec (local remaining)))))
+			(if
+				(:doc "Report a list length mismatch or extra repeat operand at the initializer.")
+				(bool.or (i32.gtz (local remaining)) (i32.lt -1i32 (local operand)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local kind) (local type) -1i32 (local values) 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn store_fixed_access
+		(:doc "Record the checked slot operation and the original source span used by its bounds check.")
+		(params (node SourceNode) (caller ScalarFunction) (receiver i32) (index i32) (kind u32) (type u32)
+			(view_start i32) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(array.store (local expressions) (local index)
+				(call runtime_expression (local kind) (local type) (local node) (local receiver) (local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn finish_owned_fixed_access
+		(:doc "Check the original inline owner and plan a loan, transfer, or replacement of its exact element.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (reference SourceNode)
+			(caller ScalarFunction) (receiver i32) (value i32) (index i32) (kind u32) (expected u32) (writable bool)
+			(statement i32) (view_start i32) (layout ScalarRecord) (records (shared-array ScalarRecord))
+			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let base (call fixed_access_base (borrow-shared (local expressions)) (local receiver)))
+			(let place (array.load (local expressions) (local base)))
+			(let-mut home (local base))
+			(let-mut path -1i32)
+			(if
+				(:doc "A projected fixed field keeps its path under the original record place.")
+				(u32.eq (struct.get (local place) kind) 52u32)
+				(then
+					(set (local home) (struct.get (local place) projection))
+					(set (local path) (local base))))
+			(if (i32.ltz (local home)) (then (return (call entry_at (local reference) -1i32 24u32))))
+			(let binding (array.load (local expressions) (local home)))
+			(let local_binding (u32.eq (struct.get (local binding) kind) 6u32))
+			(let moving (u32.eq (local expected) (local fixed_take_request)))
+			(if
+				(:doc "Access stays tied to a named place, and an explicit transfer requires a local owner.")
+				(bool.or
+					(bool.or (bool.not (bool.or (local local_binding) (call is_place_reference (struct.get (local binding) type))))
+						(bool.and (local moving) (bool.not (local local_binding))))
+					(bool.or (bool.and (local writable) (bool.not (call writable_place (local binding))))
+						(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
+							(borrow-shared (local statements)) (local receiver) (local statement)
+							(struct.get (local binding) target) (local local_binding) (local path) (local writable))))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(if
+				(:doc "Fixed length counts all slots even after an individual element has moved.")
+				(u32.eq (local kind) 36u32)
+				(then (return (call store_fixed_access (local node) (local caller) (local receiver) (local index)
+					36u32 5u32 (local view_start) (borrow-mut (local expressions))))))
+			(let element (u32.from-i32 (struct.get (local layout) first)))
+			(if
+				(:doc "Replacement installs one exact fresh or explicitly moved owner.")
+				(u32.eq (local kind) 40u32)
+				(then
+					(let child (array.load (local nodes) (local value)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local child)))
+					(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+					(let-mut seed 0u32)
+					(if (u32.eq (local tag) 43u32) (then (set (local seed) (local pending_exact_move))))
+					(array.store (local expressions) (local value)
+						(call expression_row (local seed) (local element) -1i32 -1i32 0i32 0i32 (bool false)))
+					(return (call store_fixed_access (local node) (local caller) (local receiver) (local index)
+						(local fixed_owner_store) 0u32 (local view_start) (borrow-mut (local expressions))))))
+			(if
+				(:doc "Transfer the selected owner and clear its presence.")
+				(local moving)
+				(then (return (call store_fixed_access (local node) (local caller) (local receiver) (local index)
+					(local fixed_owner_take) (local element) (local view_start) (borrow-mut (local expressions))))))
+			(if
+				(:doc "Another fixed subscript uses the stored inner array as an original place.")
+				(bool.and (bool.or (u32.eq (local expected) 55u32) (u32.eq (local expected) 56u32))
+					(bool.and (call is_record_type (local element))
+						(call is_fixed_array (array.load (local records) (call record_index (local element))))))
+				(then (return (call store_fixed_access (local node) (local caller) (local receiver) (local index)
+					(local fixed_subarray_place) (call place_reference_type (local element) (local writable))
+					(local view_start) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A heap element lends its exact descriptor through an explicit shared or mutable loan.")
+				(bool.and (call is_array_owner (local element)) (call is_reborrow_keyword (local expected)))
+				(then (return (call store_fixed_access (local node) (local caller) (local receiver) (local index)
+					(local fixed_owner_borrow) (call owner_view_type (local element) (local writable))
+					(local view_start) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A named record lends a reference only at its exact nominal type.")
+				(bool.and (call is_place_reference (local expected))
+					(u32.eq (local element) (call place_reference_target (borrow-shared (local records)) (local expected))))
+				(then (return (call store_fixed_access (local node) (local caller) (local receiver) (local index)
+					(local fixed_owner_borrow) (local expected) (local view_start) (borrow-mut (local expressions))))))
+			(return (call entry_at (local node) -1i32 24u32))))
+
+	(fn finish_fixed_access
+		(:doc `Complete an access to checked inline storage, retaining writable places for stores.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (reference SourceNode) (caller ScalarFunction)
+			(receiver i32) (value i32) (index i32) (kind u32) (expected u32) (projected bool) (view_start i32)
+			(records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let store (u32.eq (local kind) 40u32))
+			(let array (array.load (local expressions) (local receiver)))
+			(let type (call record_receiver_type (struct.get (local array) type)))
+			(let projecting (bool.and (u32.eq (local kind) 37u32) (u32.eq (local expected) 56u32)))
+			(if
+				(:doc "Only a fixed value has a statically checked extent.")
+				(bool.not (bool.and (call is_record_type (local type))
+					(call is_fixed_array (array.load (local records) (call record_index (local type))))))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let layout (array.load (local records) (call record_index (local type))))
+			(if
+				(:doc "An owning fixed temporary must be bound before any projected access.")
+				(struct.get (local layout) owns_arrays)
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(if
+				(:doc "A length reads the registered extent after any receiver evaluation.")
+				(u32.eq (local kind) 36u32)
+				(then
+					(array.store (local expressions) (local index)
+						(call runtime_expression 36u32 5u32 (local node) (local receiver) (local caller) (local view_start)))
+					(return (call entry_at (local node) (local index) 0u32))))
+			(let-mut lowered 73u32)
+			(if (local store) (then (set (local lowered) 74u32)))
+			(let element (u32.from-i32 (struct.get (local layout) first)))
+			(let-mut result (local element))
+			(if
+				(:doc "An update or subarray projection must retain the original writable place.")
+				(bool.or (local store) (local projecting))
+				(then
+					(if
+						(:doc "A projected destination follows the same writable-place rules as field assignment.")
+						(local projected)
+						(then
+							(let place (call check_writable_field (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local receiver) (borrow-shared (local records)) (borrow-shared (local expressions))))
+							(if
+								(:doc "Preserve the source of an invalid or immutable field place.")
+								(u32.gtz (struct.get (local place) error))
+								(then (return (local place)))))
+						(else
+							(if
+								(:doc "A destination has writable local storage or a checked subarray address.")
+								(bool.not (bool.or (struct.get (local array) mutable_place)
+									(u32.eq (struct.get (local array) kind) (local fixed_subarray_place))))
+								(then (return (call entry_at (local reference) -1i32 24u32))))))
+					(if
+						(:doc "Capture an inner array's address when an enclosing store needs the original row.")
+						(local projecting)
+						(then
+							(if
+								(:doc "The enclosing access needs another complete fixed layout.")
+								(bool.not (bool.and (call is_record_type (local element))
+									(call is_fixed_array (array.load (local records) (call record_index (local element))))))
+								(then (return (call entry_at (local node) -1i32 24u32))))
+							(set (local lowered) (local fixed_subarray_place))
+							(set (local result) (call place_reference_type (local element) (bool true))))
+						(else
+							(array.store (local expressions) (local value)
+								(call expression_row 0u32 (local element) -1i32 -1i32 0i32 0i32 (bool false)))
+							(set (local result) 0u32))))
+				(else
+					(if
+						(:doc "A load must provide the element type required by its enclosing expression.")
+						(bool.not (call value_matches_type (local expected) (local element)))
+						(then (return (call entry_at (local node) -1i32 24u32))))))
+			(array.store (local expressions) (local index)
+				(call runtime_expression (local lowered) (local result) (local node) (local receiver) (local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) 0u32)))))

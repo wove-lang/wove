@@ -4,10 +4,17 @@
 	(:doc `Check scoped and call loans by binding identity and statically checked field path.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../source/types.wove" (only is_builtin_integer))
 	(use wove-file "../source/array_growth.wove" (only is_array_growth (value indexed_row_owner)))
-	(use wove-file "./records.wove" (only place_borrow_kind is_mutable_place_reference is_writable_slice))
+	(use wove-file "./function_rows.wove" (only (type ScalarFunction)))
+	(use wove-file "./records.wove" (only (type ScalarRecord) place_borrow_kind is_mutable_place_reference
+		is_writable_slice is_native_record record_index record_receiver_type is_typed_slice is_place_reference
+		is_readable_slice is_record_type is_fixed_array is_array_owner encode_place_type place_reference_code
+		array_slot_code slice_element_code typed_slice_type owner_view_type))
 	(use wove-file "./flow.wove" (only (type ScalarStatement) (value fixed_shared_loan) (value fixed_mut_loan)))
-	(use wove-file "./syntax.wove" (only is_direct_call (value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_borrow) (value fixed_owner_store)))
+	(use wove-file "./syntax.wove" (only (type EntryRead) entry_at entry_form is_direct_call is_reborrow_keyword (value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_borrow) (value fixed_owner_store)))
+	(use wove-file "./native_owner_types.wove" (only is_native_owner))
 	(use wove-file "./owners.wove" (only native_handle_borrow_kind is_native_owner_write_loan owned_field_loan_kind))
 
 	(struct
@@ -44,6 +51,8 @@
 	(let local_slice_projection 147u32)
 	(let scoped_field_loan 252u32)
 	(let indexed_record_loan 253u32)
+	(let infer_shared_array 49u32)
+	(let infer_mut_array 50u32)
 
 	(fn expression_row
 		(:doc `Build a checked expression row, or an unvisited row with an expected scalar type.`)
@@ -53,6 +62,255 @@
 			(return (struct.new ScalarExpression (kind (local kind)) (type (local type)) (target (local target))
 				(first (local first)) (start (local start)) (end (local end)) (negative (local negative))
 				(borrowed_owner (bool false)) (mutable_place (bool false)) (projection -1i32) (asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))))
+
+	(fn runtime_expression
+		(:doc `Keep the operation's span in its original file, before graph packing or subrange selection.`)
+		(params (kind u32) (type u32) (node SourceNode) (first i32) (caller ScalarFunction) (view_start i32))
+		(returns ScalarExpression)
+		(body
+			(let source_base (struct.get (local caller) source_base))
+			(let start (i32.add (local view_start)
+				(i32.sub (struct.get (local node) start) (local source_base))))
+			(let end (i32.add (local view_start)
+				(i32.sub (struct.get (local node) end) (local source_base))))
+			(return (call expression_row (local kind) (local type) (struct.get (local caller) file)
+				(local first) (local start) (local end) (bool false)))))
+
+	(fn writable_place
+		(:doc `Identify a writable local or existing exclusive reference at the root of a place.`)
+		(params (binding ScalarExpression))
+		(returns bool)
+		(body (return (bool.or (struct.get (local binding) mutable_place)
+			(call is_mutable_place_reference (struct.get (local binding) type))))))
+
+	(fn check_writable_field
+		(:doc `Require a checked field projection to name writable Wove storage.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (place i32)
+			(records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let root (call field_place_root (borrow-shared (local expressions)) (local place)))
+			(let value (array.load (local expressions) (local root)))
+			(let original (array.load (local nodes) (local root)))
+			(let kind (struct.get (local value) kind))
+			(if
+				(:doc "A field of a temporary or non-local expression has no writable place.")
+				(bool.not (bool.or (u32.eq (local kind) 6u32) (u32.eq (local kind) 2u32)))
+				(then (return (call entry_at (local original) -1i32 24u32))))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local original)))
+			(let name (array.load (local nodes) (struct.get (local parts) operands)))
+			(if
+				(:doc "A mutable local or exclusive record reference supplies the original writable storage.")
+				(bool.not (call writable_place (local value)))
+				(then (return (call entry_at (local name) -1i32 37u32))))
+			(let type (call record_receiver_type (struct.get (local value) type)))
+			(let layout (array.load (local records) (call record_index (local type))))
+			(if
+				(:doc "Ordinary Wove field places use Wove-defined layouts.")
+				(call is_native_record (local layout))
+				(then (return (call entry_at (local original) -1i32 24u32))))
+			(return (call entry_at (array.load (local nodes) (local place)) (local place) 0u32))))
+
+	(fn call_loan_keyword
+		(:doc `Get the explicit reborrow keyword for an argument's expected type.`)
+		(params (expected u32))
+		(returns u32)
+		(body
+			(if
+				(:doc "Typed slice formals retain their exact type instead of a keyword code.")
+				(call is_typed_slice (local expected))
+				(then
+					(if
+						(:doc "A writable formal requires an exclusive reborrow.")
+						(call is_writable_slice (local expected))
+						(then (return 39u32)))
+					(return 35u32)))
+			(if
+				(:doc "An exclusive place requires the mutable borrow spelling.")
+				(call is_mutable_place_reference (local expected))
+				(then (return 39u32)))
+			(if
+				(:doc "A shared place or resource formal requires the shared borrow spelling.")
+				(bool.or (call is_native_owner (local expected)) (call is_place_reference (local expected)))
+				(then (return 35u32)))
+			(return (local expected))))
+
+	(fn inferred_array_loan
+		(:doc `Infer a borrow expectation from the checked source's exact element type.`)
+		(params (records (shared-array ScalarRecord)) (origin ScalarExpression) (writable bool))
+		(returns u32)
+		(body
+			(let type (struct.get (local origin) type))
+			(let-mut element 0u32)
+			(if
+				(:doc "An owner and an existing view expose the element type through their descriptor.")
+				(call is_array_owner (local type))
+				(then (set (local element) (call array_slot_code (local type))))
+				(else
+					(if
+						(:doc "Reborrowing a view preserves the original element identity.")
+						(call is_readable_slice (local type))
+						(then (set (local element) (call slice_element_code (local type))))
+						(else
+							(if
+								(:doc "A fixed local can lend its inline integer storage.")
+								(bool.and (u32.eq (struct.get (local origin) kind) 6u32) (call is_record_type (local type)))
+								(then
+									(let layout (array.load (local records) (call record_index (local type))))
+									(if
+										(:doc "Only fixed integer layouts have an existing inline slice representation.")
+										(call is_fixed_array (local layout))
+										(then
+											(let code (u32.from-i32 (struct.get (local layout) first)))
+											(if (call is_builtin_integer (local code)) (then (set (local element) (local code))))))))))))
+			(if (u32.eqz (local element)) (then (return 0u32)))
+			(if
+				(:doc "Byte views use the existing dedicated borrow keywords.")
+				(u32.eq (local element) 10u32)
+				(then
+					(if (local writable) (then (return 39u32)))
+					(return 35u32)))
+			(return (call typed_slice_type (local element) (local writable)))))
+
+	(fn store_place_loan
+		(:doc `Check the identity and access mode of a whole or projected place loan.`)
+		(params (nodes (shared-array SourceNode)) (node SourceNode) (index i32)
+			(statement i32) (expected u32) (actual u32) (binding ScalarExpression) (place i32)
+			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let mutable (call is_mutable_place_reference (local expected)))
+			(if
+				(:doc "The exact storage type and original access mode must agree with the requested reference.")
+				(bool.or (u32.not-eq (call encode_place_type (local actual)) (call place_reference_code (local expected)))
+					(bool.and (local mutable) (bool.not (call writable_place (local binding)))))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let target (struct.get (local binding) target))
+			(let local_binding (u32.eq (struct.get (local binding) kind) 6u32))
+			(if
+				(:doc "An earlier shared loan also conflicts when the new overlapping loan is exclusive.")
+				(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions)) (borrow-shared (local statements))
+					(local index) (local statement) (local target) (local local_binding) (local place) (local mutable))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(struct.new ScalarExpression (kind (call place_borrow_kind)) (type (local expected))
+					(target (local target)) (first -1i32) (start 0i32) (end 0i32) (negative (bool false))
+					(borrowed_owner (local local_binding)) (mutable_place (bool false)) (projection (local place))
+					(asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_owned_field_loan
+		(:doc "Lend the original array descriptor through a checked field path.")
+		(params (nodes (shared-array SourceNode)) (node SourceNode) (index i32) (place i32) (statement i32)
+			(expected u32) (owner u32) (binding ScalarExpression) (statements (shared-array ScalarStatement))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let-mut type (local expected))
+			(if
+				(:doc "Byte borrow keywords carry the corresponding view code one below them.")
+				(call is_reborrow_keyword (local expected))
+				(then (set (local type) (u32.dec (local expected)))))
+			(let mutable (call is_writable_slice (local type)))
+			(let target (struct.get (local binding) target))
+			(let local_binding (u32.eq (struct.get (local binding) kind) 6u32))
+			(if
+				(:doc "The loan must match the field's exact element type. An exclusive loan needs writable storage.")
+				(bool.or (u32.not-eq (local type) (call owner_view_type (local owner) (local mutable)))
+					(bool.or (bool.and (local mutable) (bool.not (call writable_place (local binding))))
+						(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
+							(borrow-shared (local statements)) (local index) (local statement) (local target) (local local_binding) (local place) (local mutable))))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(struct.new ScalarExpression (kind (call owned_field_loan_kind)) (type (local type)) (target (local target))
+					(first -1i32) (start 0i32) (end 0i32) (negative (bool false)) (borrowed_owner (local local_binding))
+					(mutable_place (bool false)) (projection (local place)) (asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_scoped_field_loan
+		(:doc "Lend an existing shared byte descriptor from its original record place.")
+		(params (nodes (shared-array SourceNode)) (node SourceNode) (index i32) (place i32) (statement i32)
+			(expected u32) (binding ScalarExpression) (statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let target (struct.get (local binding) target))
+			(let local_binding (u32.eq (struct.get (local binding) kind) 6u32))
+			(if
+				(:doc "The descriptor only grants shared access, and a live exclusive borrow of the place excludes it.")
+				(bool.or (bool.not (bool.or (u32.eq (local expected) 35u32) (u32.eq (local expected) 34u32)))
+					(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
+						(borrow-shared (local statements)) (local index) (local statement) (local target) (local local_binding) (local place) (bool false)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(struct.new ScalarExpression (kind (local scoped_field_loan)) (type 34u32) (target (local target))
+					(first -1i32) (start 0i32) (end 0i32) (negative (bool false))
+					(borrowed_owner (local local_binding)) (mutable_place (bool false))
+					(projection (local place)) (asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn read_borrow_source
+		(:doc `Read one explicit borrow form with exactly one storage operand.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (keyword u32))
+		(returns EntryRead)
+		(body
+			(let loan (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local keyword) 24u32))
+			(if (u32.gtz (struct.get (local loan) error)) (then (return (local loan))))
+			(let source_index (struct.get (local loan) operand))
+			(if
+				(:doc "A borrow must name one source.")
+				(bool.or (i32.ltz (local source_index))
+					(i32.lt -1i32 (struct.get (array.load (local nodes) (local source_index)) next_sibling)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(return (local loan))))
+
+	(fn finish_indexed_array_loan
+		(:doc "Match the indexed element to the requested view and retain its original place.")
+		(params (node SourceNode) (index i32) (reference_index i32) (receiver i32)
+			(expected u32) (record bool) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let element (array.load (local expressions) (local reference_index)))
+			(let type (struct.get (local element) type))
+			(let-mut view (local expected))
+			(if
+				(:doc "The shared byte reborrow keyword corresponds to the original byte descriptor.")
+				(call is_reborrow_keyword (local expected))
+				(then (set (local view) (u32.dec (local expected)))))
+			(if
+				(:doc "An explicit formal accepts only its own shared row view.")
+				(bool.not (bool.or (bool.or (u32.eq (local view) (local infer_shared_array)) (u32.eq (local view) (local infer_mut_array)))
+					(u32.eq (local view) (local type))))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let origin (array.load (local expressions) (local receiver)))
+			(let-mut target (struct.get (local origin) target))
+			(let-mut local_binding (struct.get (local origin) borrowed_owner))
+			(let-mut path -1i32)
+			(if
+				(:doc "An inline slot loan is tied to the local or record field holding the fixed buffer.")
+				(u32.eq (struct.get (local element) kind) (local fixed_owner_borrow))
+				(then
+					(let base (call fixed_access_base (borrow-shared (local expressions)) (local receiver)))
+					(let array (array.load (local expressions) (local base)))
+					(let-mut home (local base))
+					(if
+						(:doc "A field retains the path under its original record binding.")
+						(u32.eq (struct.get (local array) kind) 52u32)
+						(then
+							(set (local home) (struct.get (local array) projection))
+							(set (local path) (local base))))
+					(let binding (array.load (local expressions) (local home)))
+					(set (local target) (struct.get (local binding) target))
+					(set (local local_binding) (u32.eq (struct.get (local binding) kind) 6u32))))
+
+			(let-mut kind 45u32)
+			(if (local record) (then (set (local kind) (local indexed_record_loan))))
+			(array.store (local expressions) (local index)
+				(struct.new ScalarExpression (kind (local kind)) (type (local type)) (target (local target))
+					(first (local reference_index)) (start 0i32) (end 0i32) (negative (bool false))
+					(borrowed_owner (local local_binding)) (mutable_place (bool false))
+					(projection (local path)) (asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
+			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn mutable_parameter_place
 		(:doc `Represent the scalar pointee while retaining its parameter's identity and write permission.`)
