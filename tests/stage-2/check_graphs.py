@@ -4,6 +4,7 @@
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -64,6 +65,10 @@ def read_cases(manifest):
 			status, argv, *display = fields
 			argv0, = display or ["null"]
 			native[2].append((int(status), json.loads(argv), json.loads(argv0), b"", b""))
+		# A signaled process has a portable signal name and may print host-specific diagnostics.
+		elif kind == "native-signal" and native is not None:
+			signum, argv = fields
+			native[2].append((-signal.Signals[signum], json.loads(argv), None, b"", None))
 		# A program that reports results can attach expected streams to any invocation.
 		elif kind == "native-output" and native is not None:
 			stdout, stderr = (json.loads(field).encode("utf-8") for field in fields)
@@ -105,7 +110,8 @@ def check_native(probe, label, emitted, fixture_flags, executions, rejection):
 		for expected, argv, argv0, stdout, stderr in executions:
 			result = subprocess.run([program if argv0 is None else argv0, *argv],
 				executable=program, capture_output=True, timeout=30)
-			assert (result.returncode, result.stdout, result.stderr) == (expected, stdout, stderr), (label, result)
+			assert (result.returncode, result.stdout) == (expected, stdout), (label, result)
+			assert stderr is None or result.stderr == stderr, (label, result)
 
 
 # Materialize supplied assets for emission and move them before native verification.
