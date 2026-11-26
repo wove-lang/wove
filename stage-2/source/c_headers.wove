@@ -18,7 +18,7 @@
 	(use wove-file "./owned.wove" (only is_byte_owner_descriptor))
 	(use wove-file "./c_scope.wove" (only read_bridge_policy project_bridge declaring_c_bridge))
 	(use wove-file "./c_dependencies.wove" (only find_bridge_type_dependency))
-	(use wove-file "./c_markers.wove" (only read_c_optional read_c_value_macro))
+	(use wove-file "./c_markers.wove" (only read_c_optional read_c_value_macro read_c_macro_discard (type CMarker)))
 	(use wove-file "../c/arguments.wove" (only (value c_open_variadic_tail)))
 	(use wove-file "./c_formals.wove" (only is_c_fixed_formal read_c_fixed_formal c_formal_name next_c_value_formal find_c_fixed_formal))
 	(use wove-file "./c_names.wove" (only c_function_opening native_symbol_start native_symbol_end))
@@ -480,6 +480,36 @@
 			(return (call read_c_result_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local bridge) (local context)))))
 
+	(fn check_c_macro_discards
+		(:doc "Allow a discard marker only for a macro's shared borrow, which transfers no ownership.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32) (macro bool))
+		(returns CMarker)
+		(body
+			(let-mut row (local first))
+			(while
+				(:doc "Use the exact metadata attached to each native formal, including any fixed operand.")
+				(i32.not-ltz (local row))
+				(body
+					(let node (array.load (local nodes) (local row)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let marker (call read_c_macro_discard (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts)))
+					(if (u32.gtz (struct.get (local marker) error)) (then (return (local marker))))
+					(if
+						(:doc "A macro can discard a shared loan after Wove has captured and checked it.")
+						(struct.get (local marker) present)
+						(then
+							(let type_node (array.load (local nodes) (struct.get (local parts) operands)))
+							(let type (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
+							(let mode (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes))
+								(struct.get (local type) head)))
+							(if
+								(:doc "Address mutation and owning transfers require their original native arguments.")
+								(bool.not (bool.and (local macro) (u32.eq (local mode) 1u32)))
+								(then (return (struct.new CMarker (present (bool false))
+									(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 23u32)))))))
+					(set (local row) (struct.get (local node) next_sibling))))
+			(return (struct.new CMarker (present (bool false)) (start 0i32) (end 0i32) (error 0u32)))))
+
 	(fn read_c_function
 		(:doc `Check the selected foreign function's parameter and result forms and retain its exact signature.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
@@ -651,6 +681,13 @@
 				(u32.gtz (struct.get (local contracts) error))
 				(then (return (call c_member_error (struct.get (local contracts) start) (struct.get (local contracts) end)
 					(struct.get (local contracts) error)))))
+			(let discards (call check_c_macro_discards (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local first_parameter) (struct.get (local contracts) macro)))
+			(if
+				(:doc "A discarded operand still needs an admitted shared reference in a macro declaration.")
+				(u32.gtz (struct.get (local discards) error))
+				(then (return (call c_member_error (struct.get (local discards) start) (struct.get (local discards) end)
+					(struct.get (local discards) error)))))
 			(let tail (struct.get (local contracts) variadic))
 			(let-mut fixed_problem -1i32)
 			(if

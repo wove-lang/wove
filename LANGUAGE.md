@@ -769,7 +769,7 @@ Attach native contracts to the relevant declaration with `:pragma`.
 
 | Directive | Contract |
 | --- | --- |
-| `(c_macro)` | Bind a C macro with an exact signature or value type. Use a void macro call as a statement. Wove evaluates its arguments once in source order before invoking the macro. |
+| `(c_macro)` | Bind a C macro with an exact signature or value type. Use a void macro call as a statement. Wove evaluates its arguments once in source order before invoking the macro. Put `(:pragma (c_macro_discard))` on a `shared-ref` formal when the header uses that operand only as a discarded expression. Wove checks and captures the borrow, then emits a C cast to `void` for that operand. |
 | `(c_cstr parameter ...)` | Copy byte views into NUL-terminated C strings and reject embedded NUL. Mutable views copy back their original length. |
 | `(c_cstr_raw parameter ...)` | Copy all bytes, including embedded NUL, before adding a terminator. |
 | `(c_cstrs parameter ...)` | Copy shared byte rows into a null-terminated array of C-string pointers. Reject embedded NUL. |
