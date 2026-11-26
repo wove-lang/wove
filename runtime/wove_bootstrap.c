@@ -137,7 +137,12 @@ uint8_t wvrt_bootstrap_arch(void) {
 // Preserve the bootstrap C compiler's deployment when comparing self-host emissions.
 int32_t wvrt_bootstrap_deployment(void) {
 #if defined(__APPLE__) && defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)
-	return __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__;
+	const int32_t deployment = __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__;
+	// Clang collapses the minor and patch components to one digit before macOS 10.10.
+	if (deployment < 100000) {
+		return (deployment / 100) * 10000 + (deployment / 10 % 10) * 100 + deployment % 10;
+	}
+	return deployment;
 #else
 	return -1;
 #endif

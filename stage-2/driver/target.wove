@@ -13,11 +13,14 @@
 	(use wove-file "../text/equal.wove" (only equal_bytes))
 
 	(let dry_run "-###\u0000-fno-color-diagnostics\u0000-x\u0000c\u0000-c\u0000--\u0000/dev/null\u0000")
-	(let frontend_job " \"-cc1\" \"-triple\" \"")
+	(let frontend_job " \"-cc1\"")
+	(let triple_option "-triple")
 	(let macos_spelling "macosx")
 	(let arm64_spelling "arm64")
 	(let arm64e_spelling "arm64e")
 	(let x86_64h_spelling "x86_64h")
+
+	(struct TargetArgument (fields (start i32) (end i32)))
 
 	(fn scan_separator
 		(:doc "Find a delimiter or return the end of the bounded view.")
@@ -101,43 +104,80 @@
 			(let os (call target_os (borrow-shared (array.range (local triple) (local os_start) (local os_end)))))
 			(return (struct.new SelectionContext (mode 0u32) (os (local os)) (arch (local arch)) (deployment -1i32)))))
 
-	(fn frontend_triple_start
-		(:doc "Locate the triple argument at the start of a quoted frontend command line.")
+	(fn quoted_argument_end
+		(:doc "Find the closing quote of one dry-run argument.")
+		(params (line (shared-array u8)) (start i32)) (returns i32)
+		(body
+			(let length (array.len (local line)))
+			(let-mut cursor (local start))
+			(while
+				(:doc "Skip escaped bytes rather than treating any embedded quote as a delimiter.")
+				(i32.lt (local cursor) (local length))
+				(body
+					(let byte (array.load (local line) (local cursor)))
+					(if (u8.eq (local byte) 34u8) (then (return (local cursor))))
+					(if
+						(:doc "A backslash in a quoted job argument escapes the next byte.")
+						(u8.eq (local byte) 92u8)
+						(then (set (local cursor) (i32.inc (local cursor)))))
+					(set (local cursor) (i32.inc (local cursor)))))
+			(return (local length))))
+
+	(fn frontend_arguments
+		(:doc "Return the position after the executable and its exact -cc1 marker.")
 		(params (line (shared-array u8))) (returns i32)
 		(body
 			(let length (array.len (local line)))
 			(if
-				(:doc "A dry-run job begins with a space and a quoted executable path.")
+				(:doc "Only job lines begin with a space and a quoted executable.")
 				(bool.or (i32.lt (local length) 2i32)
 					(bool.or (u8.not-eq (array.load (local line) 0i32) 32u8)
 						(u8.not-eq (array.load (local line) 1i32) 34u8)))
 				(then (return -1i32)))
-			(let-mut cursor 2i32)
+			(let executable_end (call quoted_argument_end (borrow-shared (local line)) 2i32))
+			(let marker_start (i32.inc (local executable_end)))
 			(let width (array.len (local frontend_job)))
-			(while
-				(:doc "Skip escaped characters until the executable's closing quote.")
-				(i32.lt (local cursor) (local length))
-				(body
-					(let byte (array.load (local line) (local cursor)))
-					(if
-						(:doc "Only the option words directly after the executable identify a frontend job.")
-						(u8.eq (local byte) 34u8)
-						(then
-							(let start (i32.inc (local cursor)))
-							(let end (i32.add (local start) (local width)))
-							(if
-								(:doc "Require the entire command prefix before reading its argument.")
-								(bool.and (i32.lt (local end) (local length))
-									(call same_bytes (borrow-shared (local line)) (local start) (local end)
-										(borrow-shared (local frontend_job)) 0i32 (local width)))
-								(then (return (local end))))
-							(return -1i32)))
-					(if
-						(:doc "A backslash escapes the next character inside the path.")
-						(u8.eq (local byte) 92u8)
-						(then (set (local cursor) (i32.inc (local cursor)))))
-					(set (local cursor) (i32.inc (local cursor)))))
+			(let marker_end (i32.add (local marker_start) (local width)))
+			(if
+				(:doc "A linker, assembler, or diagnostic line does not supply frontend facts.")
+				(bool.and (i32.lt (local marker_end) (local length))
+					(call same_bytes (borrow-shared (local line)) (local marker_start) (local marker_end)
+						(borrow-shared (local frontend_job)) 0i32 (local width)))
+				(then (return (local marker_end))))
 			(return -1i32)))
+
+	(fn last_frontend_triple
+		(:doc "Keep the last complete -triple operand in the frontend job, including forwarded overrides.")
+		(params (line (shared-array u8)) (first i32)) (returns TargetArgument)
+		(body
+			(let-mut cursor (local first))
+			(let-mut wants_triple (bool false))
+			(let-mut target (struct.new TargetArgument (start -1i32) (end -1i32)))
+			(let length (array.len (local line)))
+			(let width (array.len (local triple_option)))
+			(while
+				(:doc "Walk one complete quoted argument at a time past its leading space.")
+				(i32.lt (i32.inc (local cursor)) (local length))
+				(body
+					(if
+						(:doc "Reject a malformed argument boundary without interpreting its bytes.")
+						(bool.or (u8.not-eq (array.load (local line) (local cursor)) 32u8)
+							(u8.not-eq (array.load (local line) (i32.inc (local cursor))) 34u8))
+						(then (return (local target))))
+					(let start (i32.add (local cursor) 2i32))
+					(let end (call quoted_argument_end (borrow-shared (local line)) (local start)))
+					(if (i32.eq (local end) (local length)) (then (return (local target))))
+					(if
+						(:doc "The operand of a triple option replaces the earlier target. Other words can start a new option.")
+						(local wants_triple)
+						(then
+							(set (local target) (struct.new TargetArgument (start (local start)) (end (local end))))
+							(set (local wants_triple) (bool false)))
+						(else
+							(set (local wants_triple) (call same_bytes (borrow-shared (local line)) (local start) (local end)
+								(borrow-shared (local triple_option)) 0i32 (local width)))))
+					(set (local cursor) (i32.inc (local end)))))
+			(return (local target))))
 
 	(fn read_frontend_target
 		(:doc "Use the single frontend job in Clang's dry-run output. A multi-architecture job has no single selection.")
@@ -152,19 +192,20 @@
 				(body
 					(let end (call scan_separator (borrow-shared (local output)) (local cursor) 10u8))
 					(let line (borrow-shared (array.range (local output) (local cursor) (local end))))
-					(let start (call frontend_triple_start (borrow-shared (local line))))
+					(let arguments (call frontend_arguments (borrow-shared (local line))))
 					(if
 						(:doc "Only a complete frontend target argument can provide selection.")
-						(i32.not-ltz (local start))
+						(i32.not-ltz (local arguments))
 						(then
-							(let finish (call scan_separator (borrow-shared (local line)) (local start) 34u8))
+							(let triple (call last_frontend_triple (borrow-shared (local line)) (local arguments)))
+							(let start (struct.get (local triple) start))
 							(if
-								(:doc "Ignore a truncated job line.")
-								(i32.lt (local finish) (array.len (local line)))
+								(:doc "Count only frontend jobs that supplied an actual triple.")
+								(i32.not-ltz (local start))
 								(then
 									(if (local found) (then (return (call default_selection 0u32))))
 									(set (local selection) (call parse_frontend_target
-										(borrow-shared (array.range (local line) (local start) (local finish)))))
+										(borrow-shared (array.range (local line) (local start) (struct.get (local triple) end)))))
 									(set (local found) (bool true))))))
 					(set (local cursor) (i32.inc (local end)))))
 			(return (local selection))))
