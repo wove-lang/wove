@@ -52,7 +52,7 @@ def position(source, offset):
 # Run a probe mode on a file or a checked subrange and keep its output bytes.
 def run_probe(executable, mode, path, bounds):
 	command = [str(executable), mode, str(path), *map(str, bounds)]
-	# Reporting coordinates for every token repeatedly scans prefixes of large compiler modules.
+	# Allow time for the complete coordinate-bearing streams from large compiler modules.
 	timeout = 60 if mode == "--tokens" else 30
 	result = subprocess.run(command, capture_output=True, check=False, timeout=timeout)
 	assert not result.stderr, (path, result.stderr)

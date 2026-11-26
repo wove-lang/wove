@@ -312,12 +312,17 @@ static void check_whitespace(void) {
 	}
 }
 
-// Map a view-relative result to file coordinates and emit its numeric fields.
-static void write_span(wvrt_slice parent, int32_t view_start, uint32_t value, int32_t start, int32_t end,
-	uint32_t error) {
-	const SourcePosition position = source_position(parent, view_start, start);
+// Emit a span using its already-resolved file coordinates.
+static void write_positioned_span(uint32_t value, int32_t start, int32_t end, uint32_t error,
+	SourcePosition position) {
 	printf("%" PRIu32 "\t%" PRId32 "\t%" PRId32 "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu32 "\n",
 		value, start, end, error, position.wv_field_0, position.wv_field_1);
+}
+
+// Map a single view-relative result to coordinates in the original file.
+static void write_span(wvrt_slice parent, int32_t view_start, uint32_t value, int32_t start, int32_t end,
+	uint32_t error) {
+	write_positioned_span(value, start, end, error, source_position(parent, view_start, start));
 }
 
 // Report a body diagnostic's related span in the same source and coordinate space.
@@ -328,7 +333,22 @@ static void write_related_span(wvrt_slice parent, int32_t view_start, int32_t fi
 		file, start, end, position.wv_field_0, position.wv_field_1);
 }
 
-// Check UTF-8 once, then advance by each token's exclusive end.
+// Reuse Wove's coordinate mapper on the bytes between adjacent token starts.
+static SourcePosition advance_token_position(wvrt_slice parent, int32_t previous, int32_t next,
+	SourcePosition position) {
+	if (next == previous) { return position; }
+	const uint8_t *bytes = parent.wvrt_items;
+	const wvrt_slice remaining = {bytes + previous, parent.wvrt_length - previous, 1};
+	const SourcePosition delta = source_position(remaining, 0, next - previous);
+
+	// The previous coordinate already counted a CR when its matching LF starts this segment.
+	const uint32_t paired_lf = previous > 0 && bytes[previous - 1] == '\r' && bytes[previous] == '\n';
+	position.wv_field_0 += delta.wv_field_0 - 1 - paired_lf;
+	position.wv_field_1 = delta.wv_field_0 == 1 ? position.wv_field_1 + (delta.wv_field_1 - 1) : delta.wv_field_1;
+	return position;
+}
+
+// Check UTF-8 once, then advance the tokenizer and its reported position independently.
 static int dump_tokens(wvrt_slice parent, wvrt_slice input, int32_t start) {
 	const SourceDiagnostic diagnostic = source_diagnostic(input);
 	if (diagnostic.wv_field_0 != 0) {
@@ -337,9 +357,15 @@ static int dump_tokens(wvrt_slice parent, wvrt_slice input, int32_t start) {
 	}
 
 	int32_t cursor = 0;
+	int32_t position_offset = 0;
+	SourcePosition position = {1, 1};
+	// A valid token start is at a UTF-8 boundary. A clipped final offset has no following token.
 	for (;;) {
 		const Token token = scan_token(input, cursor);
-		write_span(parent, start, token.wv_field_0, token.wv_field_1, token.wv_field_2, token.wv_field_3);
+		const int32_t absolute_start = start + token.wv_field_1;
+		position = advance_token_position(parent, position_offset, absolute_start, position);
+		position_offset = absolute_start;
+		write_positioned_span(token.wv_field_0, token.wv_field_1, token.wv_field_2, token.wv_field_3, position);
 		if (token.wv_field_0 == 0) {
 			return EXIT_SUCCESS;
 		}
