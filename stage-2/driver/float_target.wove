@@ -1,0 +1,231 @@
+(module native_float_target
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Locate actual binary16 uses and query the selected Clang frontend for their native ABI.")
+
+	(use wove-file "./clang.wove" (only clang_program))
+	(use wove-file "../clang/query.wove" (only query_clang_frontend (type QuerySite)))
+	(use wove-file "../clang/index.wove" (only (type ClangDeclaration)))
+	(use wove-file "../clang/values.wove" (only clang_probe_value clang_probe_u32))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/types.wove" (only (value f16_type)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
+	(use wove-file "../scalar/plan.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/records.wove" (only array_owner_element is_array_owner is_fixed_array
+		is_enum_layout is_payload_enum is_native_record is_place_reference is_record_type is_typed_slice
+		member_value_type native_field_type place_reference_target record_index slice_element_type (type ScalarRecord)))
+	(use wove-file "../text/match.wove" (only is_three_bytes))
+
+	(let f16_unavailable 79u32)
+	(let f16_probe_failed 80u32)
+	(let float_header "<float.h>")
+	(let half_fact "wvpr_has_float16")
+
+	(fn has_f16_hint
+		(:doc "Find a potential half type, operator, or literal in parsed source atoms.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))) (returns bool)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "A hint can route the entry through the graph checker. Only a checked use can request Clang.")
+				(i32.lt (local index) (array.len (local nodes)))
+				(body
+					(let node (array.load (local nodes) (local index)))
+					(let start (struct.get (local node) start))
+					(let end (struct.get (local node) end))
+					(if
+						(:doc "Strings and structured rows cannot themselves name the half format.")
+						(bool.and (u32.eq (struct.get (local node) kind) 1u32)
+							(i32.lt 2i32 (i32.sub (local end) (local start))))
+						(then
+							(if
+								(:doc "Match the exact type, a typed operation head, or a suffix.")
+								(bool.or (bool.and (call is_three_bytes (borrow-shared (local source)) (local start) 102u8 49u8 54u8)
+									(bool.or (i32.eq (i32.sub (local end) (local start)) 3i32)
+										(u8.eq (array.load (local source) (i32.add (local start) 3i32)) 46u8)))
+									(call is_three_bytes (borrow-shared (local source)) (i32.sub (local end) 3i32) 102u8 49u8 54u8))
+								(then (return (bool true))))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(return (bool false))))
+
+	(fn half_value_type
+		(:doc "Recognize native half storage directly or through a checked array, slice, or reference.")
+		(params (records (shared-array ScalarRecord)) (type u32)) (returns bool)
+		(body
+			(if (u32.eq (local type) (local f16_type)) (then (return (bool true))))
+			(if
+				(:doc "An owning array carries the type of each aligned element.")
+				(call is_array_owner (local type))
+				(then (return (call half_value_type (borrow-shared (local records)) (call array_owner_element (local type))))))
+			(if
+				(:doc "Typed slices carry their checked element type.")
+				(call is_typed_slice (local type))
+				(then (return (call half_value_type (borrow-shared (local records))
+					(call slice_element_type (borrow-shared (local records)) (local type))))))
+			(if
+				(:doc "A native reference retains the exact type of its pointee.")
+				(call is_place_reference (local type))
+				(then (return (call half_value_type (borrow-shared (local records))
+					(call place_reference_target (borrow-shared (local records)) (local type))))))
+			(if
+				(:doc "Inspect inline array elements here. Named layout fields have their own original sites.")
+				(call is_record_type (local type))
+				(then
+					(let layout (array.load (local records) (call record_index (local type))))
+					(if
+						(:doc "Only inline arrays encode element types directly in the layout.")
+						(call is_fixed_array (local layout))
+						(then (return (call half_value_type (borrow-shared (local records))
+							(int.convert u32 (struct.get (local layout) first))))))))
+			(return (bool false))))
+
+	(fn half_field_site
+		(:doc "Find the first concretely emitted member whose checked type requires binary16.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
+			(records (shared-array ScalarRecord))) (returns i32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Visit checked layouts up to their zero-initialized tail.")
+				(i32.lt (local index) (array.len (local records)))
+				(body
+					(let record (array.load (local records) (local index)))
+					(if (i32.eq (struct.get (local record) name) 0i32) (then (return -1i32)))
+					(let template (bool.and (i32.lt -1i32 (struct.get (local record) generic))
+						(i32.lt (struct.get (local record) specialization) 0i32)))
+					(let simple_enum (bool.and (call is_enum_layout (local record)) (bool.not (call is_payload_enum (local record)))))
+					(if
+						(:doc "Only concrete named layouts have source member rows to inspect.")
+						(bool.not (bool.or (local template) (bool.or (local simple_enum) (call is_fixed_array (local record)))))
+						(then
+							(let-mut field (struct.get (local record) first))
+							(let-mut ordinal 0i32)
+							(while
+								(:doc "Use the same checked member types as the C record emitter.")
+								(bool.and (i32.lt (local ordinal) (struct.get (local record) count)) (i32.lt -1i32 (local field)))
+								(body
+									(let node (array.load (local nodes) (local field)))
+									(let-mut type 0u32)
+									(if
+										(:doc "Bridge fields use the resolved C layout instead of the Wove member namespace.")
+										(call is_native_record (local record))
+										(then (set (local type) (call native_field_type (borrow-shared (local source)) (borrow-shared (local nodes))
+											(borrow-shared (local records)) (local record) (local field))))
+										(else (set (local type) (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+											(borrow-shared (local records)) (borrow-shared (local bindings)) (local record) (local node)))))
+									(if
+										(:doc "A type operand preserves the source location even in a specialized layout.")
+										(call half_value_type (borrow-shared (local records)) (local type))
+										(then
+											(let part (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+											(let type_node (struct.get (local part) operands))
+											(if (i32.lt -1i32 (local type_node)) (then (return (local type_node))))
+											(return (local field))))
+									(set (local field) (struct.get (local node) next_sibling))
+									(set (local ordinal) (i32.add (local ordinal) 1i32))))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(return -1i32)))
+
+	(fn half_site
+		(:doc "Locate a half expression, storage declaration, function signature, or record field in the checked graph.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
+			(expressions (shared-array ScalarExpression)) (statements (shared-array ScalarStatement))
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(records (shared-array ScalarRecord))) (returns i32)
+		(body
+			(if (bool.not (call has_f16_hint (borrow-shared (local source)) (borrow-shared (local nodes)))) (then (return -1i32)))
+			(let-mut index 0i32)
+			(let-mut storage -1i32)
+			(while
+				(:doc "Expression and statement rows share their original source node index.")
+				(i32.lt (local index) (array.len (local expressions)))
+				(body
+					(let expr (array.load (local expressions) (local index)))
+					(let statement (array.load (local statements) (local index)))
+					(if
+						(:doc "Prefer a checked expression over its enclosing storage declaration.")
+						(call half_value_type (borrow-shared (local records)) (struct.get (local expr) type))
+						(then (return (local index))))
+					(if
+						(:doc "A storage declaration can require half even with no initializer expression.")
+						(bool.and (i32.lt (local storage) 0i32)
+							(call half_value_type (borrow-shared (local records)) (struct.get (local statement) type)))
+						(then (set (local storage) (local index))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(if (i32.lt -1i32 (local storage)) (then (return (local storage))))
+			(set (local index) 0i32)
+			(while
+				(:doc "An unused function parameter can still introduce the half ABI.")
+				(i32.lt (local index) (array.len (local parameters)))
+				(body
+					(let param (array.load (local parameters) (local index)))
+					(if
+						(:doc "The type follows the formal's original name.")
+						(call half_value_type (borrow-shared (local records)) (struct.get (local param) type))
+						(then
+							(let name (struct.get (local param) name))
+							(let type (struct.get (array.load (local nodes) (local name)) next_sibling))
+							(if (i32.lt -1i32 (local type)) (then (return (local type))))
+							(return (local name))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(set (local index) 0i32)
+			(while
+				(:doc "Bridge results and unused Wove functions keep their native signatures.")
+				(i32.lt (local index) (array.len (local functions)))
+				(body
+					(let fn_row (array.load (local functions) (local index)))
+					(if
+						(:doc "Report the original declaration if its result introduces the half ABI.")
+						(call half_value_type (borrow-shared (local records)) (struct.get (local fn_row) result))
+						(then (return (struct.get (local fn_row) declaration))))
+					(set (local index) (i32.add (local index) 1i32))))
+			(return (call half_field_site (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (borrow-shared (local records))))))
+
+	(fn check_clang_f16
+		(:doc "Read the archive's half capability fact using the ordinary target and frontend options.")
+		(params (options (shared-array u8)) (directory (shared-array u8)) (site QuerySite)) (returns u32)
+		(body
+			(let program (call clang_program))
+			(let empty (array.alloc u8 0i32))
+			(let-mut width 1048576i32)
+			(while
+				(:doc "The same workspace bound as other live Clang probes accommodates forwarded includes.")
+				(i32.lt (local width) 33554432i32)
+				(body
+					(let-mut capture (array.alloc u8 (local width)))
+					(let-mut trace (array.alloc u8 (local width)))
+					(let-mut nodes (array.alloc JsonNode (int.convert i32 (u32.shr (int.convert u32 (local width)) 3i32))))
+					(let-mut declarations (array.alloc ClangDeclaration (int.convert i32 (u32.shr (int.convert u32 (local width)) 6i32))))
+					(let-mut names (array.alloc u8 (int.convert i32 (u32.shr (int.convert u32 (local width)) 1i32))))
+					(let result (call query_clang_frontend (borrow-shared (local program)) (borrow-shared (local options))
+						(borrow-shared (local directory)) (borrow-shared (local empty)) (borrow-shared (local float_header))
+						(local site) (borrow-mut (local capture)) (borrow-mut (local nodes))
+						(borrow-mut (local declarations)) (borrow-mut (local names)) (borrow-mut (local trace))))
+					(let error (struct.get (local result) error))
+					(if
+						(:doc "Only a successful, indexed capability probe can distinguish availability from failure.")
+						(u32.eq (local error) 0u32)
+						(then
+							(let fact (call clang_probe_u32 (borrow-shared (local capture))
+								(call clang_probe_value (borrow-shared (local capture)) (struct.get (local result) index)
+									(borrow-shared (local nodes)) (borrow-shared (local declarations))
+									(borrow-shared (local names)) (borrow-shared (local half_fact)))))
+							(let value (struct.get (local fact) value))
+							(if
+								(:doc "The shared capability enum supplies an exact boolean.")
+								(bool.or (u32.lt 0u32 (struct.get (local fact) error)) (u32.lt 1u32 (local value)))
+								(then (return (local f16_probe_failed))))
+							(if (u32.eq (local value) 0u32) (then (return (local f16_unavailable))))
+							(return 0u32)))
+					(if
+						(:doc "Only output or index exhaustion can be repaired with a larger workspace.")
+						(bool.not (bool.or (u32.eq (local error) 5u32) (u32.eq (local error) 7u32)))
+						(then (return (local f16_probe_failed))))
+					(set (local width) (i32.add (local width) (local width)))))
+			(return (local f16_probe_failed))))
+)

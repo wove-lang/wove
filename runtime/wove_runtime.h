@@ -37,6 +37,14 @@ double wvrt_float_to_integer(double wvrtvalue, double wvrtlower, double wvrtuppe
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
 float wvrt_f32_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
 
+// Half operations use the native binary16 ABI when the C target exposes it.
+#if defined(__FLT16_MANT_DIG__) && __FLT16_MANT_DIG__ == 11
+#define WVRT_HAS_F16 1
+_Float16 wvrt_f16_from_bits(uint16_t wvrtbits);
+uint16_t wvrt_f16_to_bits(_Float16 wvrtvalue);
+_Float16 wvrt_f16_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+#endif
+
 int wvrt_run_host_entry(int argc, char **argv, size_t span_size,
 	void (*write_span)(void *, int32_t, int32_t, int32_t), int32_t (*entry)(wvrt_slice, wvrt_slice));
 

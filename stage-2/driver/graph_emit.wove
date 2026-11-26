@@ -7,6 +7,11 @@
 	(use (:pragma (cfg (not bootstrap))) wove-file "./input_files.wove" (only check_header_inputs check_asset_inputs))
 	(use (:pragma (cfg (not bootstrap))) wove-file "./output.wove" (only publish_input))
 	(use (:pragma (cfg (not bootstrap))) wove-file "./protection.wove" (only (type BuildProtection)))
+	(use (:pragma (cfg (not bootstrap))) wove-file "./availability.wove" (only check_optional_c_functions))
+	(use (:pragma (cfg (not bootstrap))) wove-file "./float_target.wove" (only half_site check_clang_f16))
+	(use (:pragma (cfg (not bootstrap))) wove-file "./paths.wove" (only directory_width))
+	(use (:pragma (cfg (not bootstrap))) wove-file "../clang/query.wove" (only (type QuerySite)))
+	(use (:pragma (cfg (not bootstrap))) wove-file "../scalar/trees.wove" (only source_span_owner))
 	(use wove-file "../scalar/generics/workspace.wove" (only graph_function_workspace can_grow_function_workspace (value function_workspace_full)))
 	(use wove-file "../emit/graph.wove" (only check_graph_plan bind_entry_assets write_graph_c (type GraphPlan)))
 	(use wove-file "../emit/embeds.wove" (only request_module_embeds))
@@ -142,12 +147,65 @@
 				(borrow-shared (local staged)) (local target_index)
 				(borrow-shared (array.range (local output) 0i32 (struct.get (local written) count))) (local human))))))
 
+	(fn check_entry_frontend
+		(:doc "Check half support before querying optional C declarations that may name half types.")
+		(:pragma (cfg (not bootstrap)))
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
+			(nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression)) (statements (shared-array ScalarStatement))
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(options (shared-array u8)) (staged (shared-array u8)) (canonical (shared-array u8)) (checked bool)) (returns EntryEmission)
+		(body
+			(let width (call directory_width (borrow-shared (local staged))))
+			(if
+				(:doc "Only a successful semantic plan has checked type rows.")
+				(local checked)
+				(then
+					(let index (call half_site (borrow-shared (local arena)) (borrow-shared (local nodes)) (borrow-shared (local bindings))
+						(borrow-shared (local expressions)) (borrow-shared (local statements)) (borrow-shared (local functions))
+						(borrow-shared (local parameters)) (borrow-shared (local records))))
+					(if
+						(:doc "An actual binary16 use needs the selected frontend's capability fact.")
+						(i32.lt -1i32 (local index))
+						(then
+							(let node (array.load (local nodes) (local index)))
+							(let start (struct.get (local node) start))
+							(let file (call source_span_owner (borrow-shared (local files)) (local start) 0i32))
+							(let base (struct.get (array.load (local files) (local file)) source_start))
+							(let site (struct.new QuerySite (file (local file)) (start (i32.sub (local start) (local base)))
+								(end (i32.sub (struct.get (local node) end) (local base)))))
+							(let error (call check_clang_f16 (borrow-shared (local options))
+								(borrow-shared (array.range (local staged) 0i32 (local width))) (local site)))
+							(if
+								(:doc "Report unsupported half before an optional header can fail to declare it.")
+								(u32.lt 0u32 (local error))
+								(then (return (call entry_failure (local file) (struct.get (local site) start) (struct.get (local site) end)
+									(local error) (bool false)))))))))
+			(let available (call check_optional_c_functions (borrow-shared (local arena))
+				(borrow-shared (local files)) (borrow-shared (local bindings)) (borrow-shared (local canonical))
+				(borrow-shared (local options)) (borrow-shared (array.range (local staged) 0i32 (local width)))))
+			(if
+				(:doc "Keep the requesting name's span for the existing optional declaration diagnostics.")
+				(u32.lt 0u32 (struct.get (local available) error))
+				(then (return (call entry_failure (struct.get (local available) file) (struct.get (local available) start)
+					(struct.get (local available) end) (struct.get (local available) error) (bool false)))))
+			(return (call entry_status 0i32))))
+
+	(fn check_entry_frontend
+		(:doc "Bootstrap emits the compiler without starting a target frontend.")
+		(:pragma (cfg bootstrap))
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
+			(nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression)) (statements (shared-array ScalarStatement))
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(options (shared-array u8)) (staged (shared-array u8)) (canonical (shared-array u8)) (checked bool)) (returns EntryEmission)
+		(body (return (call entry_status 0i32))))
+
 	(fn emit_entry_graph
 		(:doc "Own the checked graph tables while loading embeds and writing the C unit in either disk driver.")
 		(:expect
 			(tests "stage-2/cli/native/emission/check.py" "stage-2/cli/native/discovery/check.py")
 			(issues "gh:wove-lang/wove:354"))
 		(params (path (shared-array u8)) (canonical (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8))
+			(probe_options (shared-array u8))
 			(protection BuildProtection) (target_index i32) (check_only bool) (arena (shared-array u8)) (files (shared-array SuppliedFile))
 			(modules (shared-array GraphModule)) (bindings (shared-array GraphBinding)) (resolved GraphResult) (human bool))
 		(returns EntryEmission)
@@ -173,8 +231,8 @@
 				(i32.lt -1i32 (local rows))
 				(body
 					(let result (call emit_entry_workspace (borrow-shared (local path)) (borrow-shared (local canonical))
-						(borrow-shared (local destination)) (borrow-shared (local staged)) (local protection) (local target_index)
-						(local check_only) (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local modules))
+						(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options))
+						(local protection) (local target_index) (local check_only) (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local modules))
 						(borrow-shared (local bindings)) (local resolved) (local human) (borrow-shared (local trees)) (local rows) (local signatures)))
 					(if
 						(:doc "A clone shortage precedes all embedding and publication side effects.")
@@ -192,6 +250,7 @@
 	(fn emit_entry_workspace
 		(:doc "Check and emit the disk graph with one private workspace allocation.")
 		(params (path (shared-array u8)) (canonical (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8))
+			(probe_options (shared-array u8))
 			(protection BuildProtection) (target_index i32) (check_only bool) (arena (shared-array u8)) (files (shared-array SuppliedFile))
 			(modules (shared-array GraphModule)) (bindings (shared-array GraphBinding)) (resolved GraphResult) (human bool)
 			(trees (shared-array ScalarTree)) (rows i32) (signatures i32)) (returns EntryEmission)
@@ -212,11 +271,25 @@
 				(borrow-shared (local trees)) (borrow-mut (local nodes)) (borrow-mut (local functions)) (borrow-mut (local parameters))
 				(borrow-mut (local records)) (borrow-mut (local statements)) (borrow-mut (local expressions))
 				(borrow-mut (local sites)) (borrow-mut (local tests))))
+			(let error (struct.get (local plan) error))
 			(if
-				(:doc "Signatures and bodies must pass before any embed path can reach the host.")
-				(u32.lt 0u32 (struct.get (local plan) error))
+				(:doc "Retry a workspace shortage before making any frontend observations.")
+				(u32.eq (local error) (local function_workspace_full))
 				(then (return (call entry_failure (struct.get (local plan) file) (struct.get (local plan) start)
-					(struct.get (local plan) end) (struct.get (local plan) error) (bool false)))))
+					(struct.get (local plan) end) (local error) (bool false)))))
+			(let frontend (call check_entry_frontend (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local bindings))
+				(borrow-shared (local nodes)) (borrow-shared (local expressions)) (borrow-shared (local statements))
+				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local records))
+				(borrow-shared (local probe_options)) (borrow-shared (local staged)) (borrow-shared (local canonical)) (u32.eq (local error) 0u32)))
+			(if
+				(:doc "A failed frontend check stops before opening embeds or writing C.")
+				(u32.lt 0u32 (struct.get (local frontend) error))
+				(then (return (local frontend))))
+			(if
+				(:doc "Keep semantic diagnostics ahead of all embed and publication effects.")
+				(u32.lt 0u32 (local error))
+				(then (return (call entry_failure (struct.get (local plan) file) (struct.get (local plan) start)
+					(struct.get (local plan) end) (local error) (bool false)))))
 			(let-mut requests (array.alloc EmbedAsset (local rows)))
 			(let count (call request_module_embeds (borrow-shared (local expressions)) (borrow-mut (local requests))))
 			(if
@@ -273,7 +346,7 @@
 			(let empty (array.alloc u8 0i32))
 			(return (call emit_entry_graph (borrow-shared (array.range (local arena) (local start) (local end)))
 				(borrow-shared (array.range (local arena) (local start) (local end)))
-				(borrow-shared (local empty)) (borrow-shared (local empty)) (struct.new BuildProtection) 0i32 (bool false)
+				(borrow-shared (local empty)) (borrow-shared (local empty)) (borrow-shared (local empty)) (struct.new BuildProtection) 0i32 (bool false)
 				(borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local modules))
 				(borrow-shared (local bindings)) (local resolved) (bool false)))))
 )

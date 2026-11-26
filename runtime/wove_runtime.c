@@ -78,6 +78,35 @@ float wvrt_f32_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int
 	return (float)wvrtvalue;
 }
 
+// Targets without native half support omit the binary16 ABI.
+#ifdef WVRT_HAS_F16
+_Static_assert(__FLT16_MAX_EXP__ == 16 && sizeof(_Float16) == sizeof(uint16_t),
+	"Wove f16 requires native binary16");
+
+// Reinterpret a half word without changing its representation.
+_Float16 wvrt_f16_from_bits(uint16_t wvrtbits) {
+	_Float16 wvrtvalue;
+	memcpy(&wvrtvalue, &wvrtbits, sizeof(wvrtvalue));
+	return wvrtvalue;
+}
+
+// Copy the complete binary16 representation, including signed zero and NaN payloads.
+uint16_t wvrt_f16_to_bits(_Float16 wvrtvalue) {
+	uint16_t wvrtbits;
+	memcpy(&wvrtbits, &wvrtvalue, sizeof(wvrtbits));
+	return wvrtbits;
+}
+
+// Keep nonfinite inputs and reject finite values beyond the binary16 range.
+_Float16 wvrt_f16_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Clang rounds finite in-range values directly from double to half.
+	if (isfinite(wvrtvalue) && (wvrtvalue < -65504.0 || wvrtvalue > 65504.0)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "floating conversion out of range");
+	}
+	return (_Float16)wvrtvalue;
+}
+#endif
+
 // Trap at the argument that failed to meet its callee's required slice length.
 void wvrt_check_slice_extent_at_span(int32_t wvrt_length, int32_t wvrt_expected,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
