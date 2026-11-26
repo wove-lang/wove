@@ -1,7 +1,7 @@
-(module emit_c_variadic
+(module emit_c_prototype
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Verify typed variadic bridge declarations against the included C prototypes.
+	(:doc `Verify variadic and pointer-out bridge declarations against the included C prototypes.
 
 	The check uses the adapted C types of the fixed prefix and admits
 	compatible byte pointers for bounded views. Clang's transparent unions
@@ -10,13 +10,16 @@
 	the selected target's default argument promotions.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "./runtime.wove" (only write_c_number write_site_number))
 	(use wove-file "../source/module.wove" (only form_parts))
 	(use wove-file "../source/c_formals.wove" (only is_c_fixed_formal))
-	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_bytes_mode is_c_array_mode is_c_storage_mode c_storage_shared_mode))
+	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_bytes_mode is_c_null_mode is_c_array_mode is_c_vector_mode
+			is_c_storage_mode c_storage_shared_mode is_c_handle_init_mode))
 	(use wove-file "../scalar/plan.wove" (only (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./c_extents.wove" (only write_c_array_pointer_type))
+	(use wove-file "./c_vectors.wove" (only (value vector_type)))
 	(use wove-file "./c_storage.wove" (only write_storage_pointer_type))
 	(use wove-file "./c_arguments.wove" (only c_symbol_text))
 	(use wove-file "./text.wove" (only c_byte c_literal_text))
@@ -24,7 +27,10 @@
 	(let check_open "_Static_assert(_Generic(&(")
 	(let after_name "),")
 	(let before_formals "(*)(")
-	(let check_close "...):1,default:0),\"Wove C variadic prototype does not match its declared fixed prefix and result\");\n")
+	(let variadic_check_close "...):1,default:0),\"Wove C variadic prototype does not match its declared fixed prefix and result\");\n")
+	(let handle_check_open "):1,default:0),\"Wove C pointer-out prototype does not match its declared signature at file ")
+	(let handle_check_bytes " bytes [")
+	(let handle_check_close ")\");\n")
 	(let string_pointer "const char*")
 	(let mut_string_pointer "char*")
 	(let byte_pointer_union "union __attribute__((__transparent_union__)){")
@@ -47,8 +53,8 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 			(let-mut cursor (call c_literal_text (borrow-shared (local byte_pointer_union))
 				(borrow-mut (local output)) (local offset) (local writing)))
 			(if
-				(:doc "A mutable view can also satisfy writable pointer formals.")
-				(u32.eq (struct.get (local param) type) 38u32)
+				(:doc "Mutable views and explicit null can satisfy writable byte pointer formals.")
+				(bool.or (call is_c_null_mode (struct.get (local param) c_mode)) (u32.eq (struct.get (local param) type) 38u32))
 				(then (set (local cursor) (call c_literal_text (borrow-shared (local writable_pointer_members))
 					(borrow-mut (local output)) (local cursor) (local writing)))))
 			(return (call c_literal_text (borrow-shared (local readonly_pointer_members))
@@ -73,8 +79,13 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 					(return (call c_literal_text (borrow-shared (local string_pointer)) (borrow-mut (local output))
 						(local offset) (local writing)))))
 			(if
-				(:doc "The C header can use any compatible byte pointer for a bounded view.")
-				(call is_c_bytes_mode (local mode))
+				(:doc "String vectors use the same terminated pointer table type as the emitted call.")
+				(call is_c_vector_mode (local mode))
+				(then (return (call c_literal_text (borrow-shared (local vector_type))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "The C header can use a compatible byte pointer for a bounded view or explicit null.")
+				(bool.or (call is_c_bytes_mode (local mode)) (call is_c_null_mode (local mode)))
 				(then (return (call write_byte_pointer_type (local param)
 					(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
@@ -89,12 +100,37 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 				(then (return (call write_storage_pointer_type (borrow-shared (local source)) (borrow-shared (local nodes))
 					(struct.get (local param) type) (u8.eq (local mode) (call c_storage_shared_mode))
 					(borrow-mut (local output)) (local offset) (local writing)))))
-			(return (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+			(let end (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (struct.get (local param) type)
-				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
+			(if
+				(:doc "A pointer-out parameter requires one additional indirection on the original C handle.")
+				(call is_c_handle_init_mode (local mode))
+				(then (return (call c_byte (borrow-mut (local output)) (local end) 42u8 (local writing)))))
+			(return (local end))))
 
-	(fn write_c_variadic_check
-		(:doc `Require the header's real function pointer type to include the declared fixed prefix and ellipsis.`)
+	(fn close_c_handle_prototype
+		(:doc "Report a header signature mismatch with the defining Wove declaration's file and byte range.")
+		(params (site SourceNode) (function ScalarFunction) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let base (struct.get (local function) source_base))
+			(let-mut digits (array.alloc u8 11i32))
+			(let open (call c_literal_text (borrow-shared (local handle_check_open))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let file (call write_c_number (borrow-mut (local output)) (local open)
+				(struct.get (local function) file) (borrow-mut (local digits)) (local writing)))
+			(let bytes (call c_literal_text (borrow-shared (local handle_check_bytes))
+				(borrow-mut (local output)) (local file) (local writing)))
+			(let start (call write_c_number (borrow-mut (local output)) (local bytes)
+				(i32.sub.wrapping (struct.get (local site) start) (local base)) (borrow-mut (local digits)) (local writing)))
+			(let end (call write_site_number (borrow-mut (local output)) (local start)
+				(i32.sub.wrapping (struct.get (local site) end) (local base)) (borrow-mut (local digits)) (local writing)))
+			(return (call c_literal_text (borrow-shared (local handle_check_close))
+				(borrow-mut (local output)) (local end) (local writing)))))
+
+	(fn write_c_prototype_check
+		(:doc `Require the header to match the complete pointer-out signature or the named variadic prefix and ellipsis.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
 			(parameters (shared-array ScalarParameter)) (function ScalarFunction) (output (mut-array u8))
 			(offset u32) (name_prefix i32) (writing bool))
@@ -114,7 +150,8 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 			(let tail (struct.get (local function) c_variadic))
 			(while
 				(:doc "Each formal in the native prefix contributes one type, including hidden C commands.")
-				(i32.lt (local native_row) (local tail))
+				(bool.and (i32.lt -1i32 (local native_row))
+					(bool.or (i32.lt (local native_row) (local tail)) (struct.get (local function) c_handle_out)))
 				(body
 					(let item (array.load (local nodes) (local native_row)))
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
@@ -131,6 +168,14 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 								(borrow-shared (local records)) (array.load (local parameters) (local parameter))
 								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 							(set (local parameter) (i32.add.wrapping (local parameter) 1i32))))
-					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
-					(set (local native_row) (struct.get (local item) next_sibling))))
-			(return (call c_literal_text (borrow-shared (local check_close)) (borrow-mut (local output)) (local cursor) (local writing))))))
+					(set (local native_row) (struct.get (local item) next_sibling))
+					(if
+						(:doc "An ellipsis or another fixed operand follows this native type.")
+						(i32.lt -1i32 (local native_row))
+						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))))))
+			(if
+				(:doc "The fixed pointer-out signature ends without an ellipsis.")
+				(struct.get (local function) c_handle_out)
+				(then (return (call close_c_handle_prototype (array.load (local nodes) (struct.get (local function) declaration))
+					(local function) (borrow-mut (local output)) (local cursor) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local variadic_check_close)) (borrow-mut (local output)) (local cursor) (local writing))))))

@@ -122,6 +122,8 @@ void wvrt_check_c_array(wvrt_slice wvrt_view, size_t wvrt_element_size, int64_t 
 
 void wvrt_check_c_handle(const volatile void *wvrt_handle, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
+void wvrt_check_c_handle_empty(const volatile void *wvrt_handle, int32_t wvrt_file,
+	int32_t wvrt_start, int32_t wvrt_end);
 
 typedef struct wvrt_c_storage wvrt_c_storage;
 

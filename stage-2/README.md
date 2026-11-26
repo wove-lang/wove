@@ -991,6 +991,21 @@ A fixed signature can mark a mutable scalar reference with
 For example, the checked-in `waitpid` accepts either a mutable `i32` loan
 or `null` for its status parameter.
 
+For a pointer-backed owner, `(:pragma (c_init output))` on a formal such
+as `(output (mut-ref Database))` passes the address of the native handle
+slot to C. For example, a `sqlite3 *` owner gives C a `sqlite3 **`.
+Declare a mutable local with `(native.empty Database)` and pass
+`(borrow-mut (local db))` to the initializer. The loan requires an empty
+slot and traps at the borrow span if a handle is already present. C may
+write the slot during the call and must release its access on return.
+The native header's prototype must match the declaration.
+
+The call returns the native `i32` status. Test the owner separately with
+`owner.is-null`. A null output leaves the slot available to retry. Any
+nonnull output belongs to the local owner even on failure, as required by
+`sqlite3_open`. An explicit move transfers responsibility and scope exit
+destroys any handle still present.
+
 The `storage` flag in `(:pragma (c_owned (drop destroy) storage))`
 declares a caller-owned C object. Initialize a local with
 `(native.alloc Actions)` to obtain zeroed storage using the definition's C

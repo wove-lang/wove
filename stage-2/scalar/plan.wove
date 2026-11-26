@@ -35,7 +35,7 @@
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null c_null_argument_kind
 		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode c_handle_mut_mode is_c_exclusive_owner_mode
-		is_c_storage_mode is_c_storage_init_mode is_c_consuming_mode))
+		is_c_storage_mode is_c_storage_init_mode is_c_handle_init_mode is_c_consuming_mode))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
 	(use wove-file "../source/types.wove" (only void_type is_builtin_integer is_builtin_float is_builtin_scalar builtin_type_keyword reference_mode))
 	(use wove-file "../source/float_ops.wove" (only float_literal_shape is_float_conversion (value float_literal)))
@@ -48,7 +48,7 @@
 	(use wove-file "./host_entry.wove" (only is_arg_span_slice))
 	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
 	(use wove-file "./owners.wove" (only is_local_owner is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
-			native_storage_init_borrow_kind native_storage_mut_borrow_kind
+			native_storage_init_borrow_kind native_storage_mut_borrow_kind native_handle_init_borrow_kind native_owner_declaration
 			is_optional_byte_owner_type optional_unwrap_kind))
 	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan field_place_root expression_row mutable_parameter_place (value indirect_local_place) (value local_slice_view) (value local_slice_projection) (type ScalarExpression)))
 	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding is_iteration_binding is_writable_local (type ScalarStatement)
@@ -60,7 +60,7 @@
 	(use wove-file "./control.wove" (only plan_control_blocks enclosing_loop sequence_paths predicate_literal control_paths native_transfer_paths has_path repeats_loop consumption_on_back_edge))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form read_statement scalar_type scalar_operator word_shift_type is_i32_division is_fixed_initializer
-			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
+			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
 	(struct
 		(:doc `A checked signature and its defining source identity.
@@ -73,7 +73,7 @@
 		Both refer to the packed defining source tree.`)
 		ScalarFunction
 		(fields (declaration i32) (name i32) (params i32) (arity i32) (result u32)
-			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_vectors bool) (c_extents i32) (c_macro bool) (c_variadic i32) (c_nulls i32) (c_storage bool)
+			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_vectors bool) (c_extents i32) (c_macro bool) (c_variadic i32) (c_nulls i32) (c_storage bool) (c_handle_out bool)
 			(c_snapshot bool) (c_snapshot_drop i32) (c_snapshot_field i32) (c_formals i32) (c_fixed bool)
 			(file i32) (tree_base i32) (tree_limit i32) (source_base i32) (body i32)))
 	(struct ScalarParameter
@@ -449,7 +449,7 @@
 					(params (local next_param)) (arity (local arity))
 					(result (struct.get (local signature) result)) (first_statement (struct.get (local signature) first_statement))
 					(body (struct.get (local signature) body))
-					(identity (local identity)) (entry (local entry)) (c_strings 0i32) (c_vectors (bool false)) (c_extents 0i32) (c_macro (bool false)) (c_variadic 0i32) (c_nulls 0i32) (c_storage (bool false))
+					(identity (local identity)) (entry (local entry)) (c_strings 0i32) (c_vectors (bool false)) (c_extents 0i32) (c_macro (bool false)) (c_variadic 0i32) (c_nulls 0i32) (c_storage (bool false)) (c_handle_out (bool false))
 					(c_snapshot (bool false)) (c_snapshot_drop -1i32) (c_snapshot_field -1i32) (c_formals -1i32) (c_fixed (bool false))
 					(file (struct.get (local scope) file)) (tree_base (struct.get (local scope) tree_base))
 					(tree_limit (struct.get (local scope) tree_limit)) (source_base (struct.get (local scope) source_base))))
@@ -2160,7 +2160,11 @@
 					(if
 						(:doc "Only an initializing borrow can use an inactive allocation.")
 						(call is_c_storage_init_mode (local mode))
-						(then (set (local kind) (call native_storage_init_borrow_kind))))))
+						(then (set (local kind) (call native_storage_init_borrow_kind))))
+					(if
+						(:doc "An opaque pointer output lends the empty owner slot itself.")
+						(call is_c_handle_init_mode (local mode))
+						(then (set (local kind) (call native_handle_init_borrow_kind))))))
 			(array.store (local expressions) (local index)
 				(call runtime_expression (local kind) (local expected) (local node) (local pointer)
 					(local caller) (local view_start)))
@@ -3077,15 +3081,15 @@
 				(call runtime_expression (local lowered) (local result) (local node) (local receiver) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
-	(fn plan_native_allocation
-		(:doc `Allocate an inactive owner using the original representation of an explicitly selected storage type.`)
+	(fn plan_native_owner_construction
+		(:doc "Construct a fresh native owner using the explicitly selected C representation.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32)
-			(operand i32) (expected u32) (caller ScalarFunction) (view_start i32)
+			(operand i32) (kind u32) (expected u32) (caller ScalarFunction) (view_start i32)
 			(bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(if
-				(:doc "An owned allocation initializes a binding and names exactly one type.")
+				(:doc "A fresh native owner initializes a binding and names exactly one type.")
 				(bool.or (bool.not (u32.eq (local expected) 42u32))
 					(bool.or (i32.lt (local operand) 0i32)
 						(i32.lt -1i32 (struct.get (array.load (local nodes) (local operand)) next_sibling))))
@@ -3103,11 +3107,19 @@
 			(let row (i32.add.wrapping (struct.get (local alias) name_node) (struct.get (local caller) tree_base)))
 			(let type (struct.get (array.load (local expressions) (local row)) type))
 			(if
-				(:doc "Only an imported caller-owned storage type has an allocation binding.")
+				(:doc "The binding must resolve to a checked native owner type.")
 				(bool.not (call is_native_owner (local type)))
 				(then (return (call entry_at (local name) -1i32 24u32))))
+			(let storage (call is_c_storage_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(call native_owner_declaration (local type))))
+			(let allocating (u32.eq (local kind) (call native_alloc_kind)))
+			(if
+				(:doc "native.alloc requires caller-owned storage and native.empty requires a pointer handle.")
+				(bool.or (bool.and (local storage) (bool.not (local allocating)))
+					(bool.and (local allocating) (bool.not (local storage))))
+				(then (return (call entry_at (local name) -1i32 24u32))))
 			(array.store (local expressions) (local index)
-				(call runtime_expression (call native_alloc_kind) (local type) (local node) -1i32 (local caller) (local view_start)))
+				(call runtime_expression (local kind) (local type) (local node) -1i32 (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_expression
@@ -3185,10 +3197,10 @@
 					(local node) (local index) (local expected) (local caller) (borrow-shared (local records))
 					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
 			(if
-				(:doc "A native storage constructor creates a new inactive owner for this binding.")
-				(u32.eq (local tag) (call native_alloc_kind))
-				(then (return (call plan_native_allocation (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local index) (struct.get (local parts) operands) (local expected) (local caller) (local view_start)
+				(:doc "A native constructor creates a fresh inactive storage owner or empty pointer owner.")
+				(call is_native_owner_constructor (local tag))
+				(then (return (call plan_native_owner_construction (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (struct.get (local parts) operands) (local tag) (local expected) (local caller) (local view_start)
 					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "The null predicate reads the presence of a native handle or an optional owner.")

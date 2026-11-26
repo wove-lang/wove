@@ -21,8 +21,7 @@
 	(use wove-file "../source/c_names.wove" (only c_function_opening))
 	(use wove-file "../source/c_formals.wove" (only find_c_fixed_formal))
 	(use wove-file "../source/c_arguments.wove" (only read_c_arguments mark_c_argument_type (type CArgument)))
-	(use wove-file "../c/arguments.wove" (only is_c_value_mode is_c_storage_mode c_storage_mut_mode))
-	(use wove-file "../source/c_owners.wove" (only is_c_storage_type))
+	(use wove-file "../c/arguments.wove" (only is_c_value_mode is_c_storage_mode c_value_mode c_storage_mut_mode c_handle_mut_mode c_storage_init_mode c_handle_init_mode))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)))
 	(use wove-file "../emit/names.wove" (only module_identity hash_spelling))
@@ -502,7 +501,7 @@
 			(let-mut parameter (local next_param))
 			(let-mut storage (bool false))
 			(while
-				(:doc "Classify extent counts and nullable scalar places by their checked types.")
+				(:doc "Classify extent counts, mutable scalar places, and native initialization loans.")
 				(i32.lt (local parameter) (local limit))
 				(body
 					(let param (array.load (local parameters) (local parameter)))
@@ -512,9 +511,18 @@
 					(let integer (bool.or (call is_builtin_integer (local type)) (call is_native_integer (local type))))
 					(let mutable_scalar (bool.and (call is_mutable_place_reference (local type))
 						(bool.not (call is_record_type (call place_reference_target (borrow-shared (local records)) (local type))))))
+					(let-mut owner_mode (call c_value_mode))
+					(if
+						(:doc "A pointer handle initialization lends the pointer slot.")
+						(u8.eq (local mode) (call c_handle_mut_mode))
+						(then (set (local owner_mode) (call c_handle_init_mode))))
+					(if
+						(:doc "A storage initialization lends the address of the backing C object.")
+						(u8.eq (local mode) (call c_storage_mut_mode))
+						(then (set (local owner_mode) (call c_storage_init_mode))))
 					(call mark_c_argument_type (borrow-mut (local arguments))
 						(i32.sub.wrapping (local parameter) (local next_param)) (local integer) (local mutable_scalar)
-						(u8.eq (local mode) (call c_storage_mut_mode)))
+						(local owner_mode))
 					(set (local parameter) (i32.add.wrapping (local parameter) 1i32))))
 			(let contracts (call read_c_arguments (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(local parts) (local first) (borrow-mut (local arguments))))
@@ -561,7 +569,7 @@
 					(result (local result_type))
 					(body -1i32) (first_statement -1i32) (identity 0u32) (entry (bool false))
 					(c_strings (local strings)) (c_vectors (struct.get (local contracts) vectors)) (c_extents (local extents)) (c_macro (struct.get (local contracts) macro))
-					(c_variadic (struct.get (local contracts) variadic)) (c_nulls (local nulls)) (c_storage (local storage))
+					(c_variadic (struct.get (local contracts) variadic)) (c_nulls (local nulls)) (c_storage (local storage)) (c_handle_out (struct.get (local contracts) handle_out))
 					(c_snapshot (struct.get (local snapshot) active)) (c_snapshot_drop (local drop))
 					(c_snapshot_field (struct.get (local snapshot) field)) (c_formals (local first))
 					(c_fixed (i32.lt -1i32 (call find_c_fixed_formal (borrow-shared (local arena)) (borrow-shared (local nodes)) (local first))))
@@ -708,15 +716,14 @@
 							(array.store (local statements) (local base) (call block_statement (local name) -1i32 -1i32 (bool false)))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))))
 
-	(fn register_storage_aliases
-		(:doc `Link selected storage type names to their original declarations in the flattened tree.`)
-		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (trees (shared-array ScalarTree))
-			(bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
+	(fn register_native_owner_aliases
+		(:doc `Link selected native owner type names to their defining declarations for construction.`)
+		(params (trees (shared-array ScalarTree)) (bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
 		(returns void)
 		(body
 			(let-mut index 0i32)
 			(while
-				(:doc "Only a checked C type import is a candidate for native allocation.")
+				(:doc "Only a checked C type import can introduce a native owner.")
 				(i32.lt (local index) (array.len (local bindings)))
 				(body
 					(let binding (array.load (local bindings) (local index)))
@@ -728,14 +735,10 @@
 						(then
 							(let file (array.load (local trees) (struct.get (local binding) file)))
 							(let declaration (i32.add.wrapping (struct.get (local file) base) (struct.get (local binding) declaration)))
-							(if
-								(:doc "The import row retains the precise defining type for the allocation planner.")
-								(call is_c_storage_type (borrow-shared (local arena)) (borrow-shared (local nodes)) (local declaration))
-								(then
-									(let owner (array.load (local trees) (struct.get (local binding) owner)))
-									(let name (i32.add.wrapping (struct.get (local owner) base) (struct.get (local binding) name_node)))
-									(array.store (local expressions) (local name)
-										(call expression_row 0u32 (call native_owner_type (local declaration)) -1i32 -1i32 0i32 0i32 (bool false)))))))
+							(let owner (array.load (local trees) (struct.get (local binding) owner)))
+							(let name (i32.add.wrapping (struct.get (local owner) base) (struct.get (local binding) name_node)))
+							(array.store (local expressions) (local name)
+								(call expression_row 0u32 (call native_owner_type (local declaration)) -1i32 -1i32 0i32 0i32 (bool false)))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))))
 
 	(fn prepare_graph_values
@@ -840,7 +843,7 @@
 			(call register_graph_value_aliases (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local trees)) (borrow-shared (local bindings))
 				(borrow-mut (local statements)))
-			(call register_storage_aliases (borrow-shared (local arena)) (borrow-shared (local nodes))
+			(call register_native_owner_aliases
 				(borrow-shared (local trees)) (borrow-shared (local bindings)) (borrow-mut (local expressions)))
 			(let wove (call register_graph_signatures (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings)) (local root)

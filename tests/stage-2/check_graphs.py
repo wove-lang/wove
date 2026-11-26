@@ -93,13 +93,14 @@ def check_native(probe, label, emitted, fixture_flags, executions, rejection):
 		generated = directory / "emitted.c"
 		program = directory / "emitted"
 		generated.write_text(source, encoding="utf-8")
-		command = [*compiler, "-std=c11", *flags, "-I", "runtime", *fixture_flags]
+		command = [*compiler, "-std=c11", *flags, "-I", "runtime"]
 		# Match stable diagnostic text without depending on compiler-specific formatting.
 		if rejection is not None:
-			result = subprocess.run([*command, "-fsyntax-only", str(generated)], capture_output=True, text=True, timeout=30)
+			result = subprocess.run([*command, *fixture_flags, "-fsyntax-only", str(generated)], capture_output=True, text=True, timeout=30)
 			assert result.returncode > 0 and all(text in result.stderr for text in rejection), (label, result)
 			return
-		subprocess.run([*command, str(generated), runtime, "-o", str(program)], check=True, timeout=30)
+		# Place fixture libraries after the objects that reference them.
+		subprocess.run([*command, str(generated), runtime, *fixture_flags, "-o", str(program)], check=True, timeout=30)
 		# Reuse the compiled fixture for every supplied argument vector.
 		for expected, argv, argv0, stdout, stderr in executions:
 			result = subprocess.run([program if argv0 is None else argv0, *argv],
