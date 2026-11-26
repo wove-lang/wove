@@ -67,6 +67,14 @@ BINARY_OPS = {
 	"u32.or": (U32, U32, "|"),
 	"u32.xor": (U32, U32, "^"),
 }
+ZERO_PREDICATES = {
+	"eqz": ("eq", False),
+	"not-eqz": ("not-eq", False),
+	"ltz": ("lt", False),
+	"not-ltz": ("not-lt", False),
+	"gtz": ("lt", True),
+	"not-gtz": ("not-lt", True),
+}
 U32_SHIFT_OPS = {
 	"u32.shl": "<<",
 	"u32.shr": ">>",
@@ -754,6 +762,24 @@ class FunctionEmitter:
 			first = self.typed(left, kind)
 			second = self.typed(right, kind)
 			return self.temporary(kind, f"{helper}({first.c}, {second.c})")
+
+		prefix, _, predicate = expr.tag.partition(".")
+		zero_comparison = ZERO_PREDICATES.get(predicate)
+		# Reuse the same typed operators when a zero operand is implicit.
+		if zero_comparison is not None:
+			comparison, reverse = zero_comparison
+			operation = BINARY_OPS.get(f"{prefix}.{comparison}")
+			# A unary alias cannot introduce a type the binary seed does not support.
+			if operation is not None:
+				kind, result, operator = operation
+				operand, = form(expr, arity=1).operands
+				value = self.typed(operand, kind)
+				# Keep the operand evaluation when unsigned comparison with zero is constant.
+				if kind in (U8, U32) and predicate in ("ltz", "not-ltz"):
+					truth = "true" if predicate == "not-ltz" else "false"
+					return self.temporary(result, f"((void){value.c}, {truth})")
+				left, right = ("0", value.c) if reverse else (value.c, "0")
+				return self.temporary(result, f"{left} {operator} {right}")
 
 		binary = BINARY_OPS.get(expr.tag)
 		# Check both operand types before applying the comparison or mask.
