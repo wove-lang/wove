@@ -723,7 +723,7 @@ Attach native contracts to the relevant declaration with `:pragma`.
 
 | Directive | Contract |
 | --- | --- |
-| `(c_macro)` | Bind a C macro with an exact signature or value type. Macro arguments evaluate once. |
+| `(c_macro)` | Bind a C macro with an exact signature or value type. Use a void macro call as a statement. Wove evaluates its arguments once in source order before invoking the macro. |
 | `(c_cstr parameter ...)` | Copy byte views into NUL-terminated C strings and reject embedded NUL. Mutable views copy back their original length. |
 | `(c_cstr_raw parameter ...)` | Copy all bytes, including embedded NUL, before adding a terminator. |
 | `(c_cstrs parameter ...)` | Copy shared byte rows into a null-terminated array of C-string pointers. Reject embedded NUL. |
