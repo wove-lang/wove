@@ -87,7 +87,7 @@
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates))
 	(use wove-file "./worker.wove" (only worker_arrays))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch is_worker_submission is_worker_pool_operation (value worker_spawn_join_kind)
+		(only entry_keyword entry_at entry_form (value array_try_copy_kind) (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch is_worker_submission is_worker_pool_operation (value worker_spawn_join_kind)
 			(value worker_spawn_on_kind) (value worker_open_pool_kind) (value worker_try_close_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_list_kind) (value pending_exact_move) (value fixed_take_request)
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
@@ -2242,10 +2242,16 @@
 			(let target (struct.get (local resolved) target))
 			(let actual (struct.get (local resolved) type))
 			(if
-				(:doc "A range projects an owner or an existing view of runtime storage.")
+				(:doc "Ordinary ranges require runtime storage. Bulk copy can also capture a fixed loan before slicing it.")
 				(bool.and (local range_source)
 					(bool.not (bool.or (call is_array_owner (local actual)) (call is_readable_slice (local actual)))))
-				(then (return (call entry_at (local reference) -1i32 24u32))))
+				(then
+					(let parent (array.load (local expressions) (struct.get (local use) parent)))
+					(if
+						(:doc "The copy's own range operands may project an inline layout.")
+						(bool.not (bool.and (u32.eq (struct.get (local parent) kind) (local array_try_copy_kind))
+							(call is_record_type (local actual))))
+						(then (return (call entry_at (local reference) -1i32 24u32))))))
 			(if
 				(:doc "An inline array access uses the original checked value or place.")
 				(bool.and (call is_record_type (local actual))
@@ -2664,9 +2670,11 @@
 			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
-			(let inferred (u32.eq (local expected) (local infer_shared_array)))
+			(let infer_mut (u32.eq (local expected) (local infer_mut_array)))
+			(let inferred (bool.or (local infer_mut) (u32.eq (local expected) (local infer_shared_array))))
 			(let-mut request (local expected))
 			(if (local inferred) (then (set (local request) 35u32)))
+			(if (local infer_mut) (then (set (local request) 39u32)))
 			(let-mut lookup 42u32)
 			(if
 				(:doc "A slice loan checks the field as array storage, including an owned field.")
@@ -2700,9 +2708,9 @@
 				(call is_array_owner (local actual))
 				(then
 					(if
-						(:doc "A scoped shared loan infers its exact view from the field owner.")
+						(:doc "An inferred loan retains the field's exact owner element and access mode.")
 						(local inferred)
-						(then (set (local request) (call owner_view_type (local actual) (bool false)))))
+						(then (set (local request) (call owner_view_type (local actual) (local infer_mut)))))
 					(return (call plan_owned_field_loan (borrow-shared (local nodes)) (local node) (local index)
 						(local place) (local statement) (local request) (local actual) (local binding)
 						(borrow-shared (local statements)) (borrow-mut (local expressions))))))
@@ -2712,6 +2720,12 @@
 				(then (return (call plan_scoped_field_loan (borrow-shared (local nodes)) (local node) (local index)
 					(local place) (local statement) (local request) (local binding)
 					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "Infer a fixed field loan from the field's original numeric element type.")
+				(local inferred)
+				(then
+					(set (local request) (call inferred_array_loan (borrow-shared (local records)) (local field) (local infer_mut)))
+					(if (u32.eqz (local request)) (then (return (call entry_at (local node) -1i32 24u32))))))
 			(return (call plan_fixed_slice_loan (borrow-shared (local nodes)) (local node) (local index)
 				(local statement) (local request) (local actual) (local binding) (local place)
 				(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
@@ -2854,16 +2868,16 @@
 				(then (return (call plan_view_option (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local reference) (local index) (local infer_shared_array) (local tag) (local caller) (local statement) (local view_start)
 					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
+			(let-mut inferred (local infer_shared_array))
+			(if (u32.eq (local keyword) 39u32) (then (set (local inferred) (local infer_mut_array))))
 			(if
-				(:doc "A shared field loan infers its descriptor for this scope.")
-				(bool.and (u32.eq (local tag) 52u32) (u32.eq (local keyword) 35u32))
+				(:doc "A projected field loan keeps its exact storage and written access mode.")
+				(u32.eq (local tag) 52u32)
 				(then (return (call plan_projected_loan (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local index) (local reference_index) (local caller) (local statement) (local infer_shared_array) (local view_start)
+					(local node) (local index) (local reference_index) (local caller) (local statement) (local inferred) (local view_start)
 					(borrow-shared (local functions)) (borrow-shared (local parameters))
 					(borrow-shared (local bindings)) (borrow-shared (local records))
 					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
-			(let-mut inferred (local infer_shared_array))
-			(if (u32.eq (local keyword) 39u32) (then (set (local inferred) (local infer_mut_array))))
 			(if
 				(:doc "A checked row may be borrowed for the enclosing lexical scope.")
 				(u32.eq (local tag) 37u32)
@@ -3762,6 +3776,53 @@
 					(asset_start (local rejected)) (asset_end 0i32) (extent_check -1i32)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
+	(fn plan_array_copy
+		(:doc "Infer a writable view's exact element and retain its loan while checking the shared source.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (expected u32) (caller ScalarFunction) (statement i32) (view_start i32)
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local array_try_copy_kind) 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let destination (struct.get (local form) operand))
+			(if
+				(:doc "A copy yields bool and needs a destination before the source.")
+				(bool.or (i32.ltz (local destination)) (bool.not (call value_matches_type (local expected) 12u32)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let place (array.load (local nodes) (local destination)))
+			(let from (struct.get (local place) next_sibling))
+			(if
+				(:doc "The copy takes exactly two view operands.")
+				(bool.or (i32.ltz (local from)) (i32.not-ltz (struct.get (array.load (local nodes) (local from)) next_sibling)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let exclusive (call read_borrow_source (borrow-shared (local source)) (borrow-shared (local nodes)) (local place) 39u32))
+			(if (u32.gtz (struct.get (local exclusive) error)) (then (return (local exclusive))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local array_try_copy_kind) 12u32 -1i32 (local destination) 0i32 0i32 (bool false)))
+			(let checked (call plan_scoped_array_loan (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local place) (local destination) (local caller) (local statement) (local view_start)
+				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
+				(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+			(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
+			(let type (struct.get (array.load (local expressions) (local destination)) type))
+			(if
+				(:doc "The inferred destination has to retain writable array access.")
+				(bool.not (call is_writable_slice (local type)))
+				(then (return (call entry_at (local place) -1i32 24u32))))
+			(let element (call slice_element_type (borrow-shared (local records)) (local type)))
+			(if
+				(:doc "Only numeric elements are supported by the typed bulk copy.")
+				(bool.not (bool.or (call is_builtin_numeric (local element)) (call is_native_integer (local element))))
+				(then (return (call entry_at (local place) -1i32 24u32))))
+			(let-mut shared (call typed_slice_type (local element) (bool false)))
+			(if (u32.eq (local element) 10u32) (then (set (local shared) 35u32)))
+			(array.store (local expressions) (local from) (call expression_row 0u32 (local shared) -1i32 -1i32 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
 	(fn plan_expression
 		(:doc `Check the scalar expression at a source row and keep its actual type.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
@@ -3831,6 +3892,14 @@
 					(local index) (local expected) (borrow-mut (local expressions))))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(if
+				(:doc "Copying into an existing view checks and captures each borrow in operand order.")
+				(u32.eq (local tag) (local array_try_copy_kind))
+				(then (return (call plan_array_copy (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
+					(local index) (local expected) (local caller) (local statement) (local view_start)
+					(borrow-shared (local functions)) (borrow-shared (local parameters))
+					(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-shared (local statements))
+					(borrow-mut (local expressions))))))
 			(if
 				(:doc "Checked exact slices retain their source through an immutable optional local.")
 				(u32.eq (local tag) (local try_slice_kind))

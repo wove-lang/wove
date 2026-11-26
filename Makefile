@@ -165,8 +165,9 @@ test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version test-stage-2-inventory
+test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o $(STAGE2)/array-copy-runtime test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version test-stage-2-inventory
 	"$(SOURCE_SCAN)"
+	"$(STAGE2)/array-copy-runtime"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
@@ -183,7 +184,7 @@ test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-ha
 		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_fixed/cases.tsv tests/stage-2/native_pointer_typedefs/cases.tsv tests/stage-2/native_arrays/cases.tsv tests/stage-2/numeric_arrays/cases.tsv tests/stage-2/native_dirent/cases.tsv tests/stage-2/native_handle_out/cases.tsv tests/stage-2/native_owner_returns/cases.tsv tests/stage-2/native_owner_fields/cases.tsv tests/stage-2/owner_assignment/cases.tsv tests/stage-2/optional_owners/cases.tsv tests/stage-2/recoverable_growth/cases.tsv \
 		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_rows/cases.tsv tests/stage-2/native_vectors/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
 		tests/stage-2/integer_compare/cases.tsv tests/stage-2/cli/native/int128/test-mode.tsv tests/stage-2/cli/native/function_values/test-mode.tsv \
-		tests/stage-2/graph/targets/cases.tsv tests/stage-2/module_arrays/cases.tsv tests/stage-2/computed_constants/cases.tsv tests/stage-2/integer_conversions/cases.tsv tests/stage-2/integer_checks/cases.tsv tests/stage-2/integer_arithmetic/cases.tsv tests/stage-2/integer_division/cases.tsv tests/stage-2/integer_bits/cases.tsv tests/stage-2/generics/cases.tsv tests/stage-2/generic_functions/cases.tsv tests/stage-2/generic_operations/cases.tsv tests/stage-2/generic_booleans/cases.tsv tests/stage-2/generic_enums/cases.tsv tests/stage-2/enums/cases.tsv tests/stage-2/matches/cases.tsv tests/stage-2/floats/cases.tsv tests/stage-2/while/exits.tsv tests/stage-2/scoped_arrays/cases.tsv tests/stage-2/borrowed_results/cases.tsv tests/stage-2/fallible_views/cases.tsv tests/stage-2/native_borrowed_records/cases.tsv tests/stage-2/for/cases.tsv tests/stage-2/array_growth/cases.tsv tests/stage-2/owned_record_arrays/traps.tsv
+		tests/stage-2/graph/targets/cases.tsv tests/stage-2/module_arrays/cases.tsv tests/stage-2/computed_constants/cases.tsv tests/stage-2/array_copy/cases.tsv tests/stage-2/integer_conversions/cases.tsv tests/stage-2/integer_checks/cases.tsv tests/stage-2/integer_arithmetic/cases.tsv tests/stage-2/integer_division/cases.tsv tests/stage-2/integer_bits/cases.tsv tests/stage-2/generics/cases.tsv tests/stage-2/generic_functions/cases.tsv tests/stage-2/generic_operations/cases.tsv tests/stage-2/generic_booleans/cases.tsv tests/stage-2/generic_enums/cases.tsv tests/stage-2/enums/cases.tsv tests/stage-2/matches/cases.tsv tests/stage-2/floats/cases.tsv tests/stage-2/while/exits.tsv tests/stage-2/scoped_arrays/cases.tsv tests/stage-2/borrowed_results/cases.tsv tests/stage-2/fallible_views/cases.tsv tests/stage-2/native_borrowed_records/cases.tsv tests/stage-2/for/cases.tsv tests/stage-2/array_growth/cases.tsv tests/stage-2/owned_record_arrays/traps.tsv
 	WOVE_TEST_RUNTIME="$(STAGE1)/runtime.tracked.o" $(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/owned_records/cases.tsv tests/stage-2/owned_record_arrays/cases.tsv tests/stage-2/owning_enums/cases.tsv tests/stage-2/array_growth/tracked.tsv tests/stage-2/for/consuming/tracked.tsv tests/stage-2/scoped_records/cases.tsv tests/stage-2/borrowed_results/tracked.tsv tests/stage-2/owner_assignment/tracked.tsv tests/stage-2/optional_owners/tracked.tsv tests/stage-2/recoverable_growth/tracked.tsv
 
 # Exercise the same byte and ID encoders in both stages and the native word digest.
@@ -512,6 +513,11 @@ $(STAGE1)/runtime.tracked.o: $(RUNTIME) $(RUNTIME_HEADER)
 	mkdir -p "$(@D)"
 	$(CLANG) -std=c11 $(CFLAGS) -Dmalloc=tracked_malloc -Dcalloc=tracked_calloc \
 		-Dfree=tracked_free -c "$<" -o "$@"
+
+# Exercise rejected descriptor contracts directly at the copy ABI.
+$(STAGE2)/array-copy-runtime: tests/stage-2/array_copy/runtime.c $(STAGE1)/runtime.o $(RUNTIME_HEADER)
+	mkdir -p "$(@D)"
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Simulate an allocator that clobbers errno when native call scratch is released.
 $(STAGE1)/runtime.cstr_cleanup: tests/support/cstr_cleanup.c $(STAGE1)/runtime.tracked.o $(RUNTIME_HEADER)

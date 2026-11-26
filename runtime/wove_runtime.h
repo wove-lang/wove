@@ -412,6 +412,7 @@ void wvrt_worker_queue_drop(wvrt_array *queue);
 wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*wvrt_handler)(wvrt_array *), wvrt_array *wvrt_job,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 bool wvrt_array_try_reserve(wvrt_array *wvrt_buffer, int32_t wvrt_capacity);
+bool wvrt_slice_try_copy(wvrt_mut_slice wvrt_destination, wvrt_slice wvrt_source);
 bool wvrt_array_try_extend(wvrt_array *wvrt_buffer, wvrt_slice wvrt_source);
 bool wvrt_array_try_push(wvrt_array *wvrt_buffer, const void *wvrt_value);
 void wvrt_array_reserve_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_capacity,
