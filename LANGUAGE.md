@@ -301,7 +301,8 @@ parameters of type `i32`, `bool`, or a fieldless enum.
 ```
 
 In a record template, a type parameter can name a copyable field or fixed
-array element, and an `i32` constant parameter can set a fixed array extent.
+array element, and an `i32` constant parameter can set an extent at any
+fixed array layer.
 Apply the template explicitly in type positions and as the first operand of
 `struct.new`. Each argument must match its declared kind. A specialization
 is identified by its defining record and normalized arguments. Different
