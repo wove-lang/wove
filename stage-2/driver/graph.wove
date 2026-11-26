@@ -3,7 +3,8 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc "Resolve native graphs with the bundled providers and emit one retained C unit.")
 
-	(use wove-file "./availability.wove" (only check_optional_c_functions (type Availability)))
+	(use wove-file "./availability.wove" (only (type Availability)))
+	(use wove-file "./float_target.wove" (only (value f16_unavailable) (value f16_probe_failed)))
 	(use wove-file "./graph_emit.wove" (only emit_entry_graph (type EntryEmission)))
 	(use wove-file "./bundled.wove" (only load_bundled_providers bundled_file_count bundled_input_width write_bundled_sources))
 	(use wove-file "./diagnostics.wove" (only report_source report_file report_path_location
@@ -11,13 +12,15 @@
 	(use wove-file "./protection.wove" (only (type BuildProtection)))
 	(use wove-file "./files.wove" (only canonical_path))
 	(use wove-file "./platform.wove" (only native_selection))
-	(use wove-file "./paths.wove" (only directory_width))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile) normalize_path))
 	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)
 		(type GraphUse) (type GraphSelector) (type GraphResult) resolve_graph_for_target))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only (type SelectedDeclaration) form_parts))
 	(use wove-file "../source/imports.wove" (only import_keyword))
+
+	(let unavailable_half "f16 is unavailable on this Clang target")
+	(let half_probe_failed "could not determine f16 support for the Clang target")
 
 	(fn needs_provider_graph
 		(:doc "Find an active use of this provider kind or a C bridge that needs validation.")
@@ -97,8 +100,21 @@
 		(params (path (shared-array u8)) (arena (shared-array u8)) (files (shared-array SuppliedFile))
 			(file i32) (error u32) (start i32) (end i32) (human bool))
 		(returns i32)
-		(body (return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena))
-			(borrow-shared (local files)) (local file) (local error) (local start) (local end) (borrow-shared (local invalid_source)) (local human)))))
+		(body
+			(if
+				(:doc "Unsupported binary16 is a source error at the checked use.")
+				(u32.eq (local error) (local f16_unavailable))
+				(then (return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (local file) (local error) (local start) (local end)
+					(borrow-shared (local unavailable_half)) (local human)))))
+			(if
+				(:doc "A failed Clang observation cannot establish whether the target supports half.")
+				(u32.eq (local error) (local f16_probe_failed))
+				(then (return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena))
+					(borrow-shared (local files)) (local file) (local error) (local start) (local end)
+					(borrow-shared (local half_probe_failed)) (local human)))))
+			(return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena)) (borrow-shared (local files))
+				(local file) (local error) (local start) (local end) (borrow-shared (local invalid_source)) (local human)))))
 
 	(fn copy_graph_bindings
 		(:doc "Seal the initialized binding prefix in the exact view consumed by the scalar graph.")
@@ -161,17 +177,9 @@
 		(body
 			(let-mut bindings (array.alloc GraphBinding (struct.get (local resolved) bindings)))
 			(call copy_graph_bindings (borrow-shared (local scratch)) (borrow-mut (local bindings)))
-			(let available (call check_optional_c_functions (borrow-shared (local arena))
-				(borrow-shared (local files)) (borrow-shared (local bindings)) (borrow-shared (local canonical))
-				(borrow-shared (local probe_options))
-				(borrow-shared (array.range (local staged) 0i32 (call directory_width (borrow-shared (local staged)))))))
-			(if
-				(:doc "Reject unavailable optional bindings before emitting a C reference.")
-				(u32.lt 0u32 (struct.get (local available) error))
-				(then (return (call report_availability (borrow-shared (local path)) (borrow-shared (local arena))
-					(borrow-shared (local files)) (local available) (local human)))))
 			(let result (call emit_entry_graph (borrow-shared (local path)) (borrow-shared (local canonical))
-				(borrow-shared (local destination)) (borrow-shared (local staged)) (local protection) (local target_index) (local check_only)
+				(borrow-shared (local destination)) (borrow-shared (local staged)) (borrow-shared (local probe_options))
+				(local protection) (local target_index) (local check_only)
 				(borrow-shared (array.range (local arena) 0i32 (local length)))
 				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings))
 				(local resolved) (local human)))
@@ -196,6 +204,13 @@
 						(struct.get (local result) asset)
 						(then (return (call report_graph_location (borrow-shared (local path)) (borrow-shared (local arena))
 							(borrow-shared (local files)) (local file) (local error) (local start) (local end) (borrow-shared (local unreadable_asset)) (local human)))))
+					(if
+						(:doc "Keep the optional declaration diagnostics returned by the frontend check.")
+						(bool.and (u32.lt 70u32 (local error)) (u32.lt (local error) 76u32))
+						(then (return (call report_availability (borrow-shared (local path)) (borrow-shared (local arena))
+							(borrow-shared (local files)) (struct.new Availability (error (local error))
+								(file (struct.get (local result) file)) (start (struct.get (local result) start))
+								(end (struct.get (local result) end))) (local human)))))
 					(return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
 						(borrow-shared (local files)) (local file) (local error) (local start) (local end) (local human)))))
 			(return (struct.get (local result) status))))
