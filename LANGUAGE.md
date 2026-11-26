@@ -675,13 +675,25 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_cstrs parameter ...)` | Copy shared byte rows into a null-terminated array of C-string pointers. Reject embedded NUL. |
 | `(c_bytes data count)` or `(c_bytes data size count)` | Borrow bytes after checking the requested count or product fits the view. |
 | `(c_array data count)` | Borrow an integer slice after checking its element count. Use a literal or a named integer parameter. |
+| `(c_variadic)` | Call a C variadic function with just its declared fixed arguments. |
 | `(c_variadic first_tail_parameter)` | Declare one typed call shape. Clang applies native promotions to the variadic arguments. |
+| `(c_variadic ...)` | Keep all declared parameters fixed and accept zero or more scalar arguments after them. |
 | `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
 | `(c_nullable parameter)` | Accept either a mutable scalar reference or literal `null` for the supported slot. |
 
 A fixed C argument such as `(const command i32 F_SETFL)` supplies the
 header constant automatically. In the Wove call, pass only the remaining
 arguments.
+
+An open C tail accepts built-in scalars and native integer aliases. The
+fixed arguments still follow their declared types and contracts, including
+C-string conversion for the bundled `printf` and `fprintf` formats.
+Wove evaluates every supplied argument once, from left to right, and
+passes each captured tail value with its exact C type. Clang applies the
+target's default promotions, including promoting `f32` to C `double`
+and applying integer promotions to narrow values. For formatted calls,
+the format must agree with the promoted types. The bundled `snprintf`
+checks that its capacity fits the mutable output view before entering C.
 
 A pointer-backed resource uses a destructor contract.
 

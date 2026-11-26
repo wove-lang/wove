@@ -7,7 +7,7 @@
 	original or converted pointers in formal order. Snapshot the native result
 	while the scratch is live, copy back mutable views, then release the scratch.`)
 
-	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_array_mode is_c_extent_mode is_c_vector_mode c_null_argument_kind is_c_storage_mode))
+	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_array_mode is_c_extent_mode is_c_vector_mode c_null_argument_kind is_c_storage_mode (value c_open_variadic_tail)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/c_names.wove" (only native_symbol_start native_symbol_end))
 	(use wove-file "../source/module.wove" (only form_parts))
@@ -207,9 +207,10 @@
 			(set (local cursor) (call c_string_text (borrow-mut (local output)) (local cursor) 1u32 (local writing)))
 			(let-mut argument (struct.get (local expression) first))
 			(let-mut formal (struct.get (local callee) params))
+			(let fixed_end (i32.add (local formal) (struct.get (local callee) arity)))
 			(while
-				(:doc "Source siblings and the checked signature walk together.")
-				(i32.not-ltz (local argument))
+				(:doc "Only declared formals have string conversion contracts.")
+				(i32.lt (local formal) (local fixed_end))
 				(body
 					(let node (array.load (local nodes) (local argument)))
 					(let param (array.load (local parameters) (local formal)))
@@ -247,6 +248,30 @@
 			(return (call c_string_text (borrow-mut (local output)) (local cursor) 3u32 (local writing)))))
 
 	(let null_pointer "(void*)0")
+	(let open_variadic_cast "((__typeof__(&(")
+	(let open_variadic_target ")))&(")
+	(let close_variadic_target "))")
+
+	(fn write_c_invocation_target
+		(:doc "Call the header's exact function type when Wove has already materialized a dynamic format.")
+		(params (source (shared-array u8)) (symbol SourceNode) (open bool)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(if
+				(:doc "Closed signatures retain the ordinary or macro spelling selected by the caller.")
+				(bool.not (local open))
+				(then (return (call c_symbol_text (borrow-shared (local source)) (local symbol)
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(let type (call c_literal_text (borrow-shared (local open_variadic_cast))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let signature (call c_symbol_text (borrow-shared (local source)) (local symbol)
+				(borrow-mut (local output)) (local type) (local writing)))
+			(let address (call c_literal_text (borrow-shared (local open_variadic_target))
+				(borrow-mut (local output)) (local signature) (local writing)))
+			(let target (call c_symbol_text (borrow-shared (local source)) (local symbol)
+				(borrow-mut (local output)) (local address) (local writing)))
+			(return (call c_literal_text (borrow-shared (local close_variadic_target))
+				(borrow-mut (local output)) (local target) (local writing)))))
 
 	(fn write_c_native_invocation
 		(:doc `Invoke the defining C function or macro with previously evaluated operands.`)
@@ -261,8 +286,10 @@
 			(let drop (struct.get (local callee) c_snapshot_drop))
 			(let field (struct.get (local callee) c_snapshot_field))
 			(let macro (struct.get (local callee) c_macro))
-			(let checked_prototype (bool.or (struct.get (local callee) c_handle_out)
-				(i32.gtz (struct.get (local callee) c_variadic))))
+			(let tail (struct.get (local callee) c_variadic))
+			(let open (i32.eq (local tail) (local c_open_variadic_tail)))
+			(let parenthesized (bool.or (struct.get (local callee) c_handle_out)
+				(bool.and (i32.gtz (local tail)) (bool.not (local open)))))
 			(let first (struct.get (local expression) first))
 			(let-mut cursor (local offset))
 			(if
@@ -293,14 +320,14 @@
 					(borrow-shared (local nodes)) (local drop) (local field) (borrow-mut (local output)) (local cursor) (local writing)))))
 			(if
 				(:doc "Enclose a macro expansion or the checked callee's function name.")
-				(bool.or (local macro) (local checked_prototype))
+				(bool.or (local macro) (local parenthesized))
 				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 40u8 (local writing)))))
 			(let symbol (array.load (local nodes) (struct.get (local callee) name)))
-			(set (local cursor) (call c_symbol_text (borrow-shared (local source)) (local symbol)
+			(set (local cursor) (call write_c_invocation_target (borrow-shared (local source)) (local symbol) (local open)
 				(borrow-mut (local output)) (local cursor) (local writing)))
 			(if
 				(:doc "Use the verified C function when a header also defines a function-like macro of that name.")
-				(local checked_prototype)
+				(local parenthesized)
 				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 40u8 (local writing)))
 			(let-mut argument (local first))
@@ -379,6 +406,14 @@
 							(set (local argument) (struct.get (array.load (local nodes) (local argument)) next_sibling))
 							(set (local formal) (i32.inc (local formal)))))
 					(set (local native_row) (struct.get (local item) next_sibling))))
+			(while
+				(:doc "Only an open call has actuals left after its fixed prefix. Clang promotes the captured scalar types.")
+				(i32.not-ltz (local argument))
+				(body
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local argument) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local argument) (struct.get (array.load (local nodes) (local argument)) next_sibling))))
 			(if
 				(:doc "Close the extra parentheses around a macro expansion before ending the initializer.")
 				(local macro)
@@ -428,10 +463,11 @@
 			(let-mut cursor (local offset))
 			(let-mut argument (struct.get (local expression) first))
 			(let-mut formal (struct.get (local callee) params))
+			(let fixed_end (i32.add (local formal) (struct.get (local callee) arity)))
 			(let-mut converted 0i32)
 			(while
-				(:doc "Use the same descriptor order as preparation, including shared string arguments.")
-				(i32.lt -1i32 (local argument))
+				(:doc "Use the same descriptor order as preparation, without entering the open tail.")
+				(i32.lt (local formal) (local fixed_end))
 				(body
 					(let param (array.load (local parameters) (local formal)))
 					(if
