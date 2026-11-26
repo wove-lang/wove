@@ -330,5 +330,7 @@ uint32_t wvrt_u32_sub_wrapping(uint32_t wvrt_left, uint32_t wvrt_right);
 int32_t wvrt_u32_shift_count(int32_t wvrt_count, wvrt_location wvrt_site);
 int32_t wvrt_u32_shift_count_at_span(int32_t wvrt_count, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_u64_shift_count_at_span(int32_t wvrt_count, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+uint64_t wvrt_u64_rotr_at_span(uint64_t wvrt_value, int32_t wvrt_count,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 
 #endif

@@ -491,6 +491,11 @@ named word type and evaluate each operand once, from left to right.
 Counts outside `[0, 32)` for `u32` or `[0, 64)` for `u64` trap at
 the original file ID and half-open span of the shift.
 
+`(u64.rotr word count)` evaluates a `u64` word and `i32` count once,
+from left to right. It rotates the word right within 64 bits or returns
+the original word when the count is zero. Counts outside `[0, 64)`
+trap at the original file ID and half-open span of the count operand.
+
 `(int.convert target value)` evaluates the integer operand once and
 preserves its numerical value when it fits the target `i8`, `u8`, `i16`,
 `u16`, `i32`, `u32`, `i64`, or `u64`. A value outside the target range traps before the cast. The
