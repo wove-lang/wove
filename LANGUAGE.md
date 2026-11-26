@@ -364,7 +364,7 @@ type on every path. `let` creates a binding and `let-mut` makes it writable.
 A local name comes into scope after its initializer.
 
 A struct field can hold any supported `owned-array` type, including a
-numeric array, an array of copyable Wove records, or nested owned arrays.
+numeric array, an array of Wove records, or nested owned arrays.
 Borrow a field through its original place with `borrow-shared` or
 `borrow-mut`. The view keeps the field's exact element type at each level,
 and an exclusive borrow requires a writable record place.
@@ -489,13 +489,27 @@ transfers the original owner to the vector. Removing a populated
 row transfers it to the result, and removing an unfilled slot traps.
 Truncation drops the owners in the removed suffix immediately.
 
-`array.alloc` supports numeric elements, copyable records, and nested
-owners. For example, `(array.alloc (owned-array Digest) count)` creates an
+`array.alloc` supports numeric elements, Wove records, and nested owners.
+For example, `(array.alloc (owned-array Digest) count)` creates an
 `(owned-array (owned-array Digest))` with unfilled row slots. Fill a slot
 with `array.store` and a fresh or moved owner of the exact row type.
 Replacing a slot drops its previous row. Use
 `(borrow-shared (array.load (local rows) index))` to read a populated row
 through its exact shared view.
+
+An owned array can store owning Wove structs with no borrowed fields.
+`(array.alloc Entry count)` starts with unfilled slots. Use `array.store`
+or `array.push` with a fresh `Entry` or an explicit `(move (local entry))`.
+Replacing a populated slot drops its old record. Removing a populated
+slot transfers its record out and shifts later slots. Truncation and
+array cleanup release the owning fields of each remaining populated slot.
+
+Use `(borrow-shared (array.load (local entries) index))` for a
+`(shared-ref Entry)` call parameter or `borrow-mut` for a `(mut-ref Entry)`
+parameter when the original array view is writable. Borrowing or removing
+an unfilled slot traps. Indexed loans keep the source array live for the
+call. An owning slot cannot be loaded by value or bound as an array
+iteration item.
 
 Fixed arrays keep their elements inline and copy by value. Use
 `(array T extent)` for a builtin scalar or copyable Wove record `T`.

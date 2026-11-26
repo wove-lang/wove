@@ -16,7 +16,7 @@
 	(use wove-file "../source/graph.wove" (only (type GraphBinding) collect_standalone_bindings))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only skip_disabled_siblings (type ModuleRead) (type SelectedDeclaration)))
-	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_record_type is_native_record is_payload_enum is_place_reference record_receiver_type place_borrow_kind is_native_integer is_typed_slice slice_element_type is_readable_slice is_writable_slice is_array_owner is_owning_record array_owner_element (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_record_type is_native_record is_payload_enum is_place_reference is_mutable_place_reference record_receiver_type place_borrow_kind is_native_integer is_typed_slice slice_element_type is_readable_slice is_writable_slice is_array_owner is_owning_record is_owning_struct_element array_owner_element (type ScalarRecord)))
 	(use wove-file "../scalar/type_sites.wove" (only target_numeric_site))
 	(use wove-file "./records.wove" (only write_value_type write_member_name write_member_separator write_parameter_name write_parameter_place write_field_place write_place_borrow captures_value_argument write_record_layouts write_array_layout_argument))
 	(use wove-file "../source/numeric_ops.wove" (only is_integer_byte_conversion is_integer_byte_encoder))
@@ -39,7 +39,7 @@
 	(use wove-file "./bindings.wove" (only write_binding_name write_module_bindings))
 	(use wove-file "./owners.wove" (only native_owner_contract write_native_destructor write_native_handle_borrow write_native_handle_out_capture write_owner_transfer))
 	(use wove-file "./owned_fields.wove" (only write_array_take write_owned_field_loan))
-	(use wove-file "./owned_aggregates.wove" (only write_aggregate_take write_aggregate_drop write_owning_layout_helpers))
+	(use wove-file "./owned_aggregates.wove" (only write_aggregate_take write_aggregate_drop open_owned_slot_call write_owning_layout_helpers))
 	(use wove-file "./c_storage.wove" (only write_storage_allocation write_storage_cleanup))
 	(use wove-file "../c/arguments.wove" (only c_null_argument_kind))
 	(use wove-file "./c_snapshots.wove" (only write_optional_unwrap))
@@ -48,7 +48,7 @@
 	(use wove-file "./c_formals.wove" (only write_fixed_c_checks))
 	(use wove-file "../scalar/flow.wove" (only after_block is_loop is_loop_exit (value break_statement) (value for_statement) (value for_source_owner) (value for_element_assignment) (type ScalarStatement) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment)))
-	(use wove-file "../scalar/loans.wove" (only is_local_slice_view (value indirect_local_place) (value local_slice_projection) (value scoped_field_loan) (type ScalarExpression)))
+	(use wove-file "../scalar/loans.wove" (only is_local_slice_view (value indirect_local_place) (value local_slice_projection) (value scoped_field_loan) (value indexed_record_loan) (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies (type CallSite)))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/syntax.wove" (only is_direct_call (value fn_ref_kind) (value indirect_call_kind) is_worker_launch is_worker_collect is_worker_pool_operation
@@ -114,8 +114,8 @@
 					(local row) (borrow-shared (local parameters)) (borrow-shared (local expressions)) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
-				(:doc "A range loan passes the descriptor already evaluated by its child projection.")
-				(u32.eq (local kind) 45u32)
+				(:doc "A range or indexed loan passes the value already evaluated by its child projection.")
+				(bool.or (u32.eq (local kind) 45u32) (u32.eq (local kind) (local indexed_record_loan)))
 				(then (return (call write_temporary_name (borrow-shared (local source))
 					(struct.get (local row) first) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
@@ -531,6 +531,32 @@
 	(let row_load_open "wvrt_array_borrow_row_at_span(")
 	(let row_store_open "wvrt_array_store_row_at_span(")
 	(let rows_alloc_open "wvrt_array_new_rows_at_span(")
+	(let owned_alloc_open "wvrt_owned_array_new(")
+	(let owned_load_open "wvrt_owned_array_borrow(")
+	(let owned_mut_open "wvrt_owned_array_borrow_mut(")
+	(let owned_store_open "wvrt_owned_array_store(")
+
+	(fn open_owned_access
+		(:doc "Choose replacement or the required borrow permission for a wrapped slot.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord) (expression ScalarExpression)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "A replacement supplies a detached owner to the existing slot.")
+				(u32.eq (struct.get (local expression) kind) 40u32)
+				(then (return (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local layout) (borrow-shared (local owned_store_open)) (borrow-mut (local output))
+					(local offset) (local name_prefix) (local writing)))))
+			(if
+				(:doc "Exclusive views lend the checked mutable place directly.")
+				(call is_mutable_place_reference (struct.get (local expression) type))
+				(then (return (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local layout) (borrow-shared (local owned_mut_open)) (borrow-mut (local output))
+					(local offset) (local name_prefix) (local writing)))))
+			(return (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local layout) (borrow-shared (local owned_load_open)) (borrow-mut (local output))
+				(local offset) (local name_prefix) (local writing)))))
 
 	(fn write_slice_access
 		(:doc `Read an inline or borrowed extent, or pass the evaluated operands and original access span to the runtime.`)
@@ -557,11 +583,12 @@
 					(return (call write_slice_length (borrow-mut (local output)) (local cursor) (local writing)))))
 			(let element (call slice_element_type (borrow-shared (local records)) (local type)))
 			(let row (call is_array_owner (local element)))
+			(let owning (call is_owning_struct_element (borrow-shared (local records)) (local element)))
 			(let typed (call is_typed_slice (local type)))
 			(let range (u32.eq (local kind) 44u32))
 			(if
 				(:doc "A typed element access indexes its backing array after the checked subscript.")
-				(bool.and (local typed) (bool.not (bool.or (local row) (local range))))
+				(bool.and (local typed) (bool.not (bool.or (local owning) (bool.or (local row) (local range)))))
 				(then (return (call write_typed_slice_access (borrow-shared (local source)) (borrow-shared (local nodes))
 					(borrow-shared (local records)) (local expression) (local element) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
@@ -584,7 +611,15 @@
 									(borrow-mut (local output)) (local offset) (local writing))))
 								(else (set (local open) (call c_literal_text (borrow-shared (local row_load_open))
 									(borrow-mut (local output)) (local offset) (local writing))))))
-						(else (set (local open) (call open_slice_access (borrow-mut (local output)) (local offset) (local kind) (local writing)))))))
+						(else
+							(if
+								(:doc "Wrapped records borrow or replace the initialized value inside the checked slot.")
+								(local owning)
+								(then (set (local open) (call open_owned_access (borrow-shared (local source)) (borrow-shared (local nodes))
+									(array.load (local records) (call record_index (local element))) (local expression)
+									(borrow-mut (local output)) (local offset) (local name_prefix) (local writing))))
+								(else (set (local open) (call open_slice_access (borrow-mut (local output))
+									(local offset) (local kind) (local writing)))))))))
 			(let view (call write_temporary_name (borrow-shared (local source)) (local receiver) (local tree_base)
 				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(let comma (call c_byte (borrow-mut (local output)) (local view) 44u8 (local writing)))
@@ -701,19 +736,28 @@
 			(let element (call array_owner_element (borrow-shared (local records)) (struct.get (local expression) type)))
 			(let byte (u32.eq (local element) 10u32))
 			(let rows (call is_array_owner (local element)))
+			(let owning (call is_owning_struct_element (borrow-shared (local records)) (local element)))
 			(let-mut open 0u32)
 			(if
 				(:doc "An array of owners needs the runtime's row destructor.")
 				(local rows)
 				(then (set (local open) (call c_literal_text (borrow-shared (local rows_alloc_open))
 					(borrow-mut (local output)) (local offset) (local writing))))
-				(else (set (local open) (call open_array_allocation (borrow-mut (local output)) (local offset) (local byte) (local writing)))))
+				(else
+					(if
+						(:doc "A record allocation installs its initialized-slot layout and destructor.")
+						(local owning)
+						(then (set (local open) (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+							(array.load (local records) (call record_index (local element))) (borrow-shared (local owned_alloc_open))
+							(borrow-mut (local output)) (local offset) (local name_prefix) (local writing))))
+						(else (set (local open) (call open_array_allocation
+							(borrow-mut (local output)) (local offset) (local byte) (local writing)))))))
 			(let-mut cursor (call write_temporary_name (borrow-shared (local source))
 				(struct.get (local expression) first) (local tree_base)
 				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(if
 				(:doc "The generic allocator takes the exact element's C layout.")
-				(bool.not (bool.or (local byte) (local rows)))
+				(bool.not (bool.or (local owning) (bool.or (local byte) (local rows))))
 				(then
 					(set (local cursor) (call write_array_layout_argument (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local records)) (local element) (bool false) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
@@ -1378,7 +1422,8 @@
 											(bool.or (u32.gtz (struct.get (local parent_operator) result))
 												(bool.or (call is_c_argument_call (local parent) (borrow-shared (local functions)))
 													(bool.or
-														(bool.or (call is_runtime_operation (local parent_kind)) (call is_fixed_initializer (local parent_kind)))
+														(bool.or (u32.eq (local parent_kind) (local indexed_record_loan))
+															(bool.or (call is_runtime_operation (local parent_kind)) (call is_fixed_initializer (local parent_kind))))
 														(bool.or (u32.eq (local parent_kind) 51u32) (u32.eq (local parent_kind) (local enum_payload_constructor)))))))))
 								(then
 									(if
