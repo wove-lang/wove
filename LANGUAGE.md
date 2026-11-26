@@ -883,11 +883,13 @@ A type provider's own prerequisites precede its header as well.
 Use `(type Size (c-type "size_t"))` for a native integer alias and
 `(struct Stat (c-type "struct stat") (fields (st_size Offset)))` for a
 native record view. `(struct.new Stat)` gives zero-initialized native
-storage. To set a declared scalar field, pass a named initializer such as
-`(struct.new Stat (st_size (int.convert Offset 42i32)))`. The values must
-have the declared Wove types and are evaluated in source order. C
-zero-initializes the omitted native members. Pass `shared-ref` or `mut-ref`
-arguments with an explicit borrow.
+storage. Use a named initializer such as
+`(struct.new Stat (st_size (int.convert Offset 42i32)))` for a declared
+scalar field. A by-value native record field also accepts an existing value
+or an inline constructor of its exact defining type, including a type from
+a bridge-local C header import. Values are evaluated once in source order.
+C zero-initializes the omitted native members. Pass `shared-ref` or
+`mut-ref` arguments with an explicit borrow.
 Bridge `const` exposes an integer constant, `let` reads a C value, and
 `let-mut` also accepts a `set` on the imported C lvalue.
 
