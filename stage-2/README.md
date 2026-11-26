@@ -517,20 +517,17 @@ comparison, as in `(u32.not-eq left right)` or `(u32.not-eqz value)`.
 Each operand runs once in source order, including for unsigned predicates
 such as `u32.gez` whose result is fixed by the type.
 
-Both unsigned word widths support `and`, `or`, `xor`, and `not`
-with a type prefix such as `u64.xor`. The first three forms take two
-words of the named type. Complement takes one. Shifts such as
-`(u64.shr word count)` take a word of the named type and an exact
-`i32` count. The left shift discards bits above the word width and
-the logical right shift fills with zeroes. Word operations return the
-named word type and evaluate each operand once, from left to right.
-Counts outside `[0, 32)` for `u32` or `[0, 64)` for `u64` trap at
-the original file ID and half-open span of the shift.
+All eight built-in integer types support `and`, `or`, `xor`, and `not`.
+The first three take two values of the exact type named in the tag, and
+complement takes one. Shifts and rotations take a word of the named type
+and an exact `i32` count. All these operations return the named type
+and evaluate each operand once, from left to right.
 
-`(u64.rotr word count)` evaluates a `u64` word and `i32` count once,
-from left to right. It rotates the word right within 64 bits or returns
-the original word when the count is zero. Counts outside `[0, 64)`
-trap at the original file ID and half-open span of the count operand.
+Left shift discards bits above the word width. Right shift extends the
+sign for signed words and fills with zeros for unsigned words. A shift
+count outside `[0, width)` traps at the full shift span. `rotl` and `rotr`
+rotate within the original word width, leaving the word unchanged at
+count zero. An invalid rotate count traps at the count operand's span.
 
 `(int.convert target value)` evaluates the integer operand once and
 preserves its numerical value when it fits the target `i8`, `u8`, `i16`,
