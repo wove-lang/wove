@@ -253,6 +253,30 @@ globals are writable `char *` lvalues. They remain documented in the
 provider pending a contract for reassigning native string pointers with
 explicit lifetimes. [Compiler prerequisite #532](https://github.com/wove-lang/wove/issues/532) · [glibc program names](https://sourceware.org/glibc/manual/latest/html_node/Error-Messages.html)
 
+## Bundled dlfcn coverage
+
+Both drivers load `dlfcn.h.wove`. The installed-compiler fixture opens
+a library, releases the handle, and verifies that `dlerror` consumes the
+loader error and leaves the copied message readable. It also exercises
+the native null filename form of `dlopen`.
+
+Clang exposed the same members for each platform across the macOS 27.2
+SDK and Debian glibc 2.41 target matrix. Clang prints the Darwin preflight
+result as `_Bool` before C23 and `bool` in C23.
+[LLVM libc dlfcn checklist](https://libc.llvm.org/headers/dlfcn.html)
+
+| Members | Coverage or outstanding contract |
+| --- | --- |
+| `dlopen`, `dlclose`, `dlerror` | The bridge owns the loader reference until explicit or lexical close. The error snapshot copies borrowed bytes from the current thread's diagnostic. |
+| `RTLD_LAZY`, `RTLD_NOW`, `RTLD_LOCAL`, `RTLD_GLOBAL`, `RTLD_NOLOAD`, `RTLD_NODELETE` | Driver feature flags expose the integer modes on both SDKs. The fixture passes each flag through the loader API. |
+| `dlopen_preflight`, `RTLD_FIRST` | Darwin-only. The fixture checks a missing and a linked path and opens the loaded image with the first-image flag. |
+| `dlmopen`, `Lmid_t`, `LM_ID_BASE`, `LM_ID_NEWLM` | glibc namespace selection with an owned handle result. The fixture uses the base namespace and checks the new-namespace sentinel. |
+| `RTLD_BINDING_MASK`, `RTLD_DEEPBIND`, `RTLD_DI_*`, `RTLD_DL_LINKMAP`, `RTLD_DL_SYMENT` | glibc integer flags and request codes. The installed fixture evaluates each selected name. |
+| `DLFO_STRUCT_HAS_EH_COUNT`, `DLFO_STRUCT_HAS_EH_DBASE`, `DLFO_EH_SEGMENT_TYPE` | glibc exposes the two record field flags on both audited ABIs. The fixture verifies both are zero. The segment-type macro needs the ELF segment constant from `<elf.h>` at the point of expansion. |
+| `RTLD_DEFAULT`, `RTLD_NEXT`, `RTLD_SELF`, `RTLD_MAIN_ONLY` | The native pointer sentinels need a borrowed pointer value contract. `RTLD_SELF` and `RTLD_MAIN_ONLY` are Darwin-only. |
+| `dlsym`, `dlvsym` | Typed symbol addresses must keep the loaded object live. A null value needs to remain distinct from a loader diagnostic. |
+| `dladdr`, `dladdr1`, `dlinfo`, `Dl_info`, `Dl_info_t`, `Dl_serinfo`, `Dl_serpath`, `dl_find_object` | Native address and flexible-array fields and request-specific pointer outputs need exact compiler contracts. The provider records the reserved glibc profiling and object-inspection extensions. |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
