@@ -60,7 +60,7 @@
 	(use wove-file "./owners.wove" (only is_local_owner is_lexical_owner is_worker_owner is_nullable_worker_owner owned_array_take_kind owned_field_loan_kind owned_aggregate_take_kind is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind native_handle_init_borrow_kind native_owner_declaration
 			is_optional_byte_owner_type optional_unwrap_kind (value worker_receipt_move_kind) (value worker_permit_move_kind)))
-	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan field_place_root expression_row mutable_parameter_place (value indirect_local_place) (value local_slice_view) (value local_slice_projection) (value scoped_field_loan) (value indexed_record_loan) (type ScalarExpression)))
+	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan indexed_owner_base field_place_root expression_row mutable_parameter_place (value indirect_local_place) (value local_slice_view) (value local_slice_projection) (value scoped_field_loan) (value indexed_record_loan) (type ScalarExpression)))
 	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding is_iteration_binding is_writable_local (type ScalarStatement)
 			(value c_writable_binding) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment) (value case_payload_binding)
@@ -68,7 +68,7 @@
 	(use wove-file "./conditional.wove" (only plan_conditional finish_conditional_value conditional_transfer_reaches is_pending_value
 		(value conditional_value) (value pending_conditional) (value pending_field_read) (value pending_array_read)))
 	(use wove-file "./control.wove" (only plan_control_blocks enclosing_loop sequence_paths predicate_literal control_paths native_transfer_paths prior_owner_take has_path repeats_loop consumption_on_back_edge))
-	(use wove-file "../source/array_growth.wove" (only is_array_growth is_array_growth_statement
+	(use wove-file "../source/array_growth.wove" (only is_array_growth is_array_growth_statement (value indexed_row_owner)
 		(value array_capacity_kind) (value array_push_kind) (value array_remove_kind) (value array_try_reserve_kind)))
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates))
 	(use wove-file "./worker.wove" (only worker_arrays))
@@ -3789,7 +3789,7 @@
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_growth_receiver
-		(:doc `Resolve a named owner or its field path without copying its descriptor.`)
+		(:doc `Resolve a named owner, field, or indexed row without transferring its descriptor.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (site SourceNode)
 			(receiver i32) (caller ScalarFunction) (statement i32) (view_start i32)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
@@ -3799,6 +3799,36 @@
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local site)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(if
+				(:doc "Index an original nested owner. The index gets the exact array subscript type.")
+				(u32.eq (local tag) 37u32)
+				(then
+					(let access (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local site) 37u32 24u32))
+					(if (u32.gtz (struct.get (local access) error)) (then (return (local access))))
+					(let parent (struct.get (local access) operand))
+					(if (i32.ltz (local parent)) (then (return (call entry_at (local site) -1i32 24u32))))
+					(let parent_node (array.load (local nodes) (local parent)))
+					(let subscript (struct.get (local parent_node) next_sibling))
+					(if
+						(:doc "An indexed owner takes exactly one subscript.")
+						(bool.or (i32.ltz (local subscript))
+							(i32.not-ltz (struct.get (array.load (local nodes) (local subscript)) next_sibling)))
+						(then (return (call entry_at (local site) -1i32 24u32))))
+					(let checked (call plan_growth_receiver (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local parent_node) (local parent) (local caller) (local statement) (local view_start)
+						(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
+						(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+					(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
+					(let outer (struct.get (array.load (local expressions) (local parent)) type))
+					(if (bool.not (call is_array_owner (local outer))) (then (return (call entry_at (local parent_node) -1i32 24u32))))
+					(let row (call array_owner_element (borrow-shared (local records)) (local outer)))
+					(if (bool.not (call is_array_owner (local row))) (then (return (call entry_at (local site) -1i32 24u32))))
+					(array.store (local expressions) (local subscript)
+						(call expression_row 0u32 5u32 -1i32 -1i32 0i32 0i32 (bool false)))
+					(array.store (local expressions) (local receiver)
+						(call runtime_expression (local indexed_row_owner) (local row) (local site) (local parent)
+							(local caller) (local view_start)))
+					(return (call entry_at (local site) (local receiver) 0u32))))
 			(if
 				(:doc "Reuse the field path and move checks applied to projected loans.")
 				(u32.eq (local tag) 52u32)
@@ -3822,9 +3852,9 @@
 	(fn plan_array_growth
 		(:doc `Check a writable owner before seeding the operand of a growth operation.
 
-		The receiver is a named place or a field of one. It has no runtime
-		evaluation effects. The emitter captures the operand before touching
-		the destination descriptor. An owned row is captured by an explicit move.`)
+		The receiver remains tied to the original owner. An indexed receiver
+		is checked and captured before any later operand runs. An owned row
+		being appended is captured by an explicit move.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
 			(receiver i32) (index i32) (kind u32) (expected u32) (caller ScalarFunction) (statement i32) (view_start i32)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
@@ -3854,15 +3884,17 @@
 			(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
 			(let owner (array.load (local expressions) (local receiver)))
 			(let type (struct.get (local owner) type))
-			(let field (u32.eq (struct.get (local owner) kind) 52u32))
-			(let-mut binding_index (local receiver))
+			(let base (call indexed_owner_base (borrow-shared (local expressions)) (local receiver)))
+			(let place (array.load (local expressions) (local base)))
+			(let field (u32.eq (struct.get (local place) kind) 52u32))
+			(let-mut binding_index (local base))
 			(let-mut path -1i32)
 			(if
 				(:doc "A field holds storage under its local or reference parameter's binding identity.")
 				(local field)
 				(then
-					(set (local binding_index) (struct.get (local owner) projection))
-					(set (local path) (local receiver))))
+					(set (local binding_index) (struct.get (local place) projection))
+					(set (local path) (local base))))
 			(if
 				(:doc "Only an original array owner supplies an allocation descriptor.")
 				(bool.or (bool.not (call is_array_owner (local type))) (i32.ltz (local binding_index)))
@@ -5071,8 +5103,9 @@
 						(then (return (call body_error (local caller) (struct.get (local iterator_node) start)
 							(struct.get (local iterator_node) end) 24u32))))
 					(if
-						(:doc "Only consuming iteration can make existing row owners its item values.")
-						(bool.not (bool.or (bool.and (local consuming) (call is_array_owner (local element)))
+						(:doc "Consuming loops take a row. Shared loops lend its original storage.")
+						(bool.not (bool.or (bool.and (bool.or (local consuming) (bool.not (call is_writable_slice (local type))))
+								(call is_array_owner (local element)))
 							(bool.or (call is_builtin_scalar (local element))
 								(bool.or (call is_record_type (local element)) (call is_native_integer (local element))))))
 						(then (return (call body_error (local caller) (struct.get (local iterator_node) start)
@@ -5091,6 +5124,13 @@
 					(array.store (local expressions) (local capture)
 						(call runtime_expression (local for_source_owner) (local type) (local iterator_node)
 							-1i32 (local caller) (local view_start)))))
+			(if
+				(:doc "A borrowed row item is a shared descriptor with the iterator's original trap span.")
+				(bool.and (bool.not (local consuming)) (call is_array_owner (local element)))
+				(then
+					(set (local element) (call owner_view_type (local element) (bool false)))
+					(array.store (local expressions) (local index)
+						(call runtime_expression 0u32 0u32 (local iterator_node) -1i32 (local caller) (local view_start)))))
 			(call register_iteration_bindings (borrow-shared (local nodes)) (local first) (local element) (local body)
 				(call is_writable_slice (local type)) (borrow-mut (local statements)))
 			(array.store (local statements) (local index)

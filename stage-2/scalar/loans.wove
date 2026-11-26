@@ -4,6 +4,7 @@
 	(:doc `Check scoped and call loans by binding identity and statically checked field path.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/array_growth.wove" (only is_array_growth (value indexed_row_owner)))
 	(use wove-file "./records.wove" (only place_borrow_kind is_mutable_place_reference is_writable_slice))
 	(use wove-file "./flow.wove" (only (type ScalarStatement) (value fixed_shared_loan) (value fixed_mut_loan)))
 	(use wove-file "./syntax.wove" (only is_direct_call (value fixed_subarray_place)))
@@ -115,13 +116,40 @@
 				(bool.or (bool.and (local local_binding) (local other_local))
 					(bool.not (bool.or (local local_binding) (local other_local))))))))
 
+	(fn indexed_owner_base
+		(:doc "Recover the original local or field under a checked indexed row place.")
+		(params (expressions (shared-array ScalarExpression)) (receiver i32)) (returns i32)
+		(body
+			(let-mut base (local receiver))
+			(while
+				(:doc "Each checked row place points to its containing owner.")
+				(u32.eq (struct.get (array.load (local expressions) (local base)) kind) (local indexed_row_owner))
+				(body (set (local base) (struct.get (array.load (local expressions) (local base)) first))))
+			(return (local base))))
+
+	(fn indexed_growth_receiver
+		(:doc "Locate an indexed growth receiver before the ordinary operation operand.")
+		(params (expressions (shared-array ScalarExpression)) (operation ScalarExpression)) (returns i32)
+		(body
+			(if
+				(:doc "Other operations do not use projection for a growth receiver.")
+				(bool.not (call is_array_growth (struct.get (local operation) kind)))
+				(then (return -1i32)))
+			(let place (struct.get (local operation) projection))
+			(if
+				(:doc "Only a checked indexed receiver needs a runtime capture.")
+				(bool.and (i32.not-ltz (local place))
+					(u32.eq (struct.get (array.load (local expressions) (local place)) kind) (local indexed_row_owner)))
+				(then (return (local place))))
+			(return -1i32)))
+
 	(fn projected_store_conflicts
 		(:doc `A projected indexed store holds its field through the index and value expressions.`)
 		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
 			(receiver i32) (target i32) (local_binding bool) (place i32))
 		(returns bool)
 		(body
-			(let-mut base (local receiver))
+			(let-mut base (call indexed_owner_base (borrow-shared (local expressions)) (local receiver)))
 			(while
 				(:doc "Follow indexed addresses to the fixed local or the original record field.")
 				(u32.eq (struct.get (array.load (local expressions) (local base)) kind) (local fixed_subarray_place))
@@ -292,6 +320,20 @@
 					(let operation (array.load (local expressions) (local parent)))
 					(let operation_kind (struct.get (local operation) kind))
 					(let first (struct.get (local operation) first))
+					(let growth (call indexed_growth_receiver (borrow-shared (local expressions)) (local operation)))
+					(if
+						(:doc "Later expressions can read a captured row's owner but cannot invalidate the indexed place.")
+						(bool.and (local exclusive)
+							(bool.or
+								(bool.and (i32.not-ltz (local growth))
+									(bool.and (i32.not-eq (local child) (local growth))
+										(call projected_store_conflicts (borrow-shared (local nodes)) (borrow-shared (local expressions))
+											(local growth) (local target) (local local_binding) (local place))))
+								(bool.and (u32.eq (local operation_kind) (local indexed_row_owner))
+									(bool.and (i32.not-eq (local child) (local first))
+										(call projected_store_conflicts (borrow-shared (local nodes)) (borrow-shared (local expressions))
+											(local parent) (local target) (local local_binding) (local place))))))
+						(then (return (bool true))))
 					(if
 						(:doc "An indexed field store excludes overlapping access while its later operands run.")
 						(bool.and (bool.and (bool.or (u32.eq (local operation_kind) 74u32)

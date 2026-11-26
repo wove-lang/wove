@@ -243,6 +243,8 @@ wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrt_length, int32_t wvrt_file, in
 wvrt_array *wvrt_array_new_rows_at_span(int32_t wvrt_length, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_slice wvrt_array_borrow_row_at_span(wvrt_slice wvrt_rows, int32_t wvrt_index,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_array_row_owner_at_span(wvrt_array *rows, int32_t index,
+	int32_t file, int32_t start, int32_t end);
 void wvrt_array_store_row_at_span(wvrt_mut_slice wvrt_rows, int32_t wvrt_index, wvrt_array *wvrt_row,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_array_new_owned_at_span(int32_t length, size_t size, size_t alignment,
