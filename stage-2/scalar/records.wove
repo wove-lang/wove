@@ -201,7 +201,7 @@
 			(return (local low))))
 
 	(fn is_owning_record
-		(:doc "Identify named Wove aggregates that own array storage.")
+		(:doc "Identify Wove value layouts that own array storage.")
 		(params (records (shared-array ScalarRecord)) (type u32))
 		(returns bool)
 		(body
@@ -379,9 +379,8 @@
 			(if (bool.not (call is_record_type (local type))) (then (return 0u32)))
 			(let record (array.load (local records) (call record_index (local type))))
 			(if
-				(:doc "Only a copyable Wove struct can supply the nominal element layout.")
-				(bool.or (bool.or (struct.get (local record) owns_arrays) (struct.get (local record) borrows_bytes))
-					(i32.not-eqz (struct.get (local record) native)))
+				(:doc "A Wove struct can own storage inside an array, but cannot carry a scoped loan there.")
+				(bool.or (struct.get (local record) borrows_bytes) (i32.not-eqz (struct.get (local record) native)))
 				(then (return 0u32)))
 			(return (local type))))
 
@@ -424,9 +423,15 @@
 					(if
 						(:doc "Named elements resolve after the defining record namespace is populated.")
 						(bool.and (local resolve_records) (u32.eqz (local element)))
-						(then (set (local element) (call record_array_element (borrow-shared (local source)) (borrow-shared (local nodes))
-							(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base)
-							(local element_node)))))))
+						(then
+							(set (local element) (call read_owned_array_type (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local leaf) (borrow-shared (local records)) (borrow-shared (local bindings)) (call scope_at (local file) (local source_base))))
+							(if
+								(:doc "Resolve an ordinary nominal element when the type is a bare record or specialization.")
+								(u32.eqz (local element))
+								(then (set (local element) (call record_array_element (borrow-shared (local source)) (borrow-shared (local nodes))
+									(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base)
+									(local element_node)))))))))
 			(let extent_node (call array_extent_operand (borrow-shared (local nodes)) (local element_node)))
 			(if (i32.ltz (local extent_node)) (then (return (local invalid))))
 			(let extent (call read_array_extent (borrow-shared (local source)) (array.load (local nodes) (local extent_node))
@@ -522,14 +527,26 @@
 								(local element) (borrow-mut (local records)) (local next) (borrow-shared (local bindings))
 								(local file) (local source_base) (local record_elements) (local scalar_elements)))
 							(if (u32.gtz (struct.get (local inner) error)) (then (return (local inner))))
-							(set (local next) (struct.get (local inner) operand))))))
+							(set (local next) (struct.get (local inner) operand)))
+						(else
+							(if
+								(:doc "Register the exact descriptor identities needed by a fixed owner element before ordering layouts.")
+								(bool.and (local record_elements)
+									(bool.and (i32.not-ltz (call owned_element_node (borrow-shared (local source)) (borrow-shared (local nodes)) (local element)))
+										(i32.not-ltz (struct.get (local element) next_sibling))))
+								(then
+									(let owners (call register_owned_rows (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local child) (struct.get (local element) next_sibling) (borrow-shared (local bindings))
+										(call scope_at (local file) (local source_base)) (borrow-mut (local records)) (local next)))
+									(if (u32.gtz (struct.get (local owners) error)) (then (return (local owners))))
+									(set (local next) (struct.get (local owners) operand))))))))
 			(let shape (call read_fixed_array_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local record_elements)))
 			(let element (struct.get (local shape) element))
 			(if
 				(:doc "A record-only pass adds shapes whose element identity depends on an aggregate.")
 				(bool.and (u32.gtz (local element))
-					(bool.or (local scalar_elements) (call is_record_type (local element))))
+					(bool.or (local scalar_elements) (bool.or (call is_record_type (local element)) (call is_array_owner (local element)))))
 				(then
 					(if
 						(:doc "An invalid extent name points at the original identifier.")
@@ -769,6 +786,18 @@
 				(u32.eq (local type) 41u32)
 				(then (return 10u32)))
 			(return (u32.sub (local type) 536870912u32))))
+
+	(fn owner_view_type
+		(:doc `Project the exact element type, using the dedicated codes for byte owners.`)
+		(params (owner u32) (writable bool)) (returns u32)
+		(body
+			(if
+				(:doc "The original byte view codes select the byte access runtime.")
+				(u32.eq (local owner) 41u32)
+				(then
+					(if (local writable) (then (return 38u32)))
+					(return 34u32)))
+			(return (call typed_slice_type (call array_slot_code (local owner)) (local writable)))))
 
 	(fn is_owned_row_layout
 		(:doc "Recognize a structural owning row identity without a standalone C value layout.")
@@ -2519,6 +2548,21 @@
 			(return (struct.new EntryRead (operand (local next)) (start 0i32) (end 0i32)
 				(error 0u32) (related -1i32)))))
 
+	(fn fixed_array_owns
+		(:doc "Find ownership through a fixed shape even when its static layout is still being registered.")
+		(params (records (shared-array ScalarRecord)) (type u32)) (returns bool)
+		(body
+			(let-mut element (local type))
+			(while
+				(:doc "Fixed arrays carry their element type in the synthetic layout row.")
+				(bool.and (call is_record_type (local element))
+					(call is_fixed_array (array.load (local records) (call record_index (local element)))))
+				(body
+					(set (local element) (u32.from-i32
+						(struct.get (array.load (local records) (call record_index (local element))) first)))))
+			(return (bool.or (call is_array_owner (local element))
+				(call is_owning_record (borrow-shared (local records)) (local element))))))
+
 	(fn register_static_array
 		(:doc "Append all new static array layers in inner-to-outer order after the ordered value layouts.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
@@ -2537,6 +2581,10 @@
 				(u32.eqz (local type))
 				(then (return (call entry_at (call named_extent_site (borrow-shared (local source))
 					(borrow-shared (local nodes)) (local node) (borrow-shared (local bindings)) (local file) (local source_base)) -1i32 23u32))))
+			(if
+				(:doc "Immutable module tables cannot be the defining storage of an owner.")
+				(call fixed_array_owns (borrow-shared (local records)) (local type))
+				(then (return (call entry_at (local node) -1i32 23u32))))
 			(let-mut row (local next))
 			(while
 				(:doc "A new wrapper refers only to layouts that already have their emission positions.")
@@ -2576,7 +2624,8 @@
 			(if
 				(:doc "Named Wove records and payload enums traverse their declaration members.")
 				(bool.and (bool.not (bool.or (local array)
-						(bool.or (call is_generic_template (local layout)) (call is_specialization_alias (local layout)))))
+						(bool.or (call is_owned_row_layout (local layout))
+							(bool.or (call is_generic_template (local layout)) (call is_specialization_alias (local layout))))))
 					(bool.or (i32.eqz (struct.get (local layout) native)) (call is_payload_enum (local layout))))
 				(then (set (local field) (struct.get (local layout) first))))
 			(array.store (local marks) (local row) 1u8)
@@ -2626,8 +2675,9 @@
 				(body
 					(let layout (array.load (local records) (local row)))
 					(if
-						(:doc "Only ordinary Wove structs can hold these array fields.")
-						(bool.and (i32.eqz (struct.get (local layout) native)) (struct.get (local layout) owns_arrays))
+						(:doc "Only ordinary Wove structs have named owning fields to validate.")
+						(bool.and (i32.gtz (struct.get (local layout) name))
+							(bool.and (i32.eqz (struct.get (local layout) native)) (struct.get (local layout) owns_arrays)))
 						(then
 							(let-mut field (struct.get (local layout) first))
 							(while
@@ -2655,8 +2705,17 @@
 			(let layout (array.load (local records) (local row)))
 			(let ok (struct.new LayoutCheck (file -1i32) (start 0i32) (end 0i32) (error 0u32)))
 			(if
+				(:doc "An inline array owns its element exactly when the complete element type owns storage.")
+				(call is_fixed_array (local layout))
+				(then
+					(let element (u32.from-i32 (struct.get (local layout) first)))
+					(let owns (bool.or (call is_array_owner (local element))
+						(call is_owning_record (borrow-shared (local records)) (local element))))
+					(array.store (local records) (local row) (call layout_state (local layout) (struct.get (local layout) emit_row) (local owns)))
+					(return (local ok))))
+			(if
 				(:doc "Only ordinary Wove records and payload enums have typed value members.")
-				(bool.or (bool.or (call is_fixed_array (local layout))
+				(bool.or (bool.or (call is_owned_row_layout (local layout))
 						(bool.or (call is_generic_template (local layout)) (call is_specialization_alias (local layout))))
 					(bool.not (bool.or (i32.eqz (struct.get (local layout) native)) (call is_payload_enum (local layout)))))
 				(then (return (local ok))))

@@ -634,6 +634,11 @@ wvrt_array *wvrt_array_new_owned_at_span(int32_t length, size_t size, size_t ali
 	return owner;
 }
 
+// Reject access to an inline owner that has already moved out of its slot.
+void wvrt_inline_slot_require(bool live, int32_t file, int32_t start, int32_t end) {
+	if (!live) { wvrt_trap_at_span(file, start, end, "uninitialized fixed array element"); }
+}
+
 // An unfilled slot has no record to lend or transfer.
 static const void *wvrt_array_live_slot(const void *items, size_t offset, size_t stride,
 	int32_t file, int32_t start, int32_t end) {

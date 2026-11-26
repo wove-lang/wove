@@ -521,11 +521,12 @@ an unfilled slot traps. Indexed loans keep the source array live for the
 call. An owning slot cannot be loaded by value or bound as an array
 iteration item.
 
-Fixed arrays keep their elements inline and copy by value. Use
-`(array T extent)` for a builtin scalar, copyable Wove record, or another
-fixed array. Each extent is a nonnegative decimal or an immutable module
-integer. For example, `(array (array i32 3) 2)` holds two rows of three
-`i32` values. The type includes the leaf type and every extent.
+Fixed arrays keep their elements inline. Use
+`(array T extent)` for a builtin scalar, a Wove record, an owned array,
+or another fixed array. Each extent is a nonnegative decimal or an
+immutable module integer. For example, `(array (array i32 3) 2)` holds two
+rows of three `i32` values. The type includes the leaf type and every extent.
+A fixed array of copyable elements copies by value.
 
 - `(array.new (array u8 2) (u8 17) (u8 25))` lists the elements.
 - `(array.repeat (array u8 128) (u8 0))` evaluates one value and fills the array.
@@ -535,12 +536,28 @@ integer. For example, `(array (array i32 3) 2)` holds two rows of three
   an inline array field of a writable record.
 - `(array.store (array.load (local grid) row) column value)` updates the
   selected row in the original writable grid. In a value expression,
-  `(array.load (local grid) row)` returns a copy of the row.
+  `(array.load (local grid) row)` returns a copy when the row is copyable.
 
-A fixed integer array or record field can lend a matching `shared-array` or
-`mut-array` view. Sibling field paths can lend independently. A whole-record
-loan overlaps all of its fields. To borrow a range from a fixed array, first
-bind a view of the whole array.
+A fixed array that contains owners is itself an owner, including through
+nested fixed arrays and record fields. Initialize each slot with a fresh
+owner or an explicit `move` in `array.new`. Copying an owning element or
+using `array.repeat` with an owning layout is a compile-time error.
+
+Use `(borrow-shared (array.load (local rows) index))` to lend an owned array
+element as a view. Use `borrow-mut` for a mutable view. An owning record
+element lends its exact `shared-ref` or `mut-ref` type. Dynamic indices into
+the same fixed array are treated as potentially overlapping for loan checks.
+
+Use `(move (array.load (local rows) index))` to transfer an element from a
+mutable local owner. The slot becomes empty and the array keeps its extent.
+An attempt to borrow or transfer an empty slot traps at the indexed expression.
+`array.store` fills an empty slot or drops a live owner before installing its
+replacement. Cleanup releases the remaining live slots in reverse index order.
+
+A fixed integer array, including one stored in a record field, can lend a
+matching `shared-array` or `mut-array` view. Sibling field paths can lend
+independently. A whole-record loan overlaps all of its fields. To borrow a
+range from a fixed array, first bind a view of the whole array.
 
 `(let view (borrow-shared (local data)))` binds a view for the enclosing
 block. A shared loan permits source reads. An exclusive loan also excludes
