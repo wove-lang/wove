@@ -247,6 +247,7 @@ static inline wvrt_slice wvrt_share_mut_slice(wvrt_mut_slice wvrtview) {
 
 wvrt_array *wvrt_array_new(int32_t wvrt_length, size_t wvrt_element_size,
 	size_t wvrt_element_alignment, wvrt_location wvrt_site);
+wvrt_array *wvrt_array_try_new(int32_t wvrt_length, size_t wvrt_size, size_t wvrt_alignment);
 wvrt_array *wvrt_array_new_at_span(int32_t wvrt_length, size_t wvrt_element_size, size_t wvrt_element_alignment,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_array_new_u8_at_span(int32_t wvrt_length, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
@@ -296,6 +297,10 @@ void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slo
 	wvrt_array_store_owned_at_span((view), (index), &(slot){true, (value)}, slot##_drop, (file), (start), (end))
 #define wvrt_owned_array_push(slot, owner, value, file, start, end) \
 	wvrt_array_push_owned_at_span((owner), &(slot){true, (value)}, (file), (start), (end))
+
+// Keep the captured record available to the rejection variant if growth fails.
+#define wvrt_owned_array_try_push(slot, owner, value) \
+	wvrt_array_try_push((owner), &(slot){true, (value)})
 
 // Transfer the removed record, with the slot's live flag consumed by the removal.
 #define wvrt_owned_array_remove(slot, owner, index, file, start, end) \
@@ -405,6 +410,8 @@ void wvrt_worker_queue_drop(wvrt_array *queue);
 wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*wvrt_handler)(wvrt_array *), wvrt_array *wvrt_job,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 bool wvrt_array_try_reserve(wvrt_array *wvrt_buffer, int32_t wvrt_capacity);
+bool wvrt_array_try_extend(wvrt_array *wvrt_buffer, wvrt_slice wvrt_source);
+bool wvrt_array_try_push(wvrt_array *wvrt_buffer, const void *wvrt_value);
 void wvrt_array_reserve_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_capacity,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_push_at_span(wvrt_array *wvrt_buffer, const void *wvrt_value,

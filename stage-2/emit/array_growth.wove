@@ -5,12 +5,13 @@
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/array_growth.wove" (only (value indexed_row_owner) (value array_capacity_kind) (value array_push_kind)
-		(value array_remove_kind) (value array_truncate_kind) (value array_reserve_kind) (value array_try_reserve_kind)))
-	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression) (value indirect_local_place)))
+		(value array_remove_kind) (value array_truncate_kind) (value array_reserve_kind) (value array_try_reserve_kind) (value array_try_extend_kind) (value array_try_push_kind)))
+	(use wove-file "../scalar/loans.wove" (only expression_row (type ScalarExpression) (value indirect_local_place)))
 	(use wove-file "../scalar/function_rows.wove" (only (type ScalarParameter)))
 	(use wove-file "../scalar/records.wove" (only is_array_owner is_owning_struct_element array_owner_element record_index (type ScalarRecord)))
 	(use wove-file "./owned_aggregates.wove" (only open_owned_slot_call))
 	(use wove-file "./records.wove" (only write_value_type write_field_place))
+	(use wove-file "./enums.wove" (only write_payload_constructor))
 	(use wove-file "./runtime.wove" (only close_runtime_call))
 	(use wove-file "./text.wove" (only c_byte c_literal_text write_temporary_name write_local_place))
 
@@ -23,6 +24,9 @@
 	(let truncate_call "wvrt_array_truncate_at_span(")
 	(let reserve_call "wvrt_array_reserve_at_span(")
 	(let try_reserve_call "wvrt_array_try_reserve(")
+	(let try_extend_call "wvrt_array_try_extend(")
+	(let try_push_call "(wvrt_array_try_push(")
+	(let owned_try_push_call "(wvrt_owned_array_try_push(")
 
 	(let indexed_owner_call "wvrt_array_row_owner_at_span(")
 
@@ -94,7 +98,55 @@
 				(:doc "The trapping reservation carries the original source location.")
 				(u32.eq (local kind) (local array_reserve_kind))
 				(then (return (call c_literal_text (borrow-shared (local reserve_call)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Extend reports failure without transferring any source element.")
+				(u32.eq (local kind) (local array_try_extend_kind))
+				(then (return (call c_literal_text (borrow-shared (local try_extend_call)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "The append result selects which variant receives the captured value.")
+				(u32.eq (local kind) (local array_try_push_kind))
+				(then (return (call c_literal_text (borrow-shared (local try_push_call)) (borrow-mut (local output)) (local offset) (local writing)))))
 			(return (call c_literal_text (borrow-shared (local try_reserve_call)) (borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn open_owned_growth_call
+		(:doc "Choose a growth macro that preserves the record slot's initialized flag.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord) (kind u32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "A rejected recoverable append returns its record instead of dropping the slot.")
+				(u32.eq (local kind) (local array_try_push_kind))
+				(then (return (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local layout) (borrow-shared (local owned_try_push_call)) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(if
+				(:doc "The trapping append runs the slot destructor if growth fails.")
+				(u32.eq (local kind) (local array_push_kind))
+				(then (return (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local layout) (borrow-shared (local owned_push_call)) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(return (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local layout) (borrow-shared (local owned_remove_call)) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+
+	(fn close_try_push
+		(:doc "Select the unit success or return the original captured value in the rejection variant.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(expression ScalarExpression) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let rejected (struct.get (local expression) asset_start))
+			(let type (struct.get (local expression) type))
+			(let accepted (call expression_row 0u32 (local type) (i32.sub 1i32 (local rejected)) -1i32 0i32 0i32 (bool false)))
+			(let returned (call expression_row 0u32 (local type) (local rejected) (struct.get (local expression) first) 0i32 0i32 (bool false)))
+			(let closed (call c_byte (borrow-mut (local output)) (local offset) 41u8 (local writing)))
+			(let choose (call c_byte (borrow-mut (local output)) (local closed) 63u8 (local writing)))
+			(let success (call write_payload_constructor (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local accepted) (local tree_base)
+				(borrow-mut (local output)) (local choose) (local name_prefix) (local writing)))
+			(let otherwise (call c_byte (borrow-mut (local output)) (local success) 58u8 (local writing)))
+			(let failure (call write_payload_constructor (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local returned) (local tree_base)
+				(borrow-mut (local output)) (local otherwise) (local name_prefix) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local failure) 41u8 (local writing)))))
 
 	(fn write_array_growth
 		(:doc `Write the growth call or capacity query. Mutation starts after the operand is captured.`)
@@ -115,7 +167,8 @@
 						(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 					(return (call c_literal_text (borrow-shared (local capacity_member)) (borrow-mut (local output)) (local owner) (local writing)))))
 			(let remove (u32.eq (local kind) (local array_remove_kind)))
-			(let push (u32.eq (local kind) (local array_push_kind)))
+			(let try_push (u32.eq (local kind) (local array_try_push_kind)))
+			(let push (bool.or (u32.eq (local kind) (local array_push_kind)) (local try_push)))
 			(let remove_row (bool.and (local remove) (call is_array_owner (struct.get (local expression) type))))
 			(let owner (array.load (local expressions) (local place)))
 			(let element (call array_owner_element (borrow-shared (local records)) (struct.get (local owner) type)))
@@ -125,17 +178,9 @@
 			(if
 				(:doc "An owning slot transfers the record and its initialized state together.")
 				(local wrapped)
-				(then
-					(let layout (array.load (local records) (call record_index (local element))))
-					(if
-						(:doc "Append creates a populated slot. Remove transfers its record out of the slot.")
-						(local push)
-						(then (set (local cursor) (call open_owned_slot_call (borrow-shared (local source))
-							(borrow-shared (local nodes)) (local layout) (borrow-shared (local owned_push_call))
-							(borrow-mut (local output)) (local offset) (local name_prefix) (local writing))))
-						(else (set (local cursor) (call open_owned_slot_call (borrow-shared (local source))
-							(borrow-shared (local nodes)) (local layout) (borrow-shared (local owned_remove_call))
-							(borrow-mut (local output)) (local offset) (local name_prefix) (local writing))))))
+				(then (set (local cursor) (call open_owned_growth_call (borrow-shared (local source))
+					(borrow-shared (local nodes)) (array.load (local records) (call record_index (local element))) (local kind)
+					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing))))
 				(else (set (local cursor) (call open_growth_call (local kind) (local remove_row)
 					(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
@@ -157,9 +202,15 @@
 			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (struct.get (local expression) first)
 				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(if
-				(:doc "A fallible reserve reports allocation failure as its result.")
-				(u32.eq (local kind) (local array_try_reserve_kind))
+				(:doc "A recoverable reserve or extend returns its success flag directly.")
+				(bool.or (u32.eq (local kind) (local array_try_reserve_kind)) (u32.eq (local kind) (local array_try_extend_kind)))
 				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+			(if
+				(:doc "Assemble the outcome only after the runtime decided whether the append took ownership.")
+				(local try_push)
+				(then (return (call close_try_push (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (local expression) (local tree_base) (borrow-mut (local output))
+					(local cursor) (local name_prefix) (local writing)))))
 			(return (call close_runtime_call (borrow-mut (local output)) (local cursor)
 				(struct.get (local expression) target) (struct.get (local expression) start)
 				(struct.get (local expression) end) (local writing))))))
