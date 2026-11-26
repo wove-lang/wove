@@ -40,7 +40,7 @@
 		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode c_handle_mut_mode is_c_exclusive_owner_mode
 		is_c_storage_mode is_c_storage_init_mode is_c_handle_init_mode is_c_consuming_mode))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
-	(use wove-file "../source/types.wove" (only void_type is_builtin_integer is_builtin_float is_builtin_numeric is_builtin_scalar builtin_type_keyword reference_mode (value f128_type) (value worker_receipt_type) (value worker_queue_type)))
+	(use wove-file "../source/types.wove" (only void_type is_builtin_integer is_builtin_float is_builtin_numeric is_builtin_scalar builtin_type_keyword reference_mode (value f128_type) (value worker_receipt_type) (value worker_queue_type) (value worker_pool_type) (value worker_permit_type)))
 	(use wove-file "../source/float_ops.wove" (only float_literal_shape is_float_conversion (value float_literal)))
 	(use wove-file "./specializations.wove" (only register_module_specializations))
 	(use wove-file "../source/generics.wove" (only has_specialization_head generic_i32_value is_checked_constant_operand
@@ -57,9 +57,9 @@
 	(use wove-file "./function_refs.wove" (only register_function_references plan_function_reference))
 	(use wove-file "./value_types.wove" (only value_matches_type (value static_number)))
 	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
-	(use wove-file "./owners.wove" (only is_local_owner is_lexical_owner is_worker_owner owned_array_take_kind owned_field_loan_kind owned_aggregate_take_kind is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
+	(use wove-file "./owners.wove" (only is_local_owner is_lexical_owner is_worker_owner is_nullable_worker_owner owned_array_take_kind owned_field_loan_kind owned_aggregate_take_kind is_native_owner native_owner_type native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind native_handle_init_borrow_kind native_owner_declaration
-			is_optional_byte_owner_type optional_unwrap_kind (value worker_receipt_move_kind)))
+			is_optional_byte_owner_type optional_unwrap_kind (value worker_receipt_move_kind) (value worker_permit_move_kind)))
 	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan field_place_root expression_row mutable_parameter_place (value indirect_local_place) (value local_slice_view) (value local_slice_projection) (value scoped_field_loan) (type ScalarExpression)))
 	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding is_iteration_binding is_writable_local (type ScalarStatement)
 			(value c_writable_binding) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
@@ -73,8 +73,8 @@
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates))
 	(use wove-file "./worker.wove" (only worker_arrays))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch (value worker_spawn_join_kind)
-			(value worker_spawn_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer
+		(only entry_keyword entry_at entry_form (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch is_worker_submission is_worker_pool_operation (value worker_spawn_join_kind)
+			(value worker_spawn_on_kind) (value worker_open_pool_kind) (value worker_try_close_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
 	(struct
@@ -1430,6 +1430,98 @@
 				(local reference) (struct.get (local form) operand) 57u32 (local index) (local caller) (local statement)
 				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 
+	(fn plan_worker_pool
+		(:doc "Check pool sizes or resolve the live pool slot for admission and close.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32)
+			(kind u32) (expected u32) (caller ScalarFunction) (statement i32) (view_start i32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local kind) 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let first (struct.get (local form) operand))
+			(if (i32.ltz (local first)) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let opening (u32.eq (local kind) (local worker_open_pool_kind)))
+			(let closing (u32.eq (local kind) (local worker_try_close_kind)))
+			(if
+				(:doc "Possibly empty pool and permit owners must acquire a lexical slot immediately.")
+				(bool.and (bool.not (local closing))
+					(bool.not (call local_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local statement))))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let reference (array.load (local nodes) (local first)))
+			(let next (struct.get (local reference) next_sibling))
+			(if
+				(:doc "Opening takes exactly two i32 values in source evaluation order.")
+				(local opening)
+				(then
+					(if
+						(:doc "Both the thread count and waiting capacity are required.")
+						(bool.or (i32.ltz (local next)) (i32.not-ltz (struct.get (array.load (local nodes) (local next)) next_sibling)))
+						(then (return (call entry_at (local node) -1i32 24u32))))
+					(let pending (call expression_row 0u32 5u32 -1i32 -1i32 0i32 0i32 (bool false)))
+					(array.store (local expressions) (local first) (local pending))
+					(array.store (local expressions) (local next) (local pending))
+					(array.store (local expressions) (local index)
+						(call worker_expression (local kind) (local worker_pool_type) -1i32 (local first) 0i32
+							(local node) (local caller) (local view_start)))
+					(return (call entry_at (local node) (local index) 0u32))))
+			(if (i32.not-ltz (local next)) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let-mut result (local worker_permit_type))
+			(if
+				(:doc "Close borrows a pool and reports whether it drained successfully.")
+				(local closing)
+				(then
+					(if
+						(:doc "The close result must satisfy its enclosing boolean context.")
+						(bool.not (call value_matches_type (local expected) 12u32))
+						(then (return (call entry_at (local node) -1i32 24u32))))
+					(set (local result) 12u32)))
+			(let checked (call plan_worker_local (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local reference) (local first) (local caller) (local statement)
+				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+			(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
+			(let pool (array.load (local expressions) (local first)))
+			(if
+				(:doc "Admission and close both act on the original pool owner.")
+				(u32.not-eq (struct.get (local pool) type) (local worker_pool_type))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(call worker_expression (local kind) (local result) (struct.get (local pool) target) -1i32 0i32
+					(local node) (local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_worker_permit
+		(:doc "Consume an exact permit slot before evaluating the job it admits.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32)
+			(caller ScalarFunction) (statement i32) (view_start i32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if (i32.ltz (local index)) (then (return (call entry_at (local node) -1i32 35u32))))
+			(let move (array.load (local nodes) (local index)))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local move) 43u32 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let reference (struct.get (local form) operand))
+			(if
+				(:doc "The explicit move must name a single local reservation.")
+				(bool.or (i32.ltz (local reference)) (i32.not-ltz (struct.get (array.load (local nodes) (local reference)) next_sibling)))
+				(then (return (call entry_at (local move) -1i32 24u32))))
+			(let checked (call plan_worker_local (borrow-shared (local source)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local reference)) (local index) (local caller) (local statement)
+				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+			(if (u32.gtz (struct.get (local checked) error)) (then (return (call at_owner_use (local checked) (local move)))))
+			(let permit (array.load (local expressions) (local index)))
+			(if
+				(:doc "A pool and other lexical worker owners cannot supply a reservation.")
+				(u32.not-eq (struct.get (local permit) type) (local worker_permit_type))
+				(then (return (call entry_at (local move) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(call worker_expression (local worker_permit_move_kind) (local worker_permit_type)
+					(struct.get (local permit) target) -1i32 0i32 (local node) (local caller) (local view_start)))
+			(return (call entry_at (local move) (struct.get (local move) next_sibling) 0u32))))
+
 	(fn valid_worker_handler
 		(:doc "Verify the one-job ABI and both owned payloads shared by worker launches and queue declarations.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (callee ScalarFunction)
@@ -1636,9 +1728,9 @@
 		The verified call row is keyed by the original call node and refers to
 		the defining function row. Its operands retain their original links.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(operand i32) (expected u32) (index i32) (caller ScalarFunction) (kind u32) (view_start i32)
+			(operand i32) (expected u32) (index i32) (caller ScalarFunction) (kind u32) (statement i32) (view_start i32)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
 			(expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
@@ -1677,7 +1769,7 @@
 					(local callee) (borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records)))))
 				(then (return (call entry_at (local name) -1i32 24u32))))
 			(let result (struct.get (local callee) result))
-			(let submitted (u32.eq (local kind) (local worker_spawn_kind)))
+			(let submitted (call is_worker_submission (local kind)))
 			(let-mut actual (local result))
 			(if
 				(:doc "Independent submission yields the receipt that owns the joinable thread.")
@@ -1691,6 +1783,15 @@
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let first (struct.get (local name) next_sibling))
 			(let-mut argument (local first))
+			(if
+				(:doc "The scheduler permit is evaluated first and is outside the handler's formal arguments.")
+				(u32.eq (local kind) (local worker_spawn_on_kind))
+				(then
+					(let checked (call plan_worker_permit (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (local first) (local caller) (local statement) (local view_start)
+						(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+					(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
+					(set (local argument) (struct.get (local checked) operand))))
 			(let-mut formal (struct.get (local callee) params))
 			(let limit (i32.add (local formal) (struct.get (local callee) arity)))
 			(while
@@ -2308,8 +2409,10 @@
 			(let reference (array.load (local nodes) (local reference_index)))
 			(let named (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) 8u32 24u32))
 			(if (u32.gtz (struct.get (local named) error)) (then (return (local named))))
+			(let-mut access 57u32)
+			(if (local consume) (then (set (local access) (local c_handle_reference))))
 			(let checked (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)
-				(struct.get (local named) operand) (local c_handle_reference) (local reference_index) (local caller) (local statement)
+				(struct.get (local named) operand) (local access) (local reference_index) (local caller) (local statement)
 				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
 			(if
 				(:doc "Report the complete use span and preserve the prior transfer as related context.")
@@ -2319,10 +2422,11 @@
 			(let actual (struct.get (local pointer) type))
 			(let target (struct.get (local pointer) target))
 			(if
-				(:doc "Only a local native owner can participate in these operations.")
+				(:doc "Nullable worker owners can be tested, and only native handles can be consumed here.")
 				(bool.not (bool.and (u32.eq (struct.get (local pointer) kind) 6u32)
 					(bool.or (call is_native_owner (local actual))
-						(bool.and (bool.not (local consume)) (call is_optional_byte_owner_type (local actual))))))
+						(bool.and (bool.not (local consume))
+							(bool.or (call is_optional_byte_owner_type (local actual)) (call is_nullable_worker_owner (local actual)))))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(if
 				(:doc "A null test reads only the owner's pointer and returns a bool.")
@@ -3874,6 +3978,12 @@
 					(local node) (local index) (local tag) (local expected) (local statement) (local caller) (local view_start)
 					(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
+				(:doc "Reservations and pool lifetimes use opaque local worker owners.")
+				(call is_worker_pool_operation (local tag))
+				(then (return (call plan_worker_pool (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local tag) (local expected) (local caller) (local statement) (local view_start)
+					(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
+			(if
 				(:doc "Initialize a local receipt queue without invoking its handler.")
 				(u32.eq (local tag) (local worker_queue_kind))
 				(then (return (call plan_worker_queue (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -3904,7 +4014,7 @@
 			(let worker (call is_worker_launch (local tag)))
 			(if
 				(:doc "A submitted job must immediately acquire a local owner for its receipt.")
-				(bool.and (u32.eq (local tag) (local worker_spawn_kind))
+				(bool.and (call is_worker_submission (local tag))
 					(bool.not (call local_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local statement))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let allocation (bool.and (u32.eq (local tag) 41u32)
@@ -3991,9 +4101,10 @@
 					(let-mut kind 3u32)
 					(if (local worker) (then (set (local kind) (local tag))))
 					(return (call plan_call (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local node) (local operand) (local expected) (local index) (local caller) (local kind) (local view_start)
+						(local node) (local operand) (local expected) (local index) (local caller) (local kind) (local statement) (local view_start)
 						(borrow-shared (local functions)) (borrow-shared (local parameters))
-						(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local expressions))))))
+						(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-shared (local statements))
+						(borrow-mut (local expressions))))))
 			(if
 				(:doc "A checked conversion takes its result type from its target operand.")
 				(u32.eq (local tag) 33u32)
@@ -4639,6 +4750,10 @@
 							(let-mut formal (struct.get (local callee) params))
 							(let formal_end (i32.add (local formal) (struct.get (local callee) arity)))
 							(let-mut argument (struct.get (local invocation) first))
+							(if
+								(:doc "The pooled permit occupies no formal slot in the handler.")
+								(u32.eq (struct.get (local invocation) kind) (local worker_spawn_on_kind))
+								(then (set (local argument) (struct.get (array.load (local nodes) (local argument)) next_sibling))))
 							(while
 								(:doc "The original sibling order and the formal table pair each operand exactly once.")
 								(bool.and (i32.not-ltz (struct.get (local callee) body))
