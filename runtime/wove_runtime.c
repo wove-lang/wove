@@ -851,6 +851,12 @@ int32_t wvrt_i32_from_wrapped_bits(uint32_t wvrtbits) {
 	return -1 - (int32_t)(UINT32_MAX - wvrtbits);
 }
 
+// Interpret a full two's-complement word using only in-range signed casts.
+int64_t wvrt_i64_from_wrapped_bits(uint64_t wvrtbits) {
+	if (wvrtbits <= (uint64_t)INT64_MAX) { return (int64_t)wvrtbits; }
+	return -INT64_C(1) - (int64_t)(UINT64_MAX - wvrtbits);
+}
+
 // Shift a signed 32-bit word using a checked count and unsigned bit operations.
 int32_t wvrt_i32_shift_at_span(int32_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {

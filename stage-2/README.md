@@ -194,7 +194,7 @@ name lookup, type checking, C emission, and caller inspection.
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices. A value-returning function must
 return its declared type on every path. Helpers can accept and return `i8`,
-`u8`, `i16`, `u16`, `i32`, `u32`, `u64`, `bool`, `f32`, and `f64`. Expressions support exact-type
+`u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `bool`, `f32`, and `f64`. Expressions support exact-type
 literals, binding reads, and direct calls. A local declared with `let` or
 `let-mut` takes its scalar type from its initializer and comes into scope
 afterwards. A `set`
@@ -366,7 +366,7 @@ an exact `i32` index and trap at the access span when it is out of bounds.
 
 A fixed integer array local can lend all its elements to a function whose
 formal is a `shared-array` or `mut-array` of the same element type. Supported
-element types are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, and `u64`.
+element types are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, and `u64`.
 For example, `(borrow-shared (local words))` supplies a matching
 `(shared-array u64)` formal. A mutable loan uses
 `(borrow-mut (local words))` and requires a `let-mut` local. The
@@ -414,6 +414,14 @@ can represent the full range, including `(u64 18446744073709551615)`.
 `u64.add.wrapping` adds modulo 2^64. `u64.eq` and `u64.lt`
 compare two exact `u64` values and return `bool`.
 
+Native `i64` values use `int64_t`. Decimal and hexadecimal literals
+cover the full signed range, including `-9223372036854775808i64` and
+`(i64 -0x8000000000000000)`. `i64.eq` and `i64.lt` compare exact signed
+operands. `i64.add.wrapping`, `i64.sub.wrapping`, and
+`i64.mul.wrapping` keep the low 64 bits. The
+[wide decimal writers](text/decimal_wide.wove) append either word type
+to a bounded byte view and preserve any prefix written before exhaustion.
+
 Both unsigned word widths support `and`, `or`, `xor`, and `not`
 with a type prefix such as `u64.xor`. The first three forms take two
 words of the named type. Complement takes one. Shifts such as
@@ -426,7 +434,7 @@ the original file ID and half-open span of the shift.
 
 `(int.convert target value)` evaluates the integer operand once and
 preserves its numerical value when it fits the target `i8`, `u8`, `i16`,
-`u16`, `i32`, `u32`, or `u64`. A value outside the target range traps before the cast. The
+`u16`, `i32`, `u32`, `i64`, or `u64`. A value outside the target range traps before the cast. The
 runtime diagnostic identifies the original file ID and half-open byte
 span of the conversion, including from a source subrange or an imported
 file. C emitted for conversions includes `wove_runtime.h` and links
@@ -448,7 +456,7 @@ and minimum remainder `-1` writes zero and returns `true`.
 For any builtin integer `T`, `(T.to.le-bytes value)` and
 `(T.to.be-bytes value)` evaluate an exact `T` once and return an inline
 `(array u8 N)`. The width `N` is one for `i8` and `u8`, two for
-`i16` and `u16`, four for `i32` and `u32`, and eight for `u64`. The inverse `T.from.le-bytes`
+`i16` and `u16`, four for `i32` and `u32`, and eight for `i64` and `u64`. The inverse `T.from.le-bytes`
 and `T.from.be-bytes` forms take a shared byte view. They trap at the
 conversion span before reading if the view has fewer or more than `N`
 elements. Signed values use two's complement. The byte order is explicit

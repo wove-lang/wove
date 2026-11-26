@@ -288,6 +288,7 @@ uint8_t wvrt_int_to_u8(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start
 int32_t wvrt_int_to_i32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 uint32_t wvrt_int_to_u32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_i32_from_wrapped_bits(uint32_t wvrt_bits);
+int64_t wvrt_i64_from_wrapped_bits(uint64_t wvrt_bits);
 int32_t wvrt_i32_shift_at_span(int32_t wvrt_value, int32_t wvrt_count, bool wvrt_right,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_i32_add_wrapping(int32_t wvrt_left, int32_t wvrt_right);
