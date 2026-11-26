@@ -329,6 +329,40 @@ wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrt_table,
 wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrt_value, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
+
+void wvrt_inline_slot_require(bool live, int32_t file, int32_t start, int32_t end);
+
+// Point at a populated inline element while preserving the pointer's access mode.
+#define WVRT_INLINE_SLOT_ADDRESS(slot, file, start, end) \
+	__extension__ ({ \
+		__auto_type wvrt_slot = (slot); \
+		wvrt_inline_slot_require(wvrt_slot->wvrt_live, (file), (start), (end)); \
+		&wvrt_slot->wvrt_value; \
+	})
+
+// Move out of a live slot while keeping its containing array available.
+#define WVRT_INLINE_SLOT_TAKE(slot, file, start, end) \
+	__extension__ ({ \
+		__auto_type wvrt_slot = (slot); \
+		wvrt_inline_slot_require(wvrt_slot->wvrt_live, (file), (start), (end)); \
+		wvrt_slot->wvrt_live = false; \
+		wvrt_slot->wvrt_value; \
+	})
+
+// Drop the heap owner stored in an initialized inline slot.
+static inline void wvrt_inline_array_slot_drop(wvrt_array **slot) {
+	wvrt_array_drop(*slot);
+}
+
+// A replacement retires the prior owner and also fills a slot left by a move.
+#define WVRT_INLINE_SLOT_REPLACE(slot, replacement, destroy) \
+	__extension__ ({ \
+		__auto_type wvrt_slot = (slot); \
+		if (wvrt_slot->wvrt_live) { destroy(&wvrt_slot->wvrt_value); } \
+		wvrt_slot->wvrt_value = (replacement); \
+		wvrt_slot->wvrt_live = true; \
+	})
+
 typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 
 // A single producer owns admission. Each permit reserves one waiting slot and keeps the pool live.

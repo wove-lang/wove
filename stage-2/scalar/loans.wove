@@ -7,7 +7,7 @@
 	(use wove-file "../source/array_growth.wove" (only is_array_growth (value indexed_row_owner)))
 	(use wove-file "./records.wove" (only place_borrow_kind is_mutable_place_reference is_writable_slice))
 	(use wove-file "./flow.wove" (only (type ScalarStatement) (value fixed_shared_loan) (value fixed_mut_loan)))
-	(use wove-file "./syntax.wove" (only is_direct_call (value fixed_subarray_place)))
+	(use wove-file "./syntax.wove" (only is_direct_call (value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_borrow) (value fixed_owner_store)))
 	(use wove-file "./owners.wove" (only native_handle_borrow_kind is_native_owner_write_loan owned_field_loan_kind))
 
 	(struct
@@ -143,21 +143,30 @@
 				(then (return (local place))))
 			(return -1i32)))
 
+	(fn fixed_access_base
+		(:doc "Follow checked subarray addresses to the original inline array place.")
+		(params (expressions (shared-array ScalarExpression)) (receiver i32)) (returns i32)
+		(body
+			(let-mut base (local receiver))
+			(while
+				(:doc "Every subarray address links its immediate containing place.")
+				(u32.eq (struct.get (array.load (local expressions) (local base)) kind) (local fixed_subarray_place))
+				(body (set (local base) (struct.get (array.load (local expressions) (local base)) first))))
+			(return (local base))))
+
 	(fn projected_store_conflicts
 		(:doc `A projected indexed store holds its field through the index and value expressions.`)
 		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
-			(receiver i32) (target i32) (local_binding bool) (place i32))
+			(receiver i32) (target i32) (local_binding bool) (place i32) (owning_slot bool))
 		(returns bool)
 		(body
-			(let-mut base (call indexed_owner_base (borrow-shared (local expressions)) (local receiver)))
-			(while
-				(:doc "Follow indexed addresses to the fixed local or the original record field.")
-				(u32.eq (struct.get (array.load (local expressions) (local base)) kind) (local fixed_subarray_place))
-				(body (set (local base) (struct.get (array.load (local expressions) (local base)) first))))
+			(let base (call fixed_access_base (borrow-shared (local expressions))
+				(call indexed_owner_base (borrow-shared (local expressions)) (local receiver))))
 			(let source (array.load (local expressions) (local base)))
 			(if
 				(:doc "Dynamic subscript paths into one local conservatively overlap the entire local.")
-				(bool.and (i32.not-eq (local base) (local receiver)) (u32.eq (struct.get (local source) kind) 6u32))
+				(bool.and (bool.or (local owning_slot) (i32.not-eq (local base) (local receiver)))
+					(u32.eq (struct.get (local source) kind) 6u32))
 				(then (return (call same_binding (local target) (local local_binding) (struct.get (local source) target) (bool true)))))
 			(let root (struct.get (local source) projection))
 			(if
@@ -340,19 +349,23 @@
 								(bool.and (i32.not-ltz (local growth))
 									(bool.and (i32.not-eq (local child) (local growth))
 										(call projected_store_conflicts (borrow-shared (local nodes)) (borrow-shared (local expressions))
-											(local growth) (local target) (local local_binding) (local place))))
+											(local growth) (local target) (local local_binding) (local place) (bool false))))
 								(bool.and (u32.eq (local operation_kind) (local indexed_row_owner))
 									(bool.and (i32.not-eq (local child) (local first))
 										(call projected_store_conflicts (borrow-shared (local nodes)) (borrow-shared (local expressions))
-											(local parent) (local target) (local local_binding) (local place))))))
+											(local parent) (local target) (local local_binding) (local place) (bool false))))))
 						(then (return (bool true))))
+					(let owning_slot (bool.or (u32.eq (local operation_kind) (local fixed_owner_store))
+						(bool.or (u32.eq (local operation_kind) (local fixed_owner_take))
+							(u32.eq (local operation_kind) (local fixed_owner_borrow)))))
 					(if
 						(:doc "An indexed field store excludes overlapping access while its later operands run.")
-						(bool.and (bool.and (bool.or (u32.eq (local operation_kind) 74u32)
-									(u32.eq (local operation_kind) (local fixed_subarray_place)))
+						(bool.and (bool.and (bool.or
+									(bool.or (u32.eq (local operation_kind) 74u32) (u32.eq (local operation_kind) (local fixed_subarray_place)))
+									(local owning_slot))
 								(i32.not-eq (local child) (local first)))
 							(call projected_store_conflicts (borrow-shared (local nodes)) (borrow-shared (local expressions))
-								(local first) (local target) (local local_binding) (local place)))
+								(local first) (local target) (local local_binding) (local place) (local owning_slot)))
 						(then (return (bool true))))
 					(if
 						(:doc "A load or range captures its receiver before evaluating later operands.")

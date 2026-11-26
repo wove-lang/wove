@@ -4,7 +4,7 @@
 	(:doc `Render fixed-array values and their checked accesses from evaluated operands.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "../scalar/records.wove" (only record_receiver_type record_index slice_element_code (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only record_receiver_type record_index is_array_owner is_readable_slice is_writable_slice slice_element_code (type ScalarRecord)))
 	(use wove-file "../scalar/loans.wove" (only (value indirect_local_place) (type ScalarExpression)))
 	(use wove-file "../scalar/function_rows.wove" (only (type ScalarParameter)))
 	(use wove-file "../scalar/flow.wove" (only (value fixed_mut_loan)))
@@ -12,11 +12,13 @@
 	(use wove-file "./bindings.wove" (only write_binding_name))
 	(use wove-file "./text.wove" (only c_byte c_literal_text c_type_text write_temporary_name write_local_place))
 	(use wove-file "./runtime.wove" (only write_c_number close_runtime_call write_slice_items))
-	(use wove-file "../scalar/syntax.wove" (only (value fixed_subarray_place)))
+	(use wove-file "../scalar/syntax.wove" (only (value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_store)))
+	(use wove-file "./owned_aggregates.wove" (only write_owner_helper_name))
 
 	(let empty_value "{0}")
 	(let list_open "{{")
 	(let list_close "}}")
+	(let live_element_open "{true,")
 	(let repeat_empty "={0};(void)")
 	(let repeat_open ";for(int32_t wvrt_repeat_index=0;wvrt_repeat_index<")
 	(let repeat_step ";++wvrt_repeat_index)")
@@ -86,6 +88,8 @@
 				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(let close (call c_byte (borrow-mut (local output)) (local type) 41u8 (local writing)))
 			(let-mut child (struct.get (local expression) first))
+			(let layout (array.load (local records) (call record_index (struct.get (local expression) type))))
+			(let owning (struct.get (local layout) owns_arrays))
 			(if
 				(:doc "A typed empty list initializes the zero-extent placeholder.")
 				(i32.ltz (local child))
@@ -95,8 +99,14 @@
 				(:doc "Append one initializer per inline element in source order.")
 				(i32.lt -1i32 (local child))
 				(body
+					(if
+						(:doc "Each listed owner starts in a populated inline slot.")
+						(local owning)
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local live_element_open))
+							(borrow-mut (local output)) (local cursor) (local writing)))))
 					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local child) (local tree_base)
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(if (local owning) (then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 125u8 (local writing)))))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
 					(set (local child) (struct.get (array.load (local nodes) (local child)) next_sibling))))
 			(return (call c_literal_text (borrow-shared (local list_close)) (borrow-mut (local output)) (local cursor) (local writing)))))
@@ -144,11 +154,12 @@
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
-			(let layout (array.load (local records) (call record_index (struct.get (local receiver) type))))
+			(let layout (array.load (local records) (call record_index (call record_receiver_type (struct.get (local receiver) type)))))
 			(let extent (struct.get (local layout) count))
 			(if
-				(:doc "Named inline storage can use the extent without loading or copying the value.")
-				(u32.eq (struct.get (local receiver) kind) 6u32)
+				(:doc "Named inline storage and owning fixed fields can use the extent without loading the value.")
+				(bool.or (u32.eq (struct.get (local receiver) kind) 6u32)
+					(bool.and (u32.eq (struct.get (local receiver) kind) 52u32) (struct.get (local layout) owns_arrays)))
 				(then (return (call write_c_number (borrow-mut (local output)) (local offset)
 					(local extent) (local writing)))))
 			(let-mut value (local offset))
@@ -171,6 +182,80 @@
 				(local extent) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local count) 41u8 (local writing)))))
 
+	(let take_inline "WVRT_INLINE_SLOT_TAKE(&")
+	(let replace_inline "WVRT_INLINE_SLOT_REPLACE(&")
+	(let address_inline "WVRT_INLINE_SLOT_ADDRESS(&")
+	(let shared_inline "wvrt_array_borrow_shared(*")
+	(let mut_inline "wvrt_array_borrow_mut(*")
+	(let drop_inline_array "wvrt_inline_array_slot_drop")
+
+	(fn open_fixed_owner_access
+		(:doc "Select a checked address, move, or replacement for an inline owning slot.")
+		(params (expression ScalarExpression) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let kind (struct.get (local expression) kind))
+			(if
+				(:doc "A move checks and clears the slot's presence flag.")
+				(u32.eq (local kind) (local fixed_owner_take))
+				(then (return (call c_literal_text (borrow-shared (local take_inline))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Replacement accepts either a populated or a previously moved slot.")
+				(u32.eq (local kind) (local fixed_owner_store))
+				(then (return (call c_literal_text (borrow-shared (local replace_inline))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(let type (struct.get (local expression) type))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Borrow the heap descriptor stored in the selected inline slot.")
+				(call is_readable_slice (local type))
+				(then
+					(if
+						(:doc "The requested view determines the borrow mode.")
+						(call is_writable_slice (local type))
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local mut_inline))
+							(borrow-mut (local output)) (local cursor) (local writing))))
+						(else (set (local cursor) (call c_literal_text (borrow-shared (local shared_inline))
+							(borrow-mut (local output)) (local cursor) (local writing)))))))
+			(return (call c_literal_text (borrow-shared (local address_inline))
+				(borrow-mut (local output)) (local cursor) (local writing)))))
+
+	(fn close_fixed_owner_access
+		(:doc "Complete a fixed slot operation with its checked span or its exact replacement destructor.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(layout ScalarRecord) (expression ScalarExpression) (index i32) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "An indexed read or move checks the presence of the selected owner.")
+				(u32.not-eq (struct.get (local expression) kind) (local fixed_owner_store))
+				(then
+					(let close (call close_runtime_call (borrow-mut (local output)) (local offset)
+						(struct.get (local expression) target) (struct.get (local expression) start)
+						(struct.get (local expression) end) (local writing)))
+					(if
+						(:doc "An array borrow wraps the checked descriptor pointer.")
+						(call is_readable_slice (struct.get (local expression) type))
+						(then (return (call c_byte (borrow-mut (local output)) (local close) 41u8 (local writing)))))
+					(return (local close))))
+			(let comma (call c_byte (borrow-mut (local output)) (local offset) 44u8 (local writing)))
+			(let stored (struct.get (array.load (local nodes) (local index)) next_sibling))
+			(let value (call write_temporary_name (borrow-shared (local source)) (local stored) (local tree_base)
+				(borrow-mut (local output)) (local comma) (local name_prefix) (local writing)))
+			(let-mut drop (call c_byte (borrow-mut (local output)) (local value) 44u8 (local writing)))
+			(let element (u32.from-i32 (struct.get (local layout) first)))
+			(if
+				(:doc "Each replacement retires only the owner in the selected slot.")
+				(call is_array_owner (local element))
+				(then (set (local drop) (call c_literal_text (borrow-shared (local drop_inline_array))
+					(borrow-mut (local output)) (local drop) (local writing))))
+				(else (set (local drop) (call write_owner_helper_name (borrow-shared (local source)) (borrow-shared (local nodes))
+					(array.load (local records) (call record_index (local element))) (bool false)
+					(borrow-mut (local output)) (local drop) (local name_prefix) (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local drop) 41u8 (local writing)))))
+
 	(fn write_fixed_access
 		(:doc `Index the original store place or the evaluated array value.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
@@ -183,10 +268,17 @@
 			(let array (array.load (local expressions) (local receiver)))
 			(let layout (array.load (local records) (call record_index (call record_receiver_type (struct.get (local array) type)))))
 			(let-mut begin (local offset))
+			(let owning (struct.get (local layout) owns_arrays))
 			(if
-				(:doc "A checked nested destination yields its address before the next operand runs.")
-				(u32.eq (struct.get (local expression) kind) (local fixed_subarray_place))
-				(then (set (local begin) (call c_byte (borrow-mut (local output)) (local begin) 38u8 (local writing)))))
+				(:doc "Open an occupancy-aware operation or an ordinary checked subarray address.")
+				(local owning)
+				(then (set (local begin) (call open_fixed_owner_access (local expression)
+					(borrow-mut (local output)) (local begin) (local writing))))
+				(else
+					(if
+						(:doc "An ordinary subarray place needs its address.")
+						(u32.eq (struct.get (local expression) kind) (local fixed_subarray_place))
+						(then (set (local begin) (call c_byte (borrow-mut (local output)) (local begin) 38u8 (local writing)))))))
 			(if
 				(:doc "Index a static table at its defining C object without copying the receiver.")
 				(u32.eq (struct.get (local array) kind) 62u32)
@@ -194,7 +286,7 @@
 					(let place (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
 						(struct.get (local array) target) (bool false) (borrow-mut (local output)) (local begin) (local name_prefix) (local writing)))
 					(return (call write_fixed_subscript (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local expression) (struct.get (local layout) count) (local tree_base)
+						(borrow-shared (local records)) (local expression) (local layout) (local tree_base)
 						(borrow-mut (local output)) (local place) (local name_prefix) (local writing)))))
 			(let-mut place (local begin))
 			(if
@@ -206,7 +298,7 @@
 						(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 					(let close (call c_byte (borrow-mut (local output)) (local pointer) 41u8 (local writing)))
 					(return (call write_fixed_subscript (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local expression) (struct.get (local layout) count) (local tree_base)
+						(borrow-shared (local records)) (local expression) (local layout) (local tree_base)
 						(borrow-mut (local output)) (local close) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Reading or writing a named local can use its inline storage directly.")
@@ -218,33 +310,39 @@
 				(else
 					(if
 						(:doc "A store or nested projection through a field path uses the original record.")
-						(bool.or (u32.eq (struct.get (local expression) kind) 74u32)
-							(u32.eq (struct.get (local expression) kind) (local fixed_subarray_place)))
+						(bool.or (local owning) (bool.or (u32.eq (struct.get (local expression) kind) 74u32)
+							(u32.eq (struct.get (local expression) kind) (local fixed_subarray_place))))
 						(then (set (local place) (call write_field_place (borrow-shared (local source)) (borrow-shared (local nodes))
 							(borrow-shared (local expressions)) (borrow-shared (local parameters)) (local receiver) (local tree_base)
 							(borrow-mut (local output)) (local begin) (local name_prefix) (local writing))))
 						(else (set (local place) (call write_temporary_name (borrow-shared (local source))
 							(local receiver) (local tree_base) (borrow-mut (local output)) (local begin) (local name_prefix) (local writing)))))))
 			(return (call write_fixed_subscript (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local expression) (struct.get (local layout) count) (local tree_base)
+				(borrow-shared (local records)) (local expression) (local layout) (local tree_base)
 				(borrow-mut (local output)) (local place) (local name_prefix) (local writing)))))
 
 	(fn write_fixed_subscript
 		(:doc `Append a checked index and an optional replacement to the already written array place.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
-			(expression ScalarExpression) (extent i32) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(records (shared-array ScalarRecord)) (expression ScalarExpression) (layout ScalarRecord) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let array (struct.get (local expression) first))
 			(let index (struct.get (array.load (local nodes) (local array)) next_sibling))
 			(let begin (call c_literal_text (borrow-shared (local access_open)) (borrow-mut (local output)) (local offset) (local writing)))
-			(let limit (call write_c_number (borrow-mut (local output)) (local begin) (local extent) (local writing)))
+			(let limit (call write_c_number (borrow-mut (local output)) (local begin) (struct.get (local layout) count) (local writing)))
 			(let comma (call c_byte (borrow-mut (local output)) (local limit) 44u8 (local writing)))
 			(let value (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
 				(borrow-mut (local output)) (local comma) (local name_prefix) (local writing)))
 			(let site (call close_runtime_call (borrow-mut (local output)) (local value)
 				(struct.get (local expression) target) (struct.get (local expression) start) (struct.get (local expression) end) (local writing)))
 			(let close (call c_byte (borrow-mut (local output)) (local site) 93u8 (local writing)))
+			(if
+				(:doc "Finish the occupancy-aware operation after selecting the exact inline slot.")
+				(struct.get (local layout) owns_arrays)
+				(then (return (call close_fixed_owner_access (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (local layout) (local expression) (local index) (local tree_base)
+					(borrow-mut (local output)) (local close) (local name_prefix) (local writing)))))
 			(if
 				(:doc "A store replaces exactly the checked element in the original array.")
 				(u32.eq (struct.get (local expression) kind) 74u32)

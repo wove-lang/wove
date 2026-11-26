@@ -6,7 +6,7 @@
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/array_growth.wove" (only (value array_push_kind) (value array_remove_kind)))
-	(use wove-file "../scalar/records.wove" (only is_payload_enum is_array_owner is_owning_record is_owning_struct_element array_owner_element slice_element_type record_index
+	(use wove-file "../scalar/records.wove" (only is_fixed_array is_payload_enum is_array_owner is_owning_record is_owning_struct_element array_owner_element slice_element_type record_index
 		member_value_type (type ScalarRecord)))
 	(use wove-file "./enums.wove" (only write_enum_ordinal))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
@@ -15,7 +15,7 @@
 	(use wove-file "./owners.wove" (only write_native_destructor))
 	(use wove-file "./owned_fields.wove" (only write_owner_slot))
 	(use wove-file "./records.wove" (only write_member_name write_record_name))
-	(use wove-file "./runtime.wove" (only open_array_drop))
+	(use wove-file "./runtime.wove" (only open_array_drop write_c_number))
 	(use wove-file "./text.wove" (only c_byte c_literal_text write_local_name))
 
 	(let take_prefix "wvrt_take_")
@@ -258,6 +258,41 @@
 			(return (call c_literal_text (borrow-shared (local c_return_take))
 				(borrow-mut (local output)) (local cursor) (local writing)))))
 
+	(let empty_fixed_drop "(void)wvrt_value;")
+	(let fixed_drop_begin "for(int32_t wvrt_i=")
+	(let fixed_drop_test ";wvrt_i>0;){--wvrt_i;if(wvrt_value->wvrt_items[wvrt_i].wvrt_live){")
+	(let fixed_slot_value "wvrt_value->wvrt_items[wvrt_i].wvrt_value);}}")
+
+	(fn write_fixed_destructor_body
+		(:doc "Drop the live elements of a fixed owner in reverse order, skipping taken slots.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(layout ScalarRecord) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let extent (struct.get (local layout) count))
+			(if
+				(:doc "An empty layout contains no owner to destroy.")
+				(i32.eqz (local extent))
+				(then (return (call c_literal_text (borrow-shared (local empty_fixed_drop))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(let loop (call c_literal_text (borrow-shared (local fixed_drop_begin))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let count (call write_c_number (borrow-mut (local output)) (local loop) (local extent) (local writing)))
+			(let-mut cursor (call c_literal_text (borrow-shared (local fixed_drop_test))
+				(borrow-mut (local output)) (local count) (local writing)))
+			(let element (u32.from-i32 (struct.get (local layout) first)))
+			(if
+				(:doc "Owned arrays drop their descriptors; inline owners drop through their exact helper.")
+				(call is_array_owner (local element))
+				(then (set (local cursor) (call open_array_drop (borrow-mut (local output)) (local cursor) (local writing))))
+				(else
+					(set (local cursor) (call open_owner_helper (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local records) (call record_index (local element))) (bool false)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 38u8 (local writing)))))
+			(return (call c_literal_text (borrow-shared (local fixed_slot_value))
+				(borrow-mut (local output)) (local cursor) (local writing)))))
+
 	(fn write_drop_helper
 		(:doc "Define the nominal destructor over the actual record fields or tagged union.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
@@ -273,6 +308,14 @@
 				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(let-mut cursor (call c_literal_text (borrow-shared (local c_owner_param))
 				(borrow-mut (local output)) (local type) (local writing)))
+			(if
+				(:doc "Fixed owners use a counted destructor over live inline slots.")
+				(call is_fixed_array (local layout))
+				(then
+					(let body (call write_fixed_destructor_body (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local layout) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(return (call c_literal_text (borrow-shared (local c_owner_close))
+						(borrow-mut (local output)) (local body) (local writing)))))
 			(if
 				(:doc "Only a tagged layout needs to branch before accessing owning storage.")
 				(call is_payload_enum (local layout))
