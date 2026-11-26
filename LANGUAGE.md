@@ -687,9 +687,13 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
 | `(c_nullable parameter)` | Accept either a mutable scalar reference or literal `null` for the supported slot. |
 
-A fixed C argument such as `(const command i32 F_SETFL)` supplies the
-header constant automatically. In the Wove call, pass only the remaining
-arguments.
+A fixed C argument in `params` supplies a native operand at that position.
+Use `(const command i32 F_SETFL)` for a header constant,
+`(const length i32 -1)` for a checked signed literal, or
+`(const tail (c-type "const char **") null)` for a null pointer with the
+exact C type. A fixed `i32` literal may also carry its `i32` suffix or
+use the `(i32 ...)` form. Clang verifies the signature against the
+included header. Pass only the ordinary parameters at Wove call sites.
 
 An open C tail accepts built-in scalars and native integer aliases. The
 fixed arguments still follow their declared types and contracts, including

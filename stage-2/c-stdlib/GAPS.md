@@ -16,8 +16,9 @@ provider. Native fixtures select bundled members from `stdio.wove`, `math.wove`,
   bodyless `fn` records the Wove
   parameter and return types. Its optional `(c-name "symbol")` records the
   native spelling when it differs. An omitted archive result becomes
-  `(returns void)`. A fixed C operand uses `(const command i32 F_GETFD)`
-  inside `params`.
+  `(returns void)`. Fixed C operands inside `params` accept i32 header
+  constants, checked signed i32 literals, and a literal null with an
+  explicit native pointer type.
 - `(c-type "native spelling")` preserves the header type on an alias, record,
   or enum. `shared-ref` and `mut-ref` borrow native scalar, record, or
   resource storage. `shared-array` and `mut-array` represent borrowed spans.
@@ -75,6 +76,17 @@ verbatim disabled text. Counts below cover active declarations.
 | `c_owned` · 4 | `dirent.h` `Directory`, `stdio.h` `File`, `spawn.h` `Actions` and `Attributes` | The `c-header` provider supports pointer results as local owners with null preservation and lexical destruction. A `shared-ref` or `mut-ref` parameter can lend a present owned pointer for a call, with exclusive access for the mutable loan. A bare owner parameter consumes an explicit move. Storage owners allocate the exact C representation and track activation separately from the allocation. Nullable storage borrows and integer handles need further lowering. |
 | `c_snapshot` · 9 | `dirent.h` `readdir{,64}`, `stdio.h` `fgets`, `stdlib.h` `getenv`, `mkdtemp`, `realpath`, `string.h` `strerror`, `unistd.h` `mkdtemp` and `environ` | Stage 2 copies borrowed and allocating `cstr` function results and `cstrs` globals such as `environ`. Stage 2 also copies fixed inline `char` fields within their declared extent. The bundled `readdir` snapshots the terminated name returned by the native API, including extended entries. The archived `readdir64` extension needs named feature selection. |
 | `c_variadic` · 16 | `fcntl.h` `open`, `openat`, and `fcntl_*`, `stdio.h` `fprintf`, `printf`, and `snprintf` | Named and open tails verify the fixed prefix and result against the header and use native default promotions. The fixed-command `fcntl_getfd`, `fcntl_getfl`, and `fcntl_getown` queries use an empty tail. Fixtures cover those queries, typed `fcntl` updates and opening modes, and the three open stdio bindings. |
+
+## Fixed native operands
+
+The eleven existing `fcntl.h` fixed commands use header constants. Both
+empty-tail queries and named variadic updates are covered by the native
+fixtures. No other checked-in provider uses a fixed operand with a signed
+literal or typed null. The standalone SQLite fixture passes `-1` and
+`const char **` null to `sqlite3_prepare_v2` and tests its statement
+pointer-out contract. A project bridge for `realpath` also exercises a fixed
+null with a copied C string result. `strtold` still needs a native `long double` result
+and a lifetime contract for an end pointer into the input string.
 
 ## Bundled math coverage
 
