@@ -52,11 +52,17 @@ WRAPPING_OPS = {
 }
 BINARY_OPS = {
 	"u8.eq": (U8, BOOL, "=="),
+	"u8.not-eq": (U8, BOOL, "!="),
 	"u8.lt": (U8, BOOL, "<"),
+	"u8.not-lt": (U8, BOOL, ">="),
 	"i32.eq": (I32, BOOL, "=="),
+	"i32.not-eq": (I32, BOOL, "!="),
 	"i32.lt": (I32, BOOL, "<"),
+	"i32.not-lt": (I32, BOOL, ">="),
 	"u32.eq": (U32, BOOL, "=="),
+	"u32.not-eq": (U32, BOOL, "!="),
 	"u32.lt": (U32, BOOL, "<"),
+	"u32.not-lt": (U32, BOOL, ">="),
 	"u32.and": (U32, U32, "&"),
 	"u32.or": (U32, U32, "|"),
 	"u32.xor": (U32, U32, "^"),
