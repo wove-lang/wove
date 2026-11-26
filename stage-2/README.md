@@ -574,6 +574,13 @@ can borrow a different buffer. The index and value have the same exact
 `i32` and `u8` types and bounds diagnostics as a store through a slice
 parameter.
 
+For numeric elements, `(array.alloc i32 count)` and `(array.alloc f64 count)`
+create zero-initialized owners with a runtime `i32` length. Shared and
+mutable parameters such as `(shared-array i32)` and `(mut-array f64)`
+borrow their original storage. Loads and stores check an `i32` index, and
+the value has the exact element type. A zero-length owner can be moved
+and borrowed, and every indexed access to it traps.
+
 For a copyable record, `(array.alloc Token count)` owns `count` zeroed
 records. The runtime allocates with `sizeof` and `_Alignof` of the
 defining C type. A whole-array call borrow uses a slice of the same
@@ -588,21 +595,21 @@ extent.
 Wove functions can require an exact element count with
 `(shared-array u8 FACET)` or `(mut-array u8 2)`. The optional extent uses the
 same decimal or immutable module integer syntax as an inline array. A
-whole inline array, a reborrow of an exact parameter, or a byte range with
+whole inline array, a reborrow of an exact parameter, or a numeric range with
 nonnegative literal endpoints can prove the argument's length. The usual
 range bounds checks still apply. If the length is unknown at compile time,
 the compiler checks the evaluated descriptor at the call argument before
 any later arguments run. An exact view can reborrow into a parameter that
 accepts any length.
 
-A byte-range argument uses `(borrow-shared (array.range (local source) start end))`
+A numeric range argument uses `(borrow-shared (array.range (local source) start end))`
 or the same projection with `borrow-mut`. An exclusive range requires a
 writable owner or mutable view. The source view and its exact `i32` endpoints
 are evaluated once, left to right. The runtime checks
 `0 <= start <= end <= source.len` before entering the callee. The view
-uses the original storage, with length `end - start` and index zero at
-`start`. The loan lasts from projection through the call, including
-later argument evaluations. A bounds failure reports the range's span.
+uses the original storage and exact element type, with length `end - start`
+and index zero at `start`. The loan lasts from projection through the call,
+including later argument evaluations. A bounds failure reports the range's span.
 
 Owners are released in reverse declaration order when their lexical
 scope exits, including on each completed loop iteration. A return
@@ -617,8 +624,8 @@ original owner. Borrowing or moving the old binding again reports
 `ownership.use_after_move` with the attempted operation and the original
 move span.
 
-A Wove helper can declare `(returns (owned-array u8))` and transfer an
-array with `(return (move (local data)))`. This transfers the original
+A Wove helper can declare a numeric owner result such as
+`(returns (owned-array i32))` and transfer an array with `(return (move (local data)))`. This transfers the original
 allocation on that exit while releasing the other live owners. An
 alternate path still sees the local until it transfers or releases it.
 A wrapper can also return the fresh owner from a call directly. The
