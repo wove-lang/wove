@@ -1228,13 +1228,19 @@ static int64_t wvrt_signed_word(uint64_t bits, uint64_t mask) {
 	return -INT64_C(1) - (int64_t)(mask - bits);
 }
 
-// Rotate the exact-width bits and report invalid counts at the count operand.
-uint64_t wvrt_rotate_at_span(uint64_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
-	int32_t width, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	// Reject invalid counts before either component shift.
+// Check the width before either rotation component can shift.
+static void wvrt_rotate_count(int32_t wvrtcount, int32_t width,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// A failed rotation points at its count operand.
 	if (!wvrt_valid_shift_count(wvrtcount, width)) {
 		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "rotate count out of range");
 	}
+}
+
+// Rotate the exact-width bits and report invalid counts at the count operand.
+uint64_t wvrt_rotate_at_span(uint64_t wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t width, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_rotate_count(wvrtcount, width, wvrtfile, wvrtstart, wvrtend);
 	const uint64_t mask = wvrt_word_mask(width);
 	const uint64_t bits = wvrtvalue & mask;
 	if (wvrtcount == 0) { return bits; }
@@ -1292,6 +1298,41 @@ int32_t wvrt_i32_shift_at_span(int32_t wvrtvalue, int32_t wvrtcount, bool wvrtri
 	return (int32_t)wvrt_signed_shift_at_span(wvrtvalue, wvrtcount, wvrtright, 32,
 		wvrtfile, wvrtstart, wvrtend);
 }
+
+#ifdef WVRT_HAS_INT128
+// Check a full-width unsigned shift before using the native unsigned operation.
+wvrt_u128 wvrt_u128_shift_at_span(wvrt_u128 wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrtcount = wvrt_shift_count_at_span(wvrtcount, 128, wvrtfile, wvrtstart, wvrtend);
+	return wvrtright ? wvrtvalue >> wvrtcount : wvrtvalue << wvrtcount;
+}
+
+// Shift unsigned bits and explicitly extend the sign of a negative right shift.
+wvrt_i128 wvrt_i128_shift_at_span(wvrt_i128 wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrtcount = wvrt_shift_count_at_span(wvrtcount, 128, wvrtfile, wvrtstart, wvrtend);
+	const wvrt_u128 wvrtbits = (wvrt_u128)wvrtvalue;
+	if (!wvrtright) { return wvrt_i128_from_wrapped_bits(wvrtbits << wvrtcount); }
+	if (wvrtvalue < 0) { return wvrt_i128_from_wrapped_bits(~(~wvrtbits >> wvrtcount)); }
+	return (wvrt_i128)(wvrtbits >> wvrtcount);
+}
+
+// Rotate every bit in the native 128-bit unsigned representation.
+wvrt_u128 wvrt_u128_rotate_at_span(wvrt_u128 wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_rotate_count(wvrtcount, 128, wvrtfile, wvrtstart, wvrtend);
+	if (wvrtcount == 0) { return wvrtvalue; }
+	const int32_t right = wvrtright ? wvrtcount : 128 - wvrtcount;
+	return (wvrtvalue >> right) | (wvrtvalue << (128 - right));
+}
+
+// Return the rotated bit pattern as a value of the original signed type.
+wvrt_i128 wvrt_i128_rotate_at_span(wvrt_i128 wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_i128_from_wrapped_bits(wvrt_u128_rotate_at_span((wvrt_u128)wvrtvalue,
+		wvrtcount, wvrtright, wvrtfile, wvrtstart, wvrtend));
+}
+#endif
 
 // Add in the modulo domain and return the corresponding signed value.
 int32_t wvrt_i32_add_wrapping(int32_t wvrtleft, int32_t wvrtright) {

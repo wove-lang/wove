@@ -105,6 +105,11 @@ the decoded value.
 | 16 bits | `i16` | `u16` |
 | 32 bits | `i32` | `u32` |
 | 64 bits | `i64` | `u64` |
+| 128 bits | `i128` | `u128` |
+
+The 128-bit types use the native `__int128` and `unsigned __int128` ABI.
+Wove checks `__SIZEOF_INT128__` for the selected Clang target and reports
+an unavailable width at the Wove source location.
 
 Typed numeric operators use `type.operation`. In `(i32.add left right)`,
 `i32` specifies the exact operands and result. The same integer operators
@@ -169,6 +174,10 @@ are available at every listed width.
   `T.from-le-bytes`, and `T.from-be-bytes`. They use fixed-width
   two's-complement encodings for signed types. Encoding produces a fixed byte
   array, and decoding requires a shared byte view of exactly that width.
+  Both 128-bit types use 16 bytes.
+
+The [128-bit decimal writers](stage-2/text/decimal_128.wove) preserve the
+full signed and unsigned values in a caller-supplied byte view.
 
 ## Floating point
 
@@ -198,7 +207,8 @@ respectively. These operations retain signed zero and NaN payloads. For example,
 little-endian bytes can widen with `(f64.from-f32 (f32.from-bits (local word)))`.
 
 The same `<destination>.from-<source>` syntax handles checked numeric conversions
-involving floats. Floating-to-integer conversions truncate toward zero and
+involving floats, with integer operands and results through 64 bits.
+Floating-to-integer conversions truncate toward zero and
 trap at the conversion span if the result cannot fit, including for NaN and
 infinity. `f32.from-f64` keeps native rounding, subnormals, and nonfinite
 values, and traps on finite values outside the binary32 range. Conversions
