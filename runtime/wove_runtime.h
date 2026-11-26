@@ -274,6 +274,27 @@ int64_t wvrt_signed_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wv
 // Test representability without narrowing the input or touching caller storage.
 #define wvrt_int_fits_type(type, value) (!__builtin_add_overflow((value), 0, &(type){0}))
 
+_Noreturn void wvrt_int_arithmetic_trap(int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+// The overflow builtin supplies the modulo result in the exact destination type.
+#define wvrt_int_wrapping(check, type, left, right) \
+	__extension__ ({ \
+		type wvrt_result; \
+		(void)check((left), (right), &wvrt_result); \
+		wvrt_result; \
+	})
+
+// A checked result uses the same exact-width builtin and reports overflow at the head.
+#define wvrt_int_checked(check, type, left, right, file, start, end) \
+	__extension__ ({ \
+		type wvrt_result; \
+		/* Test representability before exposing the result. */ \
+		if (check((left), (right), &wvrt_result)) { \
+			wvrt_int_arithmetic_trap((file), (start), (end)); \
+		} \
+		wvrt_result; \
+	})
+
 // Let the compiler check the exact pointee width and publish only a valid result.
 #define wvrt_int_try_overflow(check, left, right, output) \
 	__extension__ ({ \

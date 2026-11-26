@@ -18,9 +18,10 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 
 | Operation | Both stages | Stage 2 additions |
 | --- | --- | --- |
-| Wrapping addition | `i32.add`, `u32.add` | `i16.add`, `u16.add`, `i64.add`, `u64.add` |
-| Wrapping subtraction | `i32.sub`, `u32.sub` | `i16.sub`, `u16.sub`, `i64.sub` |
-| Wrapping multiplication | | `i32.mul`, `i64.mul` |
+| Wrapping addition | `i32.add`, `u32.add` | All integer widths |
+| Wrapping subtraction | `i32.sub`, `u32.sub` | All integer widths |
+| Wrapping multiplication | | All integer widths |
+| Checked arithmetic | | `add-checked`, `sub-checked`, and `mul-checked` at all integer widths |
 | Division and remainder | | `i32.div`, `i32.rem` |
 | Equality | `u8.eq`, `i32.eq`, `u32.eq` | All integer widths and `(int.eq Type left right)` |
 | Ordering | `u8.lt`, `i32.lt`, `u32.lt` | `lt`, `le`, `gt`, and `ge` at all integer widths |
@@ -31,6 +32,11 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 | Rotate right | | `u64.rotr` |
 | Boolean logic | `bool.and`, `bool.or`, `bool.not` | |
 
+- Integer arithmetic evaluates both operands once, from left to right.
+  Their types and the result type must match the type named in the tag.
+  Checked arithmetic traps if the mathematical result is outside that type's
+  range, including unsigned subtraction below zero. The diagnostic points
+  to the operation head.
 - Comparisons return `bool` and evaluate each written operand once, from
   left to right. A zero predicate compares with zero of the selected type,
   including when the result is fixed by unsigned ordering. `int.eq` and
