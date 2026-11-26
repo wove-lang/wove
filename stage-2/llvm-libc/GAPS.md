@@ -217,13 +217,38 @@ remaining SDK differences are listed below.
 | `DT_UNKNOWN`, `DT_FIFO`, `DT_CHR`, `DT_DIR`, `DT_BLK`, `DT_REG`, `DT_LNK`, `DT_SOCK`, `DT_WHT`, `IFTODT`, `DTTOIF` | Darwin and glibc expose these under the driver's feature flags. The fixture checks each type against its mode bits, including permission-bit masking. |
 | `MAXNAMLEN`, `DIRBLKSIZ` | The fixture checks the name limit on both SDKs and the Darwin-only block size. |
 | `DIR`, `opendir`, `fdopendir`, `closedir`, `dirfd`, `readdir`, `rewinddir`, `seekdir`, `telldir` | The provider owns `DIR *` and returns copied entry names. Installed fixtures exercise stream creation, descriptor transfer, navigation, and snapshot ownership. |
-| `struct dirent`, `struct dirent64`, `ino_t`, `ino64_t`, `size_t`, `ssize_t` | Raw entry binding is pending. Darwin's 64-bit record has `d_seekoff`, `d_namlen`, and a 1024-byte `d_name`. The audited glibc records have `d_off` and a 256-byte declared name field that can be followed by additional name bytes in a returned entry. Both expose `d_ino`, `d_reclen`, and `d_type`. |
+| `struct dirent`, `struct dirent64`, `ino_t`, `ino64_t`, `size_t`, `ssize_t` | Raw entry binding is pending a nullable native record borrow. [Compiler prerequisite #531](https://github.com/wove-lang/wove/issues/531). Darwin's 64-bit record has `d_seekoff`, `d_namlen`, and a 1024-byte `d_name`. The audited glibc records have `d_off` and a 256-byte declared name field that can be followed by additional name bytes in a returned entry. Both expose `d_ino`, `d_reclen`, and `d_type`. |
 | `readdir64`, `getdents64`, `getdirentries`, `getdirentries64` | The 64-bit Linux provider snapshots the wide name before the stream can reuse it. It checks byte or element counts and keeps the raw read results and native position outputs. The emitted fixture builds against glibc in all audited C modes. Darwin redirects its `getdirentries` declaration to an unavailable symbol under the current 64-bit inode ABI, as confirmed by a link with the macOS 27.2 SDK. [glibc directory reads](https://sourceware.org/glibc/manual/latest/html_node/Low_002dlevel-Directory-Access.html) |
 | `fdclosedir` | The macOS SDK declares it starting at deployment 26.4. The installed driver does not yet supply a deployment version to the provider selector. |
 | `readdir_r`, `readdir64_r` | Deprecated interfaces require storage sized for the native name limit and return a nullable alias into caller storage. |
 | `scandir`, `scandirat`, `fdscandir`, `scandir64`, `scandirat64`, `alphasort`, `alphasort64`, `versionsort`, `versionsort64` | The scanning calls need ownership for the allocated pointer vector and entries, plus borrowed native-record callbacks. The comparators need indirect borrowed entry pointers. |
 | `scandir_b`, `scandirat_b`, `fdscandir_b` | The Darwin variants require a C Blocks callback ABI. |
 | `posix_getdents`, `struct posix_dent`, `reclen_t`, `DT_MQ`, `DT_SEM`, `DT_SHM`, `DT_TMO` | The audited SDKs do not expose these POSIX.1-2024 members. |
+
+## Bundled errno coverage
+
+Both drivers load `errno.h.wove`. The installed-compiler fixture reads and
+writes the `errno` lvalue and restores the original value. It selects and
+evaluates every error code in the provider for its target.
+
+Clang preprocessing with Wove's feature definitions exposed 89 shared
+error codes, 20 additional Darwin codes, and 45 additional glibc codes.
+Each platform had the same entries across arm64, x86-64, C11, C17, and C23
+in the macOS 27.2 and Debian glibc 2.41 headers. The ISO C names are
+`EDOM`, `EILSEQ`, and `ERANGE`. The remaining codes follow the audited
+SDKs. [LLVM libc errno checklist](https://libc.llvm.org/headers/errno.html)
+
+Both SDKs alias `EWOULDBLOCK` to `EAGAIN`. glibc also aliases
+`EDEADLOCK` to `EDEADLK` and `ENOTSUP` to `EOPNOTSUPP`. The fixture
+checks those relations and Darwin's distinct `ENOTSUP` and
+`EOPNOTSUPP` values. Darwin's `__error` and glibc's
+`__errno_location` are reserved implementation spellings called by the
+header's `errno` macro.
+
+The GNU `program_invocation_name` and `program_invocation_short_name`
+globals are writable `char *` lvalues. They remain documented in the
+provider pending a contract for reassigning native string pointers with
+explicit lifetimes. [glibc program names](https://sourceware.org/glibc/manual/latest/html_node/Error-Messages.html)
 
 ## Bundled math coverage
 
