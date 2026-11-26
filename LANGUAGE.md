@@ -714,6 +714,15 @@ owner explicitly with `(move (local input))`. The callee owns the incoming
 array for its function body and releases it at exit unless it transfers
 ownership again.
 
+A Wove parameter such as `(params (packet Packet))` can also take a
+named struct with owning fields and no borrowed fields. Pass a fresh
+`Packet` or transfer an existing one with `(move (local packet))`.
+The argument must have the exact declared struct type. A live loan or a
+partially moved struct prevents the transfer. After a successful move the
+caller cannot use the original value. On exit the callee releases every
+field it still owns, and any owner forwarded by move remains with its
+recipient.
+
 ## Joined workers
 
 `(worker.spawn-join widen (move (local input)))` calls the named Wove
