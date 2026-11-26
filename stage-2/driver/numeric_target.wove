@@ -1,7 +1,7 @@
-(module native_float_target
+(module native_numeric_target
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Locate checked uses of target-dependent floats and verify their native ABI.")
+	(:doc "Locate checked uses of target-dependent numeric types and verify their native ABI.")
 
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "../clang/query.wove" (only query_clang_frontend (type QuerySite)))
@@ -9,9 +9,10 @@
 	(use wove-file "../clang/values.wove" (only clang_probe_value clang_probe_u32 (type ProbeWord)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/integer_checks.wove" (only (value integer_fits)))
 	(use wove-file "../source/module.wove" (only form_parts))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
-	(use wove-file "../source/types.wove" (only builtin_type_keyword (value f16_type) (value f80_type) (value f128_type)))
+	(use wove-file "../source/types.wove" (only builtin_type_keyword is_128bit_integer (value i128_type) (value f16_type) (value f80_type) (value f128_type)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../scalar/trees.wove" (only source_span_owner))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
@@ -22,9 +23,9 @@
 		member_value_type native_field_type place_reference_target record_index slice_element_type (type ScalarRecord)))
 	(use wove-file "../text/match.wove" (only is_three_bytes))
 
-	(struct FloatHints (fields (half bool) (extended bool) (quad bool)))
-	(struct FloatSupport (fields (half u32) (extended u32) (quad u32)))
-	(struct FloatRejection (fields (site QuerySite) (error u32)))
+	(struct NumericHints (fields (half bool) (extended bool) (quad bool) (wide_integer bool)))
+	(struct NumericSupport (fields (half u32) (extended u32) (quad u32) (wide_integer u32)))
+	(struct NumericRejection (fields (site QuerySite) (error u32)))
 
 	(let f16_unavailable 79u32)
 	(let f16_probe_failed 80u32)
@@ -32,10 +33,13 @@
 	(let f80_probe_failed 82u32)
 	(let f128_unavailable 83u32)
 	(let f128_probe_failed 84u32)
+	(let int128_unavailable 85u32)
+	(let int128_probe_failed 86u32)
 	(let float_header "<float.h>")
 	(let half_fact "wvpr_has_float16")
 	(let mantissa_fact "wvpr_long_double_mantissa")
 	(let quad_fact "wvpr_has_float128")
+	(let wide_integer_fact "wvpr_has_int128")
 
 	(fn target_float_keyword
 		(:doc "Find a width that depends on the selected frontend's floating ABI.")
@@ -51,14 +55,15 @@
 				(then (return (local f80_type))))
 			(return 0u32)))
 
-	(fn target_float_hints
-		(:doc "Find potential floating types, operators, or literals in parsed source atoms.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode))) (returns FloatHints)
+	(fn target_numeric_hints
+		(:doc "Find potential target-dependent numeric types, operators, or literals in source atoms.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))) (returns NumericHints)
 		(body
 			(let-mut index 0i32)
 			(let-mut half (bool false))
 			(let-mut extended (bool false))
 			(let-mut quad (bool false))
+			(let-mut wide_integer (bool false))
 			(while
 				(:doc "Hints route candidates through graph checking. Only a checked use can request Clang.")
 				(i32.lt (local index) (array.len (local nodes)))
@@ -67,7 +72,7 @@
 					(let start (struct.get (local node) start))
 					(let end (struct.get (local node) end))
 					(if
-						(:doc "Strings and structured rows cannot themselves name a floating type.")
+						(:doc "Only source atoms can name a target-dependent numeric type.")
 						(bool.and (u32.eq (struct.get (local node) kind) 1u32)
 							(i32.lt 2i32 (i32.sub (local end) (local start))))
 						(then
@@ -87,45 +92,49 @@
 								(i32.lt 3i32 (i32.sub (local end) (local start)))
 								(then
 									(let suffix (call builtin_type_keyword (borrow-shared (local source)) (i32.sub (local end) 4i32) 4i32))
-									(let prefix (call builtin_type_keyword (borrow-shared (local source)) (local start) 4i32))
+										(let prefix (call builtin_type_keyword (borrow-shared (local source)) (local start) 4i32))
+									(let head (bool.or (i32.eq (i32.sub (local end) (local start)) 4i32)
+										(u8.eq (array.load (local source) (i32.add (local start) 4i32)) 46u8)))
 									(set (local quad) (bool.or (local quad)
 										(bool.or (u32.eq (local suffix) (local f128_type))
-											(bool.and (u32.eq (local prefix) (local f128_type))
-												(bool.or (i32.eq (i32.sub (local end) (local start)) 4i32)
-													(u8.eq (array.load (local source) (i32.add (local start) 4i32)) 46u8))))))))
-							(if
-								(:doc "All target-dependent formats may be needed.")
-								(bool.and (local half) (bool.and (local extended) (local quad)))
-								(then (return (struct.new FloatHints (half (bool true)) (extended (bool true)) (quad (bool true))))))))
+											(bool.and (local head) (u32.eq (local prefix) (local f128_type))))))
+									(set (local wide_integer) (bool.or (local wide_integer)
+										(bool.or (call is_128bit_integer (local suffix))
+											(bool.and (local head) (call is_128bit_integer (local prefix))))))))))
 					(set (local index) (i32.inc (local index)))))
-			(return (struct.new FloatHints (half (local half)) (extended (local extended)) (quad (local quad))))))
+			(return (struct.new NumericHints (half (local half)) (extended (local extended)) (quad (local quad)) (wide_integer (local wide_integer))))))
 
-	(fn has_target_float_hint
-		(:doc "Route target-sensitive source atoms through the checked disk graph.")
+	(fn has_target_numeric_hint
+		(:doc "Route target-sensitive numeric atoms through the checked disk graph.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))) (returns bool)
 		(body
-			(let hints (call target_float_hints (borrow-shared (local source)) (borrow-shared (local nodes))))
+			(let hints (call target_numeric_hints (borrow-shared (local source)) (borrow-shared (local nodes))))
 			(return (bool.or (struct.get (local hints) half)
-				(bool.or (struct.get (local hints) extended) (struct.get (local hints) quad))))))
+				(bool.or (struct.get (local hints) extended)
+					(bool.or (struct.get (local hints) quad) (struct.get (local hints) wide_integer)))))))
 
-	(fn target_float_type
-		(:doc "Recognize a required float directly or through a checked array, slice, or reference.")
+	(fn target_numeric_type
+		(:doc "Recognize a required numeric capability directly or through a checked array, slice, or reference.")
 		(params (records (shared-array ScalarRecord)) (type u32) (wanted u32)) (returns bool)
 		(body
 			(if (u32.eq (local type) (local wanted)) (then (return (bool true))))
 			(if
+				(:doc "Both signednesses of the wide integer require the same target capability.")
+				(bool.and (u32.eq (local wanted) (local i128_type)) (call is_128bit_integer (local type)))
+				(then (return (bool true))))
+			(if
 				(:doc "An owning array carries the type of each aligned element.")
 				(call is_array_owner (local type))
-				(then (return (call target_float_type (borrow-shared (local records)) (call array_owner_element (local type)) (local wanted)))))
+				(then (return (call target_numeric_type (borrow-shared (local records)) (call array_owner_element (local type)) (local wanted)))))
 			(if
 				(:doc "Typed slices carry their checked element type.")
 				(call is_typed_slice (local type))
-				(then (return (call target_float_type (borrow-shared (local records))
+				(then (return (call target_numeric_type (borrow-shared (local records))
 					(call slice_element_type (borrow-shared (local records)) (local type)) (local wanted)))))
 			(if
 				(:doc "A native reference retains the exact type of its pointee.")
 				(call is_place_reference (local type))
-				(then (return (call target_float_type (borrow-shared (local records))
+				(then (return (call target_numeric_type (borrow-shared (local records))
 					(call place_reference_target (borrow-shared (local records)) (local type)) (local wanted)))))
 			(if
 				(:doc "Inspect inline array elements here. Named layout fields have their own original sites.")
@@ -135,11 +144,11 @@
 					(if
 						(:doc "Only inline arrays encode element types directly in the layout.")
 						(call is_fixed_array (local layout))
-						(then (return (call target_float_type (borrow-shared (local records))
+						(then (return (call target_numeric_type (borrow-shared (local records))
 							(u32.from-i32 (struct.get (local layout) first)) (local wanted)))))))
 			(return (bool false))))
 
-	(fn target_float_field
+	(fn target_numeric_field
 		(:doc "Find the first emitted member whose checked type requires this format.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
 			(records (shared-array ScalarRecord)) (wanted u32)) (returns i32)
@@ -175,7 +184,7 @@
 											(borrow-shared (local records)) (borrow-shared (local bindings)) (local record) (local node)))))
 									(if
 										(:doc "A type operand preserves the source location even in a specialized layout.")
-										(call target_float_type (borrow-shared (local records)) (local type) (local wanted))
+										(call target_numeric_type (borrow-shared (local records)) (local type) (local wanted))
 										(then
 											(let part (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 											(let type_node (struct.get (local part) operands))
@@ -186,7 +195,7 @@
 					(set (local index) (i32.inc (local index)))))
 			(return -1i32)))
 
-	(fn target_float_site
+	(fn target_numeric_site
 		(:doc "Locate the required format in a checked expression, storage declaration, signature, or field.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
 			(expressions (shared-array ScalarExpression)) (statements (shared-array ScalarStatement))
@@ -202,13 +211,16 @@
 					(let expr (array.load (local expressions) (local index)))
 					(let statement (array.load (local statements) (local index)))
 					(if
-						(:doc "Prefer a checked expression over its enclosing storage declaration.")
-						(call target_float_type (borrow-shared (local records)) (struct.get (local expr) type) (local wanted))
+						(:doc "A fits expression can require a type even when its argument and Boolean result have other types.")
+						(bool.or (call target_numeric_type (borrow-shared (local records)) (struct.get (local expr) type) (local wanted))
+							(bool.and (u32.eq (local wanted) (local i128_type))
+								(bool.and (u32.eq (struct.get (local expr) kind) (local integer_fits))
+									(call is_128bit_integer (u32.from-i32 (struct.get (local expr) target))))))
 						(then (return (local index))))
 					(if
 						(:doc "A storage declaration can require the format even with no initializer expression.")
 						(bool.and (i32.ltz (local storage))
-							(call target_float_type (borrow-shared (local records)) (struct.get (local statement) type) (local wanted)))
+							(call target_numeric_type (borrow-shared (local records)) (struct.get (local statement) type) (local wanted)))
 						(then (set (local storage) (local index))))
 					(set (local index) (i32.inc (local index)))))
 			(if (i32.lt -1i32 (local storage)) (then (return (local storage))))
@@ -220,7 +232,7 @@
 					(let param (array.load (local parameters) (local index)))
 					(if
 						(:doc "The type follows the formal's original name.")
-						(call target_float_type (borrow-shared (local records)) (struct.get (local param) type) (local wanted))
+						(call target_numeric_type (borrow-shared (local records)) (struct.get (local param) type) (local wanted))
 						(then
 							(let name (struct.get (local param) name))
 							(let type (struct.get (array.load (local nodes) (local name)) next_sibling))
@@ -235,10 +247,10 @@
 					(let fn_row (array.load (local functions) (local index)))
 					(if
 						(:doc "Report the original declaration if its result requires the target ABI.")
-						(call target_float_type (borrow-shared (local records)) (struct.get (local fn_row) result) (local wanted))
+						(call target_numeric_type (borrow-shared (local records)) (struct.get (local fn_row) result) (local wanted))
 						(then (return (struct.get (local fn_row) declaration))))
 					(set (local index) (i32.inc (local index)))))
-			(return (call target_float_field (borrow-shared (local source)) (borrow-shared (local nodes))
+			(return (call target_numeric_field (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local bindings)) (borrow-shared (local records)) (local wanted)))))
 
 	(fn target_site
@@ -251,7 +263,7 @@
 			(return (struct.new QuerySite (file (local file)) (start (i32.sub (local start) (local base)))
 				(end (i32.sub (struct.get (local node) end) (local base)))))))
 
-	(fn target_float_fact
+	(fn target_numeric_fact
 		(:doc "Read one unsigned capability value from the selected Clang AST.")
 		(params (capture (shared-array u8)) (index ClangIndex) (nodes (shared-array JsonNode))
 			(declarations (shared-array ClangDeclaration)) (names (shared-array u8)) (key (shared-array u8))) (returns ProbeWord)
@@ -260,7 +272,7 @@
 				(call clang_probe_value (borrow-shared (local capture)) (local index) (borrow-shared (local nodes))
 					(borrow-shared (local declarations)) (borrow-shared (local names)) (borrow-shared (local key)))))))
 
-	(fn float_fact_status
+	(fn numeric_fact_status
 		(:doc "Check that the capability enum's exact value describes the required ABI.")
 		(params (fact ProbeWord) (expected u32) (unavailable u32) (failed u32)) (returns u32)
 		(body
@@ -272,9 +284,9 @@
 			(if (u32.eq (struct.get (local fact) value) (local expected)) (then (return 0u32)))
 			(return (local unavailable))))
 
-	(fn query_float_support
+	(fn query_numeric_support
 		(:doc "Read the archive's capability facts in one query using the selected frontend options.")
-		(params (options (shared-array u8)) (directory (shared-array u8)) (site QuerySite)) (returns FloatSupport)
+		(params (options (shared-array u8)) (directory (shared-array u8)) (site QuerySite)) (returns NumericSupport)
 		(body
 			(let program (call clang_program))
 			(let empty (array.alloc u8 0i32))
@@ -298,19 +310,23 @@
 						(u32.eqz (local error))
 						(then
 							(let index (struct.get (local result) index))
-							(let half_flag (call target_float_fact (borrow-shared (local capture)) (local index)
+							(let half_flag (call target_numeric_fact (borrow-shared (local capture)) (local index)
 								(borrow-shared (local nodes)) (borrow-shared (local declarations)) (borrow-shared (local names))
 								(borrow-shared (local half_fact))))
-							(let mantissa (call target_float_fact (borrow-shared (local capture)) (local index)
+							(let mantissa (call target_numeric_fact (borrow-shared (local capture)) (local index)
 								(borrow-shared (local nodes)) (borrow-shared (local declarations)) (borrow-shared (local names))
 								(borrow-shared (local mantissa_fact))))
-							(let quad_flag (call target_float_fact (borrow-shared (local capture)) (local index)
+							(let quad_flag (call target_numeric_fact (borrow-shared (local capture)) (local index)
 								(borrow-shared (local nodes)) (borrow-shared (local declarations)) (borrow-shared (local names))
 								(borrow-shared (local quad_fact))))
-							(let half (call float_fact_status (local half_flag) 1u32 (local f16_unavailable) (local f16_probe_failed)))
-							(let extended (call float_fact_status (local mantissa) 64u32 (local f80_unavailable) (local f80_probe_failed)))
-							(let quad_native (call float_fact_status (local mantissa) 113u32 (local f128_unavailable) (local f128_probe_failed)))
-							(let quad_extension (call float_fact_status (local quad_flag) 1u32 (local f128_unavailable) (local f128_probe_failed)))
+							(let wide_flag (call target_numeric_fact (borrow-shared (local capture)) (local index)
+								(borrow-shared (local nodes)) (borrow-shared (local declarations)) (borrow-shared (local names))
+								(borrow-shared (local wide_integer_fact))))
+							(let wide_integer (call numeric_fact_status (local wide_flag) 1u32 (local int128_unavailable) (local int128_probe_failed)))
+							(let half (call numeric_fact_status (local half_flag) 1u32 (local f16_unavailable) (local f16_probe_failed)))
+							(let extended (call numeric_fact_status (local mantissa) 64u32 (local f80_unavailable) (local f80_probe_failed)))
+							(let quad_native (call numeric_fact_status (local mantissa) 113u32 (local f128_unavailable) (local f128_probe_failed)))
+							(let quad_extension (call numeric_fact_status (local quad_flag) 1u32 (local f128_unavailable) (local f128_probe_failed)))
 							(let-mut quad 0u32)
 							(if
 								(:doc "Either native spelling suffices. A failed fact matters only when the other spelling is unavailable.")
@@ -322,70 +338,84 @@
 										(bool.or (u32.eq (local quad_native) (local f128_probe_failed))
 											(u32.eq (local quad_extension) (local f128_probe_failed)))
 										(then (set (local quad) (local f128_probe_failed))))))
-							(return (struct.new FloatSupport (half (local half)) (extended (local extended)) (quad (local quad))))))
+							(return (struct.new NumericSupport (half (local half)) (extended (local extended)) (quad (local quad)) (wide_integer (local wide_integer))))))
 					(if
 						(:doc "Only output or index exhaustion can be repaired with a larger workspace.")
 						(bool.not (bool.or (u32.eq (local error) 5u32) (u32.eq (local error) 7u32)))
-						(then (return (struct.new FloatSupport (half (local f16_probe_failed)) (extended (local f80_probe_failed)) (quad (local f128_probe_failed))))))
+						(then (return (struct.new NumericSupport (half (local f16_probe_failed)) (extended (local f80_probe_failed)) (quad (local f128_probe_failed)) (wide_integer (local int128_probe_failed))))))
 					(set (local width) (i32.add (local width) (local width)))))
-			(return (struct.new FloatSupport (half (local f16_probe_failed)) (extended (local f80_probe_failed)) (quad (local f128_probe_failed))))))
+			(return (struct.new NumericSupport (half (local f16_probe_failed)) (extended (local f80_probe_failed)) (quad (local f128_probe_failed)) (wide_integer (local int128_probe_failed))))))
 
-	(fn check_float_targets
-		(:doc "Query Clang once if the checked graph uses any target-sensitive float format.")
+	(fn check_numeric_targets
+		(:doc "Query Clang once if the checked graph uses a target-dependent numeric type.")
 		(params (source (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression)) (statements (shared-array ScalarStatement))
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
-			(options (shared-array u8)) (directory (shared-array u8))) (returns FloatRejection)
+			(options (shared-array u8)) (directory (shared-array u8))) (returns NumericRejection)
 		(body
-			(let accepted (struct.new FloatRejection (site (struct.new QuerySite (file -1i32) (start 0i32) (end 0i32))) (error 0u32)))
-			(let hints (call target_float_hints (borrow-shared (local source)) (borrow-shared (local nodes))))
+			(let accepted (struct.new NumericRejection (site (struct.new QuerySite (file -1i32) (start 0i32) (end 0i32))) (error 0u32)))
+			(let hints (call target_numeric_hints (borrow-shared (local source)) (borrow-shared (local nodes))))
 			(let-mut half -1i32)
 			(let-mut extended -1i32)
 			(let-mut quad -1i32)
+			(let-mut wide_integer -1i32)
 			(if
 				(:doc "A checked binary16 use must resolve on the selected Clang target.")
 				(struct.get (local hints) half)
-				(then (set (local half) (call target_float_site (borrow-shared (local source)) (borrow-shared (local nodes))
+				(then (set (local half) (call target_numeric_site (borrow-shared (local source)) (borrow-shared (local nodes))
 					(borrow-shared (local bindings)) (borrow-shared (local expressions)) (borrow-shared (local statements))
 					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local records))
 					(local f16_type)))))
 			(if
 				(:doc "An extended-precision use needs a native long double with the requested mantissa.")
 				(struct.get (local hints) extended)
-				(then (set (local extended) (call target_float_site (borrow-shared (local source)) (borrow-shared (local nodes))
+				(then (set (local extended) (call target_numeric_site (borrow-shared (local source)) (borrow-shared (local nodes))
 					(borrow-shared (local bindings)) (borrow-shared (local expressions)) (borrow-shared (local statements))
 					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local records))
 					(local f80_type)))))
 			(if
 				(:doc "A checked binary128 use needs a successful target query.")
 				(struct.get (local hints) quad)
-				(then (set (local quad) (call target_float_site (borrow-shared (local source)) (borrow-shared (local nodes))
+				(then (set (local quad) (call target_numeric_site (borrow-shared (local source)) (borrow-shared (local nodes))
 					(borrow-shared (local bindings)) (borrow-shared (local expressions)) (borrow-shared (local statements))
 					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local records))
 					(local f128_type)))))
+			(if
+				(:doc "Either wide integer type depends on Clang's native int128 ABI.")
+				(struct.get (local hints) wide_integer)
+				(then (set (local wide_integer) (call target_numeric_site (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local bindings)) (borrow-shared (local expressions)) (borrow-shared (local statements))
+					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local records))
+					(local i128_type)))))
 			(let-mut first (local half))
 			(if
 				(:doc "Choose the first requested width as the owner of the shared query.")
 				(i32.ltz (local first))
 				(then (set (local first) (local extended))))
 			(if (i32.ltz (local first)) (then (set (local first) (local quad))))
+			(if (i32.ltz (local first)) (then (set (local first) (local wide_integer))))
 			(if (i32.ltz (local first)) (then (return (local accepted))))
 			(let site (call target_site (borrow-shared (local files)) (array.load (local nodes) (local first))))
-			(let support (call query_float_support (borrow-shared (local options)) (borrow-shared (local directory)) (local site)))
+			(let support (call query_numeric_support (borrow-shared (local options)) (borrow-shared (local directory)) (local site)))
 			(if
 				(:doc "Retain the original binary16 source span when it is the unsupported width.")
 				(bool.and (i32.lt -1i32 (local half)) (u32.gtz (struct.get (local support) half)))
-				(then (return (struct.new FloatRejection (site (local site)) (error (struct.get (local support) half))))))
+				(then (return (struct.new NumericRejection (site (local site)) (error (struct.get (local support) half))))))
 			(if
 				(:doc "If binary16 passed, report a failed extended-precision check at its own source span.")
 				(bool.and (i32.lt -1i32 (local extended)) (u32.gtz (struct.get (local support) extended)))
-				(then (return (struct.new FloatRejection (site (call target_site (borrow-shared (local files))
+				(then (return (struct.new NumericRejection (site (call target_site (borrow-shared (local files))
 					(array.load (local nodes) (local extended)))) (error (struct.get (local support) extended))))))
 			(if
 				(:doc "Report unsupported binary128 at the checked occurrence even when other widths pass.")
 				(bool.and (i32.lt -1i32 (local quad)) (u32.gtz (struct.get (local support) quad)))
-				(then (return (struct.new FloatRejection (site (call target_site (borrow-shared (local files))
+				(then (return (struct.new NumericRejection (site (call target_site (borrow-shared (local files))
 					(array.load (local nodes) (local quad)))) (error (struct.get (local support) quad))))))
+			(if
+				(:doc "Report missing int128 support at its original checked source occurrence.")
+				(bool.and (i32.not-ltz (local wide_integer)) (u32.gtz (struct.get (local support) wide_integer)))
+				(then (return (struct.new NumericRejection (site (call target_site (borrow-shared (local files))
+					(array.load (local nodes) (local wide_integer)))) (error (struct.get (local support) wide_integer))))))
 			(return (local accepted))))
 
 )

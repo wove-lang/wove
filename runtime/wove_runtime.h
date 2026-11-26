@@ -28,6 +28,24 @@ typedef struct WvrtArray {
 typedef struct { const void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size; } wvrt_slice;
 typedef struct { void *wvrt_items; int32_t wvrt_length; size_t wvrt_element_size; } wvrt_mut_slice;
 
+// Wide integers use the target's native signed and unsigned __int128 ABI.
+#if defined(__SIZEOF_INT128__)
+#define WVRT_HAS_INT128 1
+__extension__ typedef __int128 wvrt_i128;
+__extension__ typedef unsigned __int128 wvrt_u128;
+
+// Assemble integer constant expressions from portable 64-bit values.
+#define WVRT_U128_C(high, low) (((wvrt_u128)(high) << 64) | (wvrt_u128)(low))
+#define WVRT_I128_C(high, low) ((wvrt_i128)WVRT_U128_C(high, low))
+#define WVRT_I128_NEG_C(high, low) (-(wvrt_i128)(WVRT_U128_C(high, low) - 1) - 1)
+
+wvrt_i128 wvrt_i128_from_wrapped_bits(wvrt_u128 wvrt_bits);
+wvrt_u128 wvrt_u128_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_i128 wvrt_i128_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+#endif
+
 // Exact native floating representations and checked numerical conversions.
 float wvrt_f32_from_bits(uint32_t wvrtbits);
 uint32_t wvrt_f32_to_bits(float wvrtvalue);

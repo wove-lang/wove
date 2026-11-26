@@ -1084,15 +1084,22 @@ _Noreturn void wvrt_int_conversion_trap(int32_t wvrtfile, int32_t wvrtstart, int
 	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
 }
 
-// Assemble an exact-width byte view using unsigned arithmetic and unaligned byte reads.
-uint64_t wvrt_int_from_bytes(wvrt_slice wvrtview, int32_t wvrtwidth, bool wvrtbigendian,
-	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	// Check the extent before touching the first byte of the view.
-	if (wvrtwidth < 1 || wvrtwidth > 8 || wvrtview.wvrt_length != wvrtwidth ||
+// Check the exact byte view before touching any element.
+static const uint8_t *wvrt_integer_bytes(wvrt_slice wvrtview, int32_t wvrtwidth,
+	bool wvrtvalid, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// The caller supplies the range admitted by the result type.
+	if (!wvrtvalid || wvrtview.wvrt_length != wvrtwidth ||
 		wvrtview.wvrt_element_size != sizeof(uint8_t) || wvrtview.wvrt_items == NULL) {
 		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer byte width mismatch");
 	}
-	const uint8_t *wvrtbytes = wvrtview.wvrt_items;
+	return wvrtview.wvrt_items;
+}
+
+// Assemble an exact-width byte view using unsigned arithmetic and unaligned byte reads.
+uint64_t wvrt_int_from_bytes(wvrt_slice wvrtview, int32_t wvrtwidth, bool wvrtbigendian,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	const uint8_t *wvrtbytes = wvrt_integer_bytes(wvrtview, wvrtwidth, wvrtwidth >= 1 && wvrtwidth <= 8,
+		wvrtfile, wvrtstart, wvrtend);
 	uint64_t wvrtbits = 0;
 	// Read the most significant byte first in either requested order.
 	for (int32_t wvrtindex = 0; wvrtindex < wvrtwidth; ++wvrtindex) {
@@ -1113,6 +1120,36 @@ int64_t wvrt_signed_from_bytes(wvrt_slice wvrtview, int32_t wvrtwidth, bool wvrt
 	}
 	return -INT64_C(1) - (int64_t)((wvrtsign - 1) - (wvrtbits - wvrtsign));
 }
+
+#ifdef WVRT_HAS_INT128
+// Recover the signed 128-bit value using only representable signed casts.
+wvrt_i128 wvrt_i128_from_wrapped_bits(wvrt_u128 wvrtbits) {
+	const wvrt_u128 wvrtall = ~(wvrt_u128)0;
+	if (wvrtbits <= (wvrtall >> 1)) { return (wvrt_i128)wvrtbits; }
+	return -1 - (wvrt_i128)(wvrtall - wvrtbits);
+}
+
+// Assemble all sixteen bytes, including the high word, after the extent check.
+wvrt_u128 wvrt_u128_from_bytes(wvrt_slice wvrtview, int32_t wvrtwidth, bool wvrtbigendian,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	const uint8_t *wvrtbytes = wvrt_integer_bytes(wvrtview, wvrtwidth, wvrtwidth == 16,
+		wvrtfile, wvrtstart, wvrtend);
+	wvrt_u128 wvrtbits = 0;
+	// Read the bytes from the most significant end of the requested encoding.
+	for (int32_t wvrtindex = 0; wvrtindex < wvrtwidth; ++wvrtindex) {
+		int32_t wvrtoffset = wvrtbigendian ? wvrtindex : wvrtwidth - 1 - wvrtindex;
+		wvrtbits = (wvrtbits << 8) | wvrtbytes[wvrtoffset];
+	}
+	return wvrtbits;
+}
+
+// Interpret a checked 16-byte representation as a signed integer.
+wvrt_i128 wvrt_i128_from_bytes(wvrt_slice wvrtview, int32_t wvrtwidth, bool wvrtbigendian,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_i128_from_wrapped_bits(wvrt_u128_from_bytes(wvrtview, wvrtwidth, wvrtbigendian,
+		wvrtfile, wvrtstart, wvrtend));
+}
+#endif
 
 // Check Stage 2 conversions before the target-specific wrapper narrows the value.
 static int64_t wvrt_int_at_span(int64_t wvrtvalue, int64_t wvrtmin, int64_t wvrtmax,
