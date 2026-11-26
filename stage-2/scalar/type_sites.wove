@@ -1,0 +1,157 @@
+(module scalar_type_sites
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Locate checked uses of a native numeric type in emitted expressions, signatures, and layouts.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/types.wove" (only is_128bit_integer (value i128_type)))
+	(use wove-file "../source/integer_checks.wove" (only (value integer_fits)))
+	(use wove-file "./loans.wove" (only (type ScalarExpression)))
+	(use wove-file "./flow.wove" (only (type ScalarStatement)))
+	(use wove-file "./plan.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "./records.wove" (only array_owner_element is_array_owner is_fixed_array
+		is_enum_layout is_payload_enum is_native_record is_place_reference is_record_type is_typed_slice
+		member_value_type native_field_type place_reference_target record_index slice_element_type (type ScalarRecord)))
+
+	(fn target_numeric_type
+		(:doc "Recognize a required numeric capability directly or through a checked array, slice, or reference.")
+		(params (records (shared-array ScalarRecord)) (type u32) (wanted u32)) (returns bool)
+		(body
+			(if (u32.eq (local type) (local wanted)) (then (return (bool true))))
+			(if
+				(:doc "Both signednesses of the wide integer require the same target capability.")
+				(bool.and (u32.eq (local wanted) (local i128_type)) (call is_128bit_integer (local type)))
+				(then (return (bool true))))
+			(if
+				(:doc "An owning array carries the type of each aligned element.")
+				(call is_array_owner (local type))
+				(then (return (call target_numeric_type (borrow-shared (local records)) (call array_owner_element (local type)) (local wanted)))))
+			(if
+				(:doc "Typed slices carry their checked element type.")
+				(call is_typed_slice (local type))
+				(then (return (call target_numeric_type (borrow-shared (local records))
+					(call slice_element_type (borrow-shared (local records)) (local type)) (local wanted)))))
+			(if
+				(:doc "A native reference retains the exact type of its pointee.")
+				(call is_place_reference (local type))
+				(then (return (call target_numeric_type (borrow-shared (local records))
+					(call place_reference_target (borrow-shared (local records)) (local type)) (local wanted)))))
+			(if
+				(:doc "Inspect inline array elements here. Named layout fields have their own original sites.")
+				(call is_record_type (local type))
+				(then
+					(let layout (array.load (local records) (call record_index (local type))))
+					(if
+						(:doc "Only inline arrays encode element types directly in the layout.")
+						(call is_fixed_array (local layout))
+						(then (return (call target_numeric_type (borrow-shared (local records))
+							(u32.from-i32 (struct.get (local layout) first)) (local wanted)))))))
+			(return (bool false))))
+
+	(fn target_numeric_field
+		(:doc "Find the first emitted member whose checked type requires the selected numeric ABI.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
+			(records (shared-array ScalarRecord)) (wanted u32)) (returns i32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Visit checked layouts up to their zero-initialized tail.")
+				(i32.lt (local index) (array.len (local records)))
+				(body
+					(let record (array.load (local records) (local index)))
+					(if (i32.eqz (struct.get (local record) name)) (then (return -1i32)))
+					(let template (bool.and (i32.lt -1i32 (struct.get (local record) generic))
+						(i32.ltz (struct.get (local record) specialization))))
+					(let simple_enum (bool.and (call is_enum_layout (local record)) (bool.not (call is_payload_enum (local record)))))
+					(if
+						(:doc "Only concrete named layouts have source member rows to inspect.")
+						(bool.not (bool.or (local template) (bool.or (local simple_enum) (call is_fixed_array (local record)))))
+						(then
+							(let-mut field (struct.get (local record) first))
+							(let-mut ordinal 0i32)
+							(while
+								(:doc "Use the same checked member types as the C record emitter.")
+								(bool.and (i32.lt (local ordinal) (struct.get (local record) count)) (i32.lt -1i32 (local field)))
+								(body
+									(let node (array.load (local nodes) (local field)))
+									(let-mut type 0u32)
+									(if
+										(:doc "Bridge fields use the resolved C layout instead of the Wove member namespace.")
+										(call is_native_record (local record))
+										(then (set (local type) (call native_field_type (borrow-shared (local source)) (borrow-shared (local nodes))
+											(borrow-shared (local records)) (local record) (local field))))
+										(else (set (local type) (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+											(borrow-shared (local records)) (borrow-shared (local bindings)) (local record) (local node)))))
+									(if
+										(:doc "A type operand preserves the source location even in a specialized layout.")
+										(call target_numeric_type (borrow-shared (local records)) (local type) (local wanted))
+										(then
+											(let part (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+											(let type_node (struct.get (local part) operands))
+											(if (i32.lt -1i32 (local type_node)) (then (return (local type_node))))
+											(return (local field))))
+									(set (local field) (struct.get (local node) next_sibling))
+									(set (local ordinal) (i32.inc (local ordinal)))))))
+					(set (local index) (i32.inc (local index)))))
+			(return -1i32)))
+
+	(fn target_numeric_site
+		(:doc "Locate the required format in a checked expression, storage declaration, signature, or field.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
+			(expressions (shared-array ScalarExpression)) (statements (shared-array ScalarStatement))
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(records (shared-array ScalarRecord)) (wanted u32)) (returns i32)
+		(body
+			(let-mut index 0i32)
+			(let-mut storage -1i32)
+			(while
+				(:doc "Expression and statement rows share their original source node index.")
+				(i32.lt (local index) (array.len (local expressions)))
+				(body
+					(let expr (array.load (local expressions) (local index)))
+					(let statement (array.load (local statements) (local index)))
+					(if
+						(:doc "A fits expression can require a type even when its argument and Boolean result have other types.")
+						(bool.or (call target_numeric_type (borrow-shared (local records)) (struct.get (local expr) type) (local wanted))
+							(bool.and (u32.eq (local wanted) (local i128_type))
+								(bool.and (u32.eq (struct.get (local expr) kind) (local integer_fits))
+									(call is_128bit_integer (u32.from-i32 (struct.get (local expr) target))))))
+						(then (return (local index))))
+					(if
+						(:doc "A storage declaration can require the format even with no initializer expression.")
+						(bool.and (i32.ltz (local storage))
+							(call target_numeric_type (borrow-shared (local records)) (struct.get (local statement) type) (local wanted)))
+						(then (set (local storage) (local index))))
+					(set (local index) (i32.inc (local index)))))
+			(if (i32.lt -1i32 (local storage)) (then (return (local storage))))
+			(set (local index) 0i32)
+			(while
+				(:doc "An unused function parameter can still require the target ABI.")
+				(i32.lt (local index) (array.len (local parameters)))
+				(body
+					(let param (array.load (local parameters) (local index)))
+					(if
+						(:doc "The type follows the formal's original name.")
+						(call target_numeric_type (borrow-shared (local records)) (struct.get (local param) type) (local wanted))
+						(then
+							(let name (struct.get (local param) name))
+							(let type (struct.get (array.load (local nodes) (local name)) next_sibling))
+							(if (i32.lt -1i32 (local type)) (then (return (local type))))
+							(return (local name))))
+					(set (local index) (i32.inc (local index)))))
+			(set (local index) 0i32)
+			(while
+				(:doc "Bridge results and unused Wove functions keep their native signatures.")
+				(i32.lt (local index) (array.len (local functions)))
+				(body
+					(let fn_row (array.load (local functions) (local index)))
+					(if
+						(:doc "Report the original declaration if its result requires the target ABI.")
+						(call target_numeric_type (borrow-shared (local records)) (struct.get (local fn_row) result) (local wanted))
+						(then (return (struct.get (local fn_row) declaration))))
+					(set (local index) (i32.inc (local index)))))
+			(return (call target_numeric_field (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (borrow-shared (local records)) (local wanted)))))
+)
