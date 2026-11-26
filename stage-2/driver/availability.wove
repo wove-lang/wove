@@ -1,14 +1,16 @@
 (module native_c_availability
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Check selected optional C functions before native graph emission.")
+	(:doc "Check selected optional C functions and integer macros before native graph emission.")
 
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "./paths.wove" (only directory_width))
 	(use wove-file "./arguments.wove" (only write_plain_argument))
 	(use wove-file "../c/headers.wove" (only c_header_form))
-	(use wove-file "../c/probe.wove" (only (value header_begin)))
+	(use wove-file "../c/probe.wove" (only render_frontend_header_source (value header_begin)))
 	(use wove-file "../clang/query.wove" (only query_clang_frontend (type QuerySite)))
+	(use wove-file "../clang/run.wove" (only run_clang_macros))
+	(use wove-file "../clang/macros.wove" (only macro_header_presence object_macro_value))
 	(use wove-file "../clang/index.wove" (only clang_declaration clang_matches_declaration (type ClangIndex) (type ClangDeclaration)))
 	(use wove-file "./header_origin.wove" (only declaration_in_earlier_include))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes include_position write_includes (type CInclude)))
@@ -93,7 +95,9 @@
 					(let candidate (array.load (local bindings) (local row)))
 					(if
 						(:doc "Ordinary bindings and other headers do not depend on this query.")
-						(bool.and (struct.get (local candidate) optional) (call same_header (local header) (local candidate)))
+						(bool.and (struct.get (local candidate) optional)
+							(bool.and (u32.eqz (struct.get (local candidate) namespace))
+								(call same_header (local header) (local candidate))))
 						(then
 							(let-mut status 71u32)
 							(if
@@ -161,6 +165,87 @@
 					(set (local width) (i32.add (local width) (local width)))))
 			(return 74u32)))
 
+	(fn remember_macros
+		(:doc "Resolve each optional constant by its C spelling against the final macro definitions.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
+			(first i32) (present bool) (capture (shared-array u8)) (results (mut-array u8)))
+		(returns void)
+		(body
+			(let header (array.load (local bindings) (local first)))
+			(let-mut row (local first))
+			(while
+				(:doc "Only optional constant selections of this header share the macro capture.")
+				(i32.lt (local row) (array.len (local bindings)))
+				(body
+					(let candidate (array.load (local bindings) (local row)))
+					(if
+						(:doc "Keep function observations in their own capture.")
+						(bool.and (struct.get (local candidate) optional)
+							(bool.and (u32.eq (struct.get (local candidate) namespace) 2u32)
+								(call same_header (local header) (local candidate))))
+						(then
+							(let file (array.load (local files) (struct.get (local candidate) file)))
+							(let base (struct.get (local file) source_start))
+							(let start (i32.add (local base) (struct.get (local candidate) native_start)))
+							(let end (i32.add (local base) (struct.get (local candidate) native_end)))
+							(let value (call object_macro_value (borrow-shared (local capture))
+								(borrow-shared (array.range (local arena) (local start) (local end)))))
+							(let-mut status 76u8)
+							(if
+								(:doc "A matching definition is usable when the requested header exists.")
+								(bool.and (local present) (i32.lt -1i32 (struct.get (local value) start)))
+								(then (set (local status) 1u8)))
+							(array.store (local results) (local row) (local status))))
+					(set (local row) (i32.inc (local row)))))))
+
+	(fn lookup_header_macros
+		(:doc "Capture macro definitions using the same frontend settings as the native unit.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
+			(first i32) (program (shared-array u8)) (options (shared-array u8)) (header (shared-array u8))
+			(directory (shared-array u8)) (prefix (shared-array u8)) (results (mut-array u8)))
+		(returns u32)
+		(body
+			(let source (call render_frontend_header_source (borrow-shared (local prefix)) (borrow-shared (local header))))
+			(if
+				(:doc "Source generation must succeed before launching the frontend.")
+				(i32.eqz (array.len (local source)))
+				(then (return 75u32)))
+			(let-mut width 65536i32)
+			(while
+				(:doc "Retry exhausted capture storage up to the same output bound as an AST query.")
+				(i32.lt (local width) 33554432i32)
+				(body
+					(let-mut capture (array.alloc u8 (local width)))
+					(let-mut trace (array.alloc u8 (local width)))
+					(let result (call run_clang_macros (borrow-shared (local program)) (borrow-shared (local options))
+						(borrow-shared (local directory)) (borrow-shared (local source))
+						(borrow-mut (local capture)) (borrow-mut (local trace))))
+					(let error (struct.get (local result) error))
+					(if
+						(:doc "A complete capture supplies the presence marker and exact object-like names.")
+						(u32.eqz (local error))
+						(then
+							(let length (struct.get (local result) length))
+							(let present (call macro_header_presence (borrow-shared (array.range (local capture) 0i32 (local length)))))
+							(if
+								(:doc "Invalid capture output has its own import diagnostic.")
+								(i32.ltz (local present))
+								(then (return 73u32)))
+							(call remember_macros (borrow-shared (local arena)) (borrow-shared (local files))
+								(borrow-shared (local bindings)) (local first) (i32.eq (local present) 1i32)
+								(borrow-shared (array.range (local capture) 0i32 (local length))) (borrow-mut (local results)))
+							(return 0u32)))
+					(if
+						(:doc "A frontend failure differs from a successful capture of an absent macro.")
+						(u32.eq (local error) 4u32)
+						(then (return 72u32)))
+					(if
+						(:doc "Only exhaustion of capture storage can be retried with a larger buffer.")
+						(u32.not-eq (local error) 5u32)
+						(then (return 75u32)))
+					(set (local width) (i32.add (local width) (local width)))))
+			(return 74u32)))
+
 	(fn lookup_header
 		(:doc "Give the queried header the same preceding include directives as the emitted C unit.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
@@ -197,6 +282,13 @@
 			(let-mut prefix (array.alloc u8 (i32.from-u32 (local width))))
 			(let end (call write_includes (borrow-shared (local paths)) (borrow-shared (local headers))
 				(local before) (borrow-mut (local prefix)) (bool true)))
+			(if
+				(:doc "Use the final preprocessor definitions for a selected bridge constant.")
+				(u32.eq (struct.get (array.load (local bindings) (local first)) namespace) 2u32)
+				(then (return (call lookup_header_macros (borrow-shared (local arena)) (borrow-shared (local files))
+					(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
+					(borrow-shared (local options)) (borrow-shared (local header)) (borrow-shared (local directory))
+					(borrow-shared (array.range (local prefix) 0i32 (i32.from-u32 (local end)))) (borrow-mut (local results))))))
 			(return (call lookup_header_ast (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (local first) (borrow-shared (local program))
 				(borrow-shared (local options)) (borrow-shared (local header)) (borrow-shared (local directory))
@@ -345,12 +437,12 @@
 				(body
 					(let binding (array.load (local bindings) (local row)))
 					(if
-						(:doc "Only an imported function with c_optional can trigger a query.")
+						(:doc "Only a selected member with c_optional triggers a query.")
 						(struct.get (local binding) optional)
 						(then
 							(let-mut status (call cached_status (borrow-shared (local results)) (local row)))
 							(if
-								(:doc "Query at most once per header after a successful capture.")
+								(:doc "Query at most once per header and probe kind after a successful capture.")
 								(u32.eqz (local status))
 								(then
 									(set (local status) (call probe_binding (borrow-shared (local arena)) (borrow-shared (local files))
@@ -372,9 +464,10 @@
 					(set (local row) (i32.inc (local row)))))
 			(return (struct.new Availability (error 0u32) (file -1i32) (start 0i32) (end 0i32)))))
 
-	(fn check_optional_c_functions
-		(:doc "Leave graphs without selected optional functions on their filesystem-only path.")
-		(:expect (tests "stage-2/cli/native/cases.tsv" "stage-2/cli/native/bin.tsv") (issues "gh:wove-lang/wove:212"))
+	(fn check_optional_c_members
+		(:doc "Leave graphs without selected optional members on their filesystem-only path.")
+		(:expect (tests "stage-2/cli/native/cases.tsv" "stage-2/cli/native/bin.tsv" "stage-2/cli/native/optional-macros.tsv")
+			(issues "gh:wove-lang/wove:212" "gh:wove-lang/wove:539"))
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(canonical (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8)))
 		(returns Availability)

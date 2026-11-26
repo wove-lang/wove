@@ -28,10 +28,14 @@ def main():
 	# Dry runs construct the real frontend job without producing an output artifact.
 	if "-###" in arguments:
 		run_clang(arguments)
-	# An AST query can synthesize a capture or fail before producing one.
-	if "-ast-dump=json" in arguments and ("WOVE_CLANG_AST_STATUS" in os.environ or "WOVE_CLANG_AST_OUTPUT" in os.environ):
-		sys.stdout.write(os.environ.get("WOVE_CLANG_AST_OUTPUT", ""))
-		return int(os.environ.get("WOVE_CLANG_AST_STATUS", "0"))
+	# A header query can synthesize a capture or fail before producing one.
+	for flag, kind in (("-ast-dump=json", "AST"), ("-dM", "MACRO")):
+		status = f"WOVE_CLANG_{kind}_STATUS"
+		output = f"WOVE_CLANG_{kind}_OUTPUT"
+		# Only replace the query that the fixture configured.
+		if flag in arguments and (status in os.environ or output in os.environ):
+			sys.stdout.write(os.environ.get(output, ""))
+			return int(os.environ.get(status, "0"))
 	# Capture the bytes presented to Clang before the driver can clean up its stage.
 	if "WOVE_CLANG_CAPTURE_UNIT" in os.environ and "-o" in arguments:
 		output = Path(arguments[arguments.index("-o") + 1])

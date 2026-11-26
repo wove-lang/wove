@@ -1,0 +1,84 @@
+(module clang_macro_capture
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Match original object-like macro names in Clang's final preprocessor definitions.")
+
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct MacroValue (fields (start i32) (end i32)))
+	(let define_prefix "#define ")
+	(let header_present "WVPR_HEADER_PRESENT")
+
+	(fn macro_line_end
+		(:doc "Find the end of a definition line inside the complete capture.")
+		(params (capture (shared-array u8)) (start i32)) (returns i32)
+		(body
+			(let-mut cursor (local start))
+			(while
+				(:doc "An unterminated final line still ends at the capture boundary.")
+				(bool.and (i32.lt (local cursor) (array.len (local capture)))
+					(u8.not-eq (array.load (local capture) (local cursor)) 10u8))
+				(body (set (local cursor) (i32.inc (local cursor)))))
+			(return (local cursor))))
+
+	(fn object_macro_value
+		(:doc "Find the nonempty replacement span for an exact object-like macro name.")
+		(params (capture (shared-array u8)) (name (shared-array u8))) (returns MacroValue)
+		(body
+			(let prefix_width (array.len (local define_prefix)))
+			(let name_width (array.len (local name)))
+			(let-mut line 0i32)
+			(while
+				(:doc "Compare the definition prefix, exact name, and its separating space within one line.")
+				(i32.lt (local line) (array.len (local capture)))
+				(body
+					(let end (call macro_line_end (borrow-shared (local capture)) (local line)))
+					(let name_start (i32.add (local line) (local prefix_width)))
+					(if
+						(:doc "A complete object-like definition has room for a name, a space, and a replacement.")
+						(i32.lt (local name_width) (i32.dec (i32.sub (local end) (local name_start))))
+						(then
+							(let name_end (i32.add (local name_start) (local name_width)))
+							(if
+								(:doc "The space after the name excludes function-like macros and longer names.")
+								(bool.and (u8.eq (array.load (local capture) (local name_end)) 32u8)
+									(bool.and (call same_bytes (borrow-shared (local capture)) (local line) (local name_start)
+										(borrow-shared (local define_prefix)) 0i32 (local prefix_width))
+										(call same_bytes (borrow-shared (local capture)) (local name_start) (local name_end)
+											(borrow-shared (local name)) 0i32 (local name_width))))
+								(then (return (struct.new MacroValue (start (i32.inc (local name_end))) (end (local end))))))))
+					(set (local line) (i32.inc (local end)))))
+			(return (struct.new MacroValue (start -1i32) (end -1i32)))))
+
+	(fn macro_header_presence
+		(:doc "Read the probe's exact presence marker. A missing or malformed marker means invalid output.")
+		(params (capture (shared-array u8))) (returns i32)
+		(body
+			(let width (array.len (local capture)))
+			(let prefix_width (array.len (local define_prefix)))
+			(let-mut line 0i32)
+			(while
+				(:doc "A complete Clang dump consists of newline-terminated macro definitions.")
+				(i32.lt (local line) (local width))
+				(body
+					(let end (call macro_line_end (borrow-shared (local capture)) (local line)))
+					(let name (i32.add (local line) (local prefix_width)))
+					(if
+						(:doc "A bare prefix, truncated line, or unrelated output invalidates the capture.")
+						(bool.or (i32.eq (local end) (local width))
+							(bool.or (i32.le (local end) (local name))
+								(bool.not (call same_bytes (borrow-shared (local capture)) (local line) (local name)
+									(borrow-shared (local define_prefix)) 0i32 (local prefix_width)))))
+						(then (return -1i32)))
+					(set (local line) (i32.inc (local end)))))
+			(let marker (call object_macro_value (borrow-shared (local capture)) (borrow-shared (local header_present))))
+			(let start (struct.get (local marker) start))
+			(if
+				(:doc "A complete marker has one digit after its name.")
+				(bool.or (i32.ltz (local start)) (i32.not-eq (i32.inc (local start)) (struct.get (local marker) end)))
+				(then (return -1i32)))
+			(let value (array.load (local capture) (local start)))
+			(if (u8.eq (local value) 48u8) (then (return 0i32)))
+			(if (u8.eq (local value) 49u8) (then (return 1i32)))
+			(return -1i32)))
+)

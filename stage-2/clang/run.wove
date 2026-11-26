@@ -1,7 +1,7 @@
 (module clang_probe_run
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Stage one C translation unit and capture a bounded Clang AST dump.")
+	(:doc "Stage one C translation unit and capture bounded Clang frontend output.")
 
 	(use wove-file "../c/probe.wove" (only capture_probe_to_stderr probe_options_complete))
 	(use wove-file "../io/capture/descriptors.wove" (only move_above_stdio))
@@ -16,6 +16,7 @@
 	(let directory_suffix "/wove-clang.XXXXXX")
 	(let source_suffix "/probe.c")
 	(let ast_flags "-Wno-everything\u0000-Xclang\u0000-ast-dump=json\u0000-fsyntax-only\u0000-x\u0000c\u0000--\u0000")
+	(let macro_flags "-Wno-everything\u0000-dM\u0000-E\u0000-x\u0000c\u0000--\u0000")
 
 	(let trace_suffix ".stderr")
 	(let native_flags "-Xclang\u0000-dependency-file\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-MT\u0000-Xclang\u0000wove-probe\u0000-MJ\u0000/dev/null\u0000-Xclang\u0000-dependency-dot\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-header-include-file\u0000-Xclang\u0000/dev/null\u0000-H\u0000-fshow-skipped-includes\u0000")
@@ -27,26 +28,26 @@
 		(body (return (struct.new ClangRun (error (local error)) (status (local status)) (length (local length))))))
 
 	(fn invoke_clang
-		(:doc "Forward complete frontend arguments before the mandatory AST dump flags.")
-		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
+		(:doc "Forward complete frontend arguments before the required probe flags.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8))
 			(diagnostics i32) (output (mut-array u8)))
 		(returns ClangRun)
 		(body
 			(let traced (i32.lt -1i32 (local diagnostics)))
-			(let-mut flags (array.len (local ast_flags)))
+			(let-mut flag_width (array.len (local flags)))
 			(if
 				(:doc "Native probes send expanded dependency outputs to sinks and report includes.")
 				(local traced)
-				(then (set (local flags) (i32.add (local flags) (array.len (local native_flags))))))
+				(then (set (local flag_width) (i32.add (local flag_width) (array.len (local native_flags))))))
 			(let path_length (array.len (local path)))
 			(let option_length (array.len (local options)))
-			(let limit (i32.sub 2147483646i32 (local flags)))
+			(let limit (i32.sub 2147483646i32 (local flag_width)))
 			(if
 				(:doc "Check the packed argv length before adding any component or its final terminator.")
 				(bool.or (i32.lt (local limit) (local path_length))
 					(i32.lt (i32.sub (local limit) (local path_length)) (local option_length)))
 				(then (return (call clang_run_at 2u32 -1i32 0i32))))
-			(let end (i32.add (i32.add (local flags) (local path_length)) (local option_length)))
+			(let end (i32.add (i32.add (local flag_width) (local path_length)) (local option_length)))
 			(let-mut arguments (array.alloc u8 (i32.inc (local end))))
 			(let-mut options_end (call append_bytes (borrow-shared (local options)) (borrow-mut (local arguments)) 0i32))
 			(if
@@ -54,7 +55,7 @@
 				(local traced)
 				(then (set (local options_end) (call append_bytes (borrow-shared (local native_flags))
 					(borrow-mut (local arguments)) (local options_end)))))
-			(let flag_end (call append_bytes (borrow-shared (local ast_flags)) (borrow-mut (local arguments)) (local options_end)))
+			(let flag_end (call append_bytes (borrow-shared (local flags)) (borrow-mut (local arguments)) (local options_end)))
 			(let path_end (call append_bytes (borrow-shared (local path)) (borrow-mut (local arguments)) (local flag_end)))
 			(array.store (local arguments) (local path_end) 0u8)
 			(let capture (call capture_probe_to_stderr (borrow-shared (local program)) (borrow-shared (local arguments))
@@ -63,8 +64,8 @@
 				(struct.get (local capture) status) (struct.get (local capture) length)))))
 
 	(fn invoke_with_trace
-		(:doc "Capture the native include tree separately from the JSON AST.")
-		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
+		(:doc "Capture the native include tree separately from the probe's stdout.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8))
 			(output (mut-array u8)) (trace (mut-array u8)))
 		(returns ClangRun)
 		(body
@@ -72,7 +73,7 @@
 				(:doc "Standalone queries inherit diagnostics and keep their original probe arguments.")
 				(i32.eqz (array.len (local trace)))
 				(then (return (call invoke_clang (borrow-shared (local program)) (borrow-shared (local options))
-					(borrow-shared (local path)) -1i32 (borrow-mut (local output))))))
+					(borrow-shared (local flags)) (borrow-shared (local path)) -1i32 (borrow-mut (local output))))))
 			(let size (array.len (local path)))
 			(let suffix (array.len (local trace_suffix)))
 			(if
@@ -95,7 +96,7 @@
 					(let removed (call unlink (borrow-shared (local diagnostics))))
 					(return (call clang_run_at 3u32 -1i32 0i32))))
 			(let run (call invoke_clang (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local path)) (local descriptor) (borrow-mut (local output))))
+				(borrow-shared (local flags)) (borrow-shared (local path)) (local descriptor) (borrow-mut (local output))))
 			(let closed (call close (local descriptor)))
 			(let-mut error (struct.get (local run) error))
 			(if
@@ -108,7 +109,7 @@
 				(then
 					(let traced (call read_trace (borrow-shared (local diagnostics)) (borrow-mut (local trace))))
 					(if
-						(:doc "A successful AST needs the include trace for guarded headers.")
+						(:doc "A successful native probe keeps the complete include trace.")
 						(u32.eqz (local error))
 						(then (set (local error) (local traced)))
 						(else
@@ -125,7 +126,7 @@
 
 	(fn write_probe
 		(:doc "Write and close the private source before launching, then remove it on every return.")
-		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
+		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8))
 			(source (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8)))
 		(returns ClangRun)
 		(body
@@ -134,7 +135,7 @@
 				(bool.not (call write_new_file (borrow-shared (local path)) (borrow-shared (local source))))
 				(then (return (call clang_run_at 3u32 -1i32 0i32))))
 			(let result (call invoke_with_trace (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local path)) (borrow-mut (local output)) (borrow-mut (local trace))))
+				(borrow-shared (local flags)) (borrow-shared (local path)) (borrow-mut (local output)) (borrow-mut (local trace))))
 			(let removed (call unlink (borrow-shared (local path))))
 			(if
 				(:doc "A failed cleanup is reported when no earlier error explains the failure.")
@@ -144,7 +145,7 @@
 
 	(fn run_in_directory
 		(:doc "Write the probe beside the caller's C unit in the supplied private directory.")
-		(params (program (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8))
+		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8)) (directory (shared-array u8))
 			(source (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8)))
 		(returns ClangRun)
 		(body
@@ -159,16 +160,19 @@
 			(let next (call append_bytes (borrow-shared (local directory)) (borrow-mut (local path)) 0i32))
 			(let end (call append_bytes (borrow-shared (local source_suffix)) (borrow-mut (local path)) (local next)))
 			(return (call write_probe (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local path)) (borrow-shared (local source)) (borrow-mut (local output)) (borrow-mut (local trace))))))
+				(borrow-shared (local flags)) (borrow-shared (local path)) (borrow-shared (local source))
+				(borrow-mut (local output)) (borrow-mut (local trace))))))
 
 	(fn run_in_temporary_directory
 		(:doc "Remove the temporary directory owned by a standalone or retained-C query.")
-		(params (program (shared-array u8)) (options (shared-array u8)) (source (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8)))
+		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8))
+			(source (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8)))
 		(returns ClangRun)
 		(body
 			(let directory (call create_temporary_directory (borrow-shared (local directory_suffix))))
 			(let result (call run_in_directory (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local directory)) (borrow-shared (local source)) (borrow-mut (local output)) (borrow-mut (local trace))))
+				(borrow-shared (local flags)) (borrow-shared (local directory)) (borrow-shared (local source))
+				(borrow-mut (local output)) (borrow-mut (local trace))))
 			(let removed (call rmdir (borrow-shared (local directory))))
 			(if
 				(:doc "Report removal failure once the completed capture has no earlier error.")
@@ -176,9 +180,9 @@
 				(then (return (call clang_run_at 3u32 (struct.get (local result) status) (struct.get (local result) length)))))
 			(return (local result))))
 
-	(fn run_clang_probe
-		(:doc "Capture the AST using the supplied frontend arguments and private directory when available.")
-		(params (program (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8))
+	(fn capture_clang_source
+		(:doc "Capture the selected frontend output using the caller's options and private directory.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8)) (directory (shared-array u8))
 			(source (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8)))
 		(returns ClangRun)
 		(body
@@ -190,6 +194,23 @@
 				(:doc "A binary build shares its source directory and quote-include search with the probe.")
 				(i32.gtz (array.len (local directory)))
 				(then (return (call run_in_directory (borrow-shared (local program)) (borrow-shared (local options))
-					(borrow-shared (local directory)) (borrow-shared (local source)) (borrow-mut (local output)) (borrow-mut (local trace))))))
+					(borrow-shared (local flags)) (borrow-shared (local directory)) (borrow-shared (local source))
+					(borrow-mut (local output)) (borrow-mut (local trace))))))
 			(return (call run_in_temporary_directory (borrow-shared (local program)) (borrow-shared (local options))
-				(borrow-shared (local source)) (borrow-mut (local output)) (borrow-mut (local trace)))))))
+				(borrow-shared (local flags)) (borrow-shared (local source)) (borrow-mut (local output)) (borrow-mut (local trace))))))
+
+	(fn run_clang_probe
+		(:doc "Capture the translation unit's JSON AST using the existing probe contract.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8))
+			(source (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8))) (returns ClangRun)
+		(body (return (call capture_clang_source (borrow-shared (local program)) (borrow-shared (local options))
+			(borrow-shared (local ast_flags)) (borrow-shared (local directory)) (borrow-shared (local source))
+			(borrow-mut (local output)) (borrow-mut (local trace))))))
+
+	(fn run_clang_macros
+		(:doc "Capture the final preprocessor definitions after the requested header is included.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8))
+			(source (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8))) (returns ClangRun)
+		(body (return (call capture_clang_source (borrow-shared (local program)) (borrow-shared (local options))
+			(borrow-shared (local macro_flags)) (borrow-shared (local directory)) (borrow-shared (local source))
+			(borrow-mut (local output)) (borrow-mut (local trace)))))))
