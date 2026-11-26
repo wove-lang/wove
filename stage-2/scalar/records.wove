@@ -9,10 +9,10 @@
 
 	(use wove-file "../source/generics.wove"
 		(only has_generic_head has_specialization_head function_generic_list read_generic_parameter generic_argument_kind
-			read_generic_i32 read_generic_bool hash_generic_word is_checked_constant_operand
-			(value checked_type_operand) (value checked_i32_operand) (value checked_bool_operand) (value generic_bool_kind)
+			read_generic_i32 read_generic_bool constant_at constant_type_operand hash_generic_word is_checked_constant_operand
+			(value checked_type_operand) (value checked_i32_operand) (value checked_bool_operand) (value checked_enum_operand) (value generic_bool_kind) (value generic_enum_kind)
 			(type GenericConstant)))
-	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value variants_list) (value match_case)))
+	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value variants_list) (value match_case)))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_encoder))
 	(use wove-file "../source/c_scope.wove" (only declaring_c_bridge project_bridge))
 	(use wove-file "../source/scan.wove" (only is_disabled_form is_metadata_form (type SourceNode)))
@@ -233,6 +233,11 @@
 		(body (return (bool.or (i32.eq (struct.get (local layout) native) -1i32)
 			(i32.eq (struct.get (local layout) native) -2i32)))))
 
+	(fn is_fieldless_enum
+		(:doc "Identify an enum whose variants all use unit storage.")
+		(params (layout ScalarRecord)) (returns bool)
+		(body (return (i32.eq (struct.get (local layout) native) -1i32))))
+
 	(fn is_payload_enum
 		(:doc `Identify an enum containing at least one payload variant.`)
 		(params (layout ScalarRecord))
@@ -289,9 +294,9 @@
 					(if (u32.lt 2147483647u32 (local bits)) (then (return -1i32)))
 					(return (i32.from-u32 (local bits)))))
 			(if
-				(:doc "A type or Boolean parameter cannot fall through to an identically spelled module integer.")
+				(:doc "A non-i32 parameter cannot fall through to an identically spelled module integer.")
 				(bool.or (u8.eq (struct.get (local node) generic_kind) (local checked_type_operand))
-					(u8.eq (struct.get (local node) generic_kind) (local checked_bool_operand)))
+					(call is_checked_constant_operand (struct.get (local node) generic_kind)))
 				(then (return -1i32)))
 			(let start (struct.get (local node) start))
 			(let end (struct.get (local node) end))
@@ -1031,6 +1036,69 @@
 			(if (i32.ltz (local name)) (then (return -1i32)))
 			(return (struct.get (array.load (local nodes) (local name)) next_sibling))))
 
+	(fn resolved_generic_kind
+		(:doc "Resolve a named constant type in its template's defining namespace.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (definition_scope TypeScope) (parameter SourceNode)) (returns u32)
+		(body
+			(let kind (call generic_argument_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+			(if (u32.not-eq (local kind) (local generic_enum_kind)) (then (return (local kind))))
+			(let annotation (call constant_type_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+			(let type (call value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (struct.get (local definition_scope) file)
+				(struct.get (local definition_scope) source_base) (local annotation)))
+			(if
+				(:doc "Every variant in the resolved nominal type must be fieldless.")
+				(bool.and (call is_record_type (local type))
+					(call is_fieldless_enum (array.load (local records) (call record_index (local type)))))
+				(then (return (local type))))
+			(return 0u32)))
+
+	(fn check_enum_argument
+		(:doc "Normalize an exact fieldless enum argument to its defining variant row.")
+		(:expect (tests "stage-2/generic_enums/cases.tsv") (issues "gh:wove-lang/wove:99"))
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (node SourceNode) (type u32)) (returns GenericConstant)
+		(body
+			(let layout (array.load (local records) (call record_index (local type))))
+			(if
+				(:doc "A forwarded variant belongs to the exact formal's original enum, independent of aliases.")
+				(u8.eq (struct.get (local node) generic_kind) (local checked_enum_operand))
+				(then
+					(let value (struct.get (local node) generic_value))
+					(let variant (array.load (local nodes) (i32.from-u32 (local value))))
+					(let first (array.load (local nodes) (struct.get (local layout) first)))
+					(if (i32.eq (struct.get (local variant) parent) (struct.get (local first) parent))
+						(then (return (call constant_at (local node) (local value) 0u32))))
+					(return (call constant_at (local node) 0u32 23u32))))
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
+				(local enum_constructor) 23u32))
+			(if
+				(:doc "Preserve the rejected constructor or metadata span.")
+				(u32.gtz (struct.get (local form) error))
+				(then (return (struct.new GenericConstant (value 0u32) (start (struct.get (local form) start))
+					(end (struct.get (local form) end)) (error (struct.get (local form) error))))))
+			(let name (struct.get (local form) operand))
+			(if (i32.ltz (local name)) (then (return (call constant_at (local node) 0u32 23u32))))
+			(let type_name (array.load (local nodes) (local name)))
+			(let actual (call value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (struct.get (local scope) file)
+				(struct.get (local scope) source_base) (local name)))
+			(if (u32.not-eq (local actual) (local type)) (then (return (call constant_at (local type_name) 0u32 23u32))))
+			(let variant (struct.get (local type_name) next_sibling))
+			(if (i32.ltz (local variant)) (then (return (call constant_at (local node) 0u32 23u32))))
+			(let spelling (array.load (local nodes) (local variant)))
+			(let extra (struct.get (local spelling) next_sibling))
+			(if (i32.not-ltz (local extra)) (then (return (call constant_at (array.load (local nodes) (local extra)) 0u32 23u32))))
+			(let member (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local layout) first) (struct.get (local layout) count) (local spelling)))
+			(let row (struct.get (local member) row))
+			(if
+				(:doc "Only a bare name of a declared variant can select the constant.")
+				(bool.or (bool.not (call is_scalar_name (borrow-shared (local source)) (local spelling))) (i32.ltz (local row)))
+				(then (return (call constant_at (local spelling) 0u32 23u32))))
+			(return (call constant_at (local node) (u32.from-i32 (local row)) 0u32))))
+
 	(fn check_generic_argument
 		(:doc "Normalize a constant or resolve a named Wove type in the application's namespace.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
@@ -1057,6 +1125,12 @@
 						(then (return (struct.new GenericConstant (value (struct.get (local node) generic_value))
 							(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 0u32)))))
 					(return (call read_generic_bool (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
+			(if
+				(:doc "An enum formal carries its exact resolved nominal type.")
+				(call is_record_type (local kind))
+				(then (return (call check_enum_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local node) (local kind)))))
+			(if (u32.not-eq (local kind) 1u32) (then (return (call constant_at (local node) 0u32 23u32))))
 			(let-mut type 0u32)
 			(if
 				(:doc "Type arguments are named Wove types or explicit record applications.")
@@ -1075,10 +1149,59 @@
 			(return (struct.new GenericConstant (value (local type)) (start (struct.get (local node) start))
 				(end (struct.get (local node) end)) (error (local error))))))
 
+	(fn enum_variant_ordinal
+		(:doc "Recover the ordinal of a canonical variant row within its defining list.")
+		(params (nodes (shared-array SourceNode)) (layout ScalarRecord) (variant i32)) (returns i32)
+		(body
+			(let-mut row (struct.get (local layout) first))
+			(let-mut ordinal 0i32)
+			(while
+				(:doc "Advance by one declared variant until reaching the canonical source row.")
+				(i32.not-eq (local row) (local variant))
+				(body
+					(set (local row) (struct.get (array.load (local nodes) (local row)) next_sibling))
+					(set (local ordinal) (i32.inc (local ordinal)))))
+			(return (local ordinal))))
+
+	(struct EnumConstant (fields (type u32) (ordinal i32)))
+
+	(fn checked_enum_value
+		(:doc "Turn a recorded variant into its exact layout type and literal ordinal for body planning.")
+		(params (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord)) (variant i32)) (returns EnumConstant)
+		(body
+			(let parent (struct.get (array.load (local nodes) (local variant)) parent))
+			(let-mut row 0i32)
+			(while
+				(:doc "Only the populated nominal layout that owns the variant list can match.")
+				(i32.lt (local row) (array.len (local records)))
+				(body
+					(let layout (array.load (local records) (local row)))
+					(if
+						(:doc "A zero name marks the end of the populated layout table.")
+						(i32.eqz (struct.get (local layout) name))
+						(then (return (struct.new EnumConstant (type 0u32) (ordinal -1i32)))))
+					(if
+						(:doc "Use the original list row, regardless of which file or alias supplied the operand.")
+						(bool.and (call is_fieldless_enum (local layout))
+							(i32.eq (local parent) (struct.get (array.load (local nodes) (struct.get (local layout) first)) parent)))
+						(then (return (struct.new EnumConstant (type (call record_type (local row)))
+							(ordinal (call enum_variant_ordinal (borrow-shared (local nodes)) (local layout) (local variant)))))))
+					(set (local row) (i32.inc (local row)))))
+			(return (struct.new EnumConstant (type 0u32) (ordinal -1i32)))))
+
 	(fn key_argument_identity
 		(:doc "Hash a typed argument by its stable identity, independent of file or layout table order.")
-		(params (records (shared-array ScalarRecord)) (identity u32) (kind u32) (value u32)) (returns u32)
+		(params (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord)) (identity u32) (kind u32) (value u32)) (returns u32)
 		(body
+			(if
+				(:doc "Hash the defining enum and ordinal, independent of file table order or alias spelling.")
+				(call is_record_type (local kind))
+				(then
+					(let layout (array.load (local records) (call record_index (local kind))))
+					(let ordinal (call enum_variant_ordinal (borrow-shared (local nodes)) (local layout) (i32.from-u32 (local value))))
+					(return (call hash_generic_word (call hash_generic_word
+						(call hash_generic_word (local identity) (local generic_enum_kind)) (struct.get (local layout) identity))
+						(u32.from-i32 (local ordinal))))))
 			(let prefix (call hash_generic_word (local identity) (local kind)))
 			(if
 				(:doc "The argument kind and nominal tag distinguish records from scalars and i32 bits.")
@@ -1093,7 +1216,7 @@
 		(:doc "Validate each exact argument kind and derive a deterministic identity from the defining declaration.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
 			(bindings (shared-array GraphBinding)) (scope TypeScope) (use i32) (enclosing i32)
-			(template i32) (parameters i32) (definition u32)) (returns SpecializationKey)
+			(template i32) (parameters i32) (definition_scope TypeScope) (definition u32)) (returns SpecializationKey)
 		(body
 			(let node (array.load (local nodes) (local use)))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
@@ -1119,7 +1242,8 @@
 						(call names_enclosing_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 							(borrow-shared (local records)) (local enclosing) (local argument))
 						(then (return (call specialization_at (local argument) -1i32 0u32 23u32))))
-					(let kind (call generic_argument_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+					(let kind (call resolved_generic_kind (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local definition_scope) (local parameter)))
 					(let checked (call check_generic_argument (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local actual) (local kind)))
 					(if
@@ -1128,7 +1252,7 @@
 						(then (return (struct.new SpecializationKey (template -1i32) (identity 0u32)
 							(start (struct.get (local checked) start)) (end (struct.get (local checked) end))
 							(error (struct.get (local checked) error))))))
-					(set (local identity) (call key_argument_identity (borrow-shared (local records)) (local identity) (local kind)
+					(set (local identity) (call key_argument_identity (borrow-shared (local nodes)) (borrow-shared (local records)) (local identity) (local kind)
 						(struct.get (local checked) value)))
 					(set (local actual) (struct.get (local argument) next_sibling))
 					(set (local formal) (struct.get (local parameter) next_sibling))))
@@ -1169,13 +1293,15 @@
 			(if (bool.not (call is_generic_template (local layout))) (then (return (call specialization_at (local spelling) -1i32 0u32 23u32))))
 			(return (call read_specialization_arguments (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local use) (local enclosing)
-				(local template) (struct.get (local layout) generic) (struct.get (local layout) identity)))))
+				(local template) (struct.get (local layout) generic)
+				(call scope_at (struct.get (local layout) file) (struct.get (local layout) source_base))
+				(struct.get (local layout) identity)))))
 
 	(fn same_specialization_arguments
-		(:doc "Compare exact type identities and normalized i32 values across the two original namespaces.")
+		(:doc "Compare checked types, constant bits, and defining variant rows across application namespaces.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
 			(bindings (shared-array GraphBinding)) (scope TypeScope) (use i32)
-			(previous_scope TypeScope) (previous i32) (parameters i32)) (returns bool)
+			(previous_scope TypeScope) (previous i32) (parameters i32) (definition_scope TypeScope)) (returns bool)
 		(body
 			(if (i32.eq (local use) (local previous)) (then (return (bool true))))
 			(let-mut left (call specialization_first (borrow-shared (local source)) (borrow-shared (local nodes)) (local use)))
@@ -1186,7 +1312,8 @@
 				(i32.lt -1i32 (local formal))
 				(body
 					(let parameter (array.load (local nodes) (local formal)))
-					(let kind (call generic_argument_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+					(let kind (call resolved_generic_kind (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local definition_scope) (local parameter)))
 					(let a (call check_generic_argument (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local left) (local kind)))
 					(let b (call check_generic_argument (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -1224,7 +1351,8 @@
 									(bool.and (i32.eq (local name) (struct.get (local template) name)) (i32.lt -1i32 (struct.get (local layout) specialization)))
 									(call same_specialization_arguments (borrow-shared (local source)) (borrow-shared (local nodes))
 										(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local use)
-										(call use_scope (local layout)) (struct.get (local layout) specialization) (struct.get (local layout) generic)))
+										(call use_scope (local layout)) (struct.get (local layout) specialization) (struct.get (local layout) generic)
+										(call scope_at (struct.get (local template) file) (struct.get (local template) source_base))))
 								(then (return (local row))))
 							(return -2i32)))
 					(set (local row) (i32.inc (local row)))))
@@ -1650,9 +1778,23 @@
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
 			(enclosing i32) (operand SourceNode)) (returns bool)
 		(body
-			(return (bool.and (i32.lt -1i32 (local enclosing))
-				(i32.lt -1i32 (call generic_parameter_argument (borrow-shared (local source)) (borrow-shared (local nodes))
-					(array.load (local records) (local enclosing)) (local operand) 0u32))))))
+			(if (i32.ltz (local enclosing)) (then (return (bool false))))
+			(let layout (array.load (local records) (local enclosing)))
+			(if
+				(:doc "A literal constructor names a type in its first operand, while its variant name has a separate namespace.")
+				(u32.eq (struct.get (local operand) kind) 40u32)
+				(then
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+					(let first (struct.get (local parts) operands))
+					(if
+						(:doc "Only an enum type name can make an enum constant argument depend on an enclosing parameter.")
+						(bool.and (i32.not-ltz (local first))
+							(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+								(struct.get (local parts) head)) (local enum_constructor)))
+						(then (return (i32.not-ltz (call generic_parameter_argument (borrow-shared (local source))
+							(borrow-shared (local nodes)) (local layout) (array.load (local nodes) (local first)) 0u32)))))))
+			(return (i32.not-ltz (call generic_parameter_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local layout) (local operand) 0u32)))))
 
 	(fn substituted_type
 		(:doc "Resolve a type parameter in the application's file and a concrete type in the template's file.")
@@ -1920,6 +2062,38 @@
 							(set (local prior) (struct.get (local prior_form) next_sibling))))
 					(set (local current) (struct.get (local form) next_sibling))))
 			(return (call entry_at (local list) (local first) 0u32))))
+
+	(fn validate_template_constants
+		(:doc "Resolve all named constant parameters after the defining type namespace is complete.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (first i32)) (returns EntryRead)
+		(body
+			(let-mut row (local first))
+			(while
+				(:doc "Every parameter has already passed the generic list's syntax check.")
+				(i32.not-ltz (local row))
+				(body
+					(let param (array.load (local nodes) (local row)))
+					(if
+						(:doc "Built-in constant and type parameters need no nominal lookup.")
+						(u32.eqz (call resolved_generic_kind (borrow-shared (local source)) (borrow-shared (local nodes))
+							(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local param)))
+						(then
+							(let annotation (call constant_type_operand (borrow-shared (local source))
+								(borrow-shared (local nodes)) (local param)))
+							(return (call entry_at (array.load (local nodes) (local annotation)) -1i32 23u32))))
+					(set (local row) (struct.get (local param) next_sibling))))
+			(return (call entry_at (array.load (local nodes) (local first)) (local first) 0u32))))
+
+	(fn read_checked_template_parameters
+		(:doc "Check the complete parameter list of a function template in its defining namespace.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (list SourceNode)) (returns EntryRead)
+		(body
+			(let form (call read_template_parameters (borrow-shared (local source)) (borrow-shared (local nodes)) (local list)))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(return (call validate_template_constants (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (struct.get (local form) operand)))))
 
 	(fn register_nominal_type
 		(:doc `Register one selected record or enum after checking its member forms and stable identity.`)
