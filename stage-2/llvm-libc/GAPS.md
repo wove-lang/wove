@@ -277,6 +277,25 @@ result as `_Bool` before C23 and `bool` in C23.
 | `dlsym`, `dlvsym` | Typed symbol addresses must keep the loaded object live. A null value needs to remain distinct from a loader diagnostic. |
 | `dladdr`, `dladdr1`, `dlinfo`, `Dl_info`, `Dl_info_t`, `Dl_serinfo`, `Dl_serpath`, `dl_find_object` | Native address and flexible-array fields and request-specific pointer outputs need exact compiler contracts. The provider records the reserved glibc profiling and object-inspection extensions. |
 
+## Bundled fcntl coverage
+
+The hosted provider is loaded from `fcntl.h.wove` in both compiler inventories.
+The installed fixture verifies the twelve newly covered shared constants, including
+the distinct Darwin and glibc values for lease and open-file-description lock commands.
+
+Clang exposed 127 object-like macros and one function-like macro in the audited Darwin
+fcntl families, and 125 object-like macros in Debian glibc 2.41. Macro names were stable in
+C11, C17, and C23 on both architectures. On glibc, `O_DIRECTORY`, `O_DIRECT`,
+`O_NOFOLLOW`, and `O_TMPFILE` have architecture-specific values. Darwin's
+`O_POPUP` and glibc's `DN_MULTISHOT` have unsigned native expression types.
+
+| Members | Coverage or outstanding contract |
+| --- | --- |
+| `O_ASYNC`, `O_FSYNC`, `O_NDELAY`, `LOCK_EX`, `LOCK_NB`, `LOCK_SH`, `LOCK_UN` | Expose and verify the shared legacy open flags and BSD advisory-lock constants with their native values. |
+| `F_GETLEASE`, `F_SETLEASE`, `F_OFD_GETLK`, `F_OFD_SETLK`, `F_OFD_SETLKW` | Expose and verify the command numbers on both SDKs. The command-specific variadic calls and Darwin's lease argument macro remain pending. |
+| Target-specific flags, aliases, and commands | The remaining Darwin and glibc constants need individual availability and type checks. New close-on-fork, Linux descriptor-query, and Darwin extension spellings vary with the headers. |
+| GNU `flock64`, `f_owner_ex`, `file_handle`, Darwin file-security and fcntl records | Preserve their native field layouts, applicable storage and ownership contracts, and the command-specific `fcntl` operands. |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
