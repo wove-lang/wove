@@ -5,10 +5,9 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # C standard library bridge corpus
 
-Fourteen Wove files mirror the archived directory at `8ac13c06`. Each uses
-the current `c-header` provider. Native fixtures select bundled members from
-`stdio.wove`, `math.wove`, and the Linux and macOS `Stat` views.
-[Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
+The fourteen Wove files mirror the archived directory at `8ac13c06`. They are
+standalone source for the bridge design. Each uses the current `c-header`
+provider. Native fixtures select bundled members from `assert.h.wove`, `stdio.wove`, `math.wove`, and the Linux and macOS `Stat` views. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
 
 The bundled `sys_file.wove` provider exposes `flock` and `LOCK_EX` for
 serializing shared-library publication. The `c_export` pragma applies to
@@ -101,7 +100,7 @@ verbatim disabled text. Counts below cover active declarations.
 | `c_cstr_raw` · 3 | `stdio.h` `fprintf`, `printf`, and `snprintf` | Fixed format arguments use raw, call-scoped conversion that preserves embedded NUL bytes. |
 | `c_cstrs` · 6 | `spawn.h` `posix_spawn` and `posix_spawnp`, `unistd.h` `execv`, `execve`, `execvp`, and `fexecve` | The scalar bridge copies shared owned-byte rows to a terminated native table. The bundled `posix_spawnp` fixture verifies argument boundaries, empty rows, and environment transfer. |
 | `c_init` · 2 | `spawn.h` `posix_spawn_file_actions_init` and `posix_spawnattr_init` | A mutable loan of inactive caller-owned storage activates destruction on a zero i32 status. The bundled spawn file-action fixture exercises initialization, use, and cleanup. |
-| `c_macro` · 124 | `assert.h` `assert`, `math.h` macro functions and read-only macro values, `sys/stat.h` `S_IS*` and `S_TYPEIS*`, `sys/wait.h` wait status macros | Stage 2 captures arguments once before expanding value-returning macros such as `S_ISREG` and `S_TYPEISMQ`. Existing bridge types and argument contracts apply. Remaining work includes void results and additional object-like macro types. |
+| `c_macro` · 124 | `assert.h` `assert`, `math.h` macro functions and read-only macro values, `sys/stat.h` `S_IS*` and `S_TYPEIS*`, `sys/wait.h` wait status macros | Stage 2 captures arguments once in source order before expanding value macros such as `S_ISREG` and `S_TYPEISMQ` or statement macros such as `assert`. Additional object-like macro types still need lowering. |
 | `c_null` · 1 | `stdlib.h` `realpath` | Stage 2 supports the allocating `realpath` slot. It requires literal `null` and passes C `NULL`. |
 | `c_nullable` · 12 | `signal.h` `sigprocmask`, `pthread_sigmask`, `psignal`, `spawn.h` `posix_spawn{,p}`, `stdio.h` `freopen`, `fflush`, `perror`, `sys/stat.h` `futimens`, `utimensat`, `sys/wait.h` `wait`, `waitpid` | Named mutable scalar references accept either an exclusive loan or explicit null. Native fixtures exercise both forms of `waitpid`. Nullable record and handle references, strings, and bounded arrays still need their own lowering. A Wove fallible exact slice can lend a present shared view after unwrapping. Passing the option itself requires a native nullable descriptor contract. |
 | `c_optional` · 289 | `math.h` optional functions, constants, and globals. The `fromfp`, `ufromfp`, `fromfpx`, and `ufromfpx` families use `__STDC_VERSION_MATH_H__`. The `totalorder` and `totalordermag` families use `pointer_parameters`. | Bare optional function markers probe for the selected native name and report an unavailable name at the import. Qualified markers need feature-macro or exact prototype queries. Optional constants and global values need their own availability checks. |
@@ -145,6 +144,30 @@ pointer-out contract. A project bridge for `realpath` also exercises a fixed
 null with a copied C string result. `strtold` still needs a native `long double` result
 and a lifetime contract for an end pointer into the input string.
 
+
+## Bundled assert coverage
+
+Both compiler inventories load `assert.h.wove`. The installed fixture
+imports `assert` through `use c-header` from a separate project. It builds and
+links in C11, C17, and C23. The focused tests check an enabled success, an
+enabled failure that raises `SIGABRT`, and a disabled assertion whose Wove
+condition still runs once. [Compiler prerequisite](https://github.com/wove-lang/wove/pull/512)
+
+Apple Clang 21 reported the following members when preprocessing the macOS
+27.2 SDK for arm64 and x86-64 and the Debian 13 `libc6-dev`
+`2.41-12+deb13u5` headers for aarch64 and x86-64 Linux. All four targets were
+checked in C11, C17, and C23, with and without `NDEBUG`. The Wove-emitted
+assertion compiled for all four targets. The macOS targets also linked.
+[Debian arm64 headers](https://packages.debian.org/trixie/arm64/libc6-dev/download) · [Debian amd64 headers](https://packages.debian.org/trixie/amd64/libc6-dev/download)
+
+| Member | Availability and disposition |
+| --- | --- |
+| `assert` | Available in all tested target and C mode combinations. The bundled statement macro takes a Wove `bool` and uses the native `NDEBUG` policy after evaluating that argument. |
+| `static_assert` | C11 and C17 provide a declaration macro for `_Static_assert`. C23 supports `static_assert` as a keyword without the header. Both tested header sets also publish the compatibility macro in C23. The provider keeps it disabled because Wove needs declaration-time constant expressions and diagnostic text. |
+| `__STDC_VERSION_ASSERT_H__` | Absent in all tested combinations. The C23 header-version macro is listed by LLVM libc. The provider keeps it disabled until it can verify header constant availability on the selected SDK and C mode. |
+
+[LLVM libc checklist](https://libc.llvm.org/headers/assert.html) · [C11 draft §7.2](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf) · [C23 draft §§6.4.1, 6.7.11, and 7.2](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
@@ -171,8 +194,9 @@ declarations. The remaining ABI gaps include these contracts:
   scalar references. The qualified `pointer_parameters` marker and
   the `__STDC_VERSION_MATH_H__` markers also need their respective
   prototype and feature-macro checks.
-- The Darwin `__sincos*` functions need native `void` results as well
-  as their writable outputs. Optional classification macros such as
+- The Darwin `__sincos*` functions use native `void` results and writable
+  outputs. Their exact signatures and availability need activation coverage.
+  Optional classification macros such as
   `iscanonical` and `issignaling` are absent from the tested macOS SDK,
   where selecting them reports an unavailable import.
 - The archived Darwin half declarations need the `math_darwin_half`
@@ -187,7 +211,7 @@ interfaces and design constraints.
 
 | Header and archived declaration or family | Compiler behavior needed |
 | --- | --- |
-| `assert.h` `static_assert` | Support a declaration macro with a compile-time expression and diagnostic text. |
+| `assert.h` `static_assert` | See [Bundled assert coverage](#bundled-assert-coverage). |
 | `dirent.h` `readdir_r`, `readdir64_r`, scan and comparator families, Darwin Blocks variants and Darwin `getdirentries` | Represent runtime-sized native storage and nullable aliases, owned result vectors, native-record callbacks and indirect borrows, and C Blocks. Gate the raw Darwin interface on its inode ABI. |
 | `fcntl.h` optional flags and Darwin or Linux native records and commands listed in the disabled note | Probe individual declarations in the selected feature namespace and describe platform-specific native records and typed command tails. |
 | `math.h` `FP_CONTRACT`, `FENV_ROUND`, decimal and `_FloatN` or `_FloatNx` families, Darwin compatibility names and `struct exception` | Support C translation directives and the relevant native floating identities, and provide the native record with its raw character pointer. `complex.h` has its own ABI. |
