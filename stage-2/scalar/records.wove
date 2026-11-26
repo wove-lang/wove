@@ -30,7 +30,7 @@
 		as a record's fields.`)
 		ScalarRecord
 		(fields (name i32) (file i32) (identity u32) (first i32) (count i32)
-			(declaration i32) (native i32) (source_base i32) (emit_row i32)))
+			(declaration i32) (native i32) (source_base i32) (emit_row i32) (owns_arrays bool)))
 	(struct ScalarMember (fields (ordinal i32) (row i32)))
 	(struct LayoutVisit (fields (row i32) (field i32) (element bool)))
 	(struct LayoutCheck (fields (file i32) (start i32) (end i32) (error u32)))
@@ -46,6 +46,14 @@
 		(returns bool)
 		(body (return (bool.and (bool.not (u32.lt (local type) 64u32))
 			(u32.lt (local type) 268435456u32)))))
+
+	(fn is_owning_record
+		(:doc "Identify named Wove records that own byte-array fields.")
+		(params (records (shared-array ScalarRecord)) (type u32))
+		(returns bool)
+		(body
+			(return (bool.and (call is_record_type (local type))
+				(struct.get (array.load (local records) (call record_index (local type))) owns_arrays)))))
 
 	(fn record_type
 		(:doc `Encode a checked record row as a type distinct from the built-ins.`)
@@ -163,7 +171,8 @@
 			(if
 				(:doc "Only a visible Wove struct can supply the nominal element layout.")
 				(bool.or (i32.lt (local row) 0i32)
-					(bool.not (i32.eq (struct.get (array.load (local records) (local row)) native) 0i32)))
+					(bool.or (struct.get (array.load (local records) (local row)) owns_arrays)
+						(bool.not (i32.eq (struct.get (array.load (local records) (local row)) native) 0i32))))
 				(then (return 0u32)))
 			(return (call record_type (local row)))))
 
@@ -242,7 +251,7 @@
 				(struct.new ScalarRecord (name -1i32) (file -1i32)
 					(identity (int.convert u32 (local next))) (first (int.convert i32 (local element)))
 					(count (struct.get (local shape) extent)) (declaration -1i32) (native 0i32)
-					(source_base 0i32) (emit_row 0i32)))
+					(source_base 0i32) (emit_row 0i32) (owns_arrays (bool false))))
 			(return (i32.add.wrapping (local next) 1i32))))
 
 	(fn is_disabled_statement
@@ -740,8 +749,8 @@
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
 			(return -1i32)))
 
-	(fn copyable_type
-		(:doc `Resolve a scalar or visible record by the signature's original type spelling.`)
+	(fn value_type
+		(:doc "Resolve a scalar or visible value layout by its original type spelling.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
 			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (file i32) (source_base i32) (index i32))
 		(returns u32)
@@ -773,6 +782,20 @@
 				(then (return (call native_integer_type (local found)))))
 			(return (call record_type (local found)))))
 
+	(fn copyable_type
+		(:doc "Resolve a value type that can be used without transferring ownership.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (file i32) (source_base i32) (index i32))
+		(returns u32)
+		(body
+			(let type (call value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local index)))
+			(if
+				(:doc "A record with owning fields needs an explicit transfer.")
+				(call is_owning_record (borrow-shared (local records)) (local type))
+				(then (return 0u32)))
+			(return (local type))))
+
 	(fn read_wove_reference
 		(:doc `Read a call-scoped reference to a Wove record or writable built-in scalar.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
@@ -785,7 +808,7 @@
 				(bool.or (i32.lt (local element) 0i32)
 					(bool.not (i32.lt (struct.get (array.load (local nodes) (local element)) next_sibling) 0i32)))
 				(then (return (call entry_at (local node) -1i32 23u32))))
-			(let type (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+			(let type (call value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local element)))
 			(let mutable (u32.eq (local mode) 2u32))
 			(if
@@ -931,6 +954,17 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 			(return (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) operands)))))
 
+	(fn is_owned_byte_field
+		(:doc "Identify a checked member whose declared type is an owned byte array.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (member SourceNode))
+		(returns bool)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+			(let type (struct.get (local parts) operands))
+			(return (bool.and (i32.lt -1i32 (local type))
+				(call is_byte_owner_descriptor (borrow-shared (local source)) (borrow-shared (local nodes))
+					(array.load (local nodes) (local type)))))))
+
 	(fn member_value_type
 		(:doc `Resolve a Wove field or payload in the type namespace of its defining layout.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
@@ -938,6 +972,11 @@
 			(layout ScalarRecord) (member SourceNode))
 		(returns u32)
 		(body
+			(if
+				(:doc "A direct owned byte field uses the normal owning array representation.")
+				(bool.and (struct.get (local layout) owns_arrays)
+					(call is_owned_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+				(then (return (call array_owner_type 10u32))))
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
 			(let operand (struct.get (local parts) operands))
 			(if (i32.lt (local operand) 0i32) (then (return 0u32)))
@@ -1060,6 +1099,7 @@
 					(set (local previous) (i32.add.wrapping (local previous) 1i32))))
 			(let-mut list_kind 49u32)
 			(let-mut native 0i32)
+			(let-mut owns_arrays (bool false))
 			(if
 				(:doc "An enum uses a variants list and its own layout marker.")
 				(local enumeration)
@@ -1094,6 +1134,11 @@
 						(:doc "A single payload variant chooses tagged-union storage for the whole enum.")
 						(bool.and (local enumeration) (i32.lt -1i32 (struct.get (local checked) operand)))
 						(then (set (local native) -2i32)))
+					(if
+						(:doc "An ordinary record owns storage when a field declares an owned byte array.")
+						(bool.and (bool.not (local enumeration))
+							(call is_owned_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+						(then (set (local owns_arrays) (bool true))))
 					(let field_name (array.load (local nodes) (struct.get (local member) first_child)))
 					(let prior (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
 						(local first) (local count) (local field_name)))
@@ -1106,7 +1151,7 @@
 			(array.store (local records) (local index)
 				(struct.new ScalarRecord (name (local name)) (file (local file)) (identity (local identity))
 					(first (local first)) (count (local count)) (declaration (i32.sub.wrapping (local declaration) (local base)))
-					(native (local native)) (source_base (local source_base)) (emit_row 0i32)))
+					(native (local native)) (source_base (local source_base)) (emit_row 0i32) (owns_arrays (local owns_arrays))))
 			(return (call entry_at (local node) (i32.add.wrapping (local index) 1i32) 0u32))))
 
 	(fn register_module_records
@@ -1254,7 +1299,8 @@
 				(struct.new ScalarRecord (name (struct.get (local entry) name)) (file (struct.get (local entry) file))
 					(identity (struct.get (local entry) identity)) (first (struct.get (local entry) first)) (count (struct.get (local entry) count))
 					(declaration (struct.get (local entry) declaration)) (native (struct.get (local entry) native))
-					(source_base (struct.get (local entry) source_base)) (emit_row (local row))))))
+					(source_base (struct.get (local entry) source_base)) (emit_row (local row))
+					(owns_arrays (struct.get (local entry) owns_arrays))))))
 
 	(fn walk_record_layouts
 		(:doc `Validate fields and order each complete value layout after its dependencies.

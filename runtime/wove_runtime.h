@@ -136,6 +136,13 @@ _Bool wvrt_c_storage_active(const wvrt_c_storage *wvrt_storage);
 void wvrt_c_storage_finish_init(wvrt_c_storage *wvrt_storage, int32_t wvrt_status);
 void wvrt_c_storage_free(wvrt_c_storage *wvrt_storage);
 
+// Transfer one owning array pointer and leave the original slot empty.
+static inline wvrt_array *wvrt_array_take(wvrt_array **wvrt_slot) {
+	wvrt_array *wvrt_result = *wvrt_slot;
+	*wvrt_slot = NULL;
+	return wvrt_result;
+}
+
 // Borrow the full owner as a shared view over its existing storage.
 static inline wvrt_slice wvrt_array_borrow_shared(const wvrt_array *wvrtbuffer) {
 	return (wvrt_slice){wvrtbuffer->wvrt_items, wvrtbuffer->wvrt_length, wvrtbuffer->wvrt_element_size};

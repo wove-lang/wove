@@ -1,0 +1,88 @@
+(module emit_owned_fields
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Emit transfers, loans, and cleanup for owned array slots.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../scalar/records.wove" (only is_owned_byte_field (type ScalarRecord)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/plan.wove" (only (type ScalarParameter)))
+	(use wove-file "./records.wove" (only write_field_place write_member_name))
+	(use wove-file "./runtime.wove" (only open_array_drop open_array_borrow))
+	(use wove-file "./text.wove" (only c_byte c_literal_text write_local_name))
+
+	(let array_take_open "wvrt_array_take(&")
+	(struct OwnedMember (fields (ordinal i32)))
+
+	(fn write_array_take
+		(:doc "Read the original pointer and clear its slot in a single evaluation.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row ScalarExpression)
+			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression)) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (call c_literal_text (borrow-shared (local array_take_open))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let place (struct.get (local row) projection))
+			(if
+				(:doc "Use either the projected field or the original named local.")
+				(i32.lt -1i32 (local place))
+				(then (set (local cursor) (call write_field_place (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local expressions)) (borrow-shared (local parameters)) (local place) (local tree_base)
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
+				(else (set (local cursor) (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+					(struct.get (local row) target) (local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+
+	(fn write_owned_field_loan
+		(:doc "Borrow the original array pointer stored in a checked field path.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row ScalarExpression)
+			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression)) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call open_array_borrow (borrow-mut (local output)) (local offset)
+				(u32.eq (struct.get (local row) type) 38u32) (local writing)))
+			(let field (call write_field_place (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local expressions)) (borrow-shared (local parameters)) (struct.get (local row) projection) (local tree_base)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local field) 41u8 (local writing)))))
+
+	(fn write_owned_record_cleanup
+		(:doc "Release any remaining array pointers in reverse field declaration order.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord) (target i32) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut owned (array.alloc OwnedMember (struct.get (local layout) count)))
+			(let-mut field (struct.get (local layout) first))
+			(let-mut ordinal 0i32)
+			(let-mut count 0i32)
+			(while
+				(:doc "Retain the ordinals of only the owning members.")
+				(i32.lt -1i32 (local field))
+				(body
+					(let member (array.load (local nodes) (local field)))
+					(if
+						(:doc "A byte owner needs an array drop even when its slot was cleared by a move.")
+						(call is_owned_byte_field (borrow-shared (local source)) (borrow-shared (local nodes)) (local member))
+						(then
+							(array.store (local owned) (local count) (struct.new OwnedMember (ordinal (local ordinal))))
+							(set (local count) (i32.add.wrapping (local count) 1i32))))
+					(set (local ordinal) (i32.add.wrapping (local ordinal) 1i32))
+					(set (local field) (struct.get (local member) next_sibling))))
+			(let-mut cursor (local offset))
+			(while
+				(:doc "The runtime accepts null for fields that have already transferred ownership.")
+				(i32.lt 0i32 (local count))
+				(body
+					(set (local count) (i32.sub.wrapping (local count) 1i32))
+					(let open (call open_array_drop (borrow-mut (local output)) (local cursor) (local writing)))
+					(let name (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local target) (local tree_base) (borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+					(let dot (call c_byte (borrow-mut (local output)) (local name) 46u8 (local writing)))
+					(let member (call write_member_name (borrow-shared (local source)) (struct.get (array.load (local owned) (local count)) ordinal)
+						(borrow-mut (local output)) (local dot) (local name_prefix) (local writing)))
+					(let close (call c_byte (borrow-mut (local output)) (local member) 41u8 (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local close) 59u8 (local writing)))))
+			(return (local cursor)))))
