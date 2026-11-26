@@ -1,13 +1,14 @@
 (module source_generics
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Read explicit generic parameters and normalize checked i32 constant arguments.`)
+	(:doc `Read explicit generic parameters and normalize checked i32 and bool constant arguments.`)
 
 	(use wove-file "./scan.wove" (only is_identifier_head (type SourceNode)))
 	(use wove-file "./module.wove" (only form_parts validate_form_metadata))
 	(use wove-file "./types.wove" (only builtin_type_keyword is_reserved_type_name))
 	(use wove-file "./literals.wove" (only integer_atom integer_scalar read_integer_magnitude))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/boolean.wove" (only read_boolean_word))
 	(use wove-file "../hashing/fnv1a.wove" (only fnv1a_byte))
 
 	(let generic_head "generic")
@@ -21,6 +22,8 @@
 	(let checked_type_operand 1u8)
 	(let checked_i32_operand 2u8)
 	(let checked_function_operand 3u8)
+	(let checked_bool_operand 4u8)
+	(let generic_bool_kind 3u32)
 	(let normalized_i32_literal -3i32)
 
 	(fn generic_i32_value
@@ -91,12 +94,42 @@
 				(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error (local error))))))
 
 	(fn parameter_kind
-		(:doc "Recognize both supported generic parameter kinds by their original tags.")
+		(:doc "Distinguish the type and const parameter declaration tags.")
 		(params (source (shared-array u8)) (node SourceNode)) (returns u32)
 		(body
 			(if (call generic_spelling (borrow-shared (local source)) (local node) (borrow-shared (local type_parameter))) (then (return 1u32)))
 			(if (call generic_spelling (borrow-shared (local source)) (local node) (borrow-shared (local const_parameter))) (then (return 2u32)))
 			(return 0u32)))
+
+	(fn is_checked_constant_operand
+		(:doc "Recognize a checked value that cannot be used as a type or ordinary file binding.")
+		(params (annotation u8)) (returns bool)
+		(body (return (bool.or (u8.eq (local annotation) (local checked_i32_operand))
+			(u8.eq (local annotation) (local checked_bool_operand))))))
+
+	(fn constant_parameter_kind
+		(:doc "Classify the exact builtin annotation of a generic constant declaration.")
+		(params (source (shared-array u8)) (node SourceNode)) (returns u32)
+		(body
+			(if (bool.not (u32.eq (struct.get (local node) kind) 1u32)) (then (return 0u32)))
+			(let start (struct.get (local node) start))
+			(let type (call builtin_type_keyword (borrow-shared (local source))
+				(local start) (i32.sub (struct.get (local node) end) (local start))))
+			(if (u32.eq (local type) 5u32) (then (return 2u32)))
+			(if (u32.eq (local type) 12u32) (then (return (local generic_bool_kind))))
+			(return 0u32)))
+
+	(fn generic_argument_kind
+		(:doc "Read a validated parameter's exact application kind for checking and hashing.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (parameter SourceNode)) (returns u32)
+		(body
+			(let head (array.load (local nodes) (struct.get (local parameter) first_child)))
+			(let kind (call parameter_kind (borrow-shared (local source)) (local head)))
+			(if (bool.not (u32.eq (local kind) 2u32)) (then (return (local kind))))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+			(let name (array.load (local nodes) (struct.get (local parts) operands)))
+			(return (call constant_parameter_kind (borrow-shared (local source))
+				(array.load (local nodes) (struct.get (local name) next_sibling))))))
 
 	(fn is_i32_spelling
 		(:doc "Check the exact builtin type spelling over a byte interval.")
@@ -105,7 +138,7 @@
 			(local start) (i32.sub (local end) (local start))) 5u32))))
 
 	(fn read_generic_parameter
-		(:doc "Check a type or i32 constant declaration and preserve the original parameter name.")
+		(:doc "Check a type or exact constant declaration and preserve the original parameter name.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)) (returns GenericParameter)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
@@ -145,15 +178,14 @@
 					(return (call generic_parameter_at (local node) (local name) (local kind) 0u32))))
 			(if (i32.lt (local type) 0i32) (then (return (call generic_parameter_at (local node) -1i32 0u32 22u32))))
 			(let declared (array.load (local nodes) (local type)))
+			(let constant (call constant_parameter_kind (borrow-shared (local source)) (local declared)))
 			(if
-				(:doc "This constant parameter slice accepts only an exact i32 annotation.")
-				(bool.or (bool.not (u32.eq (struct.get (local declared) kind) 1u32))
-					(bool.not (call is_i32_spelling (borrow-shared (local source))
-						(struct.get (local declared) start) (struct.get (local declared) end))))
+				(:doc "A constant annotation must name a supported exact value type.")
+				(u32.eq (local constant) 0u32)
 				(then (return (call generic_parameter_at (local declared) -1i32 0u32 23u32))))
 			(let extra (struct.get (local declared) next_sibling))
 			(if (i32.lt -1i32 (local extra)) (then (return (call generic_parameter_at (array.load (local nodes) (local extra)) -1i32 0u32 22u32))))
-			(return (call generic_parameter_at (local node) (local name) (local kind) 0u32))))
+			(return (call generic_parameter_at (local node) (local name) (local constant) 0u32))))
 
 	(fn constant_at
 		(:doc "Keep the checked constant or its originating argument span.")
@@ -218,6 +250,43 @@
 					(bool.not (call is_i32_spelling (borrow-shared (local source)) (local suffix) (local end))))
 				(then (return (call constant_at (local node) 0u32 23u32))))
 			(return (call normalize_generic_i32 (borrow-shared (local source)) (local node) (local start) (local suffix)))))
+
+	(fn read_generic_bool
+		(:doc "Normalize one explicit bool literal to a checked zero or one without losing its source span.")
+		(:expect (tests "stage-2/generic_booleans/cases.tsv") (issues "gh:wove-lang/wove:99"))
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)) (returns GenericConstant)
+		(body
+			(if
+				(:doc "A bare word does not explicitly name a literal type.")
+				(bool.not (u32.eq (struct.get (local node) kind) 40u32))
+				(then (return (call constant_at (local node) 0u32 23u32))))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (array.load (local nodes) (struct.get (local parts) head)))
+			(let operand (struct.get (local parts) operands))
+			(if
+				(:doc "Only an explicit bool form can supply a Boolean argument.")
+				(bool.or (i32.lt (local operand) 0i32)
+					(bool.not (u32.eq (call constant_parameter_kind (borrow-shared (local source)) (local head)) (local generic_bool_kind))))
+				(then (return (call constant_at (local node) 0u32 23u32))))
+			(let selected (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local parts)))
+			(if
+				(:doc "Keep the originating metadata diagnostic for a literal operand.")
+				(u32.lt 0u32 (struct.get (local selected) error))
+				(then (return (struct.new GenericConstant (value 0u32)
+					(start (struct.get (local selected) start)) (end (struct.get (local selected) end))
+					(error (struct.get (local selected) error))))))
+			(let literal (array.load (local nodes) (local operand)))
+			(if
+				(:doc "A Boolean literal has exactly one operand.")
+				(i32.lt -1i32 (struct.get (local literal) next_sibling))
+				(then (return (call constant_at (local node) 0u32 23u32))))
+			(if
+				(:doc "Only a bare true or false operand has a Boolean value.")
+				(bool.not (u32.eq (struct.get (local literal) kind) 1u32))
+				(then (return (call constant_at (local literal) 0u32 25u32))))
+			(let value (call read_boolean_word (borrow-shared (local source)) (struct.get (local literal) start) (struct.get (local literal) end)))
+			(if (i32.lt (local value) 0i32) (then (return (call constant_at (local literal) 0u32 25u32))))
+			(return (call constant_at (local node) (int.convert u32 (local value)) 0u32))))
 
 	(fn hash_generic_word
 		(:doc "Feed one normalized argument word in little-endian byte order.")

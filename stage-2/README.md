@@ -349,9 +349,10 @@ A copyable record can declare a `(generic (type T) (const N i32))` list
 between its name and fields. Use `(specialize Block u8 4i32)` in types
 and constructors. Type arguments name builtin scalars, Wove value types,
 or concrete record applications. Constant arguments are typed `i32`
-integer literals. Fields can substitute a type directly
-or use type and constant parameters in a fixed array. A field may also
-use a fully concrete specialization resolved in its defining module.
+integer literals or explicit `(bool true)` and `(bool false)` forms.
+Fields can substitute a type directly or use type and integer constant
+parameters in a fixed array. A field may also use a fully concrete
+specialization resolved in its defining module.
 Repeated arguments share one concrete layout across import aliases, and
 different argument values retain distinct defining identities even with
 equal fields.
@@ -363,8 +364,10 @@ resolve in the caller, and the concrete signature and body resolve in the
 defining module. Type parameters can appear in another specialization,
 such as a result type `(specialize Result T)`. An `i32` constant can appear
 as a fixed extent, a nested application argument, or an immutable
-`(local N)` value. The compiler checks each requested body with its own
-concrete types and emits it once across aliases and call sites.
+`(local N)` value. A Boolean constant can be read with `local` or
+forwarded as an argument to another specialization. The compiler checks
+each requested body with its own concrete types and emits it once across
+aliases and call sites.
 
 Use `(set (struct.get (local tok) start) (i32 8))` to assign a field of a
 `let-mut` local. The same form accepts a nested field path and writes
