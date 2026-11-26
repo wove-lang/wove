@@ -337,6 +337,21 @@ _Noreturn void wvrt_int_arithmetic_trap(int32_t wvrt_file, int32_t wvrt_start, i
 		wvrt_ok; \
 	})
 
+_Noreturn void wvrt_int_division_trap(bool wvrt_zero, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+// Use the recoverable guard and convert a failed result into a source-site trap.
+#define wvrt_int_divide_at_span(type, left, right, remainder, file, start, end) \
+	__extension__ ({ \
+		type wvrt_dividend = (left); \
+		type wvrt_divisor = (right); \
+		type wvrt_division_result; \
+		/* The shared guard leaves the result untouched on zero or quotient overflow. */ \
+		if (!wvrt_int_try_divide(wvrt_dividend, wvrt_divisor, &wvrt_division_result, (remainder))) { \
+			wvrt_int_division_trap(wvrt_divisor == 0, (file), (start), (end)); \
+		} \
+		wvrt_division_result; \
+	})
+
 uint8_t wvrt_int_to_u8(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int32_t wvrt_int_to_i32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 uint32_t wvrt_int_to_u32(int64_t wvrt_value, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

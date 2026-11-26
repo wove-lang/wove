@@ -1027,17 +1027,17 @@ _Noreturn void wvrt_int_arithmetic_trap(int32_t wvrtfile, int32_t wvrtstart, int
 	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer arithmetic overflow");
 }
 
-// Compute a signed quotient or remainder only after checking the Wove range.
-int32_t wvrt_i32_divide_at_span(int32_t wvrtleft, int32_t wvrtright, bool wvrtremainder,
-	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	// A zero divisor is invalid for both operations.
-	if (wvrtright == 0) {
+// Report the reason checked division failed at its original operation.
+_Noreturn void wvrt_int_division_trap(bool wvrtzero, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Remainder and quotient share the zero-divisor diagnostic.
+	if (wvrtzero) {
 		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "division by zero");
 	}
-	// Handle the signed minimum without invoking either C operator on this pair.
-	if (wvrtleft == INT32_MIN && wvrtright == -1) {
-		if (wvrtremainder) { return 0; }
-		wvrt_int_arithmetic_trap(wvrtfile, wvrtstart, wvrtend);
-	}
-	return wvrtremainder ? wvrtleft % wvrtright : wvrtleft / wvrtright;
+	wvrt_int_arithmetic_trap(wvrtfile, wvrtstart, wvrtend);
+}
+
+// Keep the existing i32 call entry while using the same guarded operation as other widths.
+int32_t wvrt_i32_divide_at_span(int32_t wvrtleft, int32_t wvrtright, bool wvrtremainder,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_int_divide_at_span(int32_t, wvrtleft, wvrtright, wvrtremainder, wvrtfile, wvrtstart, wvrtend);
 }
