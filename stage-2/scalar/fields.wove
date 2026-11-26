@@ -1,0 +1,139 @@
+(module scalar_fields
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Resolve record field projections and track whether the original owner path is still live.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "./syntax.wove" (only entry_at entry_form is_scalar_name (type EntryRead)))
+	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
+	(use wove-file "./flow.wove" (only (type ScalarStatement)))
+	(use wove-file "./control.wove" (only prior_owner_take))
+	(use wove-file "./conditional.wove" (only is_pending_value (value pending_field_read)))
+	(use wove-file "./value_types.wove" (only value_matches_type))
+	(use wove-file "./records.wove" (only record_receiver_type is_record_type is_owning_record record_index
+		is_fixed_array is_enum_layout find_member is_native_record native_field_type member_value_type (type ScalarRecord)))
+
+	(fn read_field_projection
+		(:doc `Validate one projection before using its receiver or the field's name.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) 52u32 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let receiver (struct.get (local form) operand))
+			(if
+				(:doc "A projection needs a receiver before its field name.")
+				(i32.ltz (local receiver))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let member (struct.get (array.load (local nodes) (local receiver)) next_sibling))
+			(if
+				(:doc "Require exactly one field name after the receiver.")
+				(bool.or (i32.ltz (local member))
+					(i32.not-ltz (struct.get (array.load (local nodes) (local member)) next_sibling)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(return (local form))))
+
+	(fn check_owned_record_path
+		(:doc "Diagnose the first move that made this record or projected member unavailable.")
+		(params (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
+			(expressions (shared-array ScalarExpression)) (node SourceNode) (binding ScalarExpression)
+			(place i32) (index i32) (statement i32))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "Only a local owning record can have fields transferred out of it.")
+				(bool.and (u32.eq (struct.get (local binding) kind) 6u32)
+					(call is_owning_record (borrow-shared (local records)) (struct.get (local binding) type)))
+				(then
+					(let moved (call prior_owner_take (borrow-shared (local nodes)) (borrow-shared (local statements))
+						(borrow-shared (local expressions)) (struct.get (local binding) target) (local place) (bool false) (local index) (local statement)))
+					(if
+						(:doc "The attempted use and original move both retain their source spans.")
+						(i32.lt -1i32 (local moved))
+						(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local node) start))
+							(end (struct.get (local node) end)) (error 39u32) (related (local moved))))))))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_field_read
+		(:doc `Resolve one field of an already checked receiver and retain its exact type and ordinal.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(index i32) (receiver i32) (expected u32) (bindings (shared-array GraphBinding))
+			(records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let node (array.load (local nodes) (local index)))
+			(let reference (array.load (local nodes) (local receiver)))
+			(let member (struct.get (local reference) next_sibling))
+			(let name (array.load (local nodes) (local member)))
+			(if
+				(:doc "Field selection uses a bare identifier.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+				(then (return (call entry_at (local name) -1i32 34u32))))
+			(let value (array.load (local expressions) (local receiver)))
+			(if
+				(:doc "Wait for the receiver's exact result type before selecting its field.")
+				(call is_pending_value (struct.get (local value) kind))
+				(then
+					(array.store (local expressions) (local index)
+						(call expression_row (local pending_field_read) (local expected) -1i32 (local receiver) 0i32 0i32 (bool false)))
+					(return (call entry_at (local node) (local index) 0u32))))
+			(let type (call record_receiver_type (struct.get (local value) type)))
+			(if
+				(:doc "A resolved field receiver must name a record layout.")
+				(bool.not (call is_record_type (local type)))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let kind (struct.get (local value) kind))
+			(let named (bool.or (u32.eq (local kind) 6u32) (u32.eq (local kind) 2u32)))
+			(if
+				(:doc "An owning receiver needs a named place or a checked projection of one.")
+				(bool.and (call is_owning_record (borrow-shared (local records)) (local type))
+					(bool.not (bool.or (local named)
+						(bool.and (u32.eq (local kind) 52u32) (i32.not-ltz (struct.get (local value) projection))))))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let layout (array.load (local records) (call record_index (local type))))
+			(if
+				(:doc "Fixed arrays and enums do not expose named record fields.")
+				(bool.or (call is_fixed_array (local layout)) (call is_enum_layout (local layout)))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let field (call find_member (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local layout) first) (struct.get (local layout) count) (local name)))
+			(let ordinal (struct.get (local field) ordinal))
+			(if
+				(:doc "An unknown field points at the requested name.")
+				(i32.ltz (local ordinal))
+				(then (return (call entry_at (local name) -1i32 34u32))))
+			(let-mut target (local ordinal))
+			(let-mut result 0u32)
+			(let row (struct.get (local field) row))
+			(if
+				(:doc "Native fields use the real C name and the defining bridge's checked type.")
+				(call is_native_record (local layout))
+				(then
+					(set (local target) (struct.get (array.load (local nodes) (local row)) first_child))
+					(set (local result) (call native_field_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (local layout) (local row))))
+				(else
+					(set (local result) (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (array.load (local nodes) (local row))))))
+			(if
+				(:doc "The caller must accept the field's exact result type.")
+				(bool.not (call value_matches_type (local expected) (local result)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let-mut root -1i32)
+			(if
+				(:doc "Wove fields of a named place retain its root for loan checking and direct emission.")
+				(bool.not (call is_native_record (local layout)))
+				(then
+					(if
+						(:doc "A parameter or local starts a field path in its own binding namespace.")
+						(local named)
+						(then (set (local root) (local receiver)))
+						(else (set (local root) (struct.get (local value) projection))))))
+			(array.store (local expressions) (local index)
+				(struct.new ScalarExpression (kind 52u32) (type (local result)) (target (local target))
+					(first (local receiver)) (start 0i32) (end 0i32) (negative (bool false))
+					(borrowed_owner (bool false)) (mutable_place (bool false)) (projection (local root))
+					(asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
+			(return (call entry_at (local node) (local index) 0u32))))
+)
