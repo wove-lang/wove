@@ -1,7 +1,7 @@
 (module emit_enums
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Write checked enum constructors and copy matched payloads into their case scopes.`)
+	(:doc `Write checked enum constructors, case labels, and case-local payload copies.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
@@ -11,10 +11,13 @@
 	(use wove-file "./text.wove" (only c_byte c_literal_text c_text_fragment write_temporary_name write_local_name))
 	(use wove-file "./runtime.wove" (only write_c_number))
 
+	(use wove-file "./integers.wove" (only write_integer_literal))
+
 	(let c_switch "switch(")
 	(let c_switch_body "){")
 	(let c_case "case ")
 	(let c_case_body ":{")
+	(let c_case_default "default:{")
 	(let c_case_break "break;")
 	(let c_switch_end "default:__builtin_trap();}")
 	(let c_enum_tag ".wvrt_tag")
@@ -32,15 +35,38 @@
 				(local ordinal) (borrow-mut (local digits)) (local writing)))))
 
 	(fn write_case_open
-		(:doc `Begin a single case in braces so its local declarations have their own C scope.`)
-		(params (ordinal i32) (output (mut-array u8)) (offset u32) (writing bool))
+		(:doc `Open the label and scope of a literal case, enum variant, or wildcard.`)
+		(params (source (shared-array u8)) (expressions (shared-array ScalarExpression))
+			(label i32) (integer bool) (output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
-			(let open (call c_literal_text (borrow-shared (local c_case))
+			(if
+				(:doc "The explicit wildcard provides the switch's default arm.")
+				(i32.lt (local label) 0i32)
+				(then (return (call c_literal_text (borrow-shared (local c_case_default))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(let-mut cursor (call c_literal_text (borrow-shared (local c_case))
 				(borrow-mut (local output)) (local offset) (local writing)))
-			(let label (call write_enum_ordinal (local ordinal) (borrow-mut (local output)) (local open) (local writing)))
+			(if
+				(:doc "Integer labels use the same bounded literals as normal expressions, including signed minima.")
+				(local integer)
+				(then (set (local cursor) (call write_integer_literal (borrow-shared (local source))
+					(array.load (local expressions) (local label)) (borrow-mut (local output)) (local cursor) (local writing))))
+				(else (set (local cursor) (call write_enum_ordinal (local label) (borrow-mut (local output)) (local cursor) (local writing)))))
 			(return (call c_literal_text (borrow-shared (local c_case_body))
-				(borrow-mut (local output)) (local label) (local writing)))))
+				(borrow-mut (local output)) (local cursor) (local writing)))))
+
+	(fn close_match_switch
+		(:doc "Only an exhaustive enum match with no wildcard needs a synthesized trap for impossible ordinals.")
+		(params (arm ScalarStatement) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "A written default already makes the switch exhaustive.")
+				(i32.lt (struct.get (local arm) target) 0i32)
+				(then (return (call c_byte (borrow-mut (local output)) (local offset) 125u8 (local writing)))))
+			(return (call c_literal_text (borrow-shared (local c_switch_end))
+				(borrow-mut (local output)) (local offset) (local writing)))))
 
 	(fn write_payload_constructor
 		(:doc `Build a tagged value using the already evaluated payload in its selected union member.`)
@@ -74,12 +100,14 @@
 	(fn write_case_entry
 		(:doc `Open the selected case and initialize its named payload copy inside the braces.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
-			(statements (shared-array ScalarStatement)) (arm ScalarStatement) (subject i32) (tree_base i32)
+			(statements (shared-array ScalarStatement)) (expressions (shared-array ScalarExpression))
+			(arm ScalarStatement) (integer bool) (subject i32) (tree_base i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let ordinal (struct.get (local arm) target))
-			(let-mut cursor (call write_case_open (local ordinal) (borrow-mut (local output)) (local offset) (local writing)))
+			(let-mut cursor (call write_case_open (borrow-shared (local source)) (borrow-shared (local expressions))
+				(local ordinal) (local integer) (borrow-mut (local output)) (local offset) (local writing)))
 			(let name (struct.get (local arm) value))
 			(if (i32.lt (local name) 0i32) (then (return (local cursor))))
 			(let type (struct.get (array.load (local statements) (local name)) type))

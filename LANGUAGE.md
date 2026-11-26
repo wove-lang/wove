@@ -89,15 +89,25 @@ usual move rules.
 
 Stage 2 uses `(enum Status (variants (Ok) (IoError) (Invalid)))` to
 declare a nominal, copyable type. `(enum.new Status Ok)` constructs one
-variant of that type. `(match value (case Ok statements...) ...)` is a
-statement that evaluates its subject once, requires one case for every
-variant, and runs only the selected case in its own scope.
+variant of that type. `(match value (case Ok statements...) ...)`
+evaluates its subject once and runs only the selected case in its own
+scope. Cover all enum variants or use a final `(case _ ...)` for
+uncovered variants.
 
 A variant can carry one copyable value. Declare it as `(Push i64)`, build it
 with `(enum.new Instruction Push value)`, and match it with
 `(case Push (bind word) statements...)`. The payload must have the
 variant's exact declared type. The binding is an immutable copy scoped to
 that arm. Use `(bind _)` to discard the payload.
+
+A built-in integer match uses literal patterns and requires a final
+`(case _ ...)`. Bare decimal and hexadecimal patterns take the subject's
+type. An explicit type, as in `1u32` or `(u32 1)`, must agree exactly
+with the subject. Duplicate integer values are errors across spellings.
+
+In a value match, each case provides one expression of the same exact
+copyable type after its pattern and any payload binding. The selected
+expression supplies the result.
 
 ## Arrays, slices, and borrows
 

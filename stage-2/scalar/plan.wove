@@ -12,17 +12,19 @@
 	Retain source-level call sites before either inspection or lowering.
 	Array borrow inference uses expectation codes below defining record types.`)
 
-	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value enum_payload_constructor) (value match_statement)))
+	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value enum_payload_constructor) (value match_statement)
+		(value pending_match_value) (value match_case_gate)))
 	(use wove-file "./locals.wove" (only find_local read_local_name))
-	(use wove-file "./matches.wove" (only plan_match_cases match_continues))
+	(use wove-file "./integer_literals.wove" (only plan_integer_value))
+	(use wove-file "./matches.wove" (only plan_match_cases match_continues seed_match_value seed_match_results finish_match_value find_match_binding))
 	(use wove-file "./loops.wove" (only read_for_names read_iteration_source register_iteration_bindings is_iteration_statement))
 	(use wove-file "../source/integer_checks.wove" (only read_integer_check is_integer_check (value integer_fits) (type IntegerCheck)))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_conversion
 		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
 	(use wove-file "../text/character.wove" (only decode_character))
 	(use wove-file "../source/extent.wove" (only normalized_extent))
-	(use wove-file "../source/literals.wove" (only integer_magnitude_start hex_digits_start integer_digits_end integer_scalar
-		(value decimal_literal_format) (value hex_literal_format)))
+	(use wove-file "../source/literals.wove" (only integer_magnitude_start hex_digits_start integer_digits_end
+		(value hex_literal_format)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token) (value character_token)))
 	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../source/module.wove" (only form_parts skip_disabled_siblings validate_form_metadata (type ModuleRead) (type SelectedDeclaration)))
@@ -606,29 +608,6 @@
 				(then (return (u32.eq (local actual) 34u32))))
 			(return (u32.eq (local expected) (local actual)))))
 
-	(fn plan_integer_value
-		(:doc `Record a bounded integer value using the checked radix, sign, and digit span.`)
-		(params (source (shared-array u8)) (node SourceNode) (end i32) (type u32)
-			(index i32) (expressions (mut-array ScalarExpression)))
-		(returns EntryRead)
-		(body
-			(let spelling (call integer_scalar (borrow-shared (local source))
-				(struct.get (local node) start) (local end) (local type)))
-			(let digits (struct.get (local spelling) digits))
-			(if
-				(:doc "An invalid spelling or magnitude points at the whole original atom.")
-				(i32.lt (local digits) 0i32)
-				(then (return (call entry_at (local node) -1i32 25u32))))
-			(let-mut format (local decimal_literal_format))
-			(if
-				(:doc "The emitter adds a C hexadecimal prefix to the normalized digits.")
-				(struct.get (local spelling) hexadecimal)
-				(then (set (local format) (local hex_literal_format))))
-			(array.store (local expressions) (local index)
-				(call expression_row 1u32 (local type) (local format) -1i32
-					(local digits) (local end) (struct.get (local spelling) negative)))
-			(return (call entry_at (local node) (local index) 0u32))))
-
 	(fn plan_floating_value
 		(:doc `Validate the decimal spelling and record the bytes used by C for direct rounding.`)
 		(params (source (shared-array u8)) (node SourceNode) (end i32) (type u32)
@@ -660,7 +639,7 @@
 				(:doc "An enclosing operation can require a different exact type.")
 				(bool.not (call value_matches_type (local expected) (local type)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
-			(return (call plan_integer_value (borrow-shared (local source)) (local node) (local suffix)
+			(return (call plan_integer_value (borrow-shared (local source)) (local node) (struct.get (local node) start) (local suffix)
 				(local type) (local index) (borrow-mut (local expressions))))))
 
 	(fn plan_suffixed_number
@@ -780,7 +759,8 @@
 				(call is_builtin_float (local type))
 				(then (return (call plan_floating_value (borrow-shared (local source)) (local value) (struct.get (local value) end)
 					(local type) (local index) (borrow-mut (local expressions))))))
-			(return (call plan_integer_value (borrow-shared (local source)) (local value) (struct.get (local value) end)
+			(return (call plan_integer_value (borrow-shared (local source)) (local value)
+				(struct.get (local value) start) (struct.get (local value) end)
 				(local type) (local index) (borrow-mut (local expressions))))))
 
 	(fn find_module_binding
@@ -1116,8 +1096,13 @@
 				(:doc "An explicit reborrow expects the view type for its access mode.")
 				(local reborrow)
 				(then (set (local type) (u32.sub.wrapping (local expected) 1u32))))
-			(let binding (call find_local (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local statements))
-				(struct.get (local caller) first_statement) (local statement) (local name)))
+			(let-mut binding (call find_match_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local statements)) (borrow-shared (local expressions)) (local index) (local statement) (local name)))
+			(if
+				(:doc "Ordinary local lookup resumes outside the expression when no case binds this name.")
+				(i32.lt (local binding) 0i32)
+				(then (set (local binding) (call find_local (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local statements)) (struct.get (local caller) first_statement) (local statement) (local name)))))
 			(if
 				(:doc "An earlier local declaration carries its defining name and checked initializer type.")
 				(bool.not (i32.lt (local binding) 0i32))
@@ -2427,7 +2412,8 @@
 				(:doc "Inline reads can also inspect a returned or constructed fixed array.")
 				(bool.or (local projected)
 					(bool.and (bool.not (local store))
-						(bool.or (bool.or (u32.eq (local tag) 9u32) (u32.eq (local tag) (local conditional_value)))
+						(bool.or (bool.or (bool.or (u32.eq (local tag) 9u32) (u32.eq (local tag) (local conditional_value)))
+								(u32.eq (local tag) (local match_statement)))
 							(bool.or (call is_fixed_initializer (local tag)) (call is_integer_byte_encoder (local tag))))))
 				(then (return (call plan_expression (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local caller) (local receiver) 42u32 (local statement)
@@ -2907,7 +2893,8 @@
 						(else
 							(if
 								(:doc "A base receiver can start from a place or a record-producing expression.")
-								(bool.not (bool.or (u32.eq (local tag) (local conditional_value))
+								(bool.not (bool.or (bool.or (u32.eq (local tag) (local conditional_value))
+									(u32.eq (local tag) (local match_statement)))
 									(bool.or (bool.or (u32.eq (local tag) 8u32) (u32.eq (local tag) 9u32))
 										(bool.or (u32.eq (local tag) 37u32) (u32.eq (local tag) 50u32)))))
 								(then (return (call entry_at (local reference) -1i32 24u32))))
@@ -3202,6 +3189,11 @@
 				(:doc "A value if has a boolean predicate and two expression arms.")
 				(u32.eq (local tag) (local conditional_value))
 				(then (return (call plan_conditional (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local expected) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A value match checks its subject before introducing the case-local bindings.")
+				(u32.eq (local tag) (local match_statement))
+				(then (return (call seed_match_value (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (local expected) (borrow-mut (local expressions))))))
 			(if
 				(:doc "Recoverable integer forms check the exact written width and return success as a boolean.")
@@ -3532,6 +3524,11 @@
 				(u32.eq (local kind) (local pending_conditional))
 				(then (return (call finish_conditional_value (borrow-shared (local nodes))
 					(local index) (local row) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A value match joins the exact results of its already checked cases.")
+				(u32.eq (local kind) (local pending_match_value))
+				(then (return (call finish_match_value (borrow-shared (local nodes))
+					(local index) (local row) (borrow-mut (local expressions))))))
 			(let receiver (struct.get (local row) first))
 			(let expected (struct.get (local row) type))
 			(if
@@ -3545,6 +3542,51 @@
 				(local caller) (local receiver) -1i32 (local index)
 				(int.convert u32 (struct.get (local row) target)) (local expected) (bool false) (local view_start)
 				(borrow-shared (local records)) (borrow-mut (local expressions))))))
+
+	(fn finish_value_rows
+		(:doc "Resolve deferred values inside a completed interval, before finishing any parent that depends on them.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32) (last i32)
+			(caller ScalarFunction) (view_start i32) (bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let-mut index (local last))
+			(while
+				(:doc "Every deferred row is visited after its descendants. Already resolved rows need no second pass.")
+				(bool.and (i32.lt -1i32 (local index)) (bool.not (i32.lt (local index) (local first))))
+				(body
+					(let row (array.load (local expressions) (local index)))
+					(if
+						(:doc "Only joins and the reads that depend on them need their result types resolved here.")
+						(call is_pending_value (struct.get (local row) kind))
+						(then
+							(let checked (call finish_pending_value (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local index) (local row) (local caller) (local view_start) (borrow-shared (local bindings))
+								(borrow-shared (local records)) (borrow-mut (local expressions))))
+							(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))))
+					(set (local index) (i32.sub.wrapping (local index) 1i32))))
+			(return (struct.new EntryRead (operand -1i32) (start 0i32) (end 0i32) (error 0u32) (related -1i32)))))
+
+	(fn prepare_match_results
+		(:doc "Finish the subject and resolve its cases at the point where their arm expressions become visible.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (root i32)
+			(caller ScalarFunction) (view_start i32) (bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(statements (mut-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let row (array.load (local expressions) (local root)))
+			(let subject (struct.get (local row) first))
+			(let checked (call finish_value_rows (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local subject) (i32.sub.wrapping (local index) 1i32) (local caller) (local view_start)
+				(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local expressions))))
+			(if (u32.lt 0u32 (struct.get (local checked) error)) (then (return (local checked))))
+			(let type (struct.get (array.load (local expressions) (local subject)) type))
+			(let cases (call plan_match_cases (borrow-shared (local source)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local root)) (local subject) (local type)
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-mut (local statements)) (borrow-mut (local expressions))))
+			(if (u32.lt 0u32 (struct.get (local cases) error)) (then (return (local cases))))
+			(return (call seed_match_results (borrow-shared (local nodes)) (borrow-shared (local statements))
+				(local index) (struct.get (local row) type) (borrow-mut (local expressions))))))
 
 	(fn plan_value
 		(:doc `Check a statement's value tree in source order.
@@ -3600,6 +3642,18 @@
 					(let type (struct.get (local row) type))
 					(let kind (struct.get (local row) kind))
 					(if
+						(:doc "The first case follows the complete subject, so its bindings can use the resolved type.")
+						(u32.eq (local kind) (local match_case_gate))
+						(then
+							(let checked (call prepare_match_results (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local index) (struct.get (local row) target) (local caller) (local view_start)
+								(borrow-shared (local bindings)) (borrow-shared (local records))
+								(borrow-mut (local statements)) (borrow-mut (local expressions))))
+							(if
+								(:doc "Keep the subject, pattern, or case span from preparation.")
+								(u32.lt 0u32 (struct.get (local checked) error))
+								(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))))
+					(if
 						(:doc "Visit typed operands and pending row moves that still need planning.")
 						(bool.or (u32.eq (local kind) (local pending_row_move))
 							(bool.and (u32.lt 0u32 (local type)) (u32.eq (local kind) 0u32)))
@@ -3652,22 +3706,13 @@
 								(call resolved_call_site (local caller) (local callee) (local node) (local view_start)))
 							(set (local site_count) (i32.add.wrapping (local site_count) 1i32))))
 					(set (local index) (i32.add.wrapping (local index) 1i32))))
-			(let-mut pending (local last_pending))
-			(while
-				(:doc "Finish pending types from the inside out, after source-ordered checks of every operand.")
-				(bool.and (i32.lt -1i32 (local pending)) (bool.not (i32.lt (local pending) (local first_pending))))
-				(body
-					(let row (array.load (local expressions) (local pending)))
-					(if
-						(:doc "Only typed joins and their dependent reads are deferred.")
-						(call is_pending_value (struct.get (local row) kind))
-						(then
-							(let checked (call finish_pending_value (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local pending) (local row) (local caller) (local view_start) (borrow-shared (local bindings))
-								(borrow-shared (local records)) (borrow-mut (local expressions))))
-							(if (u32.lt 0u32 (struct.get (local checked) error))
-								(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local checked)))))))
-					(set (local pending) (i32.sub.wrapping (local pending) 1i32))))
+			(let finished (call finish_value_rows (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local first_pending) (local last_pending) (local caller) (local view_start)
+				(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local expressions))))
+			(if
+				(:doc "Retain the offending operand's span when resolving a deferred result.")
+				(u32.lt 0u32 (struct.get (local finished) error))
+				(then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local finished)))))
 			(if
 				(:doc "Read exact-length contracts only for expressions that contain checked calls.")
 				(i32.lt (local site_start) (local site_count))
@@ -4121,20 +4166,12 @@
 				(bool.not (i32.lt (local value) 0i32))
 				(then (set (local type) (struct.get (array.load (local expressions) (local value)) type))))
 			(if
-				(:doc "Use the checked subject's exact enum to resolve every case before planning the arms.")
+				(:doc "Use the exact checked subject type to resolve every case before planning the arms.")
 				(u32.eq (local kind) (local match_statement))
 				(then
-					(let subject (array.load (local nodes) (local value)))
-					(if
-						(:doc "Every statement match uses the subject's exact nominal enum.")
-						(bool.not (bool.and (call is_record_type (local type))
-							(call is_enum_layout (array.load (local records) (call record_index (local type))))))
-						(then (return (call body_error (local caller) (struct.get (local subject) start)
-							(struct.get (local subject) end) 24u32))))
 					(let arms (call plan_match_cases (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local node) (struct.get (local subject) next_sibling)
-						(array.load (local records) (call record_index (local type))) (borrow-shared (local records))
-						(borrow-shared (local bindings)) (borrow-mut (local statements))))
+						(local node) (local value) (local type) (borrow-shared (local records))
+						(borrow-shared (local bindings)) (borrow-mut (local statements)) (borrow-mut (local expressions))))
 					(if
 						(:doc "A missing, duplicate, or unknown case retains its source diagnostic.")
 						(u32.lt 0u32 (struct.get (local arms) error))
