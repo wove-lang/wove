@@ -1660,6 +1660,14 @@ void wvrt_worker_queue_push_at_span(wvrt_array **slot, wvrt_worker_receipt *rece
 	wvrt_trap_at_span(file, start, end, "could not append worker receipt");
 }
 
+// Transfer the oldest receipt and retain the remaining receipts in enqueue order.
+wvrt_worker_receipt *wvrt_worker_queue_pop_front_at_span(wvrt_array *queue,
+	int32_t file, int32_t start, int32_t end) {
+	wvrt_worker_receipt *receipt;
+	wvrt_array_remove_at_span(queue, 0, &receipt, file, start, end);
+	return receipt;
+}
+
 typedef struct {
 	size_t stride;
 	size_t alignment;

@@ -1,0 +1,61 @@
+(module record_worker_pipeline_fifo
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+
+	(use wove-file "./pipeline.wove" (only (as encode process_job) consume))
+	(use wove-file "./pipeline_queue.wove" (only make_job))
+	(use c-header "./ledger.h" (only begin))
+
+	(struct ArgSpan (fields (start i32) (end i32)))
+
+	(fn main
+		(:doc "The single pool thread completes the later-enqueued receipt before the first.")
+		(params (bytes (shared-array u8)) (args (shared-array ArgSpan))) (returns i32)
+		(body
+			(let discard (i32.not-eqz (call begin)))
+			(let pool (worker.open-pool 1i32 2i32))
+			(let-mut pending (worker.receipt-queue process_job))
+			(if (i32.not-eqz (worker.len (local pending))) (then (return 1i32)))
+
+			(let second_permit (worker.reserve-wait (local pool)))
+			(let second (worker.spawn-on process_job (move (local second_permit)) (call make_job 38u8)))
+			(let first_permit (worker.reserve-wait (local pool)))
+			(let first (worker.spawn-on process_job (move (local first_permit)) (call make_job 37u8)))
+			(worker.push (local pending) (move (local first)))
+			(worker.push (local pending) (move (local second)))
+
+			(if
+				(:doc "Remove the oldest receipt at capacity and leave it live on the early-exit path.")
+				(i32.not-eq (worker.len (local pending)) 2i32)
+				(then (return 2i32)))
+			(let oldest (worker.pop-front (local pending)))
+			(if (i32.not-eq (worker.len (local pending)) 1i32) (then (return 3i32)))
+			(if (local discard) (then (return 42i32)))
+			(if (i32.not-eq (call consume (worker.join (local oldest))) 40i32) (then (return 4i32)))
+
+			(let-mut next 39u8)
+			(let-mut expected 41i32)
+			(while (u8.lt (local next) 41u8)
+				(body
+					(if (i32.eq (worker.len (local pending)) 2i32)
+						(then
+							(let head (worker.pop-front (local pending)))
+							(if (i32.not-eq (call consume (worker.join (local head))) (local expected)) (then (return 5i32)))
+							(set (local expected) (i32.inc (local expected)))))
+					(let permit (worker.reserve-wait (local pool)))
+					(let receipt (worker.spawn-on process_job (move (local permit)) (call make_job (local next))))
+					(worker.push (local pending) (move (local receipt)))
+					(set (local next) (u8.inc (local next)))))
+
+			(if
+				(:doc "Closing joins every pool thread. Finished receipts still occupy the queue.")
+				(bool.not (worker.try-close (local pool)))
+				(then (return 6i32)))
+			(if (i32.not-eq (worker.len (local pending)) 2i32) (then (return 7i32)))
+			(while (i32.gtz (worker.len (local pending)))
+				(body
+					(let head (worker.pop-front (local pending)))
+					(if (i32.not-eq (call consume (worker.join (local head))) (local expected)) (then (return 8i32)))
+					(set (local expected) (i32.inc (local expected)))))
+			(if (i32.not-eq (local expected) 44i32) (then (return 9i32)))
+			(return 42i32))))

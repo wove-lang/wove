@@ -776,6 +776,21 @@ move each receipt explicitly.
 (let results (worker.join-all (local pending)))
 ```
 
+`(worker.len (local pending))` returns the number of queued receipts as an
+`i32`, including receipts whose workers have finished. An immutable queue
+binding can be read for its length.
+
+`(worker.pop-front (local pending))` removes the oldest receipt from a
+mutable queue and directly initializes a new local. The receipt keeps the
+queue's exact result type and can be joined or moved like any other receipt.
+The queue retains its remaining receipts in enqueue order. Removing from an
+empty queue traps at the removal span.
+
+```lisp
+(let oldest (worker.pop-front (local pending)))
+(let result (worker.join (local oldest)))
+```
+
 `worker.join-all` consumes the queue and returns one owned result per
 receipt in enqueue order, even when workers finish in a different order.
 For a handler returning `(owned-array Digest)`, collection returns

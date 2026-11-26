@@ -15,9 +15,12 @@ enum scenario {
 	queue_collect, queue_discard, queue_allocate, queue_backing, queue_join, queue_discard_join,
 	try_collect, try_grow, try_box, try_backing, try_frame, try_thread,
 	tile_collect, tile_thread,
-	pool_collect, pool_discard, pool_retired, pool_box, pool_backing, pool_frame, pool_missing
+	pool_collect, pool_discard, pool_retired, pool_box, pool_backing, pool_frame, pool_missing,
+	fifo_collect, fifo_discard
 };
-#if defined(RECORD_POOL_TEST)
+#if defined(RECORD_FIFO_TEST)
+static enum scenario mode = fifo_collect;
+#elif defined(RECORD_POOL_TEST)
 static enum scenario mode = pool_collect;
 #elif defined(RECORD_QUEUE_TEST)
 static enum scenario mode = queue_collect;
@@ -32,7 +35,8 @@ static const char *const scenarios[] = {
 	"collect", "discard", "joined", "pack-frame", "pack-storage", "receipt-frame", "start", "joined-start", "result-frame",
 	"queue-collect", "queue-discard", "queue-allocate", "queue-backing", "queue-join", "queue-discard-join",
 	"try-collect", "try-grow", "try-box", "try-backing", "try-frame", "try-thread", "tile-collect", "tile-thread",
-	"pool-collect", "pool-discard", "pool-retired", "pool-box", "pool-backing", "pool-frame", "pool-missing"
+	"pool-collect", "pool-discard", "pool-retired", "pool-box", "pool-backing", "pool-frame", "pool-missing",
+	"fifo-collect", "fifo-discard"
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -53,6 +57,7 @@ static void require(bool condition) {
 // Begin after the host adapter has already packed argv.
 int32_t begin(void) {
 	active = true;
+	if (mode >= fifo_collect) { return mode == fifo_discard; }
 	// The retired-pool path isolates pre-admission failures from other live locals.
 	if (mode >= pool_collect) {
 		if (mode == pool_missing) { return 3; }
@@ -143,15 +148,17 @@ static void check_ownership(void) {
 		[try_collect] = 45, [try_grow] = 39, [try_box] = 40, [try_backing] = 41,
 		[try_frame] = 42, [try_thread] = 43, [tile_collect] = 15, [tile_thread] = 15,
 		[pool_collect] = 48, [pool_discard] = 46, [pool_retired] = 16,
-		[pool_box] = 7, [pool_backing] = 8, [pool_frame] = 9, [pool_missing] = 0
+		[pool_box] = 7, [pool_backing] = 8, [pool_frame] = 9, [pool_missing] = 0,
+		[fifo_collect] = 58, [fifo_discard] = 32
 	};
 	require(acquired == expected[mode] && released == acquired);
 	unsigned completed = atomic_load_explicit(&results, memory_order_relaxed);
 	unsigned joined_count = atomic_load_explicit(&joins, memory_order_relaxed);
 	unsigned create_count = atomic_load_explicit(&creates, memory_order_relaxed);
-	// A rejected job creates no receipt, and only creation failures reach pthread_create.
-	// Only pool threads and the explicitly dedicated worker are created and joined at the host.
-	if (mode >= pool_collect) {
+	// The FIFO fixture runs each job on one persistent pool thread.
+	if (mode >= fifo_collect) {
+		require(completed == (mode == fifo_collect ? 4u : 2u) && create_count == 1 && joined_count == 1);
+	} else if (mode >= pool_collect) {
 		unsigned scheduled = mode == pool_missing ? 0u : (mode < pool_retired ? 3u : 1u);
 		unsigned handled = mode < pool_retired ? 3u : (mode == pool_retired ? 1u : 0u);
 		require(completed == handled && create_count == scheduled && joined_count == scheduled);
