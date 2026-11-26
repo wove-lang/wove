@@ -194,7 +194,8 @@ name lookup, type checking, C emission, and caller inspection.
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices. A value-returning function must
 return its declared type on every path. Helpers can accept and return `i8`,
-`u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `bool`, `f16`, `f32`, `f64`, and `f80`. Expressions support exact-type
+`u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `bool`, `f16`, `f32`, `f64`, `f80`, and `f128`.
+Expressions support exact-type
 literals, binding reads, and direct calls. A local declared with `let` or
 `let-mut` takes its scalar type from its initializer and comes into scope
 afterwards. A `set`
@@ -565,16 +566,18 @@ reads four bytes starting at index one.
 
 Stage 2 uses native C `_Float16`, `float`, `double`, and `long double` for
 `f16`, `f32`, `f64`, and `f80` in locals, function signatures, struct fields,
-and C bridges. Write a
+and C bridges. `f128` uses the Clang target's native binary128 type. Write a
 typed decimal as `(f16 -2.5)` or `-2.5f16`. A decimal needs digits before the
 point and in each written fraction or exponent. Clang rounds the original
 digits at the written width and preserves a negative sign on zero.
 
 Native `cc` and `bin` check the format using the selected Clang and its target
-options when the checked program uses `f16` or `f80`. The `f80` format requires
-a 64-bit `long double` significand and uses the target's native C size and
-alignment. On unsupported targets the compiler reports a source diagnostic
-before emitting C.
+options when the checked program uses `f16`, `f80`, or `f128`. The `f80`
+format requires a 64-bit `long double` significand and uses the target's
+native C size and alignment. For `f128`, the compiler uses `long double`
+with a 113-bit significand if available and otherwise uses Clang's
+`__float128` extension. Decimal literals use the matching C suffix. On
+unsupported targets the compiler reports a source diagnostic before emitting C.
 
 Use width-qualified `add`, `sub`, `mul`, `div`, and unary `neg` for native
 floating arithmetic. The `eq`, `not-eq`, `lt`, `le`, `gt`, and `ge` operators
@@ -594,9 +597,9 @@ infinity. `f32.from-f64` keeps native rounding, subnormals, and nonfinite
 values, and traps on finite values outside the binary32 range. Conversions
 to `f16` round at binary16 precision, preserve signed zero and nonfinite
 values, and trap on finite values outside `[-65504, 65504]`. Conversions
-from `f80` check the original extended value before rounding directly to
-the destination format or truncating to an integer. All built-in integer
-values are exactly representable in `f80`.
+from `f80` and `f128` check the original value before rounding directly
+to the destination format or truncating to an integer. Both formats
+can represent all built-in integer values exactly.
 
 A `for` statement has a binder, a source, and a body. A half-open range uses
 `(for (bind cursor) (range start end) (body ...))`. Both bounds must have the

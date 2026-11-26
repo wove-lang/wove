@@ -150,6 +150,58 @@ _Float16 wvrt_f80_to_f16(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtst
 #endif
 #endif
 
+// Both native binary128 representations use the same checked conversion rules.
+#ifdef WVRT_HAS_F128
+// Check the open truncation interval before converting the original binary128 value.
+wvrt_f128 wvrt_f128_to_integer(wvrt_f128 wvrtvalue, wvrt_f128 wvrtlower, wvrt_f128 wvrtupper,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Ordered comparisons reject NaNs and both ends of the overflow interval.
+	if (!(wvrtvalue > wvrtlower && wvrtvalue < wvrtupper)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
+	}
+	return wvrtvalue;
+}
+
+// Classify and compare at binary128 precision even when long double has fewer bits.
+static void wvrt_check_f128_range(wvrt_f128 wvrtvalue, wvrt_f128 wvrtlimit,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Nonfinite inputs keep their IEEE behavior on conversion to a narrower format.
+	if (__builtin_isfinite(wvrtvalue) && (wvrtvalue < -wvrtlimit || wvrtvalue > wvrtlimit)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "floating conversion out of range");
+	}
+}
+
+// Round directly to binary64 after checking its finite limit.
+double wvrt_f128_to_f64(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_check_f128_range(wvrtvalue, DBL_MAX, wvrtfile, wvrtstart, wvrtend);
+	return (double)wvrtvalue;
+}
+
+// Round directly to binary32 after checking its finite limit.
+float wvrt_f128_to_f32(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_check_f128_range(wvrtvalue, FLT_MAX, wvrtfile, wvrtstart, wvrtend);
+	return (float)wvrtvalue;
+}
+
+// Extended precision has its own finite limit even when it shares binary128's exponent range.
+#ifdef WVRT_HAS_F80
+// Round directly to native extended precision after checking its finite limit.
+long double wvrt_f128_to_f80(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_check_f128_range(wvrtvalue, LDBL_MAX, wvrtfile, wvrtstart, wvrtend);
+	return (long double)wvrtvalue;
+}
+#endif
+
+// Compile direct half rounding when the target also supports binary16.
+#ifdef WVRT_HAS_F16
+// Round directly to binary16 after checking its finite limit.
+_Float16 wvrt_f128_to_f16(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_check_f128_range(wvrtvalue, 65504.0, wvrtfile, wvrtstart, wvrtend);
+	return (_Float16)wvrtvalue;
+}
+#endif
+#endif
+
 // Trap at the argument that failed to meet its callee's required slice length.
 void wvrt_check_slice_extent_at_span(int32_t wvrt_length, int32_t wvrt_expected,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {

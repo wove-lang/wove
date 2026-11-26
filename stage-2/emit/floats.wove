@@ -3,7 +3,7 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Write native floating literals, bit copies, and checked numerical conversions.`)
 
-	(use wove-file "../source/types.wove" (only is_builtin_float (value f16_type) (value f32_type) (value f64_type) (value f80_type)
+	(use wove-file "../source/types.wove" (only is_builtin_float (value f16_type) (value f32_type) (value f64_type) (value f80_type) (value f128_type)
 		(value i16_type) (value u16_type) (value i64_type)))
 	(use wove-file "../source/float_ops.wove" (only (value float_from_bits) (value float_to_bits)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
@@ -12,6 +12,7 @@
 
 	(let point_zero ".0")
 	(let half_suffix "F16")
+	(let quad_literal "WVRT_F128_LITERAL(")
 	(let from_u16_bits "wvrt_f16_from_bits(")
 	(let to_u16_bits "wvrt_f16_to_bits(")
 	(let from_u32_bits "wvrt_f32_from_bits(")
@@ -25,6 +26,11 @@
 	(let extended_to_half "wvrt_f80_to_f16(")
 	(let extended_to_float "wvrt_f80_to_f32(")
 	(let extended_to_double "wvrt_f80_to_f64(")
+	(let quad_to_integer "wvrt_f128_to_integer(")
+	(let quad_to_half "wvrt_f128_to_f16(")
+	(let quad_to_float "wvrt_f128_to_f32(")
+	(let quad_to_double "wvrt_f128_to_f64(")
+	(let quad_to_extended "wvrt_f128_to_f80(")
 	(let i8_bounds ",-129.0,0x1p7")
 	(let u8_bounds ",-1.0,0x1p8")
 	(let i16_bounds ",-32769.0,0x1p15")
@@ -33,6 +39,7 @@
 	(let u32_bounds ",-1.0,0x1p32")
 	(let i64_bounds ",-0x1.0000000000001p63,0x1p63")
 	(let extended_i64_bounds ",-0x1p63L-1.0L,0x1p63L")
+	(let quad_i64_bounds ",-WVRT_F128_LITERAL(9223372036854775809.0),0x1p63")
 	(let u64_bounds ",-1.0,0x1p64")
 
 	(fn write_floating_literal
@@ -41,8 +48,15 @@
 			(output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
-			(let-mut cursor (call c_span (borrow-shared (local source)) (struct.get (local row) start)
-				(struct.get (local row) end) (borrow-mut (local output)) (local offset) (local writing)))
+			(let type (struct.get (local row) type))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "The runtime macro pastes the native binary128 suffix before C rounds the literal.")
+				(u32.eq (local type) (local f128_type))
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local quad_literal))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call c_span (borrow-shared (local source)) (struct.get (local row) start)
+				(struct.get (local row) end) (borrow-mut (local output)) (local cursor) (local writing)))
 			(if
 				(:doc "An integer-shaped decimal must become a C floating literal, including negative zero.")
 				(i32.eq (struct.get (local row) target) 2i32)
@@ -61,6 +75,10 @@
 				(:doc "An L suffix rounds the original decimal directly to native extended precision.")
 				(u32.eq (struct.get (local row) type) (local f80_type))
 				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 76u8 (local writing)))))
+			(if
+				(:doc "Close the binary128 literal macro after preserving the sign and complete decimal.")
+				(u32.eq (local type) (local f128_type))
+				(then (return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 			(return (local cursor))))
 
 	(fn open_bit_copy
@@ -98,11 +116,39 @@
 			(return (call c_literal_text (borrow-shared (local to_u64_bits))
 				(borrow-mut (local output)) (local offset) (local writing)))))
 
+	(fn write_quad_narrow
+		(:doc "Select a checked conversion that rounds straight from binary128 to its destination.")
+		(params (target u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "Use the independently guarded binary16 helper.")
+				(u32.eq (local target) (local f16_type))
+				(then (return (call c_literal_text (borrow-shared (local quad_to_half))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Convert to binary32 in one rounding step.")
+				(u32.eq (local target) (local f32_type))
+				(then (return (call c_literal_text (borrow-shared (local quad_to_float))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "The native x87 format has the same exponent range but fewer significand bits.")
+				(u32.eq (local target) (local f80_type))
+				(then (return (call c_literal_text (borrow-shared (local quad_to_extended))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local quad_to_double))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
 	(fn write_float_narrow
 		(:doc "Select the runtime check that rounds directly from the operand's precision.")
 		(params (source u32) (target u32) (output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
+			(if
+				(:doc "Select the helper whose argument stays in native binary128.")
+				(u32.eq (local source) (local f128_type))
+				(then (return (call write_quad_narrow (local target)
+					(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
 				(:doc "Keep the extra precision of an f80 operand through the range check and cast.")
 				(u32.eq (local source) (local f80_type))
@@ -129,12 +175,17 @@
 
 	(fn write_float_integer_check
 		(:doc "Select the integer range check without reducing the precision of the operand.")
-		(params (extended bool) (output (mut-array u8)) (offset u32) (writing bool))
+		(params (source u32) (output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(if
+				(:doc "Preserve the original binary128 value through the open-interval check.")
+				(u32.eq (local source) (local f128_type))
+				(then (return (call c_literal_text (borrow-shared (local quad_to_integer))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
 				(:doc "Long double can distinguish all values adjacent to the i64 and u64 endpoints.")
-				(local extended)
+				(u32.eq (local source) (local f80_type))
 				(then (return (call c_literal_text (borrow-shared (local extended_to_integer))
 					(borrow-mut (local output)) (local offset) (local writing)))))
 			(return (call c_literal_text (borrow-shared (local float_to_integer))
@@ -142,7 +193,7 @@
 
 	(fn write_integer_bounds
 		(:doc `Write the exact open interval whose truncated values fit the destination type.`)
-		(params (type u32) (extended bool) (output (mut-array u8)) (offset u32) (writing bool))
+		(params (type u32) (source u32) (output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(if
@@ -180,8 +231,13 @@
 				(u32.eq (local type) (local i64_type))
 				(then
 					(if
+						(:doc "Use a binary128 literal for the lower endpoint on either native C representation.")
+						(u32.eq (local source) (local f128_type))
+						(then (return (call c_literal_text (borrow-shared (local quad_i64_bounds))
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(if
 						(:doc "Extended precision represents INT64_MIN minus one exactly.")
-						(local extended)
+						(u32.eq (local source) (local f80_type))
 						(then (return (call c_literal_text (borrow-shared (local extended_i64_bounds))
 							(borrow-mut (local output)) (local offset) (local writing)))))
 					(return (call c_literal_text (borrow-shared (local i64_bounds))
@@ -199,15 +255,16 @@
 			(let target (struct.get (local row) type))
 			(let from_bits (u32.eq (local kind) (local float_from_bits)))
 			(let to_bits (u32.eq (local kind) (local float_to_bits)))
-			(let extended (u32.eq (local input) (local f80_type)))
+			(let wide (bool.or (u32.eq (local input) (local f80_type)) (u32.eq (local input) (local f128_type))))
 			(let float_target (call is_builtin_float (local target)))
 			(let checked_integer (bool.and (bool.not (bool.or (local from_bits) (local to_bits)))
 				(bool.not (local float_target))))
 			(let narrow (bool.and (bool.not (local from_bits))
-				(bool.or (bool.and (local extended)
-					(bool.and (local float_target) (u32.not-eq (local input) (local target))))
-					(bool.or (bool.and (u32.eq (local input) (local f64_type)) (u32.eq (local target) (local f32_type)))
-						(bool.and (u32.eq (local target) (local f16_type)) (u32.not-eq (local input) (local target)))))))
+				(bool.and (u32.not-eq (local input) (local target))
+					(bool.or (bool.and (local wide)
+						(bool.and (local float_target) (u32.not-eq (local target) (local f128_type))))
+						(bool.or (bool.and (u32.eq (local input) (local f64_type)) (u32.eq (local target) (local f32_type)))
+							(u32.eq (local target) (local f16_type)))))))
 			(let-mut cursor (local offset))
 			(if
 				(:doc "Bit operations pass the original type to a width-matched copy.")
@@ -228,14 +285,14 @@
 							(if
 								(:doc "A float-to-integer cast must check the source before truncating.")
 								(local checked_integer)
-								(then (set (local cursor) (call write_float_integer_check (local extended)
+								(then (set (local cursor) (call write_float_integer_check (local input)
 									(borrow-mut (local output)) (local cursor) (local writing)))))))))
 			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (struct.get (local row) first)
 				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(if
 				(:doc "Only integer destinations use a destination-specific open interval.")
 				(local checked_integer)
-				(then (set (local cursor) (call write_integer_bounds (local target) (local extended)
+				(then (set (local cursor) (call write_integer_bounds (local target) (local input)
 					(borrow-mut (local output)) (local cursor) (local writing)))))
 			(if
 				(:doc "Attach the Wove span to either checked numerical conversion.")
