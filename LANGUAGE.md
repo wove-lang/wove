@@ -134,9 +134,9 @@ Indexes and range endpoints are exact `i32` values. Received views count
 and index elements relative to their own bounds. Bounds violations trap.
 A call loan lasts through later arguments and the call.
 
-Stage 2 growable arrays with copyable elements use an owner as their
-receiver. Use a named owner or a field of a named place. Mutation
-requires writable storage with no overlapping live loan.
+Stage 2 growable arrays use a named owner or a field of a named place
+as their receiver. Mutation requires writable storage with no overlapping
+live loan.
 
 | Form | Meaning |
 | --- | --- |
@@ -151,6 +151,13 @@ Push captures its value before changing storage, so it can append a
 copy of a live element from the same array. Reserving capacity leaves
 the logical length unchanged. Removal and truncation use the logical
 length for bounds and retain the reserved storage.
+
+An array of owned byte rows accepts
+`(array.push (local rows) (move (local row)))`. A successful push
+transfers the original byte owner to the vector. Removing a populated
+row transfers it to the result, and removing an unfilled slot traps.
+Truncation drops the owners in the removed suffix immediately.
+
 
 Stage 2 fixed arrays keep their elements inline and copy by value. Use
 `(array T extent)` for a builtin scalar or copyable Wove record `T`.
