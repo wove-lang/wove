@@ -107,6 +107,49 @@ _Float16 wvrt_f16_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, 
 }
 #endif
 
+// Targets with x87 extended precision retain all 64 significand bits during conversion checks.
+#ifdef WVRT_HAS_F80
+// Check the original extended value before truncating to an integer.
+long double wvrt_f80_to_integer(long double wvrtvalue, long double wvrtlower, long double wvrtupper,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Ordered comparisons reject NaN as well as values outside the open interval.
+	if (!(wvrtvalue > wvrtlower && wvrtvalue < wvrtupper)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
+	}
+	return wvrtvalue;
+}
+
+// Keep nonfinite values and compare finite inputs at their original precision.
+static void wvrt_check_f80_range(long double wvrtvalue, long double wvrtlimit,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// The limit is the destination's exact largest finite magnitude.
+	if (isfinite(wvrtvalue) && (wvrtvalue < -wvrtlimit || wvrtvalue > wvrtlimit)) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "floating conversion out of range");
+	}
+}
+
+// Round directly from extended precision to binary64 after checking its finite range.
+double wvrt_f80_to_f64(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_check_f80_range(wvrtvalue, DBL_MAX, wvrtfile, wvrtstart, wvrtend);
+	return (double)wvrtvalue;
+}
+
+// Round directly from extended precision to binary32 after checking its finite range.
+float wvrt_f80_to_f32(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_check_f80_range(wvrtvalue, FLT_MAX, wvrtfile, wvrtstart, wvrtend);
+	return (float)wvrtvalue;
+}
+
+// Compile the binary16 destination helper only when both ABIs are available.
+#ifdef WVRT_HAS_F16
+// Round directly from extended precision to binary16 after checking its finite range.
+_Float16 wvrt_f80_to_f16(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_check_f80_range(wvrtvalue, 65504.0L, wvrtfile, wvrtstart, wvrtend);
+	return (_Float16)wvrtvalue;
+}
+#endif
+#endif
+
 // Trap at the argument that failed to meet its callee's required slice length.
 void wvrt_check_slice_extent_at_span(int32_t wvrt_length, int32_t wvrt_expected,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {

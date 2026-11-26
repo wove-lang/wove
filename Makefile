@@ -136,7 +136,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 	}' "$(OWNERSHIP_CASES)")
 
 .PHONY: all stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
-.PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version force-build-info
+.PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-process test-stage-2-version force-build-info
 .PHONY: test-stage-2-inventory
 .DELETE_ON_ERROR:
 .SECONDARY:
@@ -204,7 +204,7 @@ test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
 test-stage-2-native: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-native: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-native: export WOVE_BUILD_CLANG = $(CLANG)
-test-stage-2-native: $(NATIVE_COMPILER)
+test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/discovery/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
@@ -220,6 +220,12 @@ test-stage-2-native: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/protection.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/phases.tsv"
 	sh "$(NATIVE_CLI_FIXTURES)/debug/check.sh" "$(PYTHON)" "$(abspath $(NATIVE_COMPILER))" "$(NATIVE_CLI_FIXTURES)/debug/cases.tsv"
+
+# Check f80 admission and run the native cases when the selected tool supports extended precision.
+test-stage-2-f80: export WOVE_TEST_CLANG = $(CLANG)
+test-stage-2-f80: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2-f80: $(NATIVE_COMPILER)
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/extended/check.py" "$(NATIVE_COMPILER)"
 
 # Check generated metadata and version invalidation in an isolated build.
 test-stage-2-version: $(NATIVE_COMPILER) $(BUILD_VERSION)
