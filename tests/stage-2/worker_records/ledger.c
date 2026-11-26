@@ -14,9 +14,12 @@ enum scenario {
 	collect, discard, joined, pack_frame, pack_storage, receipt_frame, start, joined_start, result_frame,
 	queue_collect, queue_discard, queue_allocate, queue_backing, queue_join, queue_discard_join,
 	try_collect, try_grow, try_box, try_backing, try_frame, try_thread,
-	tile_collect, tile_thread
+	tile_collect, tile_thread,
+	pool_collect, pool_discard, pool_retired, pool_box, pool_backing, pool_frame, pool_missing
 };
-#if defined(RECORD_QUEUE_TEST)
+#if defined(RECORD_POOL_TEST)
+static enum scenario mode = pool_collect;
+#elif defined(RECORD_QUEUE_TEST)
 static enum scenario mode = queue_collect;
 #elif defined(RECORD_TRY_SPAWN_TEST)
 static enum scenario mode = try_collect;
@@ -28,7 +31,8 @@ static enum scenario mode = collect;
 static const char *const scenarios[] = {
 	"collect", "discard", "joined", "pack-frame", "pack-storage", "receipt-frame", "start", "joined-start", "result-frame",
 	"queue-collect", "queue-discard", "queue-allocate", "queue-backing", "queue-join", "queue-discard-join",
-	"try-collect", "try-grow", "try-box", "try-backing", "try-frame", "try-thread", "tile-collect", "tile-thread"
+	"try-collect", "try-grow", "try-box", "try-backing", "try-frame", "try-thread", "tile-collect", "tile-thread",
+	"pool-collect", "pool-discard", "pool-retired", "pool-box", "pool-backing", "pool-frame", "pool-missing"
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -49,6 +53,12 @@ static void require(bool condition) {
 // Begin after the host adapter has already packed argv.
 int32_t begin(void) {
 	active = true;
+	// The retired-pool path isolates pre-admission failures from other live locals.
+	if (mode >= pool_collect) {
+		if (mode == pool_missing) { return 3; }
+		if (mode >= pool_retired) { return 2; }
+		return mode == pool_discard;
+	}
 	if (mode >= try_collect) { return mode != try_collect && mode != tile_collect; }
 	if (mode == discard || mode == queue_discard || mode == queue_discard_join) { return 1; }
 	return mode == joined || mode == joined_start || mode == result_frame ? 2 : 0;
@@ -56,9 +66,9 @@ int32_t begin(void) {
 
 // Arm the calling thread at the next launch or queue collection.
 void before_spawn(void) {
-	if (mode == pack_frame || mode == queue_allocate || mode == try_box) { until_malloc_failure = 1; }
-	if (mode == pack_storage || mode == queue_backing || mode == try_grow) { until_calloc_failure = 1; }
-	if (mode == receipt_frame || mode == try_frame) { until_malloc_failure = 2; }
+	if (mode == pack_frame || mode == queue_allocate || mode == try_box || mode == pool_box) { until_malloc_failure = 1; }
+	if (mode == pack_storage || mode == queue_backing || mode == try_grow || mode == pool_backing) { until_calloc_failure = 1; }
+	if (mode == receipt_frame || mode == try_frame || mode == pool_frame) { until_malloc_failure = 2; }
 	if (mode == try_backing) { until_calloc_failure = 2; }
 }
 
@@ -131,14 +141,21 @@ static void check_ownership(void) {
 		[queue_collect] = 45, [queue_discard] = 43, [queue_allocate] = 43,
 		[queue_backing] = 44, [queue_join] = 45, [queue_discard_join] = 43,
 		[try_collect] = 45, [try_grow] = 39, [try_box] = 40, [try_backing] = 41,
-		[try_frame] = 42, [try_thread] = 43, [tile_collect] = 15, [tile_thread] = 15
+		[try_frame] = 42, [try_thread] = 43, [tile_collect] = 15, [tile_thread] = 15,
+		[pool_collect] = 48, [pool_discard] = 46, [pool_retired] = 16,
+		[pool_box] = 7, [pool_backing] = 8, [pool_frame] = 9, [pool_missing] = 0
 	};
 	require(acquired == expected[mode] && released == acquired);
 	unsigned completed = atomic_load_explicit(&results, memory_order_relaxed);
 	unsigned joined_count = atomic_load_explicit(&joins, memory_order_relaxed);
 	unsigned create_count = atomic_load_explicit(&creates, memory_order_relaxed);
 	// A rejected job creates no receipt, and only creation failures reach pthread_create.
-	if (mode >= tile_collect) {
+	// Only pool threads and the explicitly dedicated worker are created and joined at the host.
+	if (mode >= pool_collect) {
+		unsigned scheduled = mode == pool_missing ? 0u : (mode < pool_retired ? 3u : 1u);
+		unsigned handled = mode < pool_retired ? 3u : (mode == pool_retired ? 1u : 0u);
+		require(completed == handled && create_count == scheduled && joined_count == scheduled);
+	} else if (mode >= tile_collect) {
 		require(completed == 0 && joined_count == (mode == tile_collect ? 2u : 1u) && create_count == 2);
 	} else if (mode >= try_collect) {
 		require(completed == 3 && joined_count == (mode == try_collect ? 3u : 2u));
