@@ -445,7 +445,7 @@ operation span.
 requires operands of its named scalar type and returns `bool`.
 `(int.eq Type left right)` also compares two integers of the exact
 named type, including native aliases such as `Device` and `Inode`.
-`i32.add.wrapping`, `i32.sub.wrapping`, and `i32.mul.wrapping` take `i32` operands and
+`i32.add`, `i32.sub`, and `i32.mul` take `i32` operands and
 return their signed 32-bit result modulo 2^32. Each binary operand is
 evaluated once, left to right. Emitted C widens the arithmetic,
 reduces it to 32 bits as unsigned, and produces an in-range signed result.
@@ -457,34 +457,34 @@ two exact `i32` operands, evaluated once from left to right, and return
 `INT32_MIN` by `-1` also traps for overflow. The corresponding
 remainder is zero.
 
-`u32.add.wrapping` and `u32.sub.wrapping` take exact `u32` operands
+`u32.add` and `u32.sub` take exact `u32` operands
 and yield `u32` results modulo 2^32. Each operand runs once, left to
 right. Emitted C widens the operands to unsigned 64-bit arithmetic and
 keeps the low 32 bits.
 
 Native `i16` and `u16` use C `int16_t` and `uint16_t` in signatures,
 fields, and storage. Their `.eq` and `.lt` compare exact operands. Their
-`.add.wrapping` and `.sub.wrapping` keep the low 16 bits. For decimal
-output, `i32.from.i16` and `u32.from.u16` widen exactly to the types used
+`i16.add`, `i16.sub`, `u16.add`, and `u16.sub` keep the low 16 bits. For decimal
+output, `i32.from-i16` and `u32.from-u16` widen exactly to the types used
 by the shared decimal writers.
 
 Native `u64` values use `uint64_t` in emitted C. Decimal literals
 can represent the full range, including `(u64 18446744073709551615)`.
-`u64.add.wrapping` adds modulo 2^64. `u64.eq` and `u64.lt`
+`u64.add` adds modulo 2^64. `u64.eq` and `u64.lt`
 compare two exact `u64` values and return `bool`.
 
 Native `i64` values use `int64_t`. Decimal and hexadecimal literals
 cover the full signed range, including `-9223372036854775808i64` and
 `(i64 -0x8000000000000000)`. `i64.eq` and `i64.lt` compare exact signed
-operands. `i64.add.wrapping`, `i64.sub.wrapping`, and
-`i64.mul.wrapping` keep the low 64 bits. The
+operands. `i64.add`, `i64.sub`, and
+`i64.mul` keep the low 64 bits. The
 [wide decimal writers](text/decimal_wide.wove) append either word type
 to a bounded byte view and preserve any prefix written before exhaustion.
 
 Every built-in integer type supports `eq`, `lt`, `le`, `gt`, and `ge`
 with exact operands and a `bool` result. Append `z` to compare one value
-with typed zero, as in `(i16.ltz value)`. Insert `.not.` to negate a
-comparison, as in `(u32.not.eq left right)` or `(u32.not.eqz value)`.
+with typed zero, as in `(i16.ltz value)`. Prefix the predicate with `not-` to negate a
+comparison, as in `(u32.not-eq left right)` or `(u32.not-eqz value)`.
 Each operand runs once in source order, including for unsigned predicates
 such as `u32.gez` whose result is fixed by the type.
 
@@ -509,8 +509,8 @@ preserves its numerical value when it fits the target `i8`, `u8`, `i16`,
 runtime diagnostic identifies the original file ID and half-open byte
 span of the conversion, including from a source subrange or an imported
 file. C emitted for conversions includes `wove_runtime.h` and links
-with the shared Wove C runtime. `(u8.from.u32 value)` applies the same
-check after requiring an exact `u32` operand. The `<destination>.from.<source>`
+with the shared Wove C runtime. `(u8.from-u32 value)` applies the same
+check after requiring an exact `u32` operand. The `<destination>.from-<source>`
 form supports every pair of builtin integer types.
 
 `(T.fits value)` checks representability as a `bool` before a caller
@@ -524,15 +524,15 @@ the value it read. The writeback occurs only when the expression returns
 `true`. For any signed width, minimum divided by `-1` returns `false`,
 and minimum remainder `-1` writes zero and returns `true`.
 
-For any builtin integer `T`, `(T.to.le-bytes value)` and
-`(T.to.be-bytes value)` evaluate an exact `T` once and return an inline
+For any builtin integer `T`, `(T.to-le-bytes value)` and
+`(T.to-be-bytes value)` evaluate an exact `T` once and return an inline
 `(array u8 N)`. The width `N` is one for `i8` and `u8`, two for
-`i16` and `u16`, four for `i32` and `u32`, and eight for `i64` and `u64`. The inverse `T.from.le-bytes`
-and `T.from.be-bytes` forms take a shared byte view. They trap at the
+`i16` and `u16`, four for `i32` and `u32`, and eight for `i64` and `u64`. The inverse `T.from-le-bytes`
+and `T.from-be-bytes` forms take a shared byte view. They trap at the
 conversion span before reading if the view has fewer or more than `N`
 elements. Signed values use two's complement. The byte order is explicit
 on every host, and the view may start at any byte offset. For example,
-`(u32.from.le-bytes (borrow-shared (array.range (local source) 1i32 5i32)))`
+`(u32.from-le-bytes (borrow-shared (array.range (local source) 1i32 5i32)))`
 reads four bytes starting at index one.
 
 Stage 2 uses native C `float` and `double` for `f32` and `f64` in locals,
@@ -542,19 +542,19 @@ in each written fraction or exponent. Clang rounds the original digits at
 the written width and preserves a negative sign on zero.
 
 Use width-qualified `add`, `sub`, `mul`, `div`, and unary `neg` for native
-floating arithmetic. The `eq`, `ne`, `lt`, `le`, `gt`, and `ge` operators
+floating arithmetic. The `eq`, `not-eq`, `lt`, `le`, `gt`, and `ge` operators
 take two values of the named width and return `bool`. Eager operands evaluate
 once from left to right.
 
-Use `(f32.from.bits word)` and `(f32.to.bits value)` to copy the representation
+Use `(f32.from-bits word)` and `(f32.to-bits value)` to copy the representation
 between `f32` and `u32`. The matching `f64` forms use `u64`. These operations
 retain signed zero and NaN payloads. For example, an STL coordinate read from
-little-endian bytes can widen with `(f64.from.f32 (f32.from.bits (local word)))`.
+little-endian bytes can widen with `(f64.from-f32 (f32.from-bits (local word)))`.
 
-The same `<destination>.from.<source>` syntax handles checked numeric conversions
+The same `<destination>.from-<source>` syntax handles checked numeric conversions
 involving floats. Floating-to-integer conversions truncate toward zero and
 trap at the conversion span if the result cannot fit, including for NaN and
-infinity. `f32.from.f64` keeps native rounding, subnormals, and nonfinite
+infinity. `f32.from-f64` keeps native rounding, subnormals, and nonfinite
 values, and traps on finite values outside the binary32 range.
 
 A `for` statement has a binder, a source, and a body. A half-open range uses
