@@ -17,7 +17,7 @@
 	(use wove-file "./locals.wove" (only find_local read_local_name))
 	(use wove-file "./integer_literals.wove" (only plan_integer_value))
 	(use wove-file "./matches.wove" (only plan_match_cases enter_case_owner match_continues seed_match_value seed_match_results finish_match_value find_match_binding))
-	(use wove-file "./loops.wove" (only read_for_names read_iteration_source register_iteration_bindings is_iteration_statement))
+	(use wove-file "./loops.wove" (only read_for_names read_iteration_source register_iteration_bindings is_iteration_statement enter_consuming_iteration))
 	(use wove-file "../source/integer_checks.wove" (only read_integer_check is_integer_check (value integer_fits) (type IntegerCheck)))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_conversion
 		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
@@ -56,7 +56,7 @@
 	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding is_iteration_binding is_writable_local (type ScalarStatement)
 			(value c_writable_binding) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment) (value case_payload_binding)
-			(value next_path) (value break_path) (value continue_path) (value break_statement) (value for_statement) (value for_mut_binding) (value for_element_assignment)))
+			(value next_path) (value break_path) (value continue_path) (value break_statement) (value for_statement) (value for_source_owner) (value for_mut_binding) (value for_element_assignment)))
 	(use wove-file "./conditional.wove" (only plan_conditional finish_conditional_value conditional_transfer_reaches is_pending_value
 		(value conditional_value) (value pending_conditional) (value pending_field_read) (value pending_array_read)))
 	(use wove-file "./control.wove" (only plan_control_blocks enclosing_loop sequence_paths predicate_literal control_paths native_transfer_paths prior_owner_take has_path repeats_loop consumption_on_back_edge))
@@ -3976,8 +3976,9 @@
 			(let definition (array.load (local statements) (local from)))
 			(let-mut home (struct.get (array.load (local nodes) (local from)) parent))
 			(if
-				(:doc "A payload's binder is written inside the case but belongs to the arm scope.")
-				(u32.eq (struct.get (local definition) kind) (local case_payload_binding))
+				(:doc "A header binding belongs to the loop body or case arm.")
+				(bool.or (call is_iteration_binding (struct.get (local definition) kind))
+					(u32.eq (struct.get (local definition) kind) (local case_payload_binding)))
 				(then (set (local home) (struct.get (local definition) first))))
 			(let receiver (array.load (local nodes) (local statement)))
 			(if
@@ -4102,15 +4103,17 @@
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 					(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
 					(if
-						(:doc "A match consumes a named subject only on its evaluated path.")
+						(:doc "Match and for consume their original owner only on the evaluated path.")
 						(u32.eq (local tag) 43u32)
 						(then
 							(let parent (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
 								(array.load (local nodes) (local statement))))
-							(let matching (u32.eq (local match_statement) (call entry_keyword
-								(borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parent) head))))
+							(let control (call entry_keyword
+								(borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parent) head)))
+							(let taking (bool.or (u32.eq (local control) (local match_statement))
+								(u32.eq (local control) (local for_statement))))
 							(return (call plan_move (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local caller) (local root) (local statement) (local expected) (local matching)
+								(local caller) (local root) (local statement) (local expected) (local taking)
 								(borrow-shared (local functions)) (borrow-shared (local parameters))
 								(borrow-shared (local bindings)) (borrow-shared (local records))
 								(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start) (local view_start)))))
@@ -4427,7 +4430,8 @@
 	(fn plan_for
 		(:doc `Check the iterator before publishing its body bindings.
 
-		Both forms prepare their source once. An array loop holds that view for its entire body.`)
+		A borrowed iterator holds its view for the body. A consuming iterator
+		owns the array and transfers the current element on each iteration.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
 			(index i32) (statement StatementRead) (functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
 			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord)) (statements (mut-array ScalarStatement))
@@ -4442,6 +4446,9 @@
 			(if (u32.lt 0u32 (struct.get (local shape) error)) (then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local shape)))))
 			(let value (struct.get (local shape) operand))
 			(let range (bool.not (i32.eq (local iterator) (local value))))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local iterator_node)))
+			(let consuming (u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local parts) head)) 43u32))
 			(let names (call read_for_names (borrow-shared (local source)) (borrow-shared (local nodes))
 				(struct.get (local statement) binding) (bool.not (local range))))
 			(if (u32.lt 0u32 (struct.get (local names) error)) (then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local names)))))
@@ -4450,6 +4457,7 @@
 			(if (u32.lt 0u32 (struct.get (local block) error)) (then (return (call expression_error (local caller) (borrow-shared (local nodes)) (local block)))))
 			(let-mut expected (local scoped_array_initializer))
 			(if (local range) (then (set (local expected) 1u32)))
+			(if (local consuming) (then (set (local expected) 42u32)))
 			(let checked (call plan_value (borrow-shared (local source)) (borrow-shared (local nodes)) (local caller)
 				(local value) (local expected) (local index) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local statements))
@@ -4474,15 +4482,38 @@
 					(if (u32.lt 0u32 (struct.get (local upper) error)) (then (return (local upper))))
 					(set (local count) (struct.get (local upper) count)))
 				(else
-					(set (local element) (call slice_element_type (borrow-shared (local records)) (local type)))
 					(if
-						(:doc "Array iteration supports the scalar and record layouts available by value.")
-						(bool.not (bool.or (call is_builtin_scalar (local element))
-							(bool.or (call is_record_type (local element)) (call is_native_integer (local element)))))
+						(:doc "A consuming loop needs the full owning array and its exact element type.")
+						(local consuming)
+						(then
+							(if
+								(:doc "A moved non-array owner has no ordered elements to bind.")
+								(bool.not (call is_array_owner (local type)))
+								(then (return (call body_error (local caller) (struct.get (local iterator_node) start)
+									(struct.get (local iterator_node) end) 24u32))))
+							(set (local element) (call array_owner_element (local type))))
+						(else (set (local element) (call slice_element_type (borrow-shared (local records)) (local type)))))
+					(if
+						(:doc "Only consuming iteration can make existing row owners its item values.")
+						(bool.not (bool.or (bool.and (local consuming) (u32.eq (local element) (call array_owner_type 10u32)))
+							(bool.or (call is_builtin_scalar (local element))
+								(bool.or (call is_record_type (local element)) (call is_native_integer (local element))))))
 						(then (return (call body_error (local caller) (struct.get (local iterator_node) start)
 							(struct.get (local iterator_node) end) 24u32))))))
 			(let body (struct.get (local block) operand))
 			(let first (struct.get (local names) operand))
+			(if
+				(:doc "Keep the captured array live below all iteration locals until the loop exits.")
+				(local consuming)
+				(then
+					(let capture (struct.get (local iterator_node) first_child))
+					(array.store (local statements) (local capture)
+						(struct.new ScalarStatement (kind (local for_source_owner)) (target (local capture))
+							(value -1i32) (type (local type)) (first -1i32) (previous_owner (local previous_owner))
+							(falls_through (bool true)) (move_site -1i32) (paths 0u32) (previous_loan -1i32)))
+					(array.store (local expressions) (local capture)
+						(call runtime_expression (local for_source_owner) (local type) (local iterator_node)
+							-1i32 (local caller) (local view_start)))))
 			(call register_iteration_bindings (borrow-shared (local nodes)) (local first) (local element) (local body)
 				(call is_writable_slice (local type)) (borrow-mut (local statements)))
 			(array.store (local statements) (local index)
@@ -4837,6 +4868,12 @@
 													(i32.lt -1i32 (struct.get (local loan) target)))
 												(then (set (local previous_loan) (local index))))))
 									(set (local block) (local first))
+									(if
+										(:doc "A consuming body starts with its captured array and any owned item.")
+										(bool.and (u32.eq (local kind) (local for_statement))
+											(call is_array_owner (struct.get (local statement) type)))
+										(then (set (local previous_owner) (call enter_consuming_iteration
+											(borrow-shared (local nodes)) (borrow-mut (local statements)) (local statement)))))
 									(if
 										(:doc "The first case starts with its captured payload owner when present.")
 										(u32.eq (local kind) (local match_statement))

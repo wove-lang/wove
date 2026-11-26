@@ -572,6 +572,15 @@ An optional index stays immutable and relative to the view. To fill a byte
 window, borrow a checked `array.range` in the header or reborrow a named
 mutable view. Access through the source resumes after the loop exits.
 
+Use `(for (bind item) (move (local rows)) (body ...))` to consume an owned
+array. The source moves before any iteration, including for an empty array.
+Use `(bind index item)` for the original zero-based `i32` position. Each
+owned byte row moves into the current binding. An unfilled row traps at
+the header. The body can explicitly transfer the current owner to another
+array or return it. Ordinary iteration exit and `continue` release any
+current owner still held by the body. `break` and `return` also release the
+unvisited owners and the consumed array's backing storage.
+
 A `let` can bind a shared or mutable view of a named local array or array
 parameter. The binding itself is immutable. A mutable view permits writes
 through its descriptor. For example, `(let window (borrow-mut (array.range

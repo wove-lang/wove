@@ -1,13 +1,14 @@
 (module emit_loops
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Emit a counted C loop from a previously captured range or shared descriptor.`)
+	(:doc `Emit a counted C loop from captured bounds, a borrowed view, or a moved owner.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement) (value for_mut_binding)))
-	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only is_array_owner (type ScalarRecord)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "./records.wove" (only write_value_type))
-	(use wove-file "./runtime.wove" (only write_slice_items write_slice_length))
+	(use wove-file "./runtime.wove" (only write_slice_items write_slice_length close_runtime_call))
 	(use wove-file "./text.wove" (only c_byte c_literal_text write_local_name write_temporary_name))
 
 	(let declare_index "int32_t ")
@@ -73,6 +74,47 @@
 				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local cursor) 59u8 (local writing)))))
 
+	(let declare_slice "wvrt_slice ")
+	(let borrow_owner "=wvrt_array_borrow_shared(")
+	(let declare_owner "wvrt_array* ")
+	(let take_row "=wvrt_array_take_row_at_span(")
+
+	(fn write_for_owned_view
+		(:doc `Form the iteration descriptor from the loop's captured array owner.`)
+		(params (source (shared-array u8)) (owner i32) (view i32) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local declare_slice)) (borrow-mut (local output)) (local offset) (local writing)))
+			(let name (call write_temporary_name (borrow-shared (local source)) (local view) (local tree_base)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let borrow (call c_literal_text (borrow-shared (local borrow_owner)) (borrow-mut (local output)) (local name) (local writing)))
+			(let value (call write_temporary_name (borrow-shared (local source)) (local owner) (local tree_base)
+				(borrow-mut (local output)) (local borrow) (local name_prefix) (local writing)))
+			(let close (call c_byte (borrow-mut (local output)) (local value) 41u8 (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local close) 59u8 (local writing)))))
+
+	(fn write_owned_iteration_binding
+		(:doc `Transfer one row slot into a local owner before evaluating the loop body.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name i32)
+			(row i32) (owner i32) (tree_base i32) (site ScalarExpression)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local declare_owner))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let local_name (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local name) (local tree_base)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let take (call c_literal_text (borrow-shared (local take_row)) (borrow-mut (local output)) (local local_name) (local writing)))
+			(let source_name (call write_temporary_name (borrow-shared (local source)) (local owner) (local tree_base)
+				(borrow-mut (local output)) (local take) (local name_prefix) (local writing)))
+			(let comma (call c_byte (borrow-mut (local output)) (local source_name) 44u8 (local writing)))
+			(let index (call write_temporary_name (borrow-shared (local source)) (local row) (local tree_base)
+				(borrow-mut (local output)) (local comma) (local name_prefix) (local writing)))
+			(let close (call close_runtime_call (borrow-mut (local output)) (local index)
+				(struct.get (local site) target) (struct.get (local site) start) (struct.get (local site) end) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local close) 59u8 (local writing)))))
+
 	(fn write_for_body
 		(:doc `Open a counted loop and bind the current values before its first source statement.
 
@@ -80,7 +122,7 @@
 		only advances from a value strictly below the captured end.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
 			(statements (shared-array ScalarStatement)) (row i32) (block i32) (tree_base i32) (array_view bool)
-			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(owner i32) (site ScalarExpression) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let-mut cursor (local offset))
@@ -120,6 +162,12 @@
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(set (local item) (local second))))
 			(let binding (array.load (local statements) (local item)))
+			(if
+				(:doc "An owning item takes the current slot. Ordinary items keep the existing value or view path.")
+				(call is_array_owner (struct.get (local binding) type))
+				(then (return (call write_owned_iteration_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local item) (local row) (local owner) (local tree_base) (local site)
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(return (call write_iteration_binding (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (local item) (struct.get (local binding) type)
 				(local row) (local view) (local tree_base) (u32.eq (struct.get (local binding) kind) (local for_mut_binding)) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))))

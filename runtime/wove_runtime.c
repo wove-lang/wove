@@ -456,15 +456,20 @@ wvrt_array *wvrt_array_new_rows_at_span(int32_t wvrtlength, int32_t wvrtfile, in
 	return wvrt_rows;
 }
 
+// A missing row slot has no byte allocation to lend or transfer.
+static wvrt_array *wvrt_array_live_row(wvrt_array *const *wvrtitems, size_t wvrtindex,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_array *wvrt_row = wvrtitems[wvrtindex];
+	if (wvrt_row == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "uninitialized byte row"); }
+	return wvrt_row;
+}
+
 // Lend an initialized row without transferring its owner.
 wvrt_slice wvrt_array_borrow_row_at_span(wvrt_slice wvrtrows, int32_t wvrtindex,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	size_t wvrt_offset = wvrt_slice_offset_at_span(wvrtrows.wvrt_length, wvrtindex, wvrtfile, wvrtstart, wvrtend);
 	wvrt_array *const *wvrt_items = wvrtrows.wvrt_items;
-	const wvrt_array *wvrt_row = wvrt_items[wvrt_offset];
-	// Unfilled slots have no borrowable byte storage.
-	if (wvrt_row == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "uninitialized byte row"); }
-	return wvrt_array_borrow_shared(wvrt_row);
+	return wvrt_array_borrow_shared(wvrt_array_live_row(wvrt_items, wvrt_offset, wvrtfile, wvrtstart, wvrtend));
 }
 
 // Transfer one fresh or moved row and retire the owner that previously occupied the slot.
@@ -688,9 +693,19 @@ wvrt_array *wvrt_array_remove_row_at_span(wvrt_array *wvrtbuffer, int32_t wvrtin
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	size_t wvrt_index = wvrt_array_index_at_span(wvrtbuffer->wvrt_length, wvrtindex,
 		wvrtfile, wvrtstart, wvrtend);
-	wvrt_array *wvrt_row = ((wvrt_array **)wvrtbuffer->wvrt_items)[wvrt_index];
-	if (wvrt_row == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "uninitialized byte row"); }
+	wvrt_array *wvrt_row = wvrt_array_live_row(wvrtbuffer->wvrt_items, wvrt_index, wvrtfile, wvrtstart, wvrtend);
 	wvrt_array_erase(wvrtbuffer, wvrt_index);
+	return wvrt_row;
+}
+
+// Transfer a visited row without shifting later positions or changing the iteration bound.
+wvrt_array *wvrt_array_take_row_at_span(wvrt_array *wvrtbuffer, int32_t wvrtindex,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	size_t wvrt_index = wvrt_array_index_at_span(wvrtbuffer->wvrt_length, wvrtindex,
+		wvrtfile, wvrtstart, wvrtend);
+	wvrt_array **wvrt_items = wvrtbuffer->wvrt_items;
+	wvrt_array *wvrt_row = wvrt_array_live_row(wvrt_items, wvrt_index, wvrtfile, wvrtstart, wvrtend);
+	wvrt_items[wvrt_index] = NULL;
 	return wvrt_row;
 }
 
