@@ -12,16 +12,23 @@
 
 enum scenario {
 	collect, discard, joined, pack_frame, pack_storage, receipt_frame, start, joined_start, result_frame,
-	queue_collect, queue_discard, queue_allocate, queue_backing, queue_join, queue_discard_join
+	queue_collect, queue_discard, queue_allocate, queue_backing, queue_join, queue_discard_join,
+	try_collect, try_grow, try_box, try_backing, try_frame, try_thread,
+	tile_collect, tile_thread
 };
-#ifdef RECORD_QUEUE_TEST
+#if defined(RECORD_QUEUE_TEST)
 static enum scenario mode = queue_collect;
+#elif defined(RECORD_TRY_SPAWN_TEST)
+static enum scenario mode = try_collect;
+#elif defined(TILE_TRY_SPAWN_TEST)
+static enum scenario mode = tile_collect;
 #else
 static enum scenario mode = collect;
 #endif
 static const char *const scenarios[] = {
 	"collect", "discard", "joined", "pack-frame", "pack-storage", "receipt-frame", "start", "joined-start", "result-frame",
-	"queue-collect", "queue-discard", "queue-allocate", "queue-backing", "queue-join", "queue-discard-join"
+	"queue-collect", "queue-discard", "queue-allocate", "queue-backing", "queue-join", "queue-discard-join",
+	"try-collect", "try-grow", "try-box", "try-backing", "try-frame", "try-thread", "tile-collect", "tile-thread"
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -30,9 +37,10 @@ static size_t acquired;
 static size_t released;
 static bool active;
 static _Thread_local int until_malloc_failure;
-static _Thread_local bool fail_calloc;
+static _Thread_local int until_calloc_failure;
 static atomic_uint results;
 static atomic_uint joins;
+static atomic_uint creates;
 
 static void require(bool condition) {
 	if (!condition) { abort(); }
@@ -41,15 +49,17 @@ static void require(bool condition) {
 // Begin after the host adapter has already packed argv.
 int32_t begin(void) {
 	active = true;
+	if (mode >= try_collect) { return mode != try_collect && mode != tile_collect; }
 	if (mode == discard || mode == queue_discard || mode == queue_discard_join) { return 1; }
 	return mode == joined || mode == joined_start || mode == result_frame ? 2 : 0;
 }
 
 // Arm the calling thread at the next launch or queue collection.
 void before_spawn(void) {
-	if (mode == pack_frame || mode == queue_allocate) { until_malloc_failure = 1; }
-	if (mode == pack_storage || mode == queue_backing) { fail_calloc = true; }
-	if (mode == receipt_frame) { until_malloc_failure = 2; }
+	if (mode == pack_frame || mode == queue_allocate || mode == try_box) { until_malloc_failure = 1; }
+	if (mode == pack_storage || mode == queue_backing || mode == try_grow) { until_calloc_failure = 1; }
+	if (mode == receipt_frame || mode == try_frame) { until_malloc_failure = 2; }
+	if (mode == try_backing) { until_calloc_failure = 2; }
 }
 
 void before_result(void) {
@@ -77,10 +87,7 @@ void *fixture_worker_malloc(size_t size) {
 }
 
 void *fixture_worker_calloc(size_t count, size_t size) {
-	if (fail_calloc) {
-		fail_calloc = false;
-		return NULL;
-	}
+	if (until_calloc_failure > 0 && --until_calloc_failure == 0) { return NULL; }
 	return track(calloc(count, size));
 }
 
@@ -101,7 +108,9 @@ void fixture_worker_free(void *pointer) {
 
 int fixture_worker_create(pthread_t *thread, const pthread_attr_t *attr,
 	void *(*run)(void *), void *argument) {
-	if (mode == start || mode == joined_start) { return EAGAIN; }
+	unsigned index = 1 + atomic_fetch_add_explicit(&creates, 1, memory_order_relaxed);
+	if (mode == start || mode == joined_start ||
+		(mode == try_thread && index == 3) || (mode == tile_thread && index == 2)) { return EAGAIN; }
 	return pthread_create(thread, attr, run, argument);
 }
 
@@ -120,14 +129,22 @@ static void check_ownership(void) {
 		[pack_frame] = 4, [pack_storage] = 5, [receipt_frame] = 6,
 		[start] = 7, [joined_start] = 6, [result_frame] = 10,
 		[queue_collect] = 45, [queue_discard] = 43, [queue_allocate] = 43,
-		[queue_backing] = 44, [queue_join] = 45, [queue_discard_join] = 43
+		[queue_backing] = 44, [queue_join] = 45, [queue_discard_join] = 43,
+		[try_collect] = 45, [try_grow] = 39, [try_box] = 40, [try_backing] = 41,
+		[try_frame] = 42, [try_thread] = 43, [tile_collect] = 15, [tile_thread] = 15
 	};
 	require(acquired == expected[mode] && released == acquired);
 	unsigned completed = atomic_load_explicit(&results, memory_order_relaxed);
-	// The queue must retire every accepted worker even when one join reports failure.
-	if (mode >= queue_collect) {
-		require(completed == 3);
-		require(atomic_load_explicit(&joins, memory_order_relaxed) == 3);
+	unsigned joined_count = atomic_load_explicit(&joins, memory_order_relaxed);
+	unsigned create_count = atomic_load_explicit(&creates, memory_order_relaxed);
+	// A rejected job creates no receipt, and only creation failures reach pthread_create.
+	if (mode >= tile_collect) {
+		require(completed == 0 && joined_count == (mode == tile_collect ? 2u : 1u) && create_count == 2);
+	} else if (mode >= try_collect) {
+		require(completed == 3 && joined_count == (mode == try_collect ? 3u : 2u));
+		require(create_count == (mode == try_collect || mode == try_thread ? 3u : 2u));
+	} else if (mode >= queue_collect) {
+		require(completed == 3 && joined_count == 3);
 	} else {
 		require(completed == (unsigned)(mode == collect || mode == discard || mode == joined || mode == result_frame));
 	}

@@ -811,16 +811,22 @@ void wvrt_array_drop(wvrt_array *wvrtbuffer) {
 
 WVRT_DECLARE_RECORD_WORKERS()
 
+// Copy a record into transport without touching the caller's original value on failure.
+static wvrt_array *wvrt_worker_try_pack(const void *value, size_t size, size_t alignment) {
+	wvrt_array *box = wvrt_array_try_new(1, size, alignment);
+	if (box != NULL) { memcpy(box->wvrt_items, value, size); }
+	return box;
+}
+
 // Take responsibility for the value even when allocating its one-slot transport fails.
 wvrt_array *wvrt_worker_pack_at_span(void *value, size_t size, size_t alignment,
 	void (*drop)(void *), int32_t file, int32_t start, int32_t end) {
-	wvrt_array *box = wvrt_array_try_new(1, size, alignment);
+	wvrt_array *box = wvrt_worker_try_pack(value, size, alignment);
 	// The caller transferred ownership before invoking this helper.
 	if (box == NULL) {
 		if (drop != NULL) { drop(value); }
 		wvrt_trap_at_span(file, start, end, "could not allocate worker record");
 	}
-	memcpy(box->wvrt_items, value, size);
 	box->wvrt_drop_element = drop;
 	return box;
 }
@@ -1172,12 +1178,18 @@ static void wvrt_worker_prepare(wvrt_worker_receipt *worker, WvrtWorkerEntry han
 	atomic_init(&worker->done, false);
 }
 
+// Only a successfully created thread owns the input in the prepared frame.
+static bool wvrt_worker_try_start(wvrt_worker_receipt *worker, WvrtWorkerEntry handler,
+	wvrt_array *job, WvrtWorkerSite site) {
+	wvrt_worker_prepare(worker, handler, job, site);
+	return pthread_create(&worker->thread, NULL, wvrt_worker_run, worker) == 0;
+}
+
 // Start a frame with either lexical storage in the joined call or heap storage in a receipt.
 static void wvrt_worker_start(wvrt_worker_receipt *worker, WvrtWorkerEntry handler,
 	wvrt_array *job, WvrtWorkerSite site, bool submitted) {
-	wvrt_worker_prepare(worker, handler, job, site);
 	// An unsuccessful launch leaves both the job and the frame with the submitting thread.
-	if (pthread_create(&worker->thread, NULL, wvrt_worker_run, worker) != 0) {
+	if (!wvrt_worker_try_start(worker, handler, job, site)) {
 		if (submitted) { free(worker); }
 		wvrt_array_drop(job);
 		wvrt_trap_at_span(site.file, site.start, site.end,
@@ -1511,6 +1523,44 @@ void wvrt_array_push_at_span(wvrt_array *wvrtbuffer, const void *wvrtvalue,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	const char *error = wvrt_array_try_append(wvrtbuffer, wvrtvalue);
 	if (error != NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, error); }
+}
+
+// Reserve receipt space before making any transfer visible to a new thread.
+// A nonzero size requests a record box; size zero passes the original array descriptor.
+bool wvrt_worker_try_spawn_at_span(wvrt_array *queue, wvrt_array *(*array)(wvrt_array *),
+	wvrt_record_worker record, void *job, size_t size, size_t alignment, int32_t file, int32_t start, int32_t end) {
+#ifdef WVRT_POSIX_WORKERS
+	if (queue == NULL || job == NULL) { return false; }
+	int32_t length = queue->wvrt_length;
+	if (length == INT32_MAX || !wvrt_array_try_grow_to(queue, length + 1)) { return false; }
+	wvrt_array *payload = size == 0 ? job : wvrt_worker_try_pack(job, size, alignment);
+	if (payload == NULL) { return false; }
+	wvrt_worker_receipt *worker = malloc(sizeof *worker);
+	WvrtWorkerEntry handler = {.array = array, .record = record};
+	WvrtWorkerSite site = {file, start, end};
+	// Until launch succeeds the caller still owns the job. Discard only the transport.
+	if (worker == NULL || !wvrt_worker_try_start(worker, handler, payload, site)) {
+		free(worker);
+		if (size != 0) { wvrt_array_drop(payload); }
+		return false;
+	}
+	// The exclusive queue already has room. Publication cannot allocate or fail.
+	((wvrt_worker_receipt **)queue->wvrt_items)[length] = worker;
+	queue->wvrt_length = length + 1;
+	queue->wvrt_spare = 0;
+	return true;
+#else
+	(void)queue;
+	(void)array;
+	(void)record;
+	(void)job;
+	(void)size;
+	(void)alignment;
+	(void)file;
+	(void)start;
+	(void)end;
+	return false;
+#endif
 }
 
 // Create the empty owner of a FIFO sequence of joinable worker frames.
