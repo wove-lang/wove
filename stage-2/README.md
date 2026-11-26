@@ -206,6 +206,7 @@ Native symbols and the ABI entry `main` retain their original spellings.
 | --- | --- | --- | --- |
 | `f` | Function | Stable declaration hash | Function name |
 | `r` | Record | Stable declaration hash | Record name |
+| `k` | Function-pointer typedef | Interned signature row in the translation unit | Empty |
 | `m` | Record member | Zero-based position in its layout | Empty |
 | `p` | Parameter | Zero-based position in its signature | Parameter name |
 | `l` | Local | Declared name's original file-local tree row | Local name |

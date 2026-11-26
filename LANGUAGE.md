@@ -238,6 +238,34 @@ the decoded bytes. Declare an inline table with `array.new` or `array.repeat`.
 Its elements are exact scalar literals or constant constructors of a
 named Wove record. `array.load` can read the table directly.
 
+### Function values
+
+Use an inline `(fn-type (params T...) (returns R))` on a Wove parameter.
+The signature compares exact types in order. Parameter names on the
+defining function have no effect.
+
+```lisp
+(fn increment (params (value i32)) (returns i32)
+    (body (return (i32.inc (local value)))))
+
+(fn apply (params (f (fn-type (params i32) (returns i32))) (value i32))
+    (returns i32)
+    (body (return (call (local f) (local value)))))
+
+(fn example (params) (returns i32)
+    (body (return (call apply (fn-ref increment) 41i32))))
+```
+
+`(fn-ref name)` takes a concrete Wove function visible in the current
+module, including a selected import. Function values are copyable. Bind
+one with `let` or `let-mut`, or pass it to another Wove function with the
+same signature. `(call (local f) args...)` reads the target once, then
+evaluates each argument once from left to right. A callable with a
+`void` result uses the standalone call statement.
+
+Stage 2 supports built-in scalar parameters and scalar or `void`
+results in these signatures.
+
 ### Generics
 
 Records and functions can declare explicit type, `i32` constant, and
