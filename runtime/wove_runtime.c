@@ -784,6 +784,13 @@ wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrtvalue, int32_t wvrtfile,
 	return wvrtvalue;
 }
 
+// Return the present native record address without taking ownership.
+const void *wvrt_require_borrow_at_span(const void *wvrtvalue, int32_t wvrtfile,
+	int32_t wvrtstart, int32_t wvrtend) {
+	if (wvrtvalue == NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "missing optional borrowed record"); }
+	return wvrtvalue;
+}
+
 // Retire exactly the active owners in an element range.
 static void wvrt_array_drop_range(wvrt_array *wvrtbuffer, int32_t wvrtstart, int32_t wvrtend) {
 	if (wvrtbuffer->wvrt_drop_element == NULL) { return; }

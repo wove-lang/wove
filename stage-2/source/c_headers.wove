@@ -15,12 +15,13 @@
 	(use wove-file "./paths.wove" (only (type SuppliedFile)))
 	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "./types.wove" (only source_builtin_type void_type is_builtin_integer is_builtin_float is_builtin_scalar is_16bit_integer is_128bit_integer reference_mode (value i64_type)))
-	(use wove-file "./owned.wove" (only is_byte_owner_descriptor))
+	(use wove-file "./owned.wove" (only is_byte_owner_descriptor optional_type_operand))
 	(use wove-file "./c_scope.wove" (only read_bridge_policy project_bridge declaring_c_bridge))
 	(use wove-file "./c_dependencies.wove" (only find_bridge_type_dependency))
 	(use wove-file "./c_markers.wove" (only read_c_optional read_c_value_macro read_c_macro_discard (type CMarker)))
 	(use wove-file "../c/arguments.wove" (only (value c_open_variadic_tail)))
 	(use wove-file "./c_formals.wove" (only is_c_fixed_formal read_c_fixed_formal c_formal_name next_c_value_formal find_c_fixed_formal))
+	(use wove-file "./functions.wove" (only read_return_origin))
 	(use wove-file "./c_names.wove" (only c_function_opening native_symbol_start native_symbol_end))
 	(use wove-file "./c_owners.wove" (only is_native_name check_c_type is_c_storage_type))
 	(use wove-file "./c_records.wove" (only is_c_record read_c_record))
@@ -470,12 +471,46 @@
 			(return (call read_c_reference_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local bridge) (local context)))))
 
-	(fn read_c_result
-		(:doc `Snapshot owners have no corresponding native type declaration in the bridge.`)
+	(fn read_c_nullable_record
+		(:doc "Resolve an optional shared reference to a complete native record.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (bridge i32)
-			(context SelectionContext) (snapshot bool))
+			(context SelectionContext)) (returns CMemberRead)
+		(body
+			(let operand (call optional_type_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(if (i32.ltz (local operand))
+				(then (return (call c_member_error (struct.get (local node) start) (struct.get (local node) end) 23u32))))
+			(let reference (array.load (local nodes) (local operand)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)))
+			(if
+				(:doc "This result contract exposes the borrowed record through a read-only reference.")
+				(u32.not-eq (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes))
+					(struct.get (local parts) head)) 1u32)
+				(then (return (call c_member_error (struct.get (local reference) start) (struct.get (local reference) end) 23u32))))
+			(let type (call read_c_reference_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local reference) (local bridge) (local context)))
+			(if (u32.gtz (struct.get (local type) error)) (then (return (local type))))
+			(if
+				(:doc "The pointer must name a defined record layout whose lifetime comes from the selected parameter.")
+				(bool.or (i32.ltz (struct.get (local type) declaration))
+					(bool.not (call is_c_record (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local nodes) (struct.get (local type) declaration)))))
+				(then (return (call c_member_error (struct.get (local reference) start) (struct.get (local reference) end) 23u32))))
+			(return (local type))))
+
+	(fn read_c_result
+		(:doc `Resolve ordinary and borrowed native results. A copied snapshot needs no native result type.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (bridge i32)
+			(context SelectionContext) (snapshot bool) (provenance bool))
 		(returns CMemberRead)
 		(body
+			(if
+				(:doc "A provenance clause describes a native pointer and cannot accompany a copied snapshot.")
+				(local provenance)
+				(then
+					(if (local snapshot)
+						(then (return (call c_member_error (struct.get (local node) start) (struct.get (local node) end) 23u32))))
+					(return (call read_c_nullable_record (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (local bridge) (local context)))))
 			(if (local snapshot) (then (return (call c_member_error 0i32 0i32 0u32))))
 			(return (call read_c_result_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local bridge) (local context)))))
@@ -553,11 +588,20 @@
 					(struct.get (local form_returns) error)))))
 			(let result (struct.get (local form_returns) first))
 			(if
-				(:doc "The result form supplies one scalar or named resource type.")
-				(bool.or (i32.ltz (local result))
-					(i32.not-ltz (struct.get (array.load (local nodes) (local result)) next_sibling)))
+				(:doc "The result form must start with its type.")
+				(i32.ltz (local result))
 				(then (return (call c_member_error (struct.get (local returns_node) start) (struct.get (local returns_node) end) 23u32))))
 			(let result_node (array.load (local nodes) (local result)))
+			(let from (struct.get (local result_node) next_sibling))
+			(if
+				(:doc "Only an explicit and well-formed provenance clause can follow the native result type.")
+				(i32.not-ltz (local from))
+				(then
+					(let origin (call read_return_origin (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local nodes) (local from)) (local returns_node)))
+					(if (u32.gtz (struct.get (local origin) error))
+						(then (return (call c_member_error (struct.get (local origin) start) (struct.get (local origin) end)
+							(struct.get (local origin) error)))))))
 			(let snapshot (call read_c_snapshot (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts) (local result_node)))
 			(if
 				(:doc "Report malformed snapshot contracts in the defining signature.")
@@ -565,7 +609,7 @@
 				(then (return (call c_member_error (struct.get (local snapshot) start) (struct.get (local snapshot) end)
 					(struct.get (local snapshot) error)))))
 			(let resource (call read_c_result (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local result_node) (local bridge) (local context) (struct.get (local snapshot) active)))
+				(local result_node) (local bridge) (local context) (struct.get (local snapshot) active) (i32.not-ltz (local from))))
 			(if (u32.gtz (struct.get (local resource) error)) (then (return (local resource))))
 			(let first_parameter (struct.get (local form_params) first))
 			(let-mut parameter (call next_c_value_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local first_parameter)))
@@ -693,6 +737,11 @@
 				(then (return (call c_member_error (struct.get (local discards) start) (struct.get (local discards) end)
 					(struct.get (local discards) error)))))
 			(let tail (struct.get (local contracts) variadic))
+			(if
+				(:doc "An exact native prototype establishes the pointer result and the lending formal.")
+				(bool.and (i32.not-ltz (local from))
+					(bool.or (struct.get (local contracts) macro) (i32.not-eqz (local tail))))
+				(then (return (call c_member_error (struct.get (local returns_node) start) (struct.get (local returns_node) end) 23u32))))
 			(let-mut fixed_problem -1i32)
 			(if
 				(:doc "Only a named tail has declared formals after the native boundary.")

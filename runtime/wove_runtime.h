@@ -343,6 +343,8 @@ wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrt_table,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrt_value, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
+const void *wvrt_require_borrow_at_span(const void *wvrt_value, int32_t wvrt_file,
+	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
 
 void wvrt_inline_slot_require(bool live, int32_t file, int32_t start, int32_t end);

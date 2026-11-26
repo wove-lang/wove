@@ -829,6 +829,19 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
 | `(c_nullable parameter)` | Accept either a mutable scalar reference or literal `null` for the supported slot. |
 
+A native function can lend a nullable, read-only record from an exclusive
+native handle parameter. For example, a bridge for `readdir` can declare
+`(returns (optional (shared-ref Entry)) (from directory))` when
+`directory` is a `(mut-ref Directory)`. Bind the call directly with an
+immutable `let`. The option holds the stream's exclusive loan for the
+binding's lexical scope, including when the native call returns NULL.
+
+Use `(optional.is-none (local entry))` to check presence. Bind
+`(optional.unwrap (local entry))` with an immutable `let` to read the
+original native record. A missing entry traps at the unwrap span. The
+reference uses the native layout and never releases the record. Once the
+option leaves scope, the stream can be read, rewound, or closed again.
+
 A fixed C argument in `params` supplies a native operand at that position.
 Use `(const command i32 F_SETFL)` for a header constant,
 `(const length i32 -1)` for a checked signed literal, or
