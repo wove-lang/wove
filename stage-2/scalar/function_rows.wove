@@ -1,0 +1,139 @@
+(module scalar_function_rows
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Keep checked Wove and C signatures and recover the defining declaration of a function binding.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct
+		(:doc `A checked signature and its defining source identity.
+
+		A negative body denotes a foreign declaration whose native name
+		and declaration still refer to the source tree. A Wove body can be empty.
+		The original C formals include native-only constants. A positive
+		c_variadic names the first source row in the checked C tail.
+		A C text snapshot can retain a release symbol or an inline field name.
+		Both refer to the packed defining source tree.`)
+		ScalarFunction
+		(fields (declaration i32) (origin i32) (name i32) (params i32) (arity i32) (result u32)
+			(first_statement i32) (identity u32) (entry bool) (c_strings i32) (c_vectors bool) (c_extents i32) (c_macro bool) (c_variadic i32) (c_nulls i32) (c_storage bool) (c_handle_out bool)
+			(c_snapshot bool) (c_snapshot_drop i32) (c_snapshot_field i32) (c_formals i32) (c_fixed bool)
+			(file i32) (tree_base i32) (name_base i32) (tree_limit i32) (source_base i32) (body i32)))
+	(struct ScalarParameter
+		(fields (name i32) (type u32) (position i32) (c_mode u8) (c_size i32) (c_count i32) (extent i32)))
+
+	(fn checked_function_count
+		(:doc "Count the initialized signature prefix before visiting an overallocated graph table.")
+		(params (functions (shared-array ScalarFunction))) (returns i32)
+		(body
+			(let-mut count 0i32)
+			(while
+				(:doc "Only positive source name rows are complete function signatures.")
+				(bool.and (i32.lt (local count) (array.len (local functions)))
+					(i32.gtz (struct.get (array.load (local functions) (local count)) name)))
+				(body (set (local count) (i32.inc (local count)))))
+			(return (local count))))
+
+	(fn find_function
+		(:doc `Look up a checked function by a byte span from either the source or an inspection query.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
+			(spelling (shared-array u8)) (start i32) (end i32))
+		(returns i32)
+		(body
+			(let-mut cursor 0i32)
+			(while
+				(:doc "The selected namespace is the populated function prefix.")
+				(i32.lt (local cursor) (array.len (local functions)))
+				(body
+					(let target (array.load (local functions) (local cursor)))
+					(if (i32.eqz (struct.get (local target) name)) (then (return -1i32)))
+					(let declared (array.load (local nodes) (struct.get (local target) name)))
+					(if
+						(:doc "C suffix sanitization has no role in source name resolution.")
+						(call same_bytes (borrow-shared (local source)) (struct.get (local declared) start)
+							(struct.get (local declared) end) (borrow-shared (local spelling)) (local start) (local end))
+						(then (return (local cursor))))
+					(set (local cursor) (i32.inc (local cursor)))))
+			(return -1i32)))
+
+	(fn find_defining_function
+		(:doc `Find the checked function for a canonical file and file-local declaration row.`)
+		(params (functions (shared-array ScalarFunction)) (file i32) (declaration i32))
+		(returns i32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Find the canonical declaration rather than an alias's binding row.")
+				(i32.lt (local index) (array.len (local functions)))
+				(body
+					(let function (array.load (local functions) (local index)))
+					(if (i32.eqz (struct.get (local function) name)) (then (return -1i32)))
+					(if
+						(:doc "Compare the defining file and the declaration row within that file.")
+						(bool.and
+							(i32.eq (local file) (struct.get (local function) file))
+							(i32.eq (local declaration)
+								(i32.sub (struct.get (local function) declaration) (struct.get (local function) tree_base))))
+						(then (return (local index))))
+					(set (local index) (i32.inc (local index)))))
+			(return -1i32)))
+
+	(fn find_graph_function
+		(:doc `Resolve a file-local spelling to its defining scalar function.
+
+		The graph binding records the defining file and an original tree row.
+		The scalar table keeps exactly one registered signature for that pair.`)
+		(params (arena (shared-array u8)) (functions (shared-array ScalarFunction))
+			(bindings (shared-array GraphBinding)) (owner i32) (base i32)
+			(spelling (shared-array u8)) (start i32) (end i32))
+		(returns i32)
+		(body
+			(let chosen (call find_binding (borrow-shared (local arena)) (borrow-shared (local spelling))
+				(local start) (local end) (borrow-shared (local bindings)) (array.len (local bindings))
+				(local owner) (bool false) (local base) 0u32))
+			(if
+				(:doc "An unavailable name reports back to the referencing file.")
+				(i32.ltz (local chosen))
+				(then (return -1i32)))
+			(let binding (array.load (local bindings) (local chosen)))
+			(return (call find_defining_function (borrow-shared (local functions))
+				(struct.get (local binding) file) (struct.get (local binding) declaration)))))
+
+	(fn resolve_call_target
+		(:doc `Look up a named target in its caller's namespace or the single-file function table.`)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
+			(bindings (shared-array GraphBinding)) (caller ScalarFunction) (name SourceNode))
+		(returns i32)
+		(body
+			(let start (struct.get (local name) start))
+			(let end (struct.get (local name) end))
+			(if
+				(:doc "A supplied graph already provides the file's selected name bindings.")
+				(i32.gtz (array.len (local bindings)))
+				(then (return (call find_graph_function (borrow-shared (local source))
+					(borrow-shared (local functions)) (borrow-shared (local bindings))
+					(struct.get (local caller) file) (struct.get (local caller) source_base)
+					(borrow-shared (local source)) (local start) (local end)))))
+			(return (call find_function (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local source)) (local start) (local end)))))
+
+	(fn find_function_instance
+		(:doc "Locate the concrete signature by its private cloned declaration row.")
+		(params (functions (shared-array ScalarFunction)) (declaration i32)) (returns i32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "An instance declaration can only be reached through a checked application.")
+				(i32.lt (local index) (array.len (local functions)))
+				(body
+					(let instance (array.load (local functions) (local index)))
+					(if (i32.eqz (struct.get (local instance) name)) (then (return -1i32)))
+					(if
+						(:doc "A repeated application points to the same clone.")
+						(i32.eq (struct.get (local instance) declaration) (local declaration))
+						(then (return (local index))))
+					(set (local index) (i32.inc (local index)))))
+			(return -1i32)))
+)

@@ -1,0 +1,143 @@
+(module scalar_function_refs
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Check named Wove function references and intern the signatures they introduce.")
+
+	(use wove-file "../source/scan.wove" (only is_metadata_form (type SourceNode)))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/types.wove" (only is_builtin_scalar void_type))
+	(use wove-file "./callable_types.wove" (only callable_type_error (type CallableShape)))
+	(use wove-file "./function_rows.wove" (only resolve_call_target (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
+	(use wove-file "./records.wove" (only find_callable_type intern_callable_layout layout_count next_layout_node
+		is_disabled_statement (type ScalarRecord)))
+	(use wove-file "./syntax.wove" (only callable_keyword entry_at entry_form is_scalar_name (value fn_ref_kind) (type EntryRead)))
+	(use wove-file "./value_types.wove" (only value_matches_type))
+
+	(fn read_function_reference
+		(:doc "Resolve a bare fn-ref operand in the current module's function namespace.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(caller ScalarFunction) (functions (shared-array ScalarFunction)) (bindings (shared-array GraphBinding)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local fn_ref_kind) 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let operand (struct.get (local form) operand))
+			(if (i32.ltz (local operand)) (then (return (call entry_at (local node) -1i32 24u32))))
+			(let name (array.load (local nodes) (local operand)))
+			(if
+				(:doc "An extra operand or a non-bare name cannot identify a concrete function.")
+				(bool.or (i32.not-ltz (struct.get (local name) next_sibling))
+					(bool.not (call is_scalar_name (borrow-shared (local source)) (local name))))
+				(then (return (call entry_at (local name) -1i32 24u32))))
+			(let target (call resolve_call_target (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local functions)) (borrow-shared (local bindings)) (local caller) (local name)))
+			(if (i32.ltz (local target)) (then (return (call entry_at (local name) -1i32 34u32))))
+			(let callee (array.load (local functions) (local target)))
+			(if
+				(:doc "Only a Wove body with the ordinary Wove ABI has a callable address.")
+				(bool.or (struct.get (local callee) entry) (i32.ltz (struct.get (local callee) body)))
+				(then (return (call entry_at (local name) -1i32 24u32))))
+			(return (call entry_at (local name) (local target) 0u32))))
+
+	(fn function_reference_shape
+		(:doc "Read the scalar callable signature of a previously checked Wove definition.")
+		(params (nodes (shared-array SourceNode)) (callee ScalarFunction) (parameters (shared-array ScalarParameter)))
+		(returns CallableShape)
+		(body
+			(let result (struct.get (local callee) result))
+			(let invalid (call callable_type_error (call entry_at (array.load (local nodes) (struct.get (local callee) name)) -1i32 24u32)))
+			(if
+				(:doc "The initial function-value ABI has a scalar or void result.")
+				(bool.not (bool.or (call is_builtin_scalar (local result)) (u32.eq (local result) (call void_type))))
+				(then (return (local invalid))))
+			(let base (struct.get (local callee) params))
+			(let end (i32.add (local base) (struct.get (local callee) arity)))
+			(let-mut index (local base))
+			(let-mut first -1i32)
+			(if
+				(:doc "The original parameter form supplies the first named formal.")
+				(i32.lt (local base) (local end))
+				(then
+					(let parameter (array.load (local parameters) (local base)))
+					(set (local first) (struct.get (array.load (local nodes) (struct.get (local parameter) name)) parent))))
+			(while
+				(:doc "Only scalar formals can be passed through the initial function-value ABI.")
+				(i32.lt (local index) (local end))
+				(body
+					(let parameter (array.load (local parameters) (local index)))
+					(if (bool.not (call is_builtin_scalar (struct.get (local parameter) type))) (then (return (local invalid))))
+					(set (local index) (i32.inc (local index)))))
+			(return (struct.new CallableShape (first (local first)) (result (local result))
+				(named (bool true)) (start 0i32) (end 0i32) (error 0u32)))))
+
+	(fn register_function_references
+		(:doc "Intern inferred signatures before checking a definition's body. Defer diagnostics to the value planner.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(bindings (shared-array GraphBinding)) (records (mut-array ScalarRecord)))
+		(returns void)
+		(body
+			(let root (struct.get (local caller) body))
+			(let-mut index (struct.get (array.load (local nodes) (local root)) first_child))
+			(while
+				(:doc "Discover references only in ordinary, enabled syntax within the body.")
+				(i32.not-ltz (local index))
+				(body
+					(let node (array.load (local nodes) (local index)))
+					(let head (struct.get (local node) first_child))
+					(let descend (bool.and (i32.not-ltz (local head))
+						(bool.not (bool.or (call is_metadata_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))
+							(call is_disabled_statement (borrow-shared (local source)) (borrow-shared (local nodes)) (local node))))))
+					(if
+						(:doc "Only actual fn-ref forms can introduce inferred signatures.")
+						(bool.and (local descend)
+							(u32.eq (call callable_keyword (borrow-shared (local source)) (array.load (local nodes) (local head))) (local fn_ref_kind)))
+						(then
+							(let reference (call read_function_reference (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local node) (local caller) (borrow-shared (local functions)) (borrow-shared (local bindings))))
+							(if
+								(:doc "Malformed or unresolved targets are still checked in source order by the planner.")
+								(u32.eqz (struct.get (local reference) error))
+								(then
+									(let callee (array.load (local functions) (struct.get (local reference) operand)))
+									(let shape (call function_reference_shape (borrow-shared (local nodes)) (local callee) (borrow-shared (local parameters))))
+									(let next (call layout_count (borrow-shared (local records))))
+									(let registered (call intern_callable_layout (borrow-shared (local source)) (borrow-shared (local nodes))
+										(borrow-mut (local records)) (local shape) (local next)))
+									(if
+										(:doc "Further distinct signatures cannot fit; the planner reports their own spans.")
+										(i32.ltz (local registered))
+										(then (return)))))))
+					(set (local index) (call next_layout_node (borrow-shared (local nodes)) (local index) (local root) (local descend)))))))
+
+	(fn plan_function_reference
+		(:doc "Produce a copyable value with the defining Wove function's exact signature.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(caller ScalarFunction) (index i32) (expected u32) (functions (shared-array ScalarFunction))
+			(parameters (shared-array ScalarParameter)) (bindings (shared-array GraphBinding))
+			(records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let reference (call read_function_reference (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local caller) (borrow-shared (local functions)) (borrow-shared (local bindings))))
+			(if (u32.gtz (struct.get (local reference) error)) (then (return (local reference))))
+			(let target (struct.get (local reference) operand))
+			(let shape (call function_reference_shape (borrow-shared (local nodes)) (array.load (local functions) (local target))
+				(borrow-shared (local parameters))))
+			(if
+				(:doc "Unsupported signatures report at the referenced name in the caller.")
+				(u32.gtz (struct.get (local shape) error))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local reference) start))
+					(end (struct.get (local reference) end)) (error 24u32) (related -1i32)))))
+			(let type (call find_callable_type (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local shape)))
+			(if (u32.eqz (local type)) (then (return (call entry_at (local node) -1i32 16u32))))
+			(if
+				(:doc "Passing or replacing a function value requires exact parameters and result.")
+				(bool.not (call value_matches_type (local expected) (local type)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local fn_ref_kind) (local type) (local target) -1i32 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+)
