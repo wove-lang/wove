@@ -672,6 +672,19 @@ A parameter can require an exact count, as in `(shared-array u8 4)`. An
 argument whose length is unknown at compile time is checked before later
 arguments run. The usual range bounds still apply.
 
+Use `(array.try-copy-from (borrow-mut destination) (borrow-shared source))`
+to copy a byte or numeric view into the prefix of an existing writable
+view. The element types must match exactly. Fixed arrays, owned arrays,
+and subranges use the ordinary borrowing and bounds rules.
+
+The operation evaluates both borrows once in written order. The views
+must be disjoint, and the destination loan remains live while the source
+and its endpoints are evaluated. The operation returns `true` for an empty
+source or after copying all source elements. It returns `false` if the
+source is longer than the destination and leaves every destination element
+intact. A successful shorter copy preserves the destination's length and
+tail.
+
 Use `(array.try-slice (borrow-shared source) offset extent)` to bind a
 fallible exact-length shared view with `let`. The offset is an `i32`
 evaluated once after capturing the source. The extent uses the same

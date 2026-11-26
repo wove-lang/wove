@@ -1411,6 +1411,29 @@ bool wvrt_array_try_extend(wvrt_array *buffer, wvrt_slice source) {
 	return true;
 }
 
+// Copy the entire source prefix after validating both descriptors and their separation.
+bool wvrt_slice_try_copy(wvrt_mut_slice destination, wvrt_slice source) {
+	size_t size = destination.wvrt_element_size;
+	// A failed shape or element-stride check leaves both views untouched.
+	if (source.wvrt_length < 0 || source.wvrt_length > destination.wvrt_length ||
+		size == 0 || source.wvrt_element_size != size ||
+		(size_t)destination.wvrt_length > SIZE_MAX / size) {
+		return false;
+	}
+	if (source.wvrt_length == 0) { return true; }
+	if (destination.wvrt_items == NULL || source.wvrt_items == NULL) { return false; }
+	size_t source_bytes = (size_t)source.wvrt_length * size;
+	size_t destination_bytes = (size_t)destination.wvrt_length * size;
+	uintptr_t target = (uintptr_t)destination.wvrt_items;
+	uintptr_t input = (uintptr_t)source.wvrt_items;
+	// Checked Wove loans are disjoint. Refuse overlapping descriptors at the C boundary as well.
+	if (target <= input ? input - target < destination_bytes : target - input < source_bytes) {
+		return false;
+	}
+	memcpy(destination.wvrt_items, source.wvrt_items, source_bytes);
+	return true;
+}
+
 // Append a captured value, leaving the live prefix intact if storage cannot grow.
 static const char *wvrt_array_try_append(wvrt_array *buffer, const void *value) {
 	int32_t length = buffer->wvrt_length;
