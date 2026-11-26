@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 
-from syntax import IDENTIFIER, Atom, Form, Node, SourceError, form, identifier, parse
+from syntax import IDENTIFIER, WORD, Atom, Form, Node, SourceError, form, identifier, parse
 
 
 I8 = "i8"
@@ -268,7 +268,7 @@ def read_record(node: Form, index: int) -> tuple[str, Record]:
 		kind_node, = field.operands
 		kind = identifier(kind_node)
 		# A field name is an ordinary identifier and selects exactly one member.
-		if field.tag.startswith(":") or field.tag in fields:
+		if not IDENTIFIER.fullmatch(field.tag) or field.tag in fields:
 			raise SourceError(field.line)
 		# Owning and borrowed fields require record lifetime rules beyond the seed.
 		if kind not in SCALAR_TYPES:
@@ -346,7 +346,7 @@ def read_function(
 	for param in checked_form(params_node, "params").operands:
 		field = checked_form(param, arity=1)
 		# Each ordinary parameter name introduces a distinct binding.
-		if field.tag.startswith(":") or field.tag in params:
+		if not IDENTIFIER.fullmatch(field.tag) or field.tag in params:
 			raise SourceError(param.line)
 		params[field.tag] = parameter_type(field.operands[0], records)
 	result_node, = checked_form(returns_node, "returns", 1).operands
@@ -1013,7 +1013,7 @@ def cfg_matches(node: Node) -> bool:
 	# The seed only supports negating a single named predicate.
 	if negated:
 		node, = form(node, "not", 1).operands
-	predicate = identifier(node)
+	predicate = identifier(node, WORD)
 	# An unsupported predicate cannot silently select a different declaration.
 	if predicate not in ("bootstrap", "test"):
 		raise SourceError(node.line)
@@ -1062,7 +1062,7 @@ def use_provider(node: Form) -> str | None:
 	if node.operands:
 		provider = node.operands[0]
 		# Keep an arbitrary well-formed foreign provider available to the skip rule.
-		if isinstance(provider, Atom) and not provider.quoted and IDENTIFIER.fullmatch(provider.text):
+		if isinstance(provider, Atom) and not provider.quoted and WORD.fullmatch(provider.text):
 			return provider.text
 	return None
 
@@ -1172,7 +1172,7 @@ def prepare_functions(module: Module, *, entry: bool) -> None:
 def read_use(node: Form) -> tuple[str, Form]:
 	provider, source, only = form(node, "use", 3).operands
 	# Stage 1 only opens Wove source files.
-	if identifier(provider) != "wove-file":
+	if identifier(provider, WORD) != "wove-file":
 		raise SourceError(provider.line)
 	# The path is a quoted string, including when it contains escaped characters.
 	if not isinstance(source, Atom) or not source.quoted:
