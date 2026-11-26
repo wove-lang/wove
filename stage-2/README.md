@@ -1414,6 +1414,8 @@ probes used by both native commands and for the final Clang invocation in
 The driver applies the resolved standard after forwarded options at both
 the Clang driver and frontend levels.
 
+The native build commands are `cc` and `bin`. Both build one translation
+unit at a time. A project can omit `parallel` or set it to `false`.
 Ordinary `cc` and `bin` builds take one explicit UTF-8 source path and
 require an output target with a basename. `cc --check` accepts one or
 more explicit UTF-8 source paths and checks each entry's imports, embeds,
