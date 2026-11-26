@@ -5,7 +5,8 @@
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
-	(use wove-file "../scalar/records.wove" (only is_payload_enum is_array_owner is_owning_record record_index
+	(use wove-file "../source/array_growth.wove" (only (value array_push_kind) (value array_remove_kind)))
+	(use wove-file "../scalar/records.wove" (only is_payload_enum is_array_owner is_owning_record is_owning_struct_element array_owner_element slice_element_type record_index
 		member_value_type (type ScalarRecord)))
 	(use wove-file "./enums.wove" (only write_enum_ordinal))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
@@ -250,12 +251,96 @@
 			(return (call c_literal_text (borrow-shared (local c_owner_close))
 				(borrow-mut (local output)) (local cursor) (local writing)))))
 
+	(let slot_prefix "wvrt_slot_")
+	(let slot_definition "WVRT_DEFINE_OWNED_SLOT(")
+	(let slot_definition_end ")\n")
+
+	(fn write_slot_name
+		(:doc "Name the slot for the exact nominal record it contains.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let prefix (call c_literal_text (borrow-shared (local slot_prefix)) (borrow-mut (local output)) (local offset) (local writing)))
+			(return (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-mut (local output)) (local prefix) (local name_prefix) (local writing)))))
+
+	(fn open_owned_slot_call
+		(:doc "Supply the matching slot type as the first argument to a runtime macro.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord) (macro (shared-array u8))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local macro)) (borrow-mut (local output)) (local offset) (local writing)))
+			(let slot (call write_slot_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local slot) 44u8 (local writing)))))
+
+	(fn write_slot_definition
+		(:doc "Define the inline slot and attach the record's nominal destructor.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local slot_definition)) (borrow-mut (local output)) (local offset) (local writing)))
+			(let record (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let before_slot (call c_byte (borrow-mut (local output)) (local record) 44u8 (local writing)))
+			(let slot (call write_slot_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-mut (local output)) (local before_slot) (local name_prefix) (local writing)))
+			(let before_drop (call c_byte (borrow-mut (local output)) (local slot) 44u8 (local writing)))
+			(let drop (call write_owner_helper_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(bool false) (borrow-mut (local output)) (local before_drop) (local name_prefix) (local writing)))
+			(return (call c_literal_text (borrow-shared (local slot_definition_end)) (borrow-mut (local output)) (local drop) (local writing)))))
+
+	(fn slot_operation_element
+		(:doc "Select the element type only from operations that lower to a typed slot macro.")
+		(params (row ScalarExpression) (expressions (shared-array ScalarExpression)) (records (shared-array ScalarRecord)))
+		(returns u32)
+		(body
+			(let kind (struct.get (local row) kind))
+			(if
+				(:doc "Allocation carries the exact owner whose layout becomes the slot layout.")
+				(u32.eq (local kind) 41u32)
+				(then (return (call array_owner_element (borrow-shared (local records)) (struct.get (local row) type)))))
+			(if
+				(:doc "Stores and indexed loans use the receiver descriptor's exact element.")
+				(bool.or (u32.eq (local kind) 37u32) (u32.eq (local kind) 40u32))
+				(then (return (call slice_element_type (borrow-shared (local records))
+					(struct.get (array.load (local expressions) (struct.get (local row) first)) type)))))
+			(if
+				(:doc "An append's operand and a removal's result have the original element type.")
+				(u32.eq (local kind) (local array_push_kind))
+				(then (return (struct.get (array.load (local expressions) (struct.get (local row) first)) type))))
+			(if (u32.eq (local kind) (local array_remove_kind)) (then (return (struct.get (local row) type))))
+			(return 0u32)))
+
+	(fn mark_used_slots
+		(:doc "Mark wrapped layouts that have a checked array operation in this C unit.")
+		(params (expressions (shared-array ScalarExpression)) (records (shared-array ScalarRecord)) (used (mut-array u8)))
+		(returns void)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Checked expression rows include every selected body and its nested operands.")
+				(i32.lt (local index) (array.len (local expressions)))
+				(body
+					(let element (call slot_operation_element (array.load (local expressions) (local index))
+						(borrow-shared (local expressions)) (borrow-shared (local records))))
+					(if
+						(:doc "Only an owning struct requires a wrapped slot representation.")
+						(call is_owning_struct_element (borrow-shared (local records)) (local element))
+						(then (array.store (local used) (call record_index (local element)) 1u8)))
+					(set (local index) (i32.inc (local index)))))))
+
 	(fn write_owning_layout_helpers
 		(:doc "Emit ownership helpers after the layouts in dependency order so nested destructors are defined first.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
-			(bindings (shared-array GraphBinding)) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression)) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
+			(let-mut used (array.alloc u8 (array.len (local records))))
+			(call mark_used_slots (borrow-shared (local expressions)) (borrow-shared (local records)) (borrow-mut (local used)))
 			(let-mut cursor (local offset))
 			(let-mut position 0i32)
 			(while
@@ -273,6 +358,12 @@
 								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 							(set (local cursor) (call write_drop_helper (borrow-shared (local source)) (borrow-shared (local nodes))
 								(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout)
-								(borrow-mut (local output)) (local take) (local name_prefix) (local writing)))))
+								(borrow-mut (local output)) (local take) (local name_prefix) (local writing)))
+							(if
+								(:doc "Emit a slot wrapper only for a record used by a lowered array operation.")
+								(u8.eq (array.load (local used) (struct.get (local row) emit_row)) 1u8)
+								(then (set (local cursor) (call write_slot_definition (borrow-shared (local source))
+									(borrow-shared (local nodes)) (local layout) (borrow-mut (local output))
+									(local cursor) (local name_prefix) (local writing)))))))
 					(set (local position) (i32.inc (local position)))))
 			(return (local cursor)))))

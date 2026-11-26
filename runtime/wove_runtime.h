@@ -245,6 +245,54 @@ wvrt_slice wvrt_array_borrow_row_at_span(wvrt_slice wvrt_rows, int32_t wvrt_inde
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_store_row_at_span(wvrt_mut_slice wvrt_rows, int32_t wvrt_index, wvrt_array *wvrt_row,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_array_new_owned_at_span(int32_t length, size_t size, size_t alignment,
+	void (*drop)(void *), int32_t file, int32_t start, int32_t end);
+const void *wvrt_array_borrow_owned_at_span(wvrt_slice view, int32_t index,
+	int32_t file, int32_t start, int32_t end);
+void *wvrt_array_borrow_mut_owned_at_span(wvrt_mut_slice view, int32_t index,
+	int32_t file, int32_t start, int32_t end);
+void wvrt_array_store_owned_at_span(wvrt_mut_slice view, int32_t index, void *slot,
+	void (*drop)(void *), int32_t file, int32_t start, int32_t end);
+void wvrt_array_push_owned_at_span(wvrt_array *owner, void *slot, int32_t file, int32_t start, int32_t end);
+void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slot,
+	int32_t file, int32_t start, int32_t end);
+
+// Wrap each owning record in an inline slot whose first member tracks initialization.
+#define WVRT_DEFINE_OWNED_SLOT(type, slot, destroy) \
+	typedef struct { bool wvrt_live; type wvrt_value; } slot; \
+	static inline __attribute__((unused)) void slot##_drop(void *wvrt_item) { \
+		slot *wvrt_slot = wvrt_item; \
+		/* The record storage belongs to the slot only while populated. */ \
+		if (wvrt_slot->wvrt_live) { \
+			destroy(&wvrt_slot->wvrt_value); \
+			wvrt_slot->wvrt_live = false; \
+		} \
+	}
+
+// Use the slot layout and its exact destructor for the owning descriptor.
+#define wvrt_owned_array_new(slot, count, file, start, end) \
+	wvrt_array_new_owned_at_span((count), sizeof(slot), _Alignof(slot), slot##_drop, (file), (start), (end))
+
+// Lend the inline record only after checking its slot.
+#define wvrt_owned_array_borrow(slot, view, index, file, start, end) \
+	(&((const slot *)wvrt_array_borrow_owned_at_span((view), (index), (file), (start), (end)))->wvrt_value)
+#define wvrt_owned_array_borrow_mut(slot, view, index, file, start, end) \
+	(&((slot *)wvrt_array_borrow_mut_owned_at_span((view), (index), (file), (start), (end)))->wvrt_value)
+
+// Pass the captured owner through a populated slot of the same layout.
+#define wvrt_owned_array_store(slot, view, index, value, file, start, end) \
+	wvrt_array_store_owned_at_span((view), (index), &(slot){true, (value)}, slot##_drop, (file), (start), (end))
+#define wvrt_owned_array_push(slot, owner, value, file, start, end) \
+	wvrt_array_push_owned_at_span((owner), &(slot){true, (value)}, (file), (start), (end))
+
+// Transfer the removed record, with the slot's live flag consumed by the removal.
+#define wvrt_owned_array_remove(slot, owner, index, file, start, end) \
+	__extension__ ({ \
+		slot wvrt_removed; \
+		wvrt_array_remove_owned_at_span((owner), (index), &wvrt_removed, (file), (start), (end)); \
+		wvrt_removed.wvrt_value; \
+	})
+
 wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrt_bytes, int32_t wvrt_length,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_snapshot_borrowed_cstr_at_span(const char *wvrt_text,

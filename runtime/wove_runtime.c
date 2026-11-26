@@ -619,6 +619,45 @@ void wvrt_array_store_row_at_span(wvrt_mut_slice wvrtrows, int32_t wvrtindex, wv
 	wvrt_items[wvrt_offset] = wvrtrow;
 }
 
+// Allocate inactive record slots and register their exact recursive cleanup.
+wvrt_array *wvrt_array_new_owned_at_span(int32_t length, size_t size, size_t alignment,
+	void (*drop)(void *), int32_t file, int32_t start, int32_t end) {
+	wvrt_array *owner = wvrt_array_new_at_span(length, size, alignment, file, start, end);
+	owner->wvrt_drop_element = drop;
+	return owner;
+}
+
+// An unfilled slot has no record to lend or transfer.
+static const void *wvrt_array_live_slot(const void *items, size_t offset, size_t stride,
+	int32_t file, int32_t start, int32_t end) {
+	const unsigned char *slot = (const unsigned char *)items + offset * stride;
+	if (!*(const bool *)slot) { wvrt_trap_at_span(file, start, end, "uninitialized array element"); }
+	return slot;
+}
+
+// Lend a populated record slot through a shared view.
+const void *wvrt_array_borrow_owned_at_span(wvrt_slice view, int32_t index,
+	int32_t file, int32_t start, int32_t end) {
+	size_t offset = wvrt_slice_offset_at_span(view.wvrt_length, index, file, start, end);
+	return wvrt_array_live_slot(view.wvrt_items, offset, view.wvrt_element_size, file, start, end);
+}
+
+// Reuse the presence check and keep the permission carried by the original mutable view.
+void *wvrt_array_borrow_mut_owned_at_span(wvrt_mut_slice view, int32_t index,
+	int32_t file, int32_t start, int32_t end) {
+	return (void *)wvrt_array_borrow_owned_at_span(wvrt_share_mut_slice(view), index, file, start, end);
+}
+
+// Retire the previous owner before installing the captured replacement.
+void wvrt_array_store_owned_at_span(wvrt_mut_slice view, int32_t index, void *slot,
+	void (*drop)(void *), int32_t file, int32_t start, int32_t end) {
+	if (index < 0 || index >= view.wvrt_length) { drop(slot); }
+	size_t offset = wvrt_slice_offset_at_span(view.wvrt_length, index, file, start, end);
+	unsigned char *destination = (unsigned char *)view.wvrt_items + offset * view.wvrt_element_size;
+	drop(destination);
+	memcpy(destination, slot, view.wvrt_element_size);
+}
+
 // Copy compiled bytes into a fresh owner on each evaluation.
 wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrtbytes, int32_t wvrtlength,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
@@ -1453,6 +1492,16 @@ wvrt_array *wvrt_worker_join_all_at_span(wvrt_array **slot, int32_t file, int32_
 #endif
 }
 
+// Retire the incoming record if its slot could not be appended to the array.
+void wvrt_array_push_owned_at_span(wvrt_array *owner, void *slot, int32_t file, int32_t start, int32_t end) {
+	const char *error = wvrt_array_try_append(owner, slot);
+	// Failure leaves the source slot as the only owner of the detached value.
+	if (error != NULL) {
+		owner->wvrt_drop_element(slot);
+		wvrt_trap_at_span(file, start, end, error);
+	}
+}
+
 // Close an occupied slot without dropping owners moved into the surviving prefix.
 static void wvrt_array_erase(wvrt_array *wvrtbuffer, size_t wvrtindex) {
 	size_t wvrt_size = wvrtbuffer->wvrt_element_size;
@@ -1475,6 +1524,15 @@ void wvrt_array_remove_at_span(wvrt_array *wvrtbuffer, int32_t wvrtindex, void *
 	const unsigned char *wvrt_item = (const unsigned char *)wvrtbuffer->wvrt_items + wvrt_index * wvrt_size;
 	memcpy(wvrtresult, wvrt_item, wvrt_size);
 	wvrt_array_erase(wvrtbuffer, wvrt_index);
+}
+
+// Transfer an initialized record and shift the remaining slot ownership with the tail.
+void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slot,
+	int32_t file, int32_t start, int32_t end) {
+	size_t offset = wvrt_array_index_at_span(owner->wvrt_length, index, file, start, end);
+	const void *source = wvrt_array_live_slot(owner->wvrt_items, offset, owner->wvrt_element_size, file, start, end);
+	memcpy(slot, source, owner->wvrt_element_size);
+	wvrt_array_erase(owner, offset);
 }
 
 // Transfer a populated row to its new owner. An unfilled slot has no owner to return.
