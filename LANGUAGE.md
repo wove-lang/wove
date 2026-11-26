@@ -340,12 +340,19 @@ Call it as a statement. A value-returning function must return its declared
 type on every path. `let` creates a binding and `let-mut` makes it writable.
 A local name comes into scope after its initializer.
 
+A struct field can hold any supported `owned-array` type, including a
+numeric array, an array of copyable Wove records, or nested owned arrays.
+Borrow a field through its original place with `borrow-shared` or
+`borrow-mut`. The view keeps the field's exact element type at each level,
+and an exclusive borrow requires a writable record place.
+
 A record with an owning field is itself an owner. Move a whole local
 record with `(move (local grid))` or one field with
 `(move (struct.get (local grid) cells))`. Sibling fields survive a field
 move. A whole-record move or borrow requires all owning fields to be
-present. Remaining owners drop in reverse declaration order on scope exit. A
-return evaluates its result before cleanup.
+present. Remaining owners drop in reverse declaration order on scope exit.
+Dropping an owned-array field also drops the nested arrays it still owns.
+A return evaluates its result before cleanup.
 
 An `(embed "./payload.bin")` initializer resolves relative to its defining
 module and gives a fresh owner with the file's original bytes on each
