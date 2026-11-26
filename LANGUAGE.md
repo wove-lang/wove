@@ -22,7 +22,7 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 | Wrapping subtraction | `i32.sub`, `u32.sub` | All integer widths |
 | Wrapping multiplication | | All integer widths |
 | Checked arithmetic | | `add-checked`, `sub-checked`, and `mul-checked` at all integer widths |
-| Division and remainder | | `i32.div`, `i32.rem` |
+| Division and remainder | | `div` and `rem` at all integer widths |
 | Equality | `u8.eq`, `i32.eq`, `u32.eq` | All integer widths and `(int.eq Type left right)` |
 | Ordering | `u8.lt`, `i32.lt`, `u32.lt` | `lt`, `le`, `gt`, and `ge` at all integer widths |
 | Compare with zero | | `eqz`, `ltz`, `lez`, `gtz`, and `gez` at all integer widths |
@@ -48,8 +48,10 @@ operand type. Integer `add`, `sub`, and `mul` wrap at the declared width.
 - `(u64.rotr word count)` rotates a `u64` right by an `i32` count in
   `[0, 64)`. A zero count returns the word unchanged. Out-of-range counts
   trap at the count operand's source span.
-- Division truncates toward zero. A zero divisor traps for division and
-  remainder. `INT32_MIN / -1` traps, and `INT32_MIN % -1` is zero.
+- Division truncates toward zero, and a nonzero remainder has the sign of
+  the dividend. Both operations trap on zero divisors. Dividing a signed
+  minimum by `-1` traps, and its remainder by `-1` is zero. Traps point to
+  the full operation span.
 - `(int.convert Type value)` converts a fitting integer and traps on an
   out-of-range value. Stage 2 also supports conversions to and from native
   integer aliases. The seed accepts `(i32.from-u8 byte)` as well.

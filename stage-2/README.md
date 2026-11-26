@@ -450,12 +450,12 @@ return their signed 32-bit result modulo 2^32. Each binary operand is
 evaluated once, left to right. Emitted C widens the arithmetic,
 reduces it to 32 bits as unsigned, and produces an in-range signed result.
 
-`(i32.div dividend divisor)` truncates the quotient toward zero.
-`(i32.rem dividend divisor)` returns the signed remainder. Both take
-two exact `i32` operands, evaluated once from left to right, and return
-`i32`. A zero divisor traps at the original operation span. Dividing
-`INT32_MIN` by `-1` also traps for overflow. The corresponding
-remainder is zero.
+For each built-in integer type `T`, `(T.div dividend divisor)` and
+`(T.rem dividend divisor)` take two exact `T` operands, evaluated once from
+left to right, and return `T`. A signed quotient truncates toward zero, and
+a nonzero remainder has the sign of the dividend. A zero divisor traps at
+the full operation span. Dividing a signed minimum by `-1` also traps for
+overflow, and the corresponding remainder is zero.
 
 `u32.add` and `u32.sub` take exact `u32` operands
 and yield `u32` results modulo 2^32. Each operand runs once, left to
