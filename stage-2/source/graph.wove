@@ -21,6 +21,8 @@
 	(use wove-file "./tree_copy.wove" (only copy_tree))
 	(use wove-file "./c_scope.wove" (only connect_bridge_overlay))
 	(use wove-file "./c_headers.wove" (only (type HeaderMatch) find_c_header find_header_kind find_c_declaration))
+	(use wove-file "./c_dependencies.wove" (only connect_bridge_type))
+	(use wove-file "./c_dependency_paths.wove" (only scoped_uses count_bridge_uses (type BridgeUse)))
 
 	(use wove-file "./target.wove" (only default_selection (type SelectionContext)))
 
@@ -35,6 +37,17 @@
 			(type_start i32) (type_end i32) (name_node i32)
 			(header_file i32) (bridge_node i32) (default_file i32) (default_node i32) (native_file i32)
 			(optional bool) (requested_start i32) (requested_end i32) (value_macro bool) (extent i32)))
+	(let c_dependency_provider 10u32)
+
+	(fn includes_c_header
+		(:doc "Both public C selections and private dependencies contribute C includes.")
+		(params (binding GraphBinding)) (returns bool)
+		(body (return (bool.or (u32.eq (struct.get (local binding) provider) 8u32)
+			(u32.eq (struct.get (local binding) provider) (local c_dependency_provider))))))
+
+	(struct CScopeTree (fields (base i32) (rows i32)))
+	(struct CScopeVisit (fields (file i32) (node i32)))
+
 	(struct GraphUse
 		(fields (start i32) (end i32) (path_start i32) (path_end i32) (first i32) (limit i32) (error u32) (provider u32)))
 	(struct GraphSelector
@@ -605,36 +618,50 @@
 			(return (i32.sub (local position) (local base)))))
 
 	(fn c_scope_owner
-		(:doc "Translate a temporary combined tree row to the physical defining file.")
-		(params (header HeaderMatch) (primary_rows i32) (row i32)) (returns i32)
+		(:doc "Find the original file for a row in the temporary provider tree.")
+		(params (trees (shared-array CScopeTree)) (row i32))
+		(returns i32)
 		(body
-			(if (i32.lt (local row) (local primary_rows)) (then (return (struct.get (local header) file))))
-			(return (struct.get (local header) default_file))))
-
-	(fn c_scope_row_base
-		(:doc "The temporary namespace stores the primary provider first and bundled nodes after it.")
-		(params (header HeaderMatch) (primary_rows i32) (file i32)) (returns i32)
-		(body
-			(if (i32.eq (local file) (struct.get (local header) file)) (then (return 0i32)))
-			(return (local primary_rows))))
+			(let-mut file 0i32)
+			(while
+				(:doc "Only loaded tree ranges contain a temporary row.")
+				(i32.lt (local file) (array.len (local trees)))
+				(body
+					(let tree (array.load (local trees) (local file)))
+					(let base (struct.get (local tree) base))
+					(if
+						(:doc "Subtract the base after checking the lower bound.")
+						(bool.and (i32.not-lt (local row) (local base))
+							(i32.lt (i32.sub (local row) (local base)) (struct.get (local tree) rows)))
+						(then (return (local file))))
+					(set (local file) (i32.inc (local file)))))
+			(return -1i32)))
 
 	(fn c_scope_error
-		(:doc "Translate an absolute error span to the original source within the selected namespace.")
-		(params (files (shared-array SuppliedFile)) (header HeaderMatch) (count i32) (start i32) (end i32) (error u32))
+		(:doc "Restore a validation error to its physical provider source span.")
+		(params (files (shared-array SuppliedFile)) (trees (shared-array CScopeTree)) (primary i32)
+			(count i32) (start i32) (end i32) (error u32))
 		(returns GraphRead)
 		(body
-			(let-mut file (struct.get (local header) file))
-			(let fallback (struct.get (local header) default_file))
-			(if
-				(:doc "Signature or dependency validation may fail in the bundled provider.")
-				(i32.lt -1i32 (local fallback))
-				(then
-					(let input (array.load (local files) (local fallback)))
+			(let-mut file (local primary))
+			(let-mut index 0i32)
+			(while
+				(:doc "Check source ranges of the loaded trees, including dependency providers.")
+				(i32.lt (local index) (array.len (local trees)))
+				(body
 					(if
-						(:doc "Use the original backing byte range of that file.")
-						(bool.and (i32.not-lt (local start) (struct.get (local input) source_start))
-							(i32.lt (local start) (struct.get (local input) source_end)))
-						(then (set (local file) (local fallback))))))
+						(:doc "Unloaded supplied files do not define a selected diagnostic.")
+						(i32.gtz (struct.get (array.load (local trees) (local index)) rows))
+						(then
+							(let input (array.load (local files) (local index)))
+							(if
+								(:doc "Use the original backing byte range of that file.")
+								(bool.and (i32.not-lt (local start) (struct.get (local input) source_start))
+									(i32.lt (local start) (struct.get (local input) source_end)))
+								(then
+									(set (local file) (local index))
+									(set (local index) (array.len (local trees)))))))
+					(set (local index) (i32.inc (local index)))))
 			(let base (struct.get (array.load (local files) (local file)) source_start))
 			(return (struct.new GraphRead (next (local count)) (start (i32.sub (local start) (local base)))
 				(end (i32.sub (local end) (local base))) (error (local error)) (file (local file))))))
@@ -642,7 +669,7 @@
 	(fn bind_c_members
 		(:doc `Bind each selected C member to its original declaration and checked native contract.`)
 		(params (source (shared-array u8)) (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
-			(importer i32) (header HeaderMatch) (primary_rows i32) (edge GraphUse) (selectors (shared-array GraphSelector))
+			(importer i32) (header HeaderMatch) (trees (shared-array CScopeTree)) (edge GraphUse) (selectors (shared-array GraphSelector))
 			(bindings (mut-array GraphBinding)) (offset i32) (context SelectionContext))
 		(returns GraphRead)
 		(body
@@ -668,16 +695,17 @@
 					(if
 						(:doc "A rejected C member belongs to the declaring Wove file.")
 						(u32.gtz (local rejected))
-						(then (return (call c_scope_error (borrow-shared (local files)) (local header) (local count)
+						(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
+								(struct.get (local header) file) (local count)
 							(struct.get (local member) start) (struct.get (local member) end) (local rejected)))))
 					(let declaration (struct.get (local member) declaration))
 					(if
 						(:doc "A missing C member points at the original requested spelling.")
 						(i32.ltz (local declaration))
 						(then (return (call graph_read (local count) (local start) (local end) 29u32))))
-					(let file (call c_scope_owner (local header) (local primary_rows) (local declaration)))
+					(let file (call c_scope_owner (borrow-shared (local trees)) (local declaration)))
 					(let base (struct.get (array.load (local files) (local file)) source_start))
-					(let row_base (call c_scope_row_base (local header) (local primary_rows) (local file)))
+					(let row_base (struct.get (array.load (local trees) (local file)) base))
 					(let type (struct.get (local member) native_type))
 					(let-mut native_file -1i32)
 					(let-mut native_row 0i32)
@@ -686,9 +714,9 @@
 						(:doc "An inherited type retains its own defining file and node.")
 						(i32.gtz (local type))
 						(then
-							(set (local native_file) (call c_scope_owner (local header) (local primary_rows) (local type)))
+							(set (local native_file) (call c_scope_owner (borrow-shared (local trees)) (local type)))
 							(set (local native_row) (i32.sub (local type)
-								(call c_scope_row_base (local header) (local primary_rows) (local native_file))))
+								(struct.get (array.load (local trees) (local native_file)) base)))
 							(set (local native_base) (struct.get (array.load (local files) (local native_file)) source_start))))
 					(let target (struct.new GraphBinding (owner (local importer)) (start -1i32) (end -1i32)
 						(file (local file)) (declaration (i32.sub (local declaration) (local row_base)))
@@ -756,8 +784,14 @@
 				(:doc "A missing bridge is diagnosed at the original importing use.")
 				(i32.ltz (local provider))
 				(then (return (call graph_read (local offset) (struct.get (local edge) start) (struct.get (local edge) end) 27u32))))
+			(if
+				(:doc "A module-level empty selection validates its provider without activating its bridge.")
+				(i32.eq (struct.get (local edge) first) (struct.get (local edge) limit))
+				(then (return (call graph_read (local offset) 0i32 0i32 0u32))))
+			(let-mut visiting (array.alloc CScopeVisit (array.len (local bindings))))
 			(return (call bind_c_header_scope (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local source))
-				(local importer) (local header) (local edge) (borrow-shared (local selectors)) (borrow-mut (local bindings)) (local offset) (local context)))))
+				(local importer) (local header) (local edge) (borrow-shared (local selectors)) (borrow-mut (local bindings))
+				(local offset) (local context) (borrow-mut (local visiting)) 0i32))))
 
 	(fn measure_c_tree
 		(:doc "Measure the selected provider's checked source view before reserving temporary nodes.")
@@ -778,11 +812,298 @@
 				(then (call copy_tree (borrow-shared (local nodes)) (borrow-mut (local flat)) (local base) (local source_base))))
 			(return (local built))))
 
+	(fn extend_c_scope_tree
+		(:doc "Reserve one checked provider tree the first time a dependency needs that file.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile))
+			(trees (mut-array CScopeTree)) (file i32) (next i32))
+		(returns i32)
+		(body
+			(if
+				(:doc "Missing overlays and already loaded files occupy no additional rows.")
+				(bool.or (i32.ltz (local file)) (i32.gtz (struct.get (array.load (local trees) (local file)) rows)))
+				(then (return (local next))))
+			(let size (call measure_c_tree (borrow-shared (local arena)) (array.load (local files) (local file))))
+			(let rows (i32.from-u32 (struct.get (local size) rows)))
+			(if
+				(:doc "The flattened tree must fit in the signed row domain.")
+				(bool.or (i32.ltz (local rows)) (i32.lt (i32.sub 2147483647i32 (local next)) (local rows)))
+				(then (return -1i32)))
+			(array.store (local trees) (local file) (struct.new CScopeTree (base (local next)) (rows (local rows))))
+			(return (i32.add (local next) (local rows)))))
+
+	(fn write_c_dependency
+		(:doc "Publish a private dependency row for include ordering and restoration of a type selector.")
+		(params (files (shared-array SuppliedFile)) (trees (shared-array CScopeTree)) (use BridgeUse)
+			(selector i32) (definition i32) (bindings (mut-array GraphBinding)) (count i32))
+		(returns GraphRead)
+		(body
+			(let owner (struct.get (local use) owner))
+			(let input (array.load (local files) (local owner)))
+			(let source (struct.get (local input) source_start))
+			(let start (i32.sub (struct.get (local use) start) (local source)))
+			(let end (i32.sub (struct.get (local use) end) (local source)))
+			(if
+				(:doc "A private dependency consumes one checked table slot.")
+				(i32.not-lt (local count) (array.len (local bindings)))
+				(then (return (struct.new GraphRead (next (local count)) (start (local start))
+					(end (local end)) (error 16u32) (file (local owner))))))
+			(let-mut header_start (local start))
+			(let-mut header_end (local end))
+			(let-mut native_file -1i32)
+			(let-mut native_type 0i32)
+			(let-mut node -1i32)
+			(if
+				(:doc "A present provider supplies the canonical include literal, even for an empty selection.")
+				(i32.not-ltz (struct.get (local use) node))
+				(then
+					(set (local header_start) (struct.get (local use) header_start))
+					(set (local header_end) (struct.get (local use) header_end))))
+			(if
+				(:doc "A type selector points to its canonical definition even when the target is an overlay.")
+				(i32.not-ltz (local selector))
+				(then
+					(set (local native_file) (call c_scope_owner (borrow-shared (local trees)) (local definition)))
+					(set (local native_type) (i32.sub (local definition)
+						(struct.get (array.load (local trees) (local native_file)) base)))
+					(set (local node) (i32.sub (local selector) (struct.get (array.load (local trees) (local owner)) base)))))
+			(array.store (local bindings) (local count) (struct.new GraphBinding
+				(owner (local owner)) (start -1i32) (end -1i32) (file (local native_file)) (declaration (local node))
+				(namespace 3u32) (provider (local c_dependency_provider))
+				(header_start (local header_start)) (header_end (local header_end))
+				(native_start -1i32) (native_end -1i32) (signature_start -1i32) (signature_end -1i32)
+				(native_type (local native_type)) (drop_start -1i32) (drop_end -1i32)
+				(type_start -1i32) (type_end -1i32) (name_node -1i32)
+				(header_file (struct.get (local use) file)) (bridge_node (struct.get (local use) node))
+				(default_file (struct.get (local use) default_file)) (default_node (struct.get (local use) default_node))
+				(native_file (local native_file)) (optional (bool false))
+				(requested_start -1i32) (requested_end -1i32) (value_macro (bool false)) (extent -1i32)))
+			(return (call graph_read (i32.inc (local count)) 0i32 0i32 0u32))))
+
+	(fn c_scope_visiting
+		(:doc "Detect a cycle by header declaration identity, including several bridges in the same file.")
+		(params (visiting (shared-array CScopeVisit)) (depth i32) (file i32) (node i32))
+		(returns bool)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Only scopes on the current dependency path can form a cycle.")
+				(i32.lt (local index) (local depth))
+				(body
+					(let visit (array.load (local visiting) (local index)))
+					(if
+						(:doc "Both the defining file and original bridge row identify a scope.")
+						(bool.and (i32.eq (struct.get (local visit) file) (local file))
+							(i32.eq (struct.get (local visit) node) (local node)))
+						(then (return (bool true))))
+					(set (local index) (i32.inc (local index)))))
+			(return (bool false))))
+
+	(fn bind_c_provider_prerequisites
+		(:doc "Resolve the defining provider's own prerequisites before emitting its include.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (trees (shared-array CScopeTree))
+			(use BridgeUse) (bindings (mut-array GraphBinding)) (offset i32) (context SelectionContext)
+			(visiting (mut-array CScopeVisit)) (depth i32))
+		(returns GraphRead)
+		(body
+			(let owner (struct.get (local use) owner))
+			(let file (struct.get (local use) file))
+			(let node (struct.get (local use) node))
+			(if
+				(:doc "Header prerequisites cannot require their own active consumer ahead of themselves.")
+				(call c_scope_visiting (borrow-shared (local visiting)) (local depth) (local file) (local node))
+				(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
+					(local owner) (local offset) (struct.get (local use) start) (struct.get (local use) end) 28u32))))
+			(let header (struct.new HeaderMatch (file (local file)) (node (local node))
+				(start (struct.get (local use) header_start)) (end (struct.get (local use) header_end))
+				(error 0u32) (default_file (struct.get (local use) default_file)) (default_node (struct.get (local use) default_node))
+				(replace (bool false))))
+			(let base (struct.get (array.load (local files) (local owner)) source_start))
+			(let start (i32.sub (struct.get (local use) start) (local base)))
+			(let end (i32.sub (struct.get (local use) end) (local base)))
+			(if
+				(:doc "Each active include needs a future binding slot, so graph capacity bounds dependency depth.")
+				(i32.not-lt (local depth) (array.len (local visiting)))
+				(then (return (struct.new GraphRead (next (local offset)) (start (local start))
+					(end (local end)) (error 16u32) (file (local owner))))))
+			(let edge (struct.new GraphUse (start (local start)) (end (local end)) (path_start (local start)) (path_end (local end))
+				(first 0i32) (limit 0i32) (error 0u32) (provider 8u32)))
+			(let selectors (array.alloc GraphSelector 0i32))
+			(return (call bind_c_header_scope (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local arena))
+				(local owner) (local header) (local edge) (borrow-shared (local selectors)) (borrow-mut (local bindings))
+				(local offset) (local context) (borrow-mut (local visiting)) (local depth)))))
+
+	(fn bind_c_dependencies
+		(:doc "Resolve bridge-local type selectors and record their ordered includes before public C bindings.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (trees (shared-array CScopeTree))
+			(uses (shared-array BridgeUse)) (length i32) (nodes (mut-array SourceNode))
+			(bindings (mut-array GraphBinding)) (offset i32) (context SelectionContext)
+			(visiting (mut-array CScopeVisit)) (depth i32))
+		(returns GraphRead)
+		(body
+			(let-mut count (local offset))
+			(let-mut index 0i32)
+			(while
+				(:doc "Retain the original order of includes declared in the selected bridge.")
+				(i32.lt (local index) (local length))
+				(body
+					(let use (array.load (local uses) (local index)))
+					(let owner (struct.get (local use) owner))
+					(let-mut row (struct.get (local use) first))
+					(if
+						(:doc "Every present provider contributes its prerequisites before the first include of that header.")
+						(i32.not-ltz (struct.get (local use) node))
+						(then
+							(let required (call bind_c_provider_prerequisites (borrow-shared (local arena)) (borrow-shared (local files))
+								(borrow-shared (local trees)) (local use) (borrow-mut (local bindings)) (local count) (local context)
+								(borrow-mut (local visiting)) (local depth)))
+							(if (u32.gtz (struct.get (local required) error)) (then (return (local required))))
+							(set (local count) (struct.get (local required) next))))
+					(if
+						(:doc "An empty only list requests the header without importing a name.")
+						(i32.ltz (local row))
+						(then
+							(let saved (call write_c_dependency (borrow-shared (local files)) (borrow-shared (local trees))
+								(local use) -1i32 -1i32 (borrow-mut (local bindings)) (local count)))
+							(if (u32.gtz (struct.get (local saved) error)) (then (return (local saved))))
+							(set (local count) (struct.get (local saved) next))))
+					(while
+						(:doc "Resolve each explicitly named type in the dependency's target provider.")
+						(i32.not-ltz (local row))
+						(body
+							(let selector (call read_selector (borrow-shared (local arena)) (borrow-shared (local nodes)) (local row)))
+							(if
+								(:doc "Bridge-local dependencies select only native types.")
+								(bool.or (u32.gtz (struct.get (local selector) error)) (u32.not-eq (struct.get (local selector) namespace) 1u32))
+								(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
+									(local owner) (local count) (struct.get (local selector) start) (struct.get (local selector) end) 26u32))))
+							(let name (array.load (local nodes) (struct.get (local selector) first)))
+							(let start (struct.get (local name) start))
+							(let end (struct.get (local name) end))
+							(let base (struct.get (array.load (local trees) (struct.get (local use) file)) base))
+							(let found (call find_c_declaration (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(i32.add (local base) (struct.get (local use) node)) (borrow-shared (local arena))
+								(local start) (local end) 1u32 (local context)))
+							(if
+								(:doc "Errors inside the native type contract keep the provider's original location.")
+								(u32.gtz (struct.get (local found) error))
+								(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
+									(local owner) (local count) (struct.get (local found) start) (struct.get (local found) end)
+									(struct.get (local found) error)))))
+							(let definition (struct.get (local found) declaration))
+							(if
+								(:doc "A missing requested type is diagnosed in the explicit dependency declaration.")
+								(i32.ltz (local definition))
+								(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
+									(local owner) (local count) (local start) (local end) 29u32))))
+							(let local_name (array.load (local nodes) (struct.get (local selector) second)))
+							(let local_start (struct.get (local local_name) start))
+							(let local_end (struct.get (local local_name) end))
+							(if
+								(:doc "The local type spelling must be a bare identifier just as in a module use.")
+								(bool.not (call is_import_name (borrow-shared (local arena)) (local local_name)))
+								(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
+									(local owner) (local count) (local local_start) (local local_end) 26u32))))
+							(if
+								(:doc "A private type alias cannot shadow an intrinsic type name.")
+								(call is_reserved_type_name (borrow-shared (local arena)) (local local_start) (local local_end))
+								(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
+									(local owner) (local count) (local local_start) (local local_end) 30u32))))
+							(call connect_bridge_type (borrow-mut (local nodes)) (local row) (local definition))
+							(let saved (call write_c_dependency (borrow-shared (local files)) (borrow-shared (local trees))
+								(local use) (local row) (local definition) (borrow-mut (local bindings)) (local count)))
+							(if (u32.gtz (struct.get (local saved) error)) (then (return (local saved))))
+							(set (local count) (struct.get (local saved) next))
+							(set (local row) (struct.get (array.load (local nodes) (local row)) next_sibling))))
+					(set (local index) (i32.inc (local index)))))
+			(return (call graph_read (local count) 0i32 0i32 0u32))))
+
+	(fn bind_c_extended_scope
+		(:doc "Load dependency trees, restore overlays, and bind private names before checking public members.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (source (shared-array u8)) (importer i32)
+			(header HeaderMatch) (edge GraphUse) (selectors (shared-array GraphSelector))
+			(original (shared-array SourceNode)) (uses (shared-array BridgeUse)) (length i32) (trees (mut-array CScopeTree))
+			(bindings (mut-array GraphBinding)) (offset i32) (context SelectionContext)
+			(visiting (mut-array CScopeVisit)) (depth i32))
+		(returns GraphRead)
+		(body
+			(let-mut next (array.len (local original)))
+			(let-mut index 0i32)
+			(while
+				(:doc "Reserve each referenced primary and bundled tree once.")
+				(i32.lt (local index) (local length))
+				(body
+					(let match (array.load (local uses) (local index)))
+					(set (local next) (call extend_c_scope_tree (borrow-shared (local arena)) (borrow-shared (local files))
+						(borrow-mut (local trees)) (struct.get (local match) file) (local next)))
+					(if (i32.not-ltz (local next))
+						(then (set (local next) (call extend_c_scope_tree (borrow-shared (local arena)) (borrow-shared (local files))
+							(borrow-mut (local trees)) (struct.get (local match) default_file) (local next)))))
+					(if
+						(:doc "Report capacity at the original import before allocating the combined tree.")
+						(i32.ltz (local next))
+						(then (return (call graph_read (local offset) (struct.get (local edge) start) (struct.get (local edge) end) 16u32))))
+					(set (local index) (i32.inc (local index)))))
+			(let-mut nodes (array.alloc SourceNode (local next)))
+			(set (local index) 0i32)
+			(while
+				(:doc "Retain the selected provider's original rows and overlay links.")
+				(i32.lt (local index) (array.len (local original)))
+				(body
+					(array.store (local nodes) (local index) (array.load (local original) (local index)))
+					(set (local index) (i32.inc (local index)))))
+			(set (local index) 0i32)
+			(while
+				(:doc "Build the additional providers in the preassigned row ranges.")
+				(i32.lt (local index) (array.len (local trees)))
+				(body
+					(let tree (array.load (local trees) (local index)))
+					(let base (struct.get (local tree) base))
+					(if
+						(:doc "The original providers are already present. Unused files have an empty range.")
+						(i32.not-lt (local base) (array.len (local original)))
+						(then
+							(let file (array.load (local files) (local index)))
+							(let checked (call measure_c_tree (borrow-shared (local arena)) (local file)))
+							(let built (call copy_c_tree (borrow-shared (array.range (local arena)
+									(struct.get (local file) source_start) (struct.get (local file) source_end)))
+								(local checked) (local base) (struct.get (local file) source_start) (borrow-mut (local nodes))))
+							(if
+								(:doc "A new provider parse error names the provider file.")
+								(u32.gtz (struct.get (local built) error))
+								(then (return (struct.new GraphRead (next (local offset)) (start (struct.get (local built) start))
+									(end (struct.get (local built) end)) (error (struct.get (local built) error)) (file (local index))))))))
+					(set (local index) (i32.inc (local index)))))
+			(set (local index) 0i32)
+			(while
+				(:doc "Connect each dependency's project and bundled scopes before looking up its public types.")
+				(i32.lt (local index) (local length))
+				(body
+					(let match (array.load (local uses) (local index)))
+					(let fallback (struct.get (local match) default_file))
+					(if
+						(:doc "Single-provider dependencies require no scope overlay.")
+						(i32.not-ltz (local fallback))
+						(then
+							(let base (struct.get (array.load (local trees) (struct.get (local match) file)) base))
+							(let bundled (struct.get (array.load (local trees) (local fallback)) base))
+							(call connect_bridge_overlay (borrow-mut (local nodes))
+								(i32.add (local base) (struct.get (local match) node))
+								(i32.add (local bundled) (struct.get (local match) default_node)))))
+					(set (local index) (i32.inc (local index)))))
+			(let read (call bind_c_dependencies (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local trees)) (borrow-shared (local uses)) (local length) (borrow-mut (local nodes))
+				(borrow-mut (local bindings)) (local offset) (local context) (borrow-mut (local visiting)) (local depth)))
+			(if (u32.gtz (struct.get (local read) error)) (then (return (local read))))
+			(return (call bind_c_members (borrow-shared (local source)) (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local nodes)) (local importer) (local header) (borrow-shared (local trees)) (local edge)
+				(borrow-shared (local selectors)) (borrow-mut (local bindings)) (struct.get (local read) next) (local context)))))
+
 	(fn bind_c_header_scope
 		(:doc "Build a temporary tree for each provider in the namespace and keep their original offsets.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (source (shared-array u8)) (importer i32)
 			(header HeaderMatch) (edge GraphUse) (selectors (shared-array GraphSelector))
-			(bindings (mut-array GraphBinding)) (offset i32) (context SelectionContext))
+			(bindings (mut-array GraphBinding)) (offset i32) (context SelectionContext)
+			(visiting (mut-array CScopeVisit)) (depth i32))
 		(returns GraphRead)
 		(body
 			(let primary (array.load (local files) (struct.get (local header) file)))
@@ -825,8 +1146,48 @@
 							(end (struct.get (local inherited) end)) (error (struct.get (local inherited) error)) (file (local fallback))))))
 					(call connect_bridge_overlay (borrow-mut (local flat)) (struct.get (local header) node)
 						(i32.add (local rows) (struct.get (local header) default_node)))))
+			(let-mut trees (array.alloc CScopeTree (array.len (local files))))
+			(array.store (local trees) (struct.get (local header) file) (struct.new CScopeTree (base 0i32) (rows (local rows))))
+			(let-mut fallback_row -1i32)
+			(if
+				(:doc "The fallback scope follows the primary tree when an overlay is active.")
+				(i32.not-ltz (local fallback))
+				(then
+					(array.store (local trees) (local fallback) (struct.new CScopeTree (base (local rows)) (rows (local extra))))
+					(set (local fallback_row) (i32.add (local rows) (struct.get (local header) default_node)))))
+			(let capacity (i32.add
+				(call count_bridge_uses (borrow-shared (local arena)) (borrow-shared (local flat)) (struct.get (local header) node))
+				(call count_bridge_uses (borrow-shared (local arena)) (borrow-shared (local flat)) (local fallback_row))))
+			(let-mut uses (array.alloc BridgeUse (local capacity)))
+			(let plan (call scoped_uses (borrow-shared (local arena)) (borrow-shared (local files)) (borrow-shared (local flat))
+				(local header) (local fallback_row) (local context) (borrow-mut (local uses))))
+			(if
+				(:doc "Preserve dependency lookup errors at their own source locations.")
+				(u32.gtz (struct.get (local plan) error))
+				(then
+					(let file (struct.get (local plan) file))
+					(let base (struct.get (array.load (local files) (local file)) source_start))
+					(return (struct.new GraphRead (next (local offset))
+						(start (i32.sub (struct.get (local plan) start) (local base)))
+						(end (i32.sub (struct.get (local plan) end) (local base)))
+						(error (struct.get (local plan) error)) (file (local file))))))
+			(if
+				(:doc "Most C selections have no bridge-local dependency tree.")
+				(i32.gtz (struct.get (local plan) count))
+				(then
+					(if
+						(:doc "Keep the active path inside the same capacity bound as its eventual bindings.")
+						(i32.not-lt (local depth) (array.len (local visiting)))
+						(then (return (call graph_read (local offset) (struct.get (local edge) start) (struct.get (local edge) end) 16u32))))
+					(array.store (local visiting) (local depth) (struct.new CScopeVisit
+						(file (struct.get (local header) file)) (node (struct.get (local header) node))))
+					(return (call bind_c_extended_scope (borrow-shared (local arena)) (borrow-shared (local files))
+						(borrow-shared (local source)) (local importer) (local header) (local edge) (borrow-shared (local selectors))
+						(borrow-shared (local flat)) (borrow-shared (local uses)) (struct.get (local plan) count) (borrow-mut (local trees))
+						(borrow-mut (local bindings)) (local offset) (local context)
+						(borrow-mut (local visiting)) (i32.inc (local depth))))))
 			(return (call bind_c_members (borrow-shared (local source)) (borrow-shared (local arena)) (borrow-shared (local files))
-				(borrow-shared (local flat)) (local importer) (local header) (local rows) (local edge)
+				(borrow-shared (local flat)) (local importer) (local header) (borrow-shared (local trees)) (local edge)
 				(borrow-shared (local selectors)) (borrow-mut (local bindings)) (local offset) (local context)))))
 
 	(fn store_frame

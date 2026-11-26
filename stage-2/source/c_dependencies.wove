@@ -1,0 +1,97 @@
+(module source_c_dependencies
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Read lexical C dependencies and retain their original native declaration identities.")
+
+	(use wove-file "./scan.wove" (only (type SourceNode)))
+	(use wove-file "./module.wove" (only form_parts))
+	(use wove-file "./imports.wove" (only import_keyword read_import read_selector))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(struct CDependencyName (fields (declaration i32) (duplicate i32)))
+
+	(fn first_bridge_operand
+		(:doc "Start at the bridge's first ordinary member after its metadata prefix.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bridge i32))
+		(returns i32)
+		(body (return (struct.get (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
+			(array.load (local nodes) (local bridge))) operands))))
+
+	(fn next_bridge_use
+		(:doc "Find the next bridge-local use among direct children of the bridge.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32))
+		(returns i32)
+		(body
+			(let-mut row (local first))
+			(while
+				(:doc "Walk only the direct bridge members. Their declaration groups retain local selection rules.")
+				(i32.not-ltz (local row))
+				(body
+					(let node (array.load (local nodes) (local row)))
+					(let head (struct.get (local node) first_child))
+					(if
+						(:doc "An explicit use is the only form that can introduce a bridge dependency.")
+						(bool.and (i32.not-ltz (local head))
+							(u32.eq (call import_keyword (borrow-shared (local source)) (array.load (local nodes) (local head))) 2u32))
+						(then (return (local row))))
+					(set (local row) (struct.get (local node) next_sibling))))
+			(return -1i32)))
+
+	(fn connect_bridge_type
+		(:doc "Link a private type selector to the original definition in the current checked tree.")
+		(params (nodes (mut-array SourceNode)) (selector i32) (declaration i32))
+		(returns void)
+		(body
+			(let node (array.load (local nodes) (local selector)))
+			(array.store (local nodes) (local selector) (struct.new SourceNode
+				(kind (struct.get (local node) kind)) (start (struct.get (local node) start)) (end (struct.get (local node) end))
+				(parent (struct.get (local node) parent)) (first_child (struct.get (local node) first_child))
+				(next_sibling (struct.get (local node) next_sibling))
+				(bridge_project (local declaration)) (bridge_default (struct.get (local node) bridge_default))
+				(generic_kind (struct.get (local node) generic_kind)) (generic_value (struct.get (local node) generic_value))))))
+
+	(fn find_bridge_type_dependency
+		(:doc "Resolve a private type spelling using the linked selectors of its own declaring bridge.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bridge i32)
+			(start i32) (end i32))
+		(returns CDependencyName)
+		(body
+			(let first (call first_bridge_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local bridge)))
+			(let-mut row (call next_bridge_use (borrow-shared (local source)) (borrow-shared (local nodes)) (local first)))
+			(let-mut found -1i32)
+			(while
+				(:doc "A bridge-local use contributes its linked explicit type selectors only.")
+				(i32.not-ltz (local row))
+				(body
+					(let node (array.load (local nodes) (local row)))
+					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(let import (call read_import (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local node) (struct.get (local parts) operands)))
+					(let-mut selector (struct.get (local import) second))
+					(while
+						(:doc "Ignore unlinked selectors from inactive imports or forms outside the active graph.")
+						(i32.not-ltz (local selector))
+						(body
+							(let item (array.load (local nodes) (local selector)))
+							(let definition (struct.get (local item) bridge_project))
+							(if
+								(:doc "A linked selector retains the normal type rename syntax.")
+								(i32.not-ltz (local definition))
+								(then
+									(let name (call read_selector (borrow-shared (local source)) (borrow-shared (local nodes)) (local selector)))
+									(let local_name (array.load (local nodes) (struct.get (local name) second)))
+									(if
+										(:doc "Compare the local selector name with the signature spelling.")
+										(call same_bytes (borrow-shared (local source)) (local start) (local end)
+											(borrow-shared (local source)) (struct.get (local local_name) start) (struct.get (local local_name) end))
+										(then
+											(if
+												(:doc "More than one declaration for the same local name is ambiguous.")
+												(bool.and (i32.not-ltz (local found)) (i32.not-eq (local found) (local definition)))
+												(then (return (struct.new CDependencyName (declaration -1i32) (duplicate (local selector))))))
+											(set (local found) (local definition))))))
+							(set (local selector) (struct.get (local item) next_sibling))))
+					(set (local row) (call next_bridge_use (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (local node) next_sibling)))))
+			(return (struct.new CDependencyName (declaration (local found)) (duplicate -1i32)))))
+)
