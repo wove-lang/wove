@@ -349,6 +349,19 @@ write through field paths. A mutable loan starts at a `let-mut` local
 or an existing mutable reference. Reborrow a reference parameter with
 the same explicit forms to pass it to another call.
 
+A field such as `(cells (owned-array u8))` makes its record an owner.
+Initialize the field with a fresh array or `(move (local cells))`. Move
+an entire local record with `(move (local grid))`, or transfer a single
+field with `(move (struct.get (local grid) cells))`. After a field move,
+sibling fields remain available. A whole-record move or loan requires all
+owning fields to remain present. Scope cleanup drops the remaining owning
+fields in reverse declaration order.
+
+Pass `(borrow-shared (struct.get (local grid) cells))` to lend that array
+to a helper. A mutable field loan requires a mutable local or reference.
+A Wove helper can return the record by moving a local or producing a fresh
+record.
+
 For built-in scalars, a `(mut-ref T)` parameter receives an exclusive call
 loan of a mutable place of exactly `T`. In the callee, `(local name)` reads
 the scalar and `(set (local name) value)` writes the exact type back to that
@@ -617,8 +630,9 @@ For a copyable record, `(array.alloc Token count)` owns `count` zeroed
 records. The runtime allocates with `sizeof` and `_Alignof` of the
 defining C type. A whole-array call borrow uses a slice of the same
 defining record and the allocation's original storage. A `let-mut`
-binding permits exclusive access. The usual scope exits and moves apply
-to record owners.
+binding permits exclusive access. A helper with `(returns (owned-array Token))`
+can return a fresh allocation or move a local owner of that exact element type.
+The caller owns the returned allocation and releases it on scope exit.
 
 `array.len` also reads the length of a live owner or the extent of a fixed
 array. It evaluates a computed fixed array receiver before returning its
