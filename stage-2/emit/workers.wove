@@ -7,7 +7,7 @@
 	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only is_record_type is_owning_record record_index (type ScalarRecord)))
-	(use wove-file "../scalar/syntax.wove" (only is_worker_launch (value worker_spawn_kind) (value worker_try_spawn_kind)))
+	(use wove-file "../scalar/syntax.wove" (only is_worker_launch (value worker_spawn_kind) (value worker_spawn_on_kind) (value worker_try_spawn_kind)))
 	(use wove-file "../scalar/worker.wove" (only worker_result_type worker_collection_record))
 	(use wove-file "./function_names.wove" (only write_function_name))
 	(use wove-file "./owned_aggregates.wove" (only write_owner_helper_name open_owned_slot_call))
@@ -16,6 +16,7 @@
 	(use wove-file "./enums.wove" (only close_transfer_outcome))
 	(use wove-file "./runtime.wove" (only close_runtime_call))
 
+	(let spawn_on_record_call "wvrt_worker_spawn_on_record_at_span(")
 	(let try_spawn_call "(wvrt_worker_try_spawn_at_span(")
 	(let no_direct_handler "NULL,")
 	(let no_worker_adapter ",NULL,")
@@ -39,6 +40,7 @@
 	(let drop_prefix "wvrt_worker_drop_")
 	(let drop_end ")\n")
 	(let null_drop "NULL")
+	(let array_job_drop ",NULL")
 
 	(fn open_record_worker_call
 		(:doc "Choose the dedicated launch entry that accepts a typed record adapter.")
@@ -208,12 +210,81 @@
 				(borrow-mut (local output)) (local cursor) (local writing)))))
 
 	(fn is_record_worker_launch
-		(:doc "Only a dedicated launch with a record endpoint has an adapter.")
+		(:doc "A launch with a record endpoint uses a generated adapter.")
 		(params (row ScalarExpression))
 		(returns bool)
 		(body
 			(return (bool.and (i32.ltz (struct.get (local row) asset_end))
 				(call is_worker_launch (struct.get (local row) kind))))))
+
+	(fn worker_job_index
+		(:doc "Only pooled submission captures an admission operand before the job.")
+		(params (nodes (shared-array SourceNode)) (row ScalarExpression))
+		(returns i32)
+		(body
+			(let first (struct.get (local row) first))
+			(if
+				(:doc "The permit is outside the adapter's formal arguments.")
+				(u32.eq (struct.get (local row) kind) (local worker_spawn_on_kind))
+				(then (return (struct.get (array.load (local nodes) (local first)) next_sibling))))
+			(return (local first))))
+
+	(fn write_worker_job_argument
+		(:doc "Supply the captured job and its transport layout to a runtime submission.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(type u32) (operand i32) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let boxed (call is_record_type (local type)))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "The runtime boxes a record from the address of its captured value.")
+				(local boxed)
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 38u8 (local writing)))))
+			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local operand)
+				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "An array is already an owned descriptor and needs no transport layout.")
+				(bool.not (local boxed))
+				(then (return (call c_literal_text (borrow-shared (local array_job_layout))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(let size (call write_array_layout_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local type) (bool false)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(return (call write_array_layout_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local type) (bool true)
+				(borrow-mut (local output)) (local size) (local name_prefix) (local writing)))))
+
+	(fn write_pooled_record_worker
+		(:doc "Submit an adapter after the permit and the job have been captured in source order.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(expressions (shared-array ScalarExpression)) (row ScalarExpression) (callee ScalarFunction) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local spawn_on_record_call))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let handler (call write_worker_adapter_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local callee) (borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(let permit_start (call c_byte (borrow-mut (local output)) (local handler) 44u8 (local writing)))
+			(let permit (call write_temporary_name (borrow-shared (local source)) (struct.get (local row) first)
+				(local tree_base) (borrow-mut (local output)) (local permit_start) (local name_prefix) (local writing)))
+			(let job_start (call c_byte (borrow-mut (local output)) (local permit) 44u8 (local writing)))
+			(let operand (call worker_job_index (borrow-shared (local nodes)) (local row)))
+			(let type (struct.get (array.load (local expressions) (local operand)) type))
+			(let-mut cursor (call write_worker_job_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local type) (local operand) (local tree_base)
+				(borrow-mut (local output)) (local job_start) (local name_prefix) (local writing)))
+			(if
+				(:doc "Before admission the runtime can drop an owning record or its box using the recursive destructor.")
+				(call is_record_type (local type))
+				(then (set (local cursor) (call write_worker_drop_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+					(array.load (local records) (call record_index (local type)))
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
+				(else (set (local cursor) (call c_literal_text (borrow-shared (local array_job_drop))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(return (call close_runtime_call (borrow-mut (local output)) (local cursor)
+				(struct.get (local row) asset_start) (struct.get (local row) start) (struct.get (local row) end) (local writing)))))
 
 	(fn write_worker_try_spawn
 		(:doc "Pass a captured job to the fallible path and keep that same value available for rejection.")
@@ -242,25 +313,9 @@
 						(local callee) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(set (local cursor) (call c_literal_text (borrow-shared (local no_worker_adapter))
 						(borrow-mut (local output)) (local cursor) (local writing)))))
-			(let boxed (call is_record_type (local job_type)))
-			(if
-				(:doc "A record needs a copy of its inline representation to start the worker.")
-				(local boxed)
-				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 38u8 (local writing)))))
-			(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (struct.get (local row) first)
-				(local tree_base) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-			(if
-				(:doc "Record transport uses the real C size and alignment. An array is already a descriptor.")
-				(local boxed)
-				(then
-					(set (local cursor) (call write_array_layout_argument (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (local job_type) (bool false)
-						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-					(set (local cursor) (call write_array_layout_argument (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local records)) (local job_type) (bool true)
-						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
-				(else (set (local cursor) (call c_literal_text (borrow-shared (local array_job_layout))
-					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call write_worker_job_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local job_type) (struct.get (local row) first) (local tree_base)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(let condition (call close_runtime_call (borrow-mut (local output)) (local cursor)
 				(struct.get (local row) asset_start) (struct.get (local row) start) (struct.get (local row) end) (local writing)))
 			(let-mut rejected 1i32)
@@ -310,7 +365,8 @@
 							(u8.eqz (array.load (local written_functions) (local target))))
 						(then
 							(array.store (local written_functions) (local target) 1u8)
-							(let job (struct.get (array.load (local expressions) (struct.get (local row) first)) type))
+							(let operand (call worker_job_index (borrow-shared (local nodes)) (local row)))
+							(let job (struct.get (array.load (local expressions) (local operand)) type))
 							(let result (call worker_result_type (struct.get (local row) asset_end)))
 							(set (local cursor) (call write_worker_drop (borrow-shared (local source)) (borrow-shared (local nodes))
 								(borrow-shared (local records)) (local job) (borrow-mut (local written_drops))

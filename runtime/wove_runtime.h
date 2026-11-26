@@ -383,6 +383,10 @@ static inline void wvrt_inline_array_slot_drop(wvrt_array **slot) {
 
 typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 
+// A single producer owns admission. Each permit reserves one waiting slot and keeps the pool live.
+typedef struct WvrtWorkerPool WvrtWorkerPool;
+typedef struct WvrtWorkerPool WvrtWorkerPermit;
+
 // Declare record transport and fallible launch only in translation units that use them.
 #define WVRT_DECLARE_RECORD_WORKERS() \
 	typedef wvrt_array *(*wvrt_record_worker)(wvrt_array *job, int32_t file, int32_t start, int32_t end); \
@@ -393,6 +397,8 @@ typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 		int32_t file, int32_t start, int32_t end); \
 	wvrt_array *wvrt_worker_spawn_join_record_at_span(wvrt_record_worker handler, wvrt_array *job, \
 		int32_t file, int32_t start, int32_t end); \
+	wvrt_worker_receipt *wvrt_worker_spawn_on_record_at_span(wvrt_record_worker handler, WvrtWorkerPermit *permit, \
+		void *job, size_t size, size_t alignment, void (*drop)(void *), int32_t file, int32_t start, int32_t end); \
 	wvrt_array *wvrt_worker_join_all_records_at_span(wvrt_array **queue, size_t stride, size_t alignment, \
 		size_t value_offset, void (*drop)(void *), int32_t file, int32_t start, int32_t end); \
 	bool wvrt_worker_try_spawn_at_span(wvrt_array *queue, wvrt_array *(*array)(wvrt_array *), \
@@ -426,9 +432,6 @@ typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 		wvrt_worker_unpacked; \
 	})
 
-// A single producer owns admission. Each permit reserves one waiting slot and keeps the pool live.
-typedef struct WvrtWorkerPool WvrtWorkerPool;
-typedef struct WvrtWorkerPool WvrtWorkerPermit;
 WvrtWorkerPool *wvrt_worker_pool_open(int32_t threads, int32_t capacity);
 WvrtWorkerPermit *wvrt_worker_pool_reserve(WvrtWorkerPool *pool);
 WvrtWorkerPermit *wvrt_worker_pool_reserve_wait(WvrtWorkerPool *pool);

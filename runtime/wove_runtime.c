@@ -867,17 +867,18 @@ static void wvrt_worker_done(void *context) {
 	atomic_store_explicit(&worker->done, true, memory_order_release);
 }
 
+// Invoke either handler ABI and pass the launch site to record adapters that pack a result.
+static wvrt_array *wvrt_worker_invoke(wvrt_worker_receipt *worker) {
+	if (worker->handler.record == NULL) { return worker->handler.array(worker->job); }
+	WvrtWorkerSite site = worker->origin;
+	return worker->handler.record(worker->job, site.file, site.start, site.end);
+}
+
 // The generated handler consumes the job and returns its owned result by value.
 static void *wvrt_worker_run(void *context) {
 	wvrt_worker_receipt *worker = context;
 	pthread_cleanup_push(wvrt_worker_done, worker);
-	// Record adapters carry the launch site for allocation of their result.
-	if (worker->handler.record != NULL) {
-		WvrtWorkerSite site = worker->origin;
-		worker->result = worker->handler.record(worker->job, site.file, site.start, site.end);
-	} else {
-		worker->result = worker->handler.array(worker->job);
-	}
+	worker->result = wvrt_worker_invoke(worker);
 	pthread_cleanup_pop(1);
 	return NULL;
 }
@@ -940,7 +941,7 @@ static void wvrt_pool_abandoned(void *context) {
 // A job may enter native code. Keep its exit handler active until cancellation is disabled again.
 static void wvrt_pool_execute(wvrt_worker_receipt *frame) {
 	pthread_cleanup_push(wvrt_pool_abandoned, frame);
-	frame->result = frame->handler.array(frame->job);
+	frame->result = wvrt_worker_invoke(frame);
 	(void)wvrt_pool_disable_cancellation();
 	pthread_cleanup_pop(0);
 }
@@ -1301,12 +1302,12 @@ static void wvrt_pool_cancel_receipt(void *receipt) {
 #endif
 
 // Consume the reservation and the already evaluated job, returning an ordinary worker receipt.
-wvrt_worker_receipt *wvrt_worker_spawn_on_at_span(wvrt_array *(*handler)(wvrt_array *),
-	WvrtWorkerPermit *permit, wvrt_array *job, int32_t file, int32_t start, int32_t end) {
+static wvrt_worker_receipt *wvrt_worker_submit_on(WvrtWorkerEntry handler,
+	WvrtWorkerPermit *permit, wvrt_array *job, WvrtWorkerSite site) {
 	// A native caller can bypass the generated reservation check.
 	if (permit == NULL) {
 		wvrt_array_drop(job);
-		wvrt_trap_at_span(file, start, end, "cannot submit without a worker permit");
+		wvrt_trap_at_span(site.file, site.start, site.end, "cannot submit without a worker permit");
 	}
 #ifdef WVRT_POSIX_WORKERS
 	const int previous = wvrt_pool_disable_cancellation();
@@ -1315,9 +1316,9 @@ wvrt_worker_receipt *wvrt_worker_spawn_on_at_span(wvrt_array *(*handler)(wvrt_ar
 	if (worker == NULL) {
 		wvrt_array_drop(job);
 		wvrt_worker_permit_drop(permit);
-		wvrt_trap_at_span(file, start, end, "could not allocate pooled worker");
+		wvrt_trap_at_span(site.file, site.start, site.end, "could not allocate pooled worker");
 	}
-	wvrt_worker_prepare(worker, (WvrtWorkerEntry){.array = handler}, job, (WvrtWorkerSite){file, start, end});
+	wvrt_worker_prepare(worker, handler, job, site);
 	wvrt_pool_enqueue(permit, worker);
 	pthread_cleanup_push(wvrt_pool_cancel_receipt, worker);
 	(void)pthread_setcancelstate(previous, NULL);
@@ -1327,8 +1328,37 @@ wvrt_worker_receipt *wvrt_worker_spawn_on_at_span(wvrt_array *(*handler)(wvrt_ar
 #else
 	(void)handler;
 	wvrt_array_drop(job);
-	wvrt_trap_at_span(file, start, end, "could not start pooled worker");
+	wvrt_trap_at_span(site.file, site.start, site.end, "could not start pooled worker");
 #endif
+}
+
+// Submit the original array-to-array handler and its existing descriptor.
+wvrt_worker_receipt *wvrt_worker_spawn_on_at_span(wvrt_array *(*handler)(wvrt_array *),
+	WvrtWorkerPermit *permit, wvrt_array *job, int32_t file, int32_t start, int32_t end) {
+	return wvrt_worker_submit_on((WvrtWorkerEntry){.array = handler}, permit, job, (WvrtWorkerSite){file, start, end});
+}
+
+// Box an inline job before admission. A zero size passes an existing array descriptor.
+wvrt_worker_receipt *wvrt_worker_spawn_on_record_at_span(wvrt_record_worker handler, WvrtWorkerPermit *permit,
+	void *job, size_t size, size_t alignment, void (*drop)(void *), int32_t file, int32_t start, int32_t end) {
+	// A native caller can bypass permit validation before evaluating the job.
+	if (size != 0 && permit == NULL) {
+		if (drop != NULL) { drop(job); }
+		wvrt_trap_at_span(file, start, end, "cannot submit without a worker permit");
+	}
+	// Pack only inline values. An array job can pass through its existing descriptor.
+	if (size != 0) {
+		wvrt_array *box = wvrt_worker_try_pack(job, size, alignment);
+		// Until the box exists, this submission still owns the original inline value.
+		if (box == NULL) {
+			if (drop != NULL) { drop(job); }
+			wvrt_worker_permit_drop(permit);
+			wvrt_trap_at_span(file, start, end, "could not allocate worker record");
+		}
+		box->wvrt_drop_element = drop;
+		job = box;
+	}
+	return wvrt_worker_submit_on((WvrtWorkerEntry){.record = handler}, permit, job, (WvrtWorkerSite){file, start, end});
 }
 
 // Keep the joined call's frame on the stack until the thread has stopped using it.

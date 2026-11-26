@@ -836,9 +836,15 @@ unused permits. Test a pool or permit for an empty owner with `owner.is-null`.
 ```
 
 Open, reserve, and submit directly into local bindings. Reserving leaves the
-job with its caller. Submission moves a valid permit before evaluating the job
-and returns a receipt of the same type as `worker.spawn` for that handler.
-Join a pooled receipt directly or move it into a matching receipt queue.
+job with its caller. Submission moves and validates the permit before evaluating
+the job. It accepts the same exact owned-array and named Wove struct inputs and
+results as `worker.spawn`. Copyable jobs are passed by value. An existing owning
+job requires an explicit move. If transport or receipt allocation fails before
+admission, submission drops the transferred job, releases the permit, and reports
+a runtime error at the submission span.
+
+Join a pooled receipt directly or move it into a matching receipt queue. Pooled
+and dedicated receipts can share a queue when their exact result types match.
 Leaving the scope of an unused permit releases its slot.
 
 `(worker.try-close (local pool))` drains accepted jobs and joins the threads.
