@@ -1,0 +1,87 @@
+(module scalar_worker
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Check that the arrays transferred to and from a joined worker contain only Wove-owned data.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "../source/types.wove" (only is_builtin_scalar))
+	(use wove-file "./records.wove" (only array_owner_element is_array_owner is_enum_layout is_fixed_array
+		is_generic_template is_native_record is_payload_enum is_record_type is_specialization_alias member_value_type record_index record_type
+		(type ScalarRecord)))
+
+	(fn worker_payload
+		(:doc "Visit the checked layout graph and reject borrowed or native values reachable through an array.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (type u32) (visited (mut-array u8)))
+		(returns bool)
+		(body
+			(if (call is_builtin_scalar (local type)) (then (return (bool true))))
+			(if
+				(:doc "Owning descriptor edges also carry their exact element type.")
+				(call is_array_owner (local type))
+				(then (return (call worker_payload (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (borrow-shared (local bindings)) (call array_owner_element (local type))
+					(borrow-mut (local visited))))))
+			(if (bool.not (call is_record_type (local type))) (then (return (bool false))))
+			(let index (call record_index (local type)))
+			(let layout (array.load (local records) (local index)))
+			(if
+				(:doc "Opaque native records and scoped records with a byte loan cannot cross the boundary.")
+				(bool.or (call is_native_record (local layout))
+					(bool.or (struct.get (local layout) borrows_bytes) (call is_generic_template (local layout))))
+				(then (return (bool false))))
+			(if
+				(:doc "Visit each layout once, even when an owned member leads back to an active layout.")
+				(bool.not (u8.eq (array.load (local visited) (local index)) 0u8))
+				(then (return (bool true))))
+			(array.store (local visited) (local index) 1u8)
+			(if
+				(:doc "A repeated specialization can share the defining layout.")
+				(call is_specialization_alias (local layout))
+				(then (return (call worker_payload (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (borrow-shared (local bindings))
+					(call record_type (struct.get (local layout) alias_of)) (borrow-mut (local visited))))))
+			(if
+				(:doc "Fixed arrays carry their element in the checked layout rather than a named field.")
+				(call is_fixed_array (local layout))
+				(then (return (call worker_payload (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (borrow-shared (local bindings))
+					(u32.from-i32 (struct.get (local layout) first)) (borrow-mut (local visited))))))
+			(if
+				(:doc "A unit enum has an ordinary Wove tag and no payload storage.")
+				(bool.and (call is_enum_layout (local layout)) (bool.not (call is_payload_enum (local layout))))
+				(then (return (bool true))))
+			(let-mut field (struct.get (local layout) first))
+			(while
+				(:doc "Inspect every checked record field and every populated enum variant.")
+				(i32.not-ltz (local field))
+				(body
+					(let member (array.load (local nodes) (local field)))
+					(let child (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
+					(if
+						(:doc "Only empty enum variants lack a checked member type.")
+						(bool.not (bool.or (bool.and (u32.eqz (local child)) (call is_payload_enum (local layout)))
+							(call worker_payload (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (borrow-shared (local bindings)) (local child) (borrow-mut (local visited)))))
+						(then (return (bool false))))
+					(set (local field) (struct.get (local member) next_sibling))))
+			(return (bool true))))
+
+	(fn worker_arrays
+		(:doc "Require a nonnullable owned array at each endpoint and check their contained types independently of element width.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (job u32) (result u32))
+		(returns bool)
+		(body
+			(if
+				(:doc "The joined worker ABI takes and returns one owned array descriptor.")
+				(bool.not (bool.and (call is_array_owner (local job)) (call is_array_owner (local result))))
+				(then (return (bool false))))
+			(let-mut visited (array.alloc u8 (array.len (local records))))
+			(return (bool.and (call worker_payload (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local job) (borrow-mut (local visited)))
+				(call worker_payload (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (borrow-shared (local bindings)) (local result) (borrow-mut (local visited)))))))
+)

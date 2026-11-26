@@ -44,7 +44,7 @@ C_STANDARD_MODULE := stage-2/c/standard.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
 C_EMITTER_SOURCES := $(BOOLEAN_TEXT_MODULE) $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/array_growth.wove source/numeric_ops.wove source/integer_ops.wove source/integer_bits.wove source/integer_compare.wove source/integer_checks.wove source/literals.wove source/extent.wove source/float_ops.wove source/enum_forms.wove source/generics.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/conditional.wove emit/matches.wove emit/loops.wove emit/arrays.wove emit/array_growth.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/integer_checks.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_prototype.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/owned_fields.wove emit/owned_aggregates.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
-	scalar/syntax.wove scalar/signatures.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/conditional.wove scalar/integer_literals.wove scalar/matches.wove scalar/match_patterns.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/specializations.wove scalar/generics/workspace.wove scalar/generics/clone.wove scalar/generics/functions.wove scalar/owners.wove) $(DECIMAL_WRITER)
+	scalar/syntax.wove scalar/signatures.wove scalar/worker.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/conditional.wove scalar/integer_literals.wove scalar/matches.wove scalar/match_patterns.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/specializations.wove scalar/generics/workspace.wove scalar/generics/clone.wove scalar/generics/functions.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_BITS := stage-2/hashing/bits.wove
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove) $(HASHING_BITS)
 HASHING_FIXTURES := tests/stage-2/hashing
@@ -213,6 +213,7 @@ test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/literals.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/half/check.py" "$(NATIVE_COMPILER)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/quad/check.py" "$(NATIVE_COMPILER)"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/workers/check.py" "$(NATIVE_COMPILER)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/extents.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/borrow_extents.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/dirent.tsv"

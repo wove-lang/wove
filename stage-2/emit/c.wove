@@ -48,7 +48,7 @@
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment)))
 	(use wove-file "../scalar/loans.wove" (only is_local_slice_view (value indirect_local_place) (value local_slice_projection) (value scoped_field_loan) (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies checked_function_count (type ScalarFunction) (type ScalarParameter) (type CallSite)))
-	(use wove-file "../scalar/syntax.wove" (only scalar_operator is_reborrow_keyword is_fixed_access is_fixed_initializer native_alloc_kind native_empty_kind (type ScalarOperator)))
+	(use wove-file "../scalar/syntax.wove" (only is_direct_call (value worker_join_kind) scalar_operator is_reborrow_keyword is_fixed_access is_fixed_initializer native_alloc_kind native_empty_kind (type ScalarOperator)))
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates word_moves_right word_mask_type))
 	(use wove-file "./runtime.wove"
 		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_word_rotate write_word_width open_checked_word_binary open_slice_access open_slice_range open_shared_projection write_slice_length close_runtime_call write_site_number
@@ -244,7 +244,7 @@
 			(return (bool.or (bool.or (u32.eq (local kind) (local c_value_expression))
 					(bool.or (bool.or (bool.or (u32.eq (local kind) (local conditional_value)) (u32.eq (local kind) (local match_value)))
 						(u32.eq (local kind) (local enum_payload_constructor)))
-						(bool.or (u32.eq (local kind) 3u32) (u32.eq (local kind) (call place_borrow_kind)))))
+						(bool.or (call is_direct_call (local kind)) (u32.eq (local kind) (call place_borrow_kind)))))
 				(bool.or (bool.or (call is_runtime_operation (local kind)) (u32.eq (local kind) (call owner_is_null_kind)))
 					(bool.or (bool.or (u32.eq (local kind) 50u32) (u32.eq (local kind) 52u32))
 						(bool.or (call is_fixed_initializer (local kind))
@@ -698,6 +698,8 @@
 				(struct.get (local expression) target) (struct.get (local expression) start)
 				(struct.get (local expression) end) (local writing)))))
 
+	(let worker_join_call "wvrt_worker_spawn_join_at_span(")
+
 	(fn write_value
 		(:doc `Write a checked value using the temporaries already evaluated for its operands.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (value_index i32) (tree_base i32)
@@ -923,7 +925,7 @@
 					(local expression) (local operator) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
 				(:doc "Only calls need a C argument list.")
-				(u32.not-eq (local kind) 3u32)
+				(bool.not (call is_direct_call (local kind)))
 				(then (return (call write_scalar (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local expression) (local tree_base) (borrow-shared (local parameters)) (borrow-shared (local expressions)) (borrow-mut (local output))
 					(local offset) (local name_prefix) (local writing)))))
@@ -933,9 +935,20 @@
 				(call has_c_arguments (local callee))
 				(then (return (call write_temporary_name (borrow-shared (local source)) (local value_index) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
-			(let-mut cursor (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local callee) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
-			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 40u8 (local writing)))
+			(let worker (u32.eq (local kind) (local worker_join_kind)))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Pass the statically checked Wove handler as the thread helper's first operand.")
+				(local worker)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local worker_join_call))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local callee) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(if
+				(:doc "The worker's job follows the handler, while an ordinary direct call opens its argument list.")
+				(local worker)
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing))))
+				(else (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 40u8 (local writing)))))
 			(let first (struct.get (local expression) first))
 			(let-mut index (local first))
 			(while
@@ -960,6 +973,12 @@
 							(borrow-shared (local source)) (borrow-shared (local nodes)) (local row) (local tree_base)
 							(borrow-shared (local parameters)) (borrow-shared (local expressions)) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 					(set (local index) (struct.get (array.load (local nodes) (local index)) next_sibling))))
+			(if
+				(:doc "Attach the original site to thread creation and join diagnostics.")
+				(local worker)
+				(then (return (call close_runtime_call (borrow-mut (local output)) (local cursor)
+					(struct.get (local expression) asset_start) (struct.get (local expression) start) (struct.get (local expression) end)
+					(local writing)))))
 			(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 
 	(fn write_temporary_declaration
@@ -1595,6 +1614,21 @@
 
 	(let private_function_prefix "static __attribute__((unused)) ")
 
+	(fn write_formal_slot
+		(:doc "Give an owned formal its lexical owner name and other formals their ordinary parameter name.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (item ScalarParameter) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "Moves and cleanup address the owned argument's original slot.")
+				(call is_array_owner (struct.get (local item) type))
+				(then (return (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+					(struct.get (local item) name) (local tree_base) (borrow-mut (local output)) (local offset)
+					(local name_prefix) (local writing)))))
+			(return (call write_parameter_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)
+				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+
 	(fn write_signature
 		(:doc `Write one C signature, including generated parameter names for a definition.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction)
@@ -1640,8 +1674,8 @@
 						(bool.not (local prototype))
 						(then
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 32u8 (local writing)))
-							(set (local cursor) (call write_parameter_name
-								(borrow-shared (local source)) (borrow-shared (local nodes)) (local item)
+							(set (local cursor) (call write_formal_slot (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local item) (struct.get (local function) name_base)
 								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 					(set (local index) (i32.inc (local index)))))
 			(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
@@ -1791,8 +1825,8 @@
 				(i32.lt (local index) (local limit))
 				(body
 					(set (local cursor) (call c_text_fragment (borrow-mut (local output)) (local cursor) 4u32 (local writing)))
-					(set (local cursor) (call write_parameter_name (borrow-shared (local source))
-						(borrow-shared (local nodes)) (array.load (local parameters) (local index))
+					(set (local cursor) (call write_formal_slot (borrow-shared (local source))
+						(borrow-shared (local nodes)) (array.load (local parameters) (local index)) (struct.get (local function) name_base)
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 59u8 (local writing)))
 					(set (local index) (i32.inc (local index)))))
@@ -1832,12 +1866,13 @@
 					(set (local index) (i32.inc (local index)))))
 			(set (local index) 0i32)
 			(while
-				(:doc "A slice signature needs its ABI even when the body ignores the parameter.")
+				(:doc "Array formals need their runtime ABI even when the body ignores them.")
 				(i32.lt (local index) (array.len (local parameters)))
 				(body
+					(let type (struct.get (array.load (local parameters) (local index)) type))
 					(if
-						(:doc "Every supported slice type uses a runtime descriptor.")
-						(call is_readable_slice (struct.get (array.load (local parameters) (local index)) type))
+						(:doc "Both borrowed views and transferred owners use runtime descriptors.")
+						(bool.or (call is_readable_slice (local type)) (call is_array_owner (local type)))
 						(then (return (bool true))))
 					(set (local index) (i32.inc (local index)))))
 			(set (local index) 0i32)

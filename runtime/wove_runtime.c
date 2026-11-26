@@ -11,6 +11,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Keep the runtime usable on targets whose C library has no POSIX threads.
+#if (defined(__unix__) || defined(__APPLE__)) && __has_include(<pthread.h>)
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#define WVRT_POSIX_WORKERS 1
+#endif
+
 // Report a runtime failure at the originating Wove location and exit.
 static _Noreturn void wvrt_trap(wvrt_location wvrtsite, const char *wvrtmessage) {
 	fprintf(stderr, "%s:%d:%d: runtime error: %s\n", wvrtsite.wvrt_file, wvrtsite.wvrt_line, wvrtsite.wvrt_column, wvrtmessage);
@@ -736,6 +744,82 @@ void wvrt_array_drop(wvrt_array *wvrtbuffer) {
 	free(wvrtbuffer->wvrt_items);
 	free(wvrtbuffer);
 }
+
+// The joinable thread owns the input as soon as creation succeeds.
+#ifdef WVRT_POSIX_WORKERS
+typedef struct {
+	wvrt_array *(*wvrt_handler)(wvrt_array *);
+	wvrt_array *wvrt_job;
+	wvrt_array *wvrt_result;
+	atomic_bool wvrt_done;
+} WvrtJoinedWorker;
+
+// Publish the last frame access on both normal return and native thread exit.
+static void wvrt_joined_worker_done(void *wvrt_context) {
+	WvrtJoinedWorker *wvrt_frame = wvrt_context;
+	atomic_store_explicit(&wvrt_frame->wvrt_done, true, memory_order_release);
+}
+
+// The generated handler consumes the job and returns its owned result by value.
+static void *wvrt_joined_worker_run(void *wvrt_context) {
+	WvrtJoinedWorker *wvrt_frame = wvrt_context;
+	pthread_cleanup_push(wvrt_joined_worker_done, wvrt_frame);
+	wvrt_frame->wvrt_result = wvrt_frame->wvrt_handler(wvrt_frame->wvrt_job);
+	pthread_cleanup_pop(1);
+	return NULL;
+}
+
+// Release a completed result when native cancellation interrupts its delivery.
+static void wvrt_joined_worker_cancel_delivery(void *wvrt_result) {
+	wvrt_array_drop(wvrt_result);
+}
+#endif
+
+// Keep the caller's frame live until the worker has returned or published its last access.
+wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*wvrt_handler)(wvrt_array *), wvrt_array *wvrt_job,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+#ifdef WVRT_POSIX_WORKERS
+	int wvrt_previous_cancel;
+	// Joining is a cancellation point. The input still belongs to this frame before creation.
+	if (pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &wvrt_previous_cancel) != 0) {
+		wvrt_array_drop(wvrt_job);
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not protect joined worker");
+	}
+	WvrtJoinedWorker wvrt_frame = {
+		.wvrt_handler = wvrt_handler, .wvrt_job = wvrt_job, .wvrt_result = NULL, .wvrt_done = false
+	};
+	pthread_t wvrt_thread;
+	// A failed launch never transferred ownership to the generated handler.
+	if (pthread_create(&wvrt_thread, NULL, wvrt_joined_worker_run, &wvrt_frame) != 0) {
+		wvrt_array_drop(wvrt_job);
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not start joined worker");
+	}
+	// A failed join does not prove that the child has stopped using the frame.
+	if (pthread_join(wvrt_thread, NULL) != 0) {
+		// Wait for publication before reading and dropping the child's result.
+		while (!atomic_load_explicit(&wvrt_frame.wvrt_done, memory_order_acquire)) {
+			(void)sched_yield();
+		}
+		wvrt_array_drop(wvrt_frame.wvrt_result);
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not join worker");
+	}
+	// Native thread exit cannot furnish the Wove result required by this call.
+	if (wvrt_frame.wvrt_result == NULL) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "joined worker exited without returning");
+	}
+	// A pending native cancellation must drop the result before unwinding the caller.
+	pthread_cleanup_push(wvrt_joined_worker_cancel_delivery, wvrt_frame.wvrt_result);
+	(void)pthread_setcancelstate(wvrt_previous_cancel, NULL);
+	pthread_testcancel();
+	pthread_cleanup_pop(0);
+	return wvrt_frame.wvrt_result;
+#else
+	(void)wvrt_handler;
+	wvrt_array_drop(wvrt_job);
+	wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not start joined worker");
+#endif
+}
+
 
 // Publish new capacity only after aligned allocation and copying the live prefix succeed.
 bool wvrt_array_try_reserve(wvrt_array *wvrtbuffer, int32_t wvrtcapacity) {

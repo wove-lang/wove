@@ -67,8 +67,9 @@
 	(use wove-file "../source/array_growth.wove" (only is_array_growth is_array_growth_statement
 		(value array_capacity_kind) (value array_push_kind) (value array_remove_kind) (value array_try_reserve_kind)))
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates))
+	(use wove-file "./worker.wove" (only worker_arrays))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword entry_at entry_form read_statement scalar_type scalar_operator is_fixed_initializer
+		(only entry_keyword entry_at entry_form is_direct_call (value worker_join_kind) read_statement scalar_type scalar_operator is_fixed_initializer
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
 	(struct
@@ -100,6 +101,7 @@
 	(struct BodyPlan
 		(fields (count i32) (file i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32)))
 
+	(let owned_parameter_binding 571u32)
 	(let pending_row_move 106u32)
 	(let pending_member_move 248u32)
 	(let pending_exact_move 250u32)
@@ -250,6 +252,12 @@
 						(borrow-shared (local records)) (borrow-shared (local bindings))
 						(struct.get (local scope) file) (struct.get (local scope) source_base) (local operand) (i32.ltz (local bridge))))
 					(let type_node (array.load (local nodes) (local operand)))
+					(let-mut owned 0u32)
+					(if
+						(:doc "Wove formals can take the same exact owned array types as Wove results.")
+						(bool.and (bool.not (local native)) (u32.gtz (struct.get (local checked) error)))
+						(then (set (local owned) (call owned_result_type (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local type_node) (borrow-shared (local records)) (borrow-shared (local bindings)) (local scope)))))
 					(let view (call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
 					(let view_element (struct.get (local view) element))
 					(let native_view (bool.and (i32.lt -1i32 (local bridge))
@@ -259,13 +267,17 @@
 					(let native_alias (bool.and (i32.lt -1i32 (local bridge))
 						(bool.and (u32.eq (struct.get (local type_node) kind) 1u32)
 							(u32.eqz (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand))))))
-					(let-mut type 0u32)
+					(let-mut type (local owned))
 					(let-mut mode (call c_value_mode))
 					(if
 						(:doc "Native aliases in scalar and slice positions resolve in the defining bridge.")
-						(bool.and (u32.eqz (struct.get (local checked) error))
+						(bool.and (bool.or (u32.gtz (local owned)) (u32.eqz (struct.get (local checked) error)))
 							(bool.not (bool.or (local native_alias) (local native_view))))
-						(then (set (local type) (u32.from-i32 (struct.get (local checked) operand))))
+						(then
+							(if
+								(:doc "Only ordinary parameters take their type from the view or scalar reader.")
+								(u32.eqz (local owned))
+								(then (set (local type) (u32.from-i32 (struct.get (local checked) operand))))))
 						(else
 							(if
 								(:doc "Only native signatures can access unimported types in the defining bridge.")
@@ -1179,6 +1191,18 @@
 				(i32.ltz (local binding))
 				(then (set (local binding) (call find_local (borrow-shared (local source)) (borrow-shared (local nodes))
 					(borrow-shared (local statements)) (struct.get (local caller) first_statement) (local statement) (local name)))))
+			(let-mut parameter -1i32)
+			(if
+				(:doc "An owned formal is the outermost lexical owner of its incoming slot.")
+				(i32.ltz (local binding))
+				(then
+					(set (local parameter) (call find_function_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local caller) (borrow-shared (local parameters)) (local name)))
+					(if
+						(:doc "Reuse the same read, borrow, and move checks as a local owner.")
+						(bool.and (i32.not-ltz (local parameter))
+							(call is_array_owner (struct.get (array.load (local parameters) (local parameter)) type)))
+						(then (set (local binding) (struct.get (array.load (local parameters) (local parameter)) name))))))
 			(if
 				(:doc "An earlier local declaration carries its defining name and checked initializer type.")
 				(i32.not-ltz (local binding))
@@ -1258,8 +1282,7 @@
 							(mutable_place (call is_writable_local (local kind)))
 							(projection (local projection)) (asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
 					(return (call entry_at (local node) (local binding) 0u32))))
-			(let target (call find_function_parameter (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local caller) (borrow-shared (local parameters)) (local name)))
+			(let target (local parameter))
 			(if
 				(:doc "Parameters and locals shadow immutable storage in the defining module.")
 				(i32.ltz (local target))
@@ -1567,9 +1590,10 @@
 		The verified call row is keyed by the original call node and refers to
 		the defining function row. Its operands retain their original links.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(operand i32) (expected u32) (index i32) (caller ScalarFunction)
+			(operand i32) (expected u32) (index i32) (caller ScalarFunction) (worker bool) (view_start i32)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
+			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(if
@@ -1577,6 +1601,10 @@
 				(i32.ltz (local operand))
 				(then (return (call entry_at (local node) -1i32 34u32))))
 			(let name (array.load (local nodes) (local operand)))
+			(if
+				(:doc "The joined form accepts a named Wove handler.")
+				(bool.and (local worker) (bool.not (call is_scalar_name (borrow-shared (local source)) (local name))))
+				(then (return (call entry_at (local name) -1i32 34u32))))
 			(let-mut target -1i32)
 			(if
 				(:doc "An explicit application refers to the already registered concrete declaration.")
@@ -1596,6 +1624,21 @@
 					(struct.get (array.load (local functions) (local target)) entry))
 				(then (return (call entry_at (local name) -1i32 34u32))))
 			(let callee (array.load (local functions) (local target)))
+			(if
+				(:doc "The thread ABI needs one Wove-owned job and a Wove-owned result.")
+				(local worker)
+				(then
+					(if
+						(:doc "Reject C handlers and other arities before looking up their first formal.")
+						(bool.or (i32.ltz (struct.get (local callee) body)) (i32.not-eq (struct.get (local callee) arity) 1i32))
+						(then (return (call entry_at (local name) -1i32 24u32))))
+					(let parameter (array.load (local parameters) (struct.get (local callee) params)))
+					(if
+						(:doc "Array layouts must carry no borrowed views or native values.")
+						(bool.not (call worker_arrays (borrow-shared (local source)) (borrow-shared (local nodes))
+							(borrow-shared (local records)) (borrow-shared (local bindings)) (struct.get (local parameter) type)
+							(struct.get (local callee) result)))
+						(then (return (call entry_at (local name) -1i32 24u32))))))
 			(let actual (struct.get (local callee) result))
 			(let owning_initializer (bool.and (u32.eq (local expected) 42u32)
 				(bool.or (call is_array_owner (local actual)) (call is_optional_byte_owner_type (local actual)))))
@@ -1640,8 +1683,19 @@
 								(:doc "Byte slice arguments use their reborrow keyword code. Typed slices keep the exact formal type.")
 								(call is_byte_view_type (local argument_type))
 								(then (set (local argument_type) (u32.inc (local argument_type)))))
+							(let-mut pending 0u32)
+							(if
+								(:doc "An explicit move empties the source slot while this consuming argument evaluates.")
+								(call is_array_owner (local argument_type))
+								(then
+									(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+									(if
+										(:doc "The move checker rejects mismatched types and active loans.")
+										(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+											(struct.get (local parts) head)) 43u32)
+										(then (set (local pending) (local pending_exact_move))))))
 							(array.store (local expressions) (local argument)
-								(call expression_row 0u32 (local argument_type)
+								(call expression_row (local pending) (local argument_type)
 									(local native_formal) -1i32 0i32 0i32 (bool false)))))
 					(set (local argument) (struct.get (local operand) next_sibling))
 					(set (local formal) (i32.inc (local formal)))))
@@ -1649,6 +1703,19 @@
 				(:doc "The number of actual arguments must exactly match the signature.")
 				(bool.or (i32.lt (local formal) (local limit)) (i32.not-ltz (local argument)))
 				(then (return (call entry_at (local node) -1i32 35u32))))
+			(if
+				(:doc "Keep the caller's file and original worker expression span for thread failures.")
+				(local worker)
+				(then
+					(let base (struct.get (local caller) source_base))
+					(array.store (local expressions) (local index)
+						(struct.new ScalarExpression (kind (local worker_join_kind)) (type (local actual))
+							(target (local target)) (first (local first))
+							(start (i32.add (local view_start) (i32.sub (struct.get (local node) start) (local base))))
+							(end (i32.add (local view_start) (i32.sub (struct.get (local node) end) (local base))))
+							(negative (bool false)) (borrowed_owner (bool false)) (mutable_place (bool false)) (projection -1i32)
+							(asset_start (struct.get (local caller) file)) (asset_end 0i32) (extent_check -1i32)))
+					(return (call entry_at (local node) (local index) 0u32))))
 			(array.store (local expressions) (local index)
 				(call expression_row 3u32 (local actual) (local target) (local first) 0i32 0i32 (bool false)))
 			(return (call entry_at (local node) (local index) 0u32))))
@@ -3743,6 +3810,7 @@
 				(:doc "A shift or rotate retains the type of its word.")
 				(local checked_count)
 				(then (set (local actual) (local word_type))))
+			(let worker (u32.eq (local tag) (local worker_join_kind)))
 			(let allocation (bool.and (u32.eq (local tag) 41u32)
 				(bool.or (u32.eq (local expected) 42u32) (call is_array_owner (local expected)))))
 			(let embed (bool.and (u32.eq (local tag) 60u32) (u32.eq (local expected) 42u32)))
@@ -3750,7 +3818,7 @@
 				(:doc "Check the type named by a literal or operator. Reads and calls resolve their types below.")
 				(bool.not
 					(bool.or (call value_matches_type (local expected) (local actual))
-						(bool.or (bool.or (bool.or (local allocation) (local embed)) (u32.eq (local tag) 33u32))
+						(bool.or (bool.or (local worker) (bool.or (bool.or (local allocation) (local embed)) (u32.eq (local tag) 33u32)))
 							(bool.or (bool.or (local constructing) (local member_read))
 								(bool.or (u32.eq (local tag) 8u32) (u32.eq (local tag) 9u32))))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
@@ -3812,11 +3880,11 @@
 					(return (local checked))))
 			(if
 				(:doc "A call resolves in the selected function table.")
-				(u32.eq (local tag) 9u32)
+				(bool.or (local worker) (u32.eq (local tag) 9u32))
 				(then (return (call plan_call (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local node) (local operand) (local expected) (local index) (local caller)
+					(local node) (local operand) (local expected) (local index) (local caller) (local worker) (local view_start)
 					(borrow-shared (local functions)) (borrow-shared (local parameters))
-					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
+					(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A checked conversion takes its result type from its target operand.")
 				(u32.eq (local tag) 33u32)
@@ -4096,9 +4164,10 @@
 			(let definition (array.load (local statements) (local from)))
 			(let-mut home (struct.get (array.load (local nodes) (local from)) parent))
 			(if
-				(:doc "A header binding belongs to the loop body or case arm.")
+				(:doc "A formal belongs to its function body and each header binding belongs to its checked block.")
 				(bool.or (call is_iteration_binding (struct.get (local definition) kind))
-					(u32.eq (struct.get (local definition) kind) (local case_payload_binding)))
+					(bool.or (u32.eq (struct.get (local definition) kind) (local case_payload_binding))
+						(u32.eq (struct.get (local definition) kind) (local owned_parameter_binding))))
 				(then (set (local home) (struct.get (local definition) first))))
 			(let receiver (array.load (local nodes) (local statement)))
 			(if
@@ -4237,7 +4306,8 @@
 								(borrow-shared (local functions)) (borrow-shared (local parameters))
 								(borrow-shared (local bindings)) (borrow-shared (local records))
 								(borrow-mut (local statements)) (borrow-mut (local expressions)) (local site_start) (local view_start)))))
-					(let fresh (bool.or (u32.eq (local tag) 9u32) (u32.eq (local tag) (local conditional_value))))
+					(let fresh (bool.or (u32.eq (local tag) 9u32)
+						(bool.or (u32.eq (local tag) (local worker_join_kind)) (u32.eq (local tag) (local conditional_value)))))
 					(let construct (bool.or (bool.and (local returning_record) (bool.or (u32.eq (local tag) 50u32)
 						(u32.eq (local tag) (local enum_constructor))))
 						(bool.and (call is_array_owner (local expected))
@@ -4326,7 +4396,7 @@
 							(set (local last_pending) (local index))))
 					(if
 						(:doc "Record every resolved call in source order, including a field receiver checked by its parent.")
-						(u32.eq (struct.get (local expression) kind) 3u32)
+						(call is_direct_call (struct.get (local expression) kind))
 						(then
 							(let node (array.load (local nodes) (local index)))
 							(if
@@ -4435,7 +4505,7 @@
 					(let invocation (array.load (local expressions) (local call_index)))
 					(if
 						(:doc "Call operands and all their range endpoints already have checked expression rows.")
-						(u32.eq (struct.get (local invocation) kind) 3u32)
+						(call is_direct_call (struct.get (local invocation) kind))
 						(then
 							(let callee (array.load (local functions) (struct.get (local invocation) target)))
 							(let-mut formal (struct.get (local callee) params))
@@ -4853,6 +4923,33 @@
 					(falls_through (local falls)) (move_site -1i32) (paths (local paths)) (previous_loan (local previous_loan))))
 			(return (local checked))))
 
+	(fn seed_owned_parameters
+		(:doc "Put transferred formals in the outer owner chain before planning the first statement.")
+		(params (caller ScalarFunction) (parameters (shared-array ScalarParameter)) (statements (mut-array ScalarStatement)))
+		(returns i32)
+		(body
+			(let-mut parameter (struct.get (local caller) params))
+			(let limit (i32.add (local parameter) (struct.get (local caller) arity)))
+			(let-mut owner -1i32)
+			(while
+				(:doc "Use the original formal name row as the lexical binding identity and cleanup slot.")
+				(i32.lt (local parameter) (local limit))
+				(body
+					(let param (array.load (local parameters) (local parameter)))
+					(let type (struct.get (local param) type))
+					(if
+						(:doc "Each transferred array joins the same reverse-order cleanup chain as a local owner.")
+						(call is_array_owner (local type))
+						(then
+							(let name (struct.get (local param) name))
+							(array.store (local statements) (local name)
+								(struct.new ScalarStatement (kind (local owned_parameter_binding)) (target (local name)) (value -1i32)
+									(type (local type)) (first (struct.get (local caller) body)) (previous_owner (local owner))
+									(falls_through (bool true)) (move_site -1i32) (paths (local next_path)) (previous_loan -1i32)))
+							(set (local owner) (local name))))
+					(set (local parameter) (i32.inc (local parameter)))))
+			(return (local owner))))
+
 	(fn plan_function_body
 		(:doc `Check one function in source order and merge return paths at block boundaries.
 
@@ -4871,7 +4968,7 @@
 			(let outer (struct.get (local caller) body))
 			(let-mut block (local outer))
 			(let-mut falls_through (bool true))
-			(let-mut previous_owner -1i32)
+			(let-mut previous_owner (call seed_owned_parameters (local caller) (borrow-shared (local parameters)) (borrow-mut (local statements))))
 			(let-mut previous_loan -1i32)
 			(while
 				(:doc "Visit remaining statements or leave nested blocks until the function body is complete.")
