@@ -30,6 +30,7 @@
 	(use wove-file "./matches.wove" (only write_match_edge))
 	(use wove-file "../scalar/conditional.wove" (only (value conditional_value) (value conditional_then) (value conditional_else)))
 	(use wove-file "../scalar/owners.wove" (only is_native_owner native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind is_owner_take owned_aggregate_take_kind owned_array_take_kind owned_field_loan_kind is_native_storage_write_loan is_native_owner_write_loan native_handle_init_borrow_kind
+			(value worker_receipt_move_kind)
 			is_optional_byte_owner_type optional_unwrap_kind))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset)))
 	(use wove-file "./embeds.wove" (only close_embed_copy request_module_embeds bind_module_embeds))
@@ -49,7 +50,7 @@
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment)))
 	(use wove-file "../scalar/loans.wove" (only is_local_slice_view (value indirect_local_place) (value local_slice_projection) (value scoped_field_loan) (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies checked_function_count (type ScalarFunction) (type ScalarParameter) (type CallSite)))
-	(use wove-file "../scalar/syntax.wove" (only is_direct_call (value worker_join_kind) scalar_operator is_reborrow_keyword is_fixed_access is_fixed_initializer native_alloc_kind native_empty_kind (type ScalarOperator)))
+	(use wove-file "../scalar/syntax.wove" (only is_direct_call is_worker_launch (value worker_spawn_kind) (value worker_join_kind) scalar_operator is_reborrow_keyword is_fixed_access is_fixed_initializer native_alloc_kind native_empty_kind (type ScalarOperator)))
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates word_moves_right word_mask_type))
 	(use wove-file "./runtime.wove"
 		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_word_rotate write_word_width open_checked_word_binary open_slice_access open_slice_range open_shared_projection write_slice_length close_runtime_call write_site_number
@@ -59,7 +60,7 @@
 	(use wove-file "./integers.wove" (only write_integer_arithmetic write_integer_literal write_16bit_wrapping write_i64_wrapping))
 	(use wove-file "./integer_checks.wove" (only write_integer_check))
 	(use wove-file "../source/integer_checks.wove" (only is_integer_check))
-	(use wove-file "../source/types.wove" (only is_16bit_integer is_64bit_integer is_128bit_integer is_builtin_integer is_signed_builtin_integer (value i64_type) (value i128_type)))
+	(use wove-file "../source/types.wove" (only is_16bit_integer is_64bit_integer is_128bit_integer is_builtin_integer is_signed_builtin_integer (value i64_type) (value i128_type) (value worker_receipt_type)))
 	(use wove-file "../source/integer_compare.wove" (only comparison_is_zero comparison_is_negated))
 	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment c_cast c_i32_bias write_c_name
 			function_name_role write_temporary_name write_local_name write_local_place write_loop_label open_static_value write_static_bytes))
@@ -704,7 +705,35 @@
 				(struct.get (local expression) target) (struct.get (local expression) start)
 				(struct.get (local expression) end) (local writing)))))
 
-	(let worker_join_call "wvrt_worker_spawn_join_at_span(")
+	(let worker_spawn_join_call "wvrt_worker_spawn_join_at_span(")
+	(let worker_spawn_call "wvrt_worker_spawn_at_span(")
+	(let worker_join_call "wvrt_worker_join_at_span(&")
+	(let worker_take_call "wvrt_worker_receipt_take(&")
+	(let worker_drop_call "wvrt_worker_receipt_drop(")
+
+	(fn write_worker_slot_operation
+		(:doc "Pass the address of the receipt's original slot so a move or join can clear it before transfer.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row ScalarExpression) (tree_base i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let join (u32.eq (struct.get (local row) kind) (local worker_join_kind)))
+			(let-mut open (local offset))
+			(if
+				(:doc "Only joining waits for the thread and needs a diagnostic site.")
+				(local join)
+				(then (set (local open) (call c_literal_text (borrow-shared (local worker_join_call))
+					(borrow-mut (local output)) (local offset) (local writing))))
+				(else (set (local open) (call c_literal_text (borrow-shared (local worker_take_call))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(let slot (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local row) target) (local tree_base) (borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(if
+				(:doc "Report explicit join failures at the written join, even after moving a receipt.")
+				(local join)
+				(then (return (call close_runtime_call (borrow-mut (local output)) (local slot)
+					(struct.get (local row) asset_start) (struct.get (local row) start) (struct.get (local row) end) (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local slot) 41u8 (local writing)))))
 
 	(fn write_value
 		(:doc `Write a checked value using the temporaries already evaluated for its operands.`)
@@ -825,6 +854,11 @@
 						(local expression) (struct.get (local owner) target) (local tree_base)
 						(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(if
+				(:doc "Receipt moves and joins consume the original lexical slot.")
+				(bool.or (u32.eq (local kind) (local worker_join_kind)) (u32.eq (local kind) (local worker_receipt_move_kind)))
+				(then (return (call write_worker_slot_operation (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(if
 				(:doc "An evaluating move clears the original array slot before passing the pointer onward.")
 				(u32.eq (local kind) (call owned_array_take_kind))
 				(then (return (call write_array_take (borrow-shared (local source)) (borrow-shared (local nodes)) (local expression)
@@ -942,13 +976,19 @@
 				(call has_c_arguments (local callee))
 				(then (return (call write_temporary_name (borrow-shared (local source)) (local value_index) (local tree_base)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
-			(let worker (u32.eq (local kind) (local worker_join_kind)))
+			(let worker (call is_worker_launch (local kind)))
 			(let-mut cursor (local offset))
 			(if
 				(:doc "Pass the statically checked Wove handler as the thread helper's first operand.")
 				(local worker)
-				(then (set (local cursor) (call c_literal_text (borrow-shared (local worker_join_call))
-					(borrow-mut (local output)) (local cursor) (local writing)))))
+				(then
+					(if
+						(:doc "Submitting returns an owning receipt. The joined launch directly returns its array.")
+						(u32.eq (local kind) (local worker_spawn_kind))
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_call))
+							(borrow-mut (local output)) (local cursor) (local writing))))
+						(else (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_join_call))
+							(borrow-mut (local output)) (local cursor) (local writing)))))))
 			(set (local cursor) (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local callee) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(if
@@ -1250,6 +1290,11 @@
 		(returns u32)
 		(body
 			(let type (struct.get (local row) type))
+			(if
+				(:doc "Leaving a scope waits for any receipt that still owns its worker.")
+				(u32.eq (local type) (local worker_receipt_type))
+				(then (return (call c_literal_text (borrow-shared (local worker_drop_call))
+					(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
 				(:doc "Array allocations are released through the shared runtime.")
 				(bool.not (call is_native_owner (local type)))
@@ -1865,8 +1910,9 @@
 					(if
 						(:doc "The runtime ABI supplies checked operations and the owned array result type.")
 						(bool.or (call is_runtime_operation (struct.get (local value) kind))
-							(bool.or (bool.or (call is_array_owner (struct.get (local value) type))
-									(call is_optional_byte_owner_type (struct.get (local value) type)))
+							(bool.or (bool.or (u32.eq (struct.get (local value) type) (local worker_receipt_type))
+								(bool.or (call is_array_owner (struct.get (local value) type))
+									(call is_optional_byte_owner_type (struct.get (local value) type))))
 								(bool.and (u32.eq (struct.get (local value) kind) 62u32)
 									(u32.eq (struct.get (local value) type) 34u32))))
 						(then (return (bool true))))

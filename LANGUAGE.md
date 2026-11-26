@@ -462,6 +462,27 @@ successful join, the caller owns the returned array. Thread creation and
 join failures report the source span of the worker expression. When
 linking emitted C directly on a POSIX host, pass `-pthread`.
 
+## Submitted workers
+
+`worker.spawn` starts the same kind of named handler on a fresh thread and
+returns a receipt without waiting. Bind it directly to a local. The caller
+can start other jobs or do work before it joins.
+
+```lisp
+(let first (worker.spawn widen (move (local first_job))))
+(let second (worker.spawn widen (move (local second_job))))
+(let second_result (worker.join (local second)))
+(let first_result (worker.join (local first)))
+```
+
+`worker.join` consumes the receipt and returns the exact owned array type
+declared by the handler. Use `move` to give a receipt to another local.
+Exiting its scope, including by early return, joins a live receipt and drops
+the unclaimed result. Launch failures and failures during implicit cleanup
+report the submission span. An explicit join failure reports its join span.
+C code reached by multiple workers is responsible for synchronizing its shared
+state.
+
 ## C interop
 
 Use a C header's bundled declarations or provide Wove signatures in
