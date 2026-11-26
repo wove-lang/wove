@@ -111,6 +111,11 @@ def check_tool_calls(root, options):
 	log = root / "clang.jsonl"
 	calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 	expected = list(options.get("queries", []))
+	# Target selection is an independent query before any header or final compiler invocation.
+	if "target_query" in options:
+		expected.insert(0, options["target_query"])
+	else:
+		calls = [arguments for arguments in calls if "-###" not in arguments]
 	# Binary cases also verify their final build invocation and platform link flags.
 	if "arguments" in options:
 		expected.append(options.get(sys.platform, options["arguments"]))
@@ -249,7 +254,7 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		if preserve:
 			after = publication_snapshot(root)
 			# The manifest already checked any compiler observation recorded by the wrapper.
-			if tool and ("arguments" in tool or "queries" in tool):
+			if tool:
 				after.pop(Path("clang.jsonl"), None)
 			assert after == before, label
 			return

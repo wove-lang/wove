@@ -82,7 +82,7 @@ CONFIG_SOURCES := $(C_STANDARD_MODULE) $(addprefix stage-2/config/,compiler.wove
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_storage.wove output.wove publication.wove platform.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove numeric_target.wove header_origin.wove clang.wove)
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_storage.wove output.wove publication.wove platform.wove target.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove numeric_target.wove header_origin.wove clang.wove)
 BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove unistd.wove spawn.wove fcntl.wove errno.wove sys_stat.wove sys_wait.wove dirent.wove math.wove)
 NATIVE_BUILD_ASSETS = runtime/wove_runtime.c runtime/wove_runtime.h $(CLANG_TEMPLATE)
 NATIVE_STDIO := stage-2/io/stdio.wove
@@ -152,9 +152,9 @@ stage-1: $(BOOTSTRAP_COMPILER)
 stage-2: $(NATIVE_COMPILER)
 
 # Compare all native emissions from the same graph and exercise the final executable.
-self-host: export WOVE_BUILD_CLANG = $(CLANG)
+self-host: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
 self-host: $(FINAL_COMPILER) $(STAGE2)/wovec.c $(SELF_HOST_SOURCE)/.ready
-	"$(FINAL_COMPILER)" cc "$(SELF_HOST_ENTRY)" -o "$(SELF_HOST_VERIFIED)"
+	CLANG="$(abspath $(BUILD_CLANG))" "$(FINAL_COMPILER)" cc "$(SELF_HOST_ENTRY)" -o "$(SELF_HOST_VERIFIED)"
 	cmp "$(STAGE2)/wovec.c" "$(BUILD_DIR)/.wovec-cache/default/wovec/bin/main.c"
 	cmp "$(STAGE2)/wovec.c" "$(STAGE2)/.wovec-cache/default/wovec-self-hosted/bin/main.c"
 	CLANG="$(abspath $(BUILD_CLANG))" "$(FINAL_COMPILER)" bin "$(NATIVE_CLI_FIXTURES)/input.wove" -o "$(SELF_HOST_SMOKE)"
@@ -224,6 +224,7 @@ test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80 test-stage-2-workers
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/extents.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/borrow_extents.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/dirent.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/deployment.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/standard.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/protection.tsv"

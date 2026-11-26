@@ -124,6 +124,7 @@ bool wvrt_bootstrap_same_file(wvrt_slice left, wvrt_slice right);
 bool wvrt_bootstrap_write(wvrt_slice bytes, bool diagnostic);
 uint8_t wvrt_bootstrap_os(void);
 uint8_t wvrt_bootstrap_arch(void);
+int32_t wvrt_bootstrap_deployment(void);
 
 // Store each row as the generated Wove type before exposing the two borrowed views.
 #define WVRT_HOST_ENTRY(entry, span) \

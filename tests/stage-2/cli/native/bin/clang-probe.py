@@ -11,12 +11,23 @@ import shutil
 import sys
 
 
+# Delegate to Clang after applying the fixture toolchain's spelling aliases.
+def run_clang(arguments):
+	clang = json.loads(os.environ["WOVE_REAL_CLANG"])
+	aliases = json.loads(os.environ.get("WOVE_CLANG_TEST_ALIASES", "{}"))
+	arguments = [aliases.get(argument, argument) for argument in arguments]
+	os.execvp(clang[0], [*clang, *arguments])
+
+
 # Record exactly what the launcher supplies before delegating to the test toolchain.
 def main():
 	arguments = sys.argv[1:]
 	# An append records every launch, so retries or duplicate invocations fail the case.
 	with Path(os.environ["WOVE_CLANG_LOG"]).open("a", encoding="utf-8") as log:
 		log.write(json.dumps(arguments) + "\n")
+	# Dry runs construct the real frontend job without producing an output artifact.
+	if "-###" in arguments:
+		run_clang(arguments)
 	# An AST query can synthesize a capture or fail before producing one.
 	if "-ast-dump=json" in arguments and ("WOVE_CLANG_AST_STATUS" in os.environ or "WOVE_CLANG_AST_OUTPUT" in os.environ):
 		sys.stdout.write(os.environ.get("WOVE_CLANG_AST_OUTPUT", ""))
@@ -36,6 +47,9 @@ def main():
 			output.symlink_to(executable.name)
 		else:
 			output.write_bytes(b"partial native output")
+			# A successful simulated link marks its regular output executable.
+			if os.environ["WOVE_CLANG_STATUS"] == "0":
+				output.chmod(0o700)
 		# Only a fixture-supplied dependency is reported by a simulated frontend.
 		if "WOVE_CLANG_DEPENDENCY" in os.environ:
 			dependency = json.dumps(str(output.with_name(os.environ["WOVE_CLANG_DEPENDENCY"])))
@@ -45,11 +59,7 @@ def main():
 	if "WOVE_CLANG_STDOUT" in os.environ:
 		sys.stdout.write(os.environ["WOVE_CLANG_STDOUT"])
 		sys.stdout.flush()
-	clang = json.loads(os.environ["WOVE_REAL_CLANG"])
-	# Older fixture toolchains can use an equivalent spelling after argv is recorded.
-	aliases = json.loads(os.environ.get("WOVE_CLANG_TEST_ALIASES", "{}"))
-	arguments = [aliases.get(argument, argument) for argument in arguments]
-	os.execvp(clang[0], [*clang, *arguments])
+	run_clang(arguments)
 
 
 if __name__ == "__main__":

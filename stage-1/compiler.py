@@ -114,6 +114,7 @@ BOOTSTRAP_CALLS: dict[str, tuple[tuple[Type, ...], Type]] = {
 	"bootstrap_write": ((_BYTE_VIEW, BOOL), BOOL),
 	"bootstrap_os": ((), U8),
 	"bootstrap_arch": ((), U8),
+	"bootstrap_deployment": ((), I32),
 }
 
 
