@@ -211,6 +211,8 @@ void wvrt_array_remove_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_index, void
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_array_remove_row_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_index,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_array_take_row_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_index,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_truncate_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_length,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 

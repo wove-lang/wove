@@ -5,7 +5,8 @@
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts))
-	(use wove-file "./flow.wove" (only block_statement (type ScalarStatement) (value for_binding) (value for_mut_binding) (value for_statement)))
+	(use wove-file "./flow.wove" (only block_statement statement_exit_state (type ScalarStatement) (value for_binding) (value for_mut_binding) (value for_statement)))
+	(use wove-file "./records.wove" (only is_array_owner))
 	(use wove-file "./syntax.wove" (only entry_at entry_form entry_keyword is_reborrow_keyword is_scalar_name same_name (type EntryRead) (value for_bind) (value for_range)))
 
 	(fn read_for_names
@@ -74,7 +75,7 @@
 				(struct.get (local parts) head)) (local for_statement)))))
 
 	(fn read_iteration_source
-		(:doc `Return the borrow expression or the lower bound of an integer range.`)
+		(:doc `Return the array operand or the lower bound of an integer range.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (iterator i32))
 		(returns EntryRead)
 		(body
@@ -86,8 +87,8 @@
 				(u32.eq (local tag) (local for_range))
 				(then (return (call read_for_bounds (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))))
 			(if
-				(:doc "The whole array view is checked as a single borrow expression.")
-				(call is_reborrow_keyword (local tag))
+				(:doc "A borrow or explicit move evaluates its array source once.")
+				(bool.or (call is_reborrow_keyword (local tag)) (u32.eq (local tag) 43u32))
 				(then (return (call entry_at (local node) (local iterator) 0u32))))
 			(return (call entry_at (local node) -1i32 24u32))))
 
@@ -121,6 +122,40 @@
 			(array.store (local statements) (local first) (call iteration_binding (local first) (local first_type) (local block) (local first_writable)))
 			(let arm (array.load (local statements) (local block)))
 			(array.store (local statements) (local block) (call block_statement (struct.get (local arm) first) (local first) -1i32 (bool true)))))
+
+	(fn iterator_owner_boundary
+		(:doc `Find the owner preserved at the end of one iteration.
+
+		The move head identifies the C capture for a consuming loop.
+		Other statements use the enclosing chain unchanged.`)
+		(params (nodes (shared-array SourceNode)) (loop ScalarStatement))
+		(returns i32)
+		(body
+			(if
+				(:doc "Only a consuming for has a hidden owner beneath its iteration locals.")
+				(bool.and (u32.eq (struct.get (local loop) kind) (local for_statement))
+					(call is_array_owner (struct.get (local loop) type)))
+				(then (return (struct.get (array.load (local nodes) (struct.get (local loop) value)) first_child))))
+			(return (struct.get (local loop) previous_owner))))
+
+	(fn enter_consuming_iteration
+		(:doc `Link the current owned item above the captured array before checking the body.`)
+		(params (nodes (shared-array SourceNode)) (statements (mut-array ScalarStatement)) (loop ScalarStatement))
+		(returns i32)
+		(body
+			(let boundary (call iterator_owner_boundary (borrow-shared (local nodes)) (local loop)))
+			(let block (array.load (local statements) (struct.get (local loop) first)))
+			(let-mut item (struct.get (local block) target))
+			(let indexed (struct.get (array.load (local nodes) (local item)) next_sibling))
+			(if (i32.lt -1i32 (local indexed)) (then (set (local item) (local indexed))))
+			(let binding (array.load (local statements) (local item)))
+			(if
+				(:doc "A copyable item adds no destructor to the iteration owner's chain.")
+				(bool.not (call is_array_owner (struct.get (local binding) type)))
+				(then (return (local boundary))))
+			(array.store (local statements) (local item)
+				(call statement_exit_state (local binding) (local item) (local boundary) (bool true) 0u32))
+			(return (local item))))
 
 	(fn find_iteration_binding
 		(:doc `Find a header name by comparing the one or two original identifier rows.`)
