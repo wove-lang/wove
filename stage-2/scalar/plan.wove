@@ -88,7 +88,7 @@
 	(use wove-file "./worker.wove" (only worker_signature worker_receipt_result worker_result_type worker_queue_loan))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form (value array_try_copy_kind) (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch is_worker_submission is_worker_pool_operation (value worker_spawn_join_kind)
-			(value worker_spawn_on_kind) (value worker_try_spawn_kind) (value worker_open_pool_kind) (value worker_try_close_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_list_kind) (value pending_exact_move) (value fixed_take_request)
+			(value worker_spawn_on_kind) (value worker_try_spawn_kind) (value worker_open_pool_kind) (value worker_try_close_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) (value worker_pop_front_kind) is_worker_queue_access is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_list_kind) (value pending_exact_move) (value fixed_take_request)
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
 	(struct
@@ -1166,7 +1166,7 @@
 							(start (struct.get (local node) start)) (end (struct.get (local node) end))
 							(error 39u32) (related (local transfer))))))
 					(if
-						(:doc "No operation can consume or modify a queue already reserved for a job being evaluated.")
+						(:doc "A fallible launch excludes other access to its queue during job evaluation.")
 						(bool.and (u32.eq (local actual) (local worker_queue_type))
 							(call worker_queue_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
 								(local index) (local statement) (struct.get (local declaration) target)))
@@ -1716,6 +1716,57 @@
 					(struct.get (local receipt) target) -1i32 (struct.get (local receipt) asset_end) (local move) (local caller) (local view_start)))
 			(array.store (local expressions) (local index)
 				(call worker_expression (local worker_push_kind) 0u32 (struct.get (local queue) target) (local move_index) 0i32
+					(local node) (local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_worker_queue_access
+		(:doc "Read a live queue's length or transfer its first receipt with its exact result type.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32) (kind u32)
+			(expected u32) (statement i32) (caller ScalarFunction) (view_start i32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local kind) 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let operand (struct.get (local form) operand))
+			(if
+				(:doc "Both forms operate on exactly one existing queue slot.")
+				(bool.or (i32.ltz (local operand)) (i32.not-ltz (struct.get (array.load (local nodes) (local operand)) next_sibling)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let reference (array.load (local nodes) (local operand)))
+			(let checked (call plan_worker_local (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local reference) (local index) (local caller) (local statement)
+				(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+			(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
+			(let queue (array.load (local expressions) (local index)))
+			(let pop (u32.eq (local kind) (local worker_pop_front_kind)))
+			(if
+				(:doc "The queue stays live. Only removal needs permission to modify it.")
+				(bool.or (u32.not-eq (struct.get (local queue) type) (local worker_queue_type))
+					(bool.and (local pop) (bool.not (struct.get (local queue) mutable_place))))
+				(then (return (call entry_at (local reference) -1i32 24u32))))
+			(let-mut type 5u32)
+			(let-mut result 0i32)
+			(if
+				(:doc "The popped receipt must immediately acquire a lexical cleanup slot.")
+				(local pop)
+				(then
+					(if
+						(:doc "A popped receipt can only directly initialize a new inferred local.")
+						(bool.or (u32.not-eq (local expected) 42u32)
+							(bool.not (call local_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local statement))))
+						(then (return (call entry_at (local node) -1i32 24u32))))
+					(set (local type) (local worker_receipt_type))
+					(set (local result) (struct.get (local queue) asset_end)))
+				(else
+					(if
+						(:doc "Queue length has the same exact i32 type as array length.")
+						(bool.not (call value_matches_type (local expected) (local type)))
+						(then (return (call entry_at (local node) -1i32 24u32))))))
+			(array.store (local expressions) (local index)
+				(call worker_expression (local kind) (local type) (struct.get (local queue) target) -1i32 (local result)
 					(local node) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
@@ -4128,6 +4179,12 @@
 						(struct.get (local form) operand) (local index) (local tag) (local expected) (local caller) (local statement) (local view_start)
 						(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 						(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "Queue length and front removal use the original live local.")
+				(call is_worker_queue_access (local tag))
+				(then (return (call plan_worker_queue_access (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local tag) (local expected) (local statement) (local caller) (local view_start)
+					(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A join resolves the precise result of its receipt or queue.")
 				(call is_worker_collect (local tag))
