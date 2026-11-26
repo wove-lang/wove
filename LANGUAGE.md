@@ -119,8 +119,8 @@ and index elements relative to their own bounds. Bounds violations trap.
 A call loan lasts through later arguments and the call.
 
 Stage 2 fixed arrays keep their elements inline and copy by value. Use
-`(array T extent)` for the type, with a builtin scalar `T` and a nonnegative
-decimal extent.
+`(array T extent)` for a builtin scalar or copyable Wove record `T`.
+The extent is a nonnegative decimal or an immutable module integer.
 
 - `(array.new (array u8 2) (u8 17) (u8 25))` lists the elements.
 - `(array.repeat (array u8 128) (u8 0))` evaluates one value and fills the array.

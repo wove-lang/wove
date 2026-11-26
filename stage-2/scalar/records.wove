@@ -32,7 +32,7 @@
 		(fields (name i32) (file i32) (identity u32) (first i32) (count i32)
 			(declaration i32) (native i32) (source_base i32) (emit_row i32)))
 	(struct ScalarMember (fields (ordinal i32) (row i32)))
-	(struct LayoutVisit (fields (row i32) (field i32)))
+	(struct LayoutVisit (fields (row i32) (field i32) (element bool)))
 	(struct LayoutCheck (fields (file i32) (start i32) (end i32) (error u32)))
 
 	(fn is_record_type
@@ -73,7 +73,7 @@
 		(body (return (i32.eq (struct.get (local layout) native) -2i32))))
 
 	(fn find_fixed_array_type
-		(:doc `Find the one structural type for the exact scalar element and extent.`)
+		(:doc `Find the one structural type for the exact element and extent.`)
 		(params (records (shared-array ScalarRecord)) (shape FixedArrayShape))
 		(returns u32)
 		(body
@@ -148,10 +148,30 @@
 				(then (return (local size))))
 			(return (local node))))
 
+	(fn record_array_element
+		(:doc "Resolve an ordinary named Wove record in the array spelling's type namespace.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (file i32) (source_base i32) (name SourceNode))
+		(returns u32)
+		(body
+			(if
+				(:doc "A nested type form or quoted spelling cannot name an element record.")
+				(bool.not (call is_scalar_name (borrow-shared (local source)) (local name)))
+				(then (return 0u32)))
+			(let row (call find_record (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local name)))
+			(if
+				(:doc "Only a visible Wove struct can supply the nominal element layout.")
+				(bool.or (i32.lt (local row) 0i32)
+					(bool.not (i32.eq (struct.get (array.load (local records) (local row)) native) 0i32)))
+				(then (return 0u32)))
+			(return (call record_type (local row)))))
+
 	(fn read_fixed_array_shape
-		(:doc "Read an exact anonymous inline array layout using its owner's value namespace.")
+		(:doc "Read a fixed layout with an exact scalar or named Wove record element and a checked extent.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(bindings (shared-array GraphBinding)) (file i32) (source_base i32))
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
+			(file i32) (source_base i32) (resolve_records bool))
 		(returns FixedArrayShape)
 		(body
 			(let invalid (struct.new FixedArrayShape (element 0u32) (extent -1i32)))
@@ -162,7 +182,13 @@
 				(:doc "Only a complete array type contributes an element and extent.")
 				(bool.or (u32.lt 0u32 (struct.get (local form) error)) (i32.lt (local element_node) 0i32))
 				(then (return (local invalid))))
-			(let element (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element_node)))
+			(let-mut element (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local element_node)))
+			(if
+				(:doc "Resolve a named element after the defining record namespace is populated.")
+				(bool.and (local resolve_records) (u32.eq (local element) 0u32))
+				(then (set (local element) (call record_array_element (borrow-shared (local source)) (borrow-shared (local nodes))
+					(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base)
+					(array.load (local nodes) (local element_node))))))
 			(let extent_node (call array_extent_operand (borrow-shared (local nodes)) (local element_node)))
 			(if (i32.lt (local extent_node) 0i32) (then (return (local invalid))))
 			(let extent (call read_array_extent (borrow-shared (local source)) (array.load (local nodes) (local extent_node))
@@ -178,7 +204,7 @@
 		(body
 			(return (call find_fixed_array_type (borrow-shared (local records))
 				(call read_fixed_array_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
-					(borrow-shared (local bindings)) (local file) (local source_base))))))
+					(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (bool true))))))
 
 	(fn next_layout_node
 		(:doc `Advance through one declaration without following its outer siblings.`)
@@ -241,7 +267,8 @@
 		Layout discovery skips disabled statements and metadata. Malformed
 		types remain for the signature, field, or expression checker to report.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32)
-			(records (mut-array ScalarRecord)) (start i32) (bindings (shared-array GraphBinding)) (file i32) (source_base i32))
+			(records (mut-array ScalarRecord)) (start i32) (bindings (shared-array GraphBinding)) (file i32) (source_base i32)
+			(record_elements bool))
 		(returns EntryRead)
 		(body
 			(let-mut index (struct.get (array.load (local nodes) (local declaration)) first_child))
@@ -274,22 +301,28 @@
 								(call is_fixed_array_type_head (borrow-shared (local source)) (local spelling))
 								(then
 									(let shape (call read_fixed_array_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
-									(borrow-shared (local bindings)) (local file) (local source_base)))
+										(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local record_elements)))
+									(let element (struct.get (local shape) element))
 									(if
-										(:doc "A named size that cannot supply a nonnegative integer points at the identifier.")
-										(bool.and (u32.lt 0u32 (struct.get (local shape) element)) (i32.lt (struct.get (local shape) extent) 0i32))
+										(:doc "The first pass keeps scalar layout order. The second adds only resolved record elements.")
+										(bool.and (u32.lt 0u32 (local element))
+											(bool.or (bool.not (local record_elements)) (call is_record_type (local element))))
 										(then
-											(let site (call named_extent_site (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
-												(borrow-shared (local bindings)) (local file) (local source_base)))
 											(if
-												(:doc "Retain the existing whole-type diagnostic for invalid decimal extents.")
-												(i32.lt (struct.get (local node) start) (struct.get (local site) start))
-												(then (return (call entry_at (local site) -1i32 23u32))))))
-									(set (local next) (call intern_fixed_array (local shape) (borrow-mut (local records)) (local next))))
+												(:doc "A named size that cannot supply a nonnegative integer points at the identifier.")
+												(i32.lt (struct.get (local shape) extent) 0i32)
+												(then
+													(let site (call named_extent_site (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
+														(borrow-shared (local bindings)) (local file) (local source_base)))
+													(if
+														(:doc "Invalid decimal extents keep the whole-type diagnostic.")
+														(i32.lt (struct.get (local node) start) (struct.get (local site) start))
+														(then (return (call entry_at (local site) -1i32 23u32))))))
+											(set (local next) (call intern_fixed_array (local shape) (borrow-mut (local records)) (local next))))))
 								(else
 									(if
-										(:doc "A checked integer encoder returns one byte per declared integer byte.")
-										(local in_body)
+										(:doc "Register inferred encoder layouts with the other scalar arrays.")
+										(bool.and (local in_body) (bool.not (local record_elements)))
 										(then
 											(let op (call read_named_conversion (borrow-shared (local source)) (local spelling)))
 											(if
@@ -1099,7 +1132,8 @@
 						(bool.or (u32.eq (local kind) (local enum_declaration)) (bool.or (u32.eq (local kind) 1u32) (u32.eq (local kind) 48u32)))
 						(then
 							(let arrays (call register_fixed_arrays (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local form) (borrow-mut (local records)) (local next) (borrow-shared (local bindings)) (local file) (local source_base)))
+								(local form) (borrow-mut (local records)) (local next) (borrow-shared (local bindings))
+								(local file) (local source_base) (bool false)))
 							(if (u32.lt 0u32 (struct.get (local arrays) error)) (then (return (local arrays))))
 							(set (local next) (struct.get (local arrays) operand))))
 					(if
@@ -1118,6 +1152,38 @@
 			(return (struct.new EntryRead (operand (local next)) (start 0i32) (end 0i32)
 				(error 0u32) (related -1i32)))))
 
+	(fn register_module_record_arrays
+		(:doc "Intern selected record-element arrays once local and imported record names have defining layouts.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(declarations (shared-array SelectedDeclaration)) (count i32) (base i32) (file i32) (source_base i32)
+			(bindings (shared-array GraphBinding)) (records (mut-array ScalarRecord)) (start i32))
+		(returns EntryRead)
+		(body
+			(let-mut index 0i32)
+			(let-mut next (local start))
+			(while
+				(:doc "Use the already rebased nodes of the active declaration list.")
+				(i32.lt (local index) (local count))
+				(body
+					(let form (struct.get (array.load (local declarations) (i32.add.wrapping (local base) (local index))) node))
+					(let kind (call declaration_kind (borrow-shared (local source)) (borrow-shared (local nodes)) (local form)))
+					(if
+						(:doc "Functions, record fields, and enum payloads can contain fixed record array spellings.")
+						(bool.or (u32.eq (local kind) (local enum_declaration))
+							(bool.or (u32.eq (local kind) 1u32) (u32.eq (local kind) 48u32)))
+						(then
+							(let arrays (call register_fixed_arrays (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local form) (borrow-mut (local records)) (local next) (borrow-shared (local bindings))
+								(local file) (local source_base) (bool true)))
+							(if
+								(:doc "An invalid named extent retains its defining source position.")
+								(u32.lt 0u32 (struct.get (local arrays) error))
+								(then (return (local arrays))))
+							(set (local next) (struct.get (local arrays) operand))))
+					(set (local index) (i32.add.wrapping (local index) 1i32))))
+			(return (struct.new EntryRead (operand (local next)) (start 0i32) (end 0i32)
+				(error 0u32) (related -1i32)))))
+
 	(fn register_static_array
 		(:doc `Intern a module array once its defining element layout has been ordered.
 
@@ -1129,31 +1195,12 @@
 			(records (mut-array ScalarRecord)) (next i32))
 		(returns u32)
 		(body
-			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) 70u32 23u32))
-			(let operand (struct.get (local form) operand))
+			(let shape (call read_fixed_array_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (bool true)))
 			(if
-				(:doc "An array type starts with a valid form and one element spelling.")
-				(bool.or (u32.lt 0u32 (struct.get (local form) error)) (i32.lt (local operand) 0i32))
+				(:doc "A table needs a checked scalar or record element and a nonnegative extent.")
+				(bool.or (u32.eq (struct.get (local shape) element) 0u32) (i32.lt (struct.get (local shape) extent) 0i32))
 				(then (return 0u32)))
-			(let name (array.load (local nodes) (local operand)))
-			(let size (call array_extent_operand (borrow-shared (local nodes)) (local operand)))
-			(if (i32.lt (local size) 0i32) (then (return 0u32)))
-			(let extent (call read_array_extent (borrow-shared (local source)) (array.load (local nodes) (local size))
-				(borrow-shared (local bindings)) (local file) (local source_base)))
-			(if
-				(:doc "Only a bare type name and nonnegative extent can contribute a layout.")
-				(bool.or (bool.not (u32.eq (struct.get (local name) kind) 1u32)) (i32.lt (local extent) 0i32))
-				(then (return 0u32)))
-			(let element (call copyable_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local records)) (borrow-shared (local bindings)) (local file) (local source_base) (local operand)))
-			(if
-				(:doc "Tables use builtin scalars or ordinary named Wove records.")
-				(bool.not (bool.or (call is_builtin_scalar (local element))
-					(bool.and (call is_record_type (local element))
-						(bool.not (bool.or (call is_native_record (array.load (local records) (call record_index (local element))))
-							(call is_enum_layout (array.load (local records) (call record_index (local element)))))))))
-				(then (return 0u32)))
-			(let shape (struct.new FixedArrayShape (element (local element)) (extent (local extent))))
 			(let existing (call find_fixed_array_type (borrow-shared (local records)) (local shape)))
 			(if (u32.lt 0u32 (local existing)) (then (return (local existing))))
 			(let end (call intern_fixed_array (local shape) (borrow-mut (local records)) (local next)))
@@ -1175,19 +1222,27 @@
 				(end (i32.sub.wrapping (struct.get (local spelling) end) (local base))) (error (local error))))))
 
 	(fn enter_layout
-		(:doc `Mark a layout active and push its first Wove member for dependency checking.`)
-		(params (row i32) (layout ScalarRecord) (depth i32)
+		(:doc "Mark a layout active and start with its first member or its array element dependency.")
+		(params (row i32) (layout ScalarRecord) (depth i32) (origin i32)
 			(marks (mut-array u8)) (stack (mut-array LayoutVisit)))
 		(returns void)
 		(body
+			(let array (call is_fixed_array (local layout)))
+			(let element (bool.and (local array)
+				(call is_record_type (int.convert u32 (struct.get (local layout) first)))))
 			(let-mut field -1i32)
 			(if
-				(:doc "Named Wove records and payload enums can embed another value layout.")
-				(bool.and (bool.not (call is_fixed_array (local layout)))
+				(:doc "An array carries the source field that led to its element dependency.")
+				(local element)
+				(then (set (local field) (local origin))))
+			(if
+				(:doc "Named Wove records and payload enums traverse their declaration members.")
+				(bool.and (bool.not (local array))
 					(bool.or (i32.eq (struct.get (local layout) native) 0i32) (call is_payload_enum (local layout))))
 				(then (set (local field) (struct.get (local layout) first))))
 			(array.store (local marks) (local row) 1u8)
-			(array.store (local stack) (local depth) (struct.new LayoutVisit (row (local row)) (field (local field))))))
+			(array.store (local stack) (local depth)
+				(struct.new LayoutVisit (row (local row)) (field (local field)) (element (local element))))))
 
 	(fn publish_layout
 		(:doc `Record which defining layout is emitted at this position while retaining all type identities.`)
@@ -1205,8 +1260,8 @@
 		(:doc `Validate fields and order each complete value layout after its dependencies.
 
 		Traverse roots in table order. An explicit stack keeps source depth
-		out of the host stack. A field leading to an active layout closes a
-		by-value cycle and supplies the diagnostic span.`)
+		out of the host stack. Fields and array elements both participate in by-value cycles.
+		The field that introduces the recursive dependency supplies its span.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
 			(bindings (shared-array GraphBinding)) (records (mut-array ScalarRecord)) (count i32)
 			(marks (mut-array u8)) (stack (mut-array LayoutVisit)))
@@ -1225,7 +1280,7 @@
 						(u8.eq (array.load (local marks) (local root)) 0u8)
 						(then
 							(set (local depth) 0i32)
-							(call enter_layout (local root) (array.load (local records) (local root)) (local depth)
+							(call enter_layout (local root) (array.load (local records) (local root)) (local depth) -1i32
 								(borrow-mut (local marks)) (borrow-mut (local stack)))))
 					(while
 						(:doc "Finish a layout once every field's defining layout has been emitted.")
@@ -1234,31 +1289,40 @@
 							(let visit (array.load (local stack) (local depth)))
 							(let row (struct.get (local visit) row))
 							(let field (struct.get (local visit) field))
+							(let element (struct.get (local visit) element))
 							(if
-								(:doc "Postorder publishes the original row after its children.")
-								(i32.lt (local field) 0i32)
+								(:doc "Postorder publishes the original row after its dependencies.")
+								(bool.and (bool.not (local element)) (i32.lt (local field) 0i32))
 								(then
 									(call publish_layout (borrow-mut (local records)) (local written) (local row))
 									(array.store (local marks) (local row) 2u8)
 									(set (local written) (i32.add.wrapping (local written) 1i32))
 									(set (local depth) (i32.sub.wrapping (local depth) 1i32)))
 								(else
-									(let member (array.load (local nodes) (local field)))
 									(let layout (array.load (local records) (local row)))
-									(let type (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
-										(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
+									(let-mut type 0u32)
+									(let-mut next -1i32)
 									(if
-										(:doc "A unit variant can omit its type. Other members require a visible copyable layout.")
-										(u32.eq (local type) 0u32)
-										(then
-											(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+										(:doc "A fixed wrapper has one dependency even when its extent is zero.")
+										(local element)
+										(then (set (local type) (int.convert u32 (struct.get (local layout) first))))
+										(else
+											(let member (array.load (local nodes) (local field)))
+											(set (local type) (call member_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
+												(borrow-shared (local records)) (borrow-shared (local bindings)) (local layout) (local member)))
 											(if
-												(:doc "Missing operands were allowed only for unit variants.")
-												(i32.lt -1i32 (struct.get (local parts) operands))
-												(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
-													(local layout) (local member) 23u32))))))
+												(:doc "A unit variant can omit its type. Other members require a visible copyable layout.")
+												(u32.eq (local type) 0u32)
+												(then
+													(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local member)))
+													(if
+														(:doc "Missing operands were allowed only for unit variants.")
+														(i32.lt -1i32 (struct.get (local parts) operands))
+														(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+															(local layout) (local member) 23u32))))))
+											(set (local next) (struct.get (local member) next_sibling))))
 									(array.store (local stack) (local depth)
-										(struct.new LayoutVisit (row (local row)) (field (struct.get (local member) next_sibling))))
+										(struct.new LayoutVisit (row (local row)) (field (local next)) (element (bool false))))
 									(if
 										(:doc "Only a by-value aggregate field needs a separate layout.")
 										(call is_record_type (local type))
@@ -1268,14 +1332,23 @@
 											(if
 												(:doc "A visiting child closes a cycle through inline storage.")
 												(u8.eq (local mark) 1u8)
-												(then (return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
-													(local layout) (local member) 23u32))))
+												(then
+													(let member (array.load (local nodes) (local field)))
+													(if
+														(:doc "A recursive array element reports the containing field that led to the wrapper.")
+														(local element)
+														(then
+															(let parent (array.load (local stack) (i32.sub.wrapping (local depth) 1i32)))
+															(return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+																(array.load (local records) (struct.get (local parent) row)) (local member) 23u32))))
+													(return (call layout_error (borrow-shared (local source)) (borrow-shared (local nodes))
+														(local layout) (local member) 23u32))))
 											(if
 												(:doc "Revisit this layout after ordering the unvisited child.")
 												(u8.eq (local mark) 0u8)
 												(then
 													(set (local depth) (i32.add.wrapping (local depth) 1i32))
-													(call enter_layout (local child) (array.load (local records) (local child)) (local depth)
+													(call enter_layout (local child) (array.load (local records) (local child)) (local depth) (local field)
 														(borrow-mut (local marks)) (borrow-mut (local stack)))))))))))
 					(set (local root) (i32.add.wrapping (local root) 1i32))))
 			(return (local ok))))
