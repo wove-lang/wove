@@ -8,12 +8,15 @@
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only is_record_type is_owning_record record_index (type ScalarRecord)))
 	(use wove-file "../scalar/syntax.wove" (only is_worker_launch (value worker_spawn_kind)))
-	(use wove-file "../scalar/worker.wove" (only worker_result_type))
+	(use wove-file "../scalar/worker.wove" (only worker_result_type worker_collection_record))
 	(use wove-file "./function_names.wove" (only write_function_name))
-	(use wove-file "./owned_aggregates.wove" (only write_owner_helper_name))
+	(use wove-file "./owned_aggregates.wove" (only write_owner_helper_name open_owned_slot_call))
 	(use wove-file "./records.wove" (only write_record_name))
-	(use wove-file "./text.wove" (only c_byte c_literal_text))
+	(use wove-file "./text.wove" (only c_byte c_literal_text write_local_name))
+	(use wove-file "./runtime.wove" (only close_runtime_call))
 
+	(let join_records "WVRT_WORKER_JOIN_RECORDS(")
+	(let join_owned_records "WVRT_WORKER_JOIN_OWNED_RECORDS(")
 	(let worker_declarations "WVRT_DECLARE_RECORD_WORKERS()\n")
 	(let spawn_record "wvrt_worker_spawn_record_at_span(")
 	(let join_record "wvrt_worker_spawn_join_record_at_span(")
@@ -85,6 +88,29 @@
 		(body
 			(return (call open_worker_transport (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
 				(borrow-shared (local unpack_record)) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+
+	(fn write_worker_record_collection
+		(:doc "Collect boxed results into the existing exact inline record array layout.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(row ScalarExpression) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Owning records need the same live slot and destructor as ordinary array allocation.")
+				(struct.get (local layout) owns_arrays)
+				(then (set (local cursor) (call open_owned_slot_call (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local layout) (borrow-shared (local join_owned_records)) (borrow-mut (local output))
+					(local offset) (local name_prefix) (local writing))))
+				(else (set (local cursor) (call open_worker_transport (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local layout) (borrow-shared (local join_records)) (borrow-mut (local output))
+					(local offset) (local name_prefix) (local writing)))))
+			(let address (call c_byte (borrow-mut (local output)) (local cursor) 38u8 (local writing)))
+			(let slot (call write_local_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local row) target) (local tree_base)
+				(borrow-mut (local output)) (local address) (local name_prefix) (local writing)))
+			(return (call close_runtime_call (borrow-mut (local output)) (local slot)
+				(struct.get (local row) asset_start) (struct.get (local row) start) (struct.get (local row) end) (local writing)))))
 
 	(fn write_worker_drop_argument
 		(:doc "Use the nominal recursive destructor for owning records and a null callback for copies.")
@@ -192,16 +218,25 @@
 		(returns u32)
 		(body
 			(let-mut index 0i32)
+			(let-mut collect (bool false))
 			(while
-				(:doc "Most translation units use no record workers and need no adapter tables.")
+				(:doc "Find the first adapter and note whether a collection alone needs the declarations.")
 				(bool.and (i32.lt (local index) (array.len (local expressions)))
 					(bool.not (call is_record_worker_launch (array.load (local expressions) (local index)))))
-				(body (set (local index) (i32.inc (local index)))))
-			(if (i32.eq (local index) (array.len (local expressions))) (then (return (local offset))))
-			(let-mut written_functions (array.alloc u8 (array.len (local functions))))
-			(let-mut written_drops (array.alloc u8 (array.len (local records))))
+				(body
+					(set (local collect) (bool.or (local collect)
+						(u32.gtz (call worker_collection_record (array.load (local expressions) (local index))))))
+					(set (local index) (i32.inc (local index)))))
+			(let adapters (i32.lt (local index) (array.len (local expressions))))
+			(if
+				(:doc "Programs that use only array workers need no record declarations.")
+				(bool.not (bool.or (local adapters) (local collect)))
+				(then (return (local offset))))
 			(let-mut cursor (call c_literal_text (borrow-shared (local worker_declarations))
 				(borrow-mut (local output)) (local offset) (local writing)))
+			(if (bool.not (local adapters)) (then (return (local cursor))))
+			(let-mut written_functions (array.alloc u8 (array.len (local functions))))
+			(let-mut written_drops (array.alloc u8 (array.len (local records))))
 			(while
 				(:doc "Use the checked callee row across repeated launches and imported aliases.")
 				(i32.lt (local index) (array.len (local expressions)))

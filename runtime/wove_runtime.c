@@ -1580,40 +1580,73 @@ void wvrt_worker_queue_push_at_span(wvrt_array **slot, wvrt_worker_receipt *rece
 	wvrt_trap_at_span(file, start, end, "could not append worker receipt");
 }
 
-// Consume the receipt queue and transfer each result to its submission-order slot.
-wvrt_array *wvrt_worker_join_all_at_span(wvrt_array **slot, int32_t file, int32_t start, int32_t end) {
-	if (*slot == NULL) { wvrt_trap_at_span(file, start, end, "cannot join an empty worker queue slot"); }
+typedef struct {
+	size_t stride;
+	size_t alignment;
+	size_t value_offset;
+	void (*drop)(void *);
+	bool boxed;
+} WvrtWorkerResultLayout;
+
+// Retire each receipt into the exact output array representation in enqueue order.
+static wvrt_array *wvrt_worker_collect(wvrt_array **slot, WvrtWorkerResultLayout layout, WvrtWorkerSite site) {
+	if (*slot == NULL) { wvrt_trap_at_span(site.file, site.start, site.end, "cannot join an empty worker queue slot"); }
 #ifdef WVRT_POSIX_WORKERS
-	WvrtWorkerSite site = {file, start, end};
 	const int previous = wvrt_worker_protect(site, NULL);
 	wvrt_array *queue = wvrt_array_take(slot);
-	wvrt_array *results = wvrt_prepare_rows(wvrt_array_try_new(queue->wvrt_length,
-		sizeof(wvrt_array *), _Alignof(wvrt_array *)));
+	wvrt_array *results = wvrt_array_try_new(queue->wvrt_length, layout.stride, layout.alignment);
 	// Output allocation failure still retires all the consumed receipts.
 	if (results == NULL) {
 		(void)wvrt_worker_queue_drain(queue, &site);
-		wvrt_trap_at_span(file, start, end, "could not allocate worker results");
+		wvrt_trap_at_span(site.file, site.start, site.end, "could not allocate worker results");
 	}
+	results->wvrt_length = 0;
+	results->wvrt_drop_element = layout.drop;
 	wvrt_worker_receipt **pending = queue->wvrt_items;
-	wvrt_array **rows = results->wvrt_items;
-	// Published results remain owned by the output even when a later join fails.
+	// Only the initialized prefix belongs to the output while collection is in flight.
 	for (int32_t index = 0; index < queue->wvrt_length; ++index) {
 		wvrt_worker_receipt *worker = pending[index];
 		pending[index] = NULL;
-		const char *error = wvrt_worker_retire(worker, true, &rows[index]);
-		// Release the collected prefix and all remaining receipts before reporting the failure.
+		wvrt_array *result;
+		const char *error = wvrt_worker_retire(worker, true, &result);
+		// Release the collected prefix, a failed join's result, and all remaining receipts.
 		if (error != NULL) {
 			wvrt_array_drop(results);
+			wvrt_array_drop(result);
 			(void)wvrt_worker_queue_drain(queue, &site);
-			wvrt_trap_at_span(file, start, end, error);
+			wvrt_trap_at_span(site.file, site.start, site.end, error);
 		}
+		unsigned char *item = (unsigned char *)results->wvrt_items + (size_t)index * layout.stride;
+		// Unpack a record into its inline value. A wrapped slot starts with its live flag.
+		if (layout.boxed) {
+			wvrt_worker_unpack(result, item + layout.value_offset);
+			if (layout.drop != NULL) { *(bool *)item = true; }
+		} else {
+			*(wvrt_array **)item = result;
+		}
+		++results->wvrt_length;
 	}
 	wvrt_array_drop(queue);
 	return wvrt_worker_deliver(results, previous);
 #else
 	wvrt_array_drop(wvrt_array_take(slot));
-	return wvrt_array_new_rows_at_span(0, file, start, end);
+	wvrt_array *results = wvrt_array_new_at_span(0, layout.stride, layout.alignment, site.file, site.start, site.end);
+	results->wvrt_drop_element = layout.drop;
+	return results;
 #endif
+}
+
+// Preserve the original nested-array ABI and transfer each result descriptor directly.
+wvrt_array *wvrt_worker_join_all_at_span(wvrt_array **slot, int32_t file, int32_t start, int32_t end) {
+	WvrtWorkerResultLayout layout = {sizeof(wvrt_array *), _Alignof(wvrt_array *), 0, wvrt_drop_row, false};
+	return wvrt_worker_collect(slot, layout, (WvrtWorkerSite){file, start, end});
+}
+
+// Collect uniform record results into the exact generated value or owning-slot layout.
+wvrt_array *wvrt_worker_join_all_records_at_span(wvrt_array **slot, size_t stride, size_t alignment,
+	size_t value_offset, void (*drop)(void *), int32_t file, int32_t start, int32_t end) {
+	WvrtWorkerResultLayout layout = {stride, alignment, value_offset, drop, true};
+	return wvrt_worker_collect(slot, layout, (WvrtWorkerSite){file, start, end});
 }
 
 // Retire the incoming record if its slot could not be appended to the array.

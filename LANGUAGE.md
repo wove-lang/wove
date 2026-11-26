@@ -763,11 +763,11 @@ state.
 
 ## Worker receipt queues
 
-Receipt queues accept array-to-array worker receipts.
-
 `(worker.receipt-queue digest_batch)` creates an empty local queue for
-receipts whose result type matches `digest_batch`. It starts no worker.
-Use a mutable binding to enqueue and move each receipt explicitly.
+receipts with the exact declared result type of `digest_batch`. It starts
+no worker. A queue can mix receipts from different handlers or job types
+when their results have the same type. Use a mutable binding to enqueue and
+move each receipt explicitly.
 
 ```lisp
 (let-mut pending (worker.receipt-queue digest_batch))
@@ -778,10 +778,12 @@ Use a mutable binding to enqueue and move each receipt explicitly.
 
 `worker.join-all` consumes the queue and returns one owned result per
 receipt in enqueue order, even when workers finish in a different order.
-For a handler returning `(owned-array Digest)`, the result is
-`(owned-array (owned-array Digest))`. An empty queue returns an empty
-array of the same type. Moving a queue to a new local transfers its
-pending receipts.
+For a handler returning `(owned-array Digest)`, collection returns
+`(owned-array (owned-array Digest))`. For a handler returning the named
+struct `Encoded`, it returns `(owned-array Encoded)`. Ownership of any
+fields in those records passes to the result array. An empty queue returns
+an empty array of the same type. Moving a queue to a new local transfers
+its pending receipts.
 
 Exiting a queue's scope, including by early return, joins all uncollected
 receipts and drops their results. If collection fails, the runtime
