@@ -1,0 +1,67 @@
+(module record_worker_pipeline
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+
+	(bridge c-header "./ledger.h"
+		(fn begin (params) (returns i32))
+		(fn before_spawn (params) (returns void))
+		(fn before_result (params) (returns void)))
+
+	(use c-header "./ledger.h" (only begin before_spawn before_result))
+
+	(struct Block (fields (bytes (owned-array u8)) (scratch (owned-array u8))))
+	(struct Job (fields (block Block) (length i32)))
+	(struct Encoded (fields (block Block) (used i32) (original i32)))
+	(struct ArgSpan (fields (start i32) (end i32)))
+
+	(fn source_job (params) (returns Job)
+		(body
+			(let-mut bytes (array.alloc u8 3i32))
+			(array.store (local bytes) 0i32 39u8)
+			(array.store (local bytes) 1i32 39u8)
+			(array.store (local bytes) 2i32 39u8)
+			(return (struct.new Job
+				(block (struct.new Block (bytes (move (local bytes))) (scratch (array.alloc u8 1i32))))
+				(length 3i32)))))
+
+	(fn run_length (params (input (shared-array u8)) (length i32)) (returns i32)
+		(body
+			(let value (array.load (local input) 0i32))
+			(let-mut count 1i32)
+			(while (bool.and (i32.lt (local count) (local length)) (u8.eq (array.load (local input) (local count)) (local value)))
+				(body (set (local count) (i32.inc (local count)))))
+			(return (local count))))
+
+	(fn encode (params (job Job)) (returns Encoded)
+		(body
+			(let length (struct.get (local job) length))
+			(let input (move (struct.get (struct.get (local job) block) bytes)))
+			(let run (call run_length (borrow-shared (local input)) (local length)))
+			(let-mut output (array.alloc u8 2i32))
+			(array.store (local output) 0i32 (u8.from-i32 (local run)))
+			(array.store (local output) 1i32 (array.load (local input) 0i32))
+			(let encoded (struct.new Encoded
+				(block (struct.new Block (bytes (move (local output))) (scratch (array.alloc u8 1i32))))
+				(used 2i32) (original (local length))))
+			(call before_result)
+			(return (move (local encoded)))))
+
+	(fn consume (params (encoded Encoded)) (returns i32)
+		(body
+			(if (i32.not-eq (struct.get (local encoded) used) 2i32) (then (return 1i32)))
+			(let bytes (move (struct.get (struct.get (local encoded) block) bytes)))
+			(if (i32.not-eq (i32.from-u8 (array.load (local bytes) 0i32)) (struct.get (local encoded) original))
+				(then (return 2i32)))
+			(return (i32.add (i32.from-u8 (array.load (local bytes) 1i32)) (struct.get (local encoded) original)))))
+
+	(fn main (params (bytes (shared-array u8)) (args (shared-array ArgSpan))) (returns i32)
+		(body
+			(let mode (call begin))
+			(let job (call source_job))
+			(call before_spawn)
+			(if (i32.eq (local mode) 2i32)
+				(then (return (call consume (worker.spawn-join encode (move (local job)))))))
+			(let receipt (worker.spawn encode (move (local job))))
+			(if (i32.eq (local mode) 1i32) (then (return 42i32)))
+			(let forwarded (move (local receipt)))
+			(return (call consume (worker.join (local forwarded)))))))

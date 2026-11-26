@@ -727,12 +727,18 @@ recipient.
 
 `(worker.spawn-join widen (move (local input)))` calls the named Wove
 function `widen` on a fresh thread and waits for its result. The handler
-takes one owned array and returns an owned array through a normal Wove
-return. Its input and output element types may differ. Arrays that contain
-borrowed or native data cannot cross the worker boundary. After a
-successful join, the caller owns the returned array. Thread creation and
-join failures report the source span of the worker expression. When
-linking emitted C directly on a POSIX host, pass `-pthread`.
+takes and returns one owned array or named Wove struct. The job and
+result can have different types. A copyable struct is copied into the
+job, so the caller can keep using its original value. Pass an existing
+owning struct or array with `move`, just as for an ordinary Wove call.
+Borrowed or native values, including fields nested in a job or result,
+cannot cross the worker boundary.
+
+After a successful join, the caller receives the exact declared result.
+A launch failure releases the transferred job, including all its nested
+owners. Thread creation and join failures report the source span of the
+worker expression. When linking emitted C directly on a POSIX host,
+pass `-pthread`.
 
 ## Submitted workers
 
@@ -747,15 +753,17 @@ can start other jobs or do work before it joins.
 (let first_result (worker.join (local first)))
 ```
 
-`worker.join` consumes the receipt and returns the exact owned array type
-declared by the handler. Use `move` to give a receipt to another local.
+`worker.join` consumes the receipt and returns the exact array or struct
+type declared by the handler. Use `move` to give a receipt to another local.
 Exiting its scope, including by early return, joins a live receipt and drops
-the unclaimed result. Launch failures and failures during implicit cleanup
-report the submission span. An explicit join failure reports its join span.
+the unclaimed result, including all its nested owners. Launch failures and
+failures during implicit cleanup report the submission span. An explicit join failure reports its join span.
 C code reached by multiple workers is responsible for synchronizing its shared
 state.
 
 ## Worker receipt queues
+
+Receipt queues accept array-to-array worker receipts.
 
 `(worker.receipt-queue digest_batch)` creates an empty local queue for
 receipts whose result type matches `digest_batch`. It starts no worker.

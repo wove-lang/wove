@@ -85,7 +85,7 @@
 	(use wove-file "../source/array_growth.wove" (only is_array_growth is_array_growth_statement (value indexed_row_owner)
 		(value array_capacity_kind) (value array_push_kind) (value array_remove_kind) (value array_try_reserve_kind) (value array_try_alloc_kind) (value array_try_extend_kind) (value array_try_push_kind)))
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates))
-	(use wove-file "./worker.wove" (only worker_arrays))
+	(use wove-file "./worker.wove" (only worker_signature worker_receipt_result worker_result_type))
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form (value array_try_copy_kind) (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch is_worker_submission is_worker_pool_operation (value worker_spawn_join_kind)
 			(value worker_spawn_on_kind) (value worker_open_pool_kind) (value worker_try_close_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_list_kind) (value pending_exact_move) (value fixed_take_request)
@@ -1602,7 +1602,8 @@
 	(fn valid_worker_handler
 		(:doc "Verify the one-job ABI and both owned payloads shared by worker launches and queue declarations.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (callee ScalarFunction)
-			(parameters (shared-array ScalarParameter)) (bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord)))
+			(parameters (shared-array ScalarParameter)) (bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord))
+			(allow_records bool))
 		(returns bool)
 		(body
 			(if
@@ -1610,9 +1611,9 @@
 				(bool.or (i32.ltz (struct.get (local callee) body)) (i32.not-eq (struct.get (local callee) arity) 1i32))
 				(then (return (bool false))))
 			(let job (array.load (local parameters) (struct.get (local callee) params)))
-			(return (call worker_arrays (borrow-shared (local source)) (borrow-shared (local nodes))
+			(return (call worker_signature (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (struct.get (local job) type)
-				(struct.get (local callee) result)))))
+				(struct.get (local callee) result) (local allow_records)))))
 
 	(fn plan_worker_queue
 		(:doc "Infer an empty local queue from the exact result type of the named Wove handler.")
@@ -1646,7 +1647,7 @@
 			(if
 				(:doc "Use precisely the payload eligibility rules of submission.")
 				(bool.not (call valid_worker_handler (borrow-shared (local source)) (borrow-shared (local nodes)) (local callee)
-					(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))))
+					(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records)) (bool false)))
 				(then (return (call entry_at (local name) -1i32 24u32))))
 			(array.store (local expressions) (local index)
 				(call worker_expression (local worker_queue_kind) (local worker_queue_type) -1i32 -1i32
@@ -1700,7 +1701,7 @@
 			(if (u32.gtz (struct.get (local receipt_read) error)) (then (return (local receipt_read))))
 			(let receipt (array.load (local expressions) (local move_index)))
 			(if
-				(:doc "Match the result's exact owner type, including nominal element identity.")
+				(:doc "Only an array-to-array receipt with the exact result can enter this queue.")
 				(bool.or (u32.not-eq (struct.get (local receipt) type) (local worker_receipt_type))
 					(i32.not-eq (struct.get (local receipt) asset_end) (struct.get (local queue) asset_end)))
 				(then (return (call entry_at (local move) -1i32 24u32))))
@@ -1713,7 +1714,7 @@
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_worker_join
-		(:doc "Consume a receipt or queue and check the resulting exact owned array type.")
+		(:doc "Consume a receipt or queue and check the exact value that it delivers.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32) (kind u32)
 			(expected u32) (statement i32) (caller ScalarFunction) (view_start i32)
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
@@ -1741,13 +1742,13 @@
 				(:doc "The two join operations each accept their own kind of worker owner.")
 				(u32.not-eq (struct.get (local owner) type) (local type))
 				(then (return (call entry_at (local reference) -1i32 24u32))))
-			(let-mut result (u32.from-i32 (struct.get (local owner) asset_end)))
+			(let-mut result (call worker_result_type (struct.get (local owner) asset_end)))
 			(if
 				(:doc "Batch collection adds exactly one ownership layer to the handler result.")
 				(local all)
 				(then (set (local result) (call owning_array_type (borrow-shared (local records)) (local result)))))
 			(if
-				(:doc "A fresh array can initialize a local or supply the same exact owned result.")
+				(:doc "The delivered array or record can initialize a local or supply the same exact result.")
 				(bool.or (u32.eqz (local result))
 					(bool.not (bool.or (u32.eq (local expected) 42u32) (u32.eq (local expected) (local result)))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
@@ -1849,7 +1850,8 @@
 			(if
 				(:doc "Only valid Wove handlers can cross the thread boundary.")
 				(bool.and (local worker) (bool.not (call valid_worker_handler (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local callee) (borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records)))))
+					(local callee) (borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))
+					(u32.not-eq (local kind) (local worker_spawn_on_kind)))))
 				(then (return (call entry_at (local name) -1i32 24u32))))
 			(let result (struct.get (local callee) result))
 			(let submitted (call is_worker_submission (local kind)))
@@ -1976,8 +1978,10 @@
 				(:doc "Keep the caller's file and original worker expression span for thread failures.")
 				(local worker)
 				(then
+					(let job (array.load (local parameters) (struct.get (local callee) params)))
 					(array.store (local expressions) (local index)
-						(call worker_expression (local kind) (local actual) (local target) (local first) (i32.from-u32 (local result))
+						(call worker_expression (local kind) (local actual) (local target) (local first)
+							(call worker_receipt_result (struct.get (local job) type) (local result))
 							(local node) (local caller) (local view_start)))
 					(return (call entry_at (local node) (local index) 0u32))))
 			(array.store (local expressions) (local index)

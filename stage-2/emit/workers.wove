@@ -1,0 +1,229 @@
+(module emit_workers
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Adapt ordinary Wove record values to the shared worker receipt runtime.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/records.wove" (only is_record_type is_owning_record record_index (type ScalarRecord)))
+	(use wove-file "../scalar/syntax.wove" (only is_worker_launch (value worker_spawn_kind)))
+	(use wove-file "../scalar/worker.wove" (only worker_result_type))
+	(use wove-file "./function_names.wove" (only write_function_name))
+	(use wove-file "./owned_aggregates.wove" (only write_owner_helper_name))
+	(use wove-file "./records.wove" (only write_record_name))
+	(use wove-file "./text.wove" (only c_byte c_literal_text))
+
+	(let worker_declarations "WVRT_DECLARE_RECORD_WORKERS()\n")
+	(let spawn_record "wvrt_worker_spawn_record_at_span(")
+	(let join_record "wvrt_worker_spawn_join_record_at_span(")
+	(let adapter_name "wvrt_worker_adapter_")
+	(let adapter_definition "static wvrt_array *")
+	(let adapter_formals "(wvrt_array *wvrt_job,int32_t wvrt_file,int32_t wvrt_start,int32_t wvrt_end){")
+	(let ignore_site "(void)wvrt_file;(void)wvrt_start;(void)wvrt_end;")
+	(let return_value "return ")
+	(let adapter_job "wvrt_job")
+	(let adapter_site ",wvrt_file,wvrt_start,wvrt_end)")
+	(let adapter_end ";}\n")
+	(let pack_record "WVRT_WORKER_PACK(")
+	(let unpack_record "WVRT_WORKER_UNPACK(")
+	(let define_drop "WVRT_DEFINE_WORKER_DROP(")
+	(let drop_prefix "wvrt_worker_drop_")
+	(let drop_end ")\n")
+	(let null_drop "NULL")
+
+	(fn open_record_worker_call
+		(:doc "Choose the dedicated launch entry that accepts a typed record adapter.")
+		(params (kind u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "A submitted job keeps its receipt for a later join.")
+				(u32.eq (local kind) (local worker_spawn_kind))
+				(then (return (call c_literal_text (borrow-shared (local spawn_record))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local join_record))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_worker_adapter_name
+		(:doc "Derive the private adapter from the exact defining function symbol.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let prefix (call c_literal_text (borrow-shared (local adapter_name))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(return (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local function) (borrow-mut (local output)) (local prefix) (local name_prefix) (local writing)))))
+
+	(fn open_worker_transport
+		(:doc "Write the exact C value type before the payload expression.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord) (macro (shared-array u8))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared (local macro))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let type (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local type) 44u8 (local writing)))))
+
+	(fn open_worker_pack
+		(:doc "Begin an evaluating pack of an exact record value.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(return (call open_worker_transport (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-shared (local pack_record)) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+
+	(fn open_worker_unpack
+		(:doc "Begin an evaluating unpack that transfers a boxed record to the receiver.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(return (call open_worker_transport (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-shared (local unpack_record)) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+
+	(fn write_worker_drop_argument
+		(:doc "Use the nominal recursive destructor for owning records and a null callback for copies.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let comma (call c_byte (borrow-mut (local output)) (local offset) 44u8 (local writing)))
+			(if
+				(:doc "A copyable record has no live fields to destroy.")
+				(bool.not (struct.get (local layout) owns_arrays))
+				(then (return (call c_literal_text (borrow-shared (local null_drop))
+					(borrow-mut (local output)) (local comma) (local writing)))))
+			(let prefix (call c_literal_text (borrow-shared (local drop_prefix))
+				(borrow-mut (local output)) (local comma) (local writing)))
+			(return (call write_record_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-mut (local output)) (local prefix) (local name_prefix) (local writing)))))
+
+	(fn write_worker_drop
+		(:doc "Define one erased drop callback for each boxed owning layout.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(type u32) (written (mut-array u8)) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(if (bool.not (call is_owning_record (borrow-shared (local records)) (local type))) (then (return (local offset))))
+			(let index (call record_index (local type)))
+			(if (u8.not-eqz (array.load (local written) (local index))) (then (return (local offset))))
+			(array.store (local written) (local index) 1u8)
+			(let layout (array.load (local records) (local index)))
+			(let open (call open_worker_transport (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(borrow-shared (local define_drop)) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
+			(let drop (call write_owner_helper_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local layout)
+				(bool false) (borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+			(return (call c_literal_text (borrow-shared (local drop_end)) (borrow-mut (local output)) (local drop) (local writing)))))
+
+	(fn write_worker_adapter
+		(:doc "Restore the job, call the defining Wove function by value, and prepare its result for the receipt.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(function ScalarFunction) (job u32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let prefix (call c_literal_text (borrow-shared (local adapter_definition))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let name (call write_worker_adapter_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local function)
+				(borrow-mut (local output)) (local prefix) (local name_prefix) (local writing)))
+			(let-mut cursor (call c_literal_text (borrow-shared (local adapter_formals))
+				(borrow-mut (local output)) (local name) (local writing)))
+			(let result (struct.get (local function) result))
+			(let boxed_result (call is_record_type (local result)))
+			(if
+				(:doc "An array result reuses its descriptor and needs no allocation site in the adapter.")
+				(bool.not (local boxed_result))
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local ignore_site))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call c_literal_text (borrow-shared (local return_value))
+				(borrow-mut (local output)) (local cursor) (local writing)))
+			(if
+				(:doc "The worker packs a returned record once, preserving the original launch site for allocation failure.")
+				(local boxed_result)
+				(then (set (local cursor) (call open_worker_pack (borrow-shared (local source)) (borrow-shared (local nodes))
+					(array.load (local records) (call record_index (local result)))
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(set (local cursor) (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local function)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 40u8 (local writing)))
+			(let boxed_job (call is_record_type (local job)))
+			(if
+				(:doc "Transfer the exact record and release its transport before the Wove callee takes ownership.")
+				(local boxed_job)
+				(then (set (local cursor) (call open_worker_unpack (borrow-shared (local source)) (borrow-shared (local nodes))
+					(array.load (local records) (call record_index (local job)))
+					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+			(set (local cursor) (call c_literal_text (borrow-shared (local adapter_job))
+				(borrow-mut (local output)) (local cursor) (local writing)))
+			(if
+				(:doc "Finish unboxing before closing the ordinary function call.")
+				(local boxed_job)
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))
+			(if
+				(:doc "A boxed result uses the same destructor on allocation failure and receipt cleanup.")
+				(local boxed_result)
+				(then
+					(set (local cursor) (call write_worker_drop_argument (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local records) (call record_index (local result)))
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(set (local cursor) (call c_literal_text (borrow-shared (local adapter_site))
+						(borrow-mut (local output)) (local cursor) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local adapter_end))
+				(borrow-mut (local output)) (local cursor) (local writing)))))
+
+	(fn is_record_worker_launch
+		(:doc "Only a dedicated launch with a record endpoint has an adapter.")
+		(params (row ScalarExpression))
+		(returns bool)
+		(body
+			(return (bool.and (i32.ltz (struct.get (local row) asset_end))
+				(call is_worker_launch (struct.get (local row) kind))))))
+
+	(fn write_worker_adapters
+		(:doc "Emit each referenced adapter once after the normal prototypes and aggregate destructors.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(functions (shared-array ScalarFunction)) (expressions (shared-array ScalarExpression))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Most translation units use no record workers and need no adapter tables.")
+				(bool.and (i32.lt (local index) (array.len (local expressions)))
+					(bool.not (call is_record_worker_launch (array.load (local expressions) (local index)))))
+				(body (set (local index) (i32.inc (local index)))))
+			(if (i32.eq (local index) (array.len (local expressions))) (then (return (local offset))))
+			(let-mut written_functions (array.alloc u8 (array.len (local functions))))
+			(let-mut written_drops (array.alloc u8 (array.len (local records))))
+			(let-mut cursor (call c_literal_text (borrow-shared (local worker_declarations))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(while
+				(:doc "Use the checked callee row across repeated launches and imported aliases.")
+				(i32.lt (local index) (array.len (local expressions)))
+				(body
+					(let row (array.load (local expressions) (local index)))
+					(let target (struct.get (local row) target))
+					(if
+						(:doc "Only the first recorded launch of this function emits its adapter.")
+						(bool.and (call is_record_worker_launch (local row))
+							(u8.eqz (array.load (local written_functions) (local target))))
+						(then
+							(array.store (local written_functions) (local target) 1u8)
+							(let job (struct.get (array.load (local expressions) (struct.get (local row) first)) type))
+							(let result (call worker_result_type (struct.get (local row) asset_end)))
+							(set (local cursor) (call write_worker_drop (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (local job) (borrow-mut (local written_drops))
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(set (local cursor) (call write_worker_drop (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (local result) (borrow-mut (local written_drops))
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+							(set (local cursor) (call write_worker_adapter (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (array.load (local functions) (local target)) (local job)
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+					(set (local index) (i32.inc (local index)))))
+			(return (local cursor)))))
