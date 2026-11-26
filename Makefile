@@ -93,6 +93,9 @@ NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/io/process_file.wove \
 	$(PROCESS_LAUNCHER_SOURCES) $(DRIVER_C_PROVIDERS) $(CLANG_QUERY_SOURCES))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
+WORKER_FIXTURES := $(NATIVE_CLI_FIXTURES)/workers
+WORKER_RUNTIME := $(STAGE2)/workers/runtime.o
+WORKER_PROBE := $(STAGE2)/workers/failure
 PROCESS_MODULES := stage-2/io/process.wove stage-2/io/temporary.wove stage-2/io/capture/descriptors.wove stage-2/io/capture/child.wove
 PROCESS_FIXTURES := tests/stage-2/process
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
@@ -136,7 +139,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 	}' "$(OWNERSHIP_CASES)")
 
 .PHONY: all stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
-.PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-process test-stage-2-version force-build-info
+.PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-workers test-stage-2-process test-stage-2-version force-build-info
 .PHONY: test-stage-2-inventory
 .DELETE_ON_ERROR:
 .SECONDARY:
@@ -204,7 +207,7 @@ test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
 test-stage-2-native: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-native: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-native: export WOVE_BUILD_CLANG = $(CLANG)
-test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80
+test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80 test-stage-2-workers
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/discovery/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
@@ -213,7 +216,6 @@ test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/literals.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/half/check.py" "$(NATIVE_COMPILER)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/quad/check.py" "$(NATIVE_COMPILER)"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/workers/check.py" "$(NATIVE_COMPILER)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/extents.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/borrow_extents.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/dirent.tsv"
@@ -228,6 +230,23 @@ test-stage-2-f80: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-f80: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-f80: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/extended/check.py" "$(NATIVE_COMPILER)"
+
+# Run the Wove transfer fixtures and the host probe for thread API failures.
+test-stage-2-workers: export WOVE_TEST_CLANG = $(CLANG)
+test-stage-2-workers: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2-workers: $(NATIVE_COMPILER) $(WORKER_PROBE)
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(WORKER_FIXTURES)/cases.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_PROBE)" "$(WORKER_FIXTURES)/failure.tsv"
+
+# Intercept thread creation and join in the runtime object used by the worker probe.
+$(WORKER_RUNTIME): $(RUNTIME) $(RUNTIME_HEADER)
+	mkdir -p "$(@D)"
+	$(CLANG) -std=c11 $(CFLAGS) -pthread -Dpthread_create=fixture_worker_create \
+		-Dpthread_join=fixture_worker_join -c "$<" -o "$@"
+
+# The probe can still call the original thread APIs when a case allows them.
+$(WORKER_PROBE): $(WORKER_FIXTURES)/failure.c $(WORKER_RUNTIME) $(RUNTIME_HEADER)
+	$(CLANG) -std=c11 $(CFLAGS) -pthread -I runtime $(filter-out %.h,$^) -o "$@"
 
 # Check generated metadata and version invalidation in an isolated build.
 test-stage-2-version: $(NATIVE_COMPILER) $(BUILD_VERSION)
