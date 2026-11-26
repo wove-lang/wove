@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 Spellings are case-sensitive. Decimal integer atoms carry their type, as in
 `-3i32` and `42u32`. The typed lists `(i32 -3)` and `(u32 42)` are
 equivalent. Both stages support `i8`, `u8`, `i32`, and `u32`. Stage 2 also
-supports `i16`, `u16`, and `u64`. Boolean literals are `(bool true)` and `(bool false)`.
+supports `i16`, `u16`, `i64`, and `u64`. Boolean literals are `(bool true)` and `(bool false)`.
 
 ## Integers and booleans
 
@@ -16,12 +16,12 @@ In `(i32.add.wrapping left right)`, the prefix selects the exact operand type.
 
 | Operation | Both stages | Stage 2 additions |
 | --- | --- | --- |
-| Wrapping addition | `i32.add.wrapping`, `u32.add.wrapping` | `i16.add.wrapping`, `u16.add.wrapping`, `u64.add.wrapping` |
-| Wrapping subtraction | `i32.sub.wrapping`, `u32.sub.wrapping` | `i16.sub.wrapping`, `u16.sub.wrapping` |
-| Wrapping multiplication | | `i32.mul.wrapping` |
+| Wrapping addition | `i32.add.wrapping`, `u32.add.wrapping` | `i16.add.wrapping`, `u16.add.wrapping`, `i64.add.wrapping`, `u64.add.wrapping` |
+| Wrapping subtraction | `i32.sub.wrapping`, `u32.sub.wrapping` | `i16.sub.wrapping`, `u16.sub.wrapping`, `i64.sub.wrapping` |
+| Wrapping multiplication | | `i32.mul.wrapping`, `i64.mul.wrapping` |
 | Division and remainder | | `i32.div`, `i32.rem` |
-| Equality | `u8.eq`, `i32.eq`, `u32.eq` | `i16.eq`, `u16.eq`, `u64.eq`, `(int.eq Type left right)` |
-| Less than | `u8.lt`, `i32.lt`, `u32.lt` | `i16.lt`, `u16.lt`, `u64.lt` |
+| Equality | `u8.eq`, `i32.eq`, `u32.eq` | `i16.eq`, `u16.eq`, `i64.eq`, `u64.eq`, `(int.eq Type left right)` |
+| Less than | `u8.lt`, `i32.lt`, `u32.lt` | `i16.lt`, `u16.lt`, `i64.lt`, `u64.lt` |
 | AND, OR, XOR, complement | `u32.and`, `u32.or`, `u32.xor`, `u32.not` | `i32.and`, `i32.or`, `u64.and`, `u64.or`, `u64.xor`, `u64.not` |
 | Left and right shift | `u32.shl`, `u32.shr` | `i32.shl`, `i32.shr`, `u64.shl`, `u64.shr` |
 | Boolean logic | `bool.and`, `bool.or`, `bool.not` | |
