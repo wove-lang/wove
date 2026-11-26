@@ -90,7 +90,8 @@ library with Clang builtins disabled.
 | Macro calls and header values | `fpclassify`, `isfinite`, `FP_NAN`, `HUGE_VAL`, and `M_PI_2` |
 | Target selection | The Linux/macOS POSIX group exposes `j0`. Graph fixtures reject Darwin `__sinpi` under Linux and Linux `drem` under macOS at the requesting name. |
 
-The remaining signatures use several distinct native contracts:
+A macOS header audit built and linked wrappers for 151 existing function
+declarations. The remaining ABI gaps include these contracts:
 
 - `FloatEval`, `DoubleEval`, and `LongDouble` require native floating
   aliases for `float_t`, `double_t`, and `long double`. This includes
@@ -101,6 +102,10 @@ The remaining signatures use several distinct native contracts:
   scalar references. The qualified `pointer_parameters` marker and
   the `__STDC_VERSION_MATH_H__` markers also need their respective
   prototype and feature-macro checks.
+- The Darwin `__sincos*` functions need native `void` results as well
+  as their writable outputs. Optional classification macros such as
+  `iscanonical` and `issignaling` are absent from the tested macOS SDK,
+  where selecting them reports an unavailable import.
 - The archived Darwin half declarations need the `math_darwin_half`
   selection and minimum-deployment check before probing individual
   optional symbols. Core `f16` already has a target admission check.
