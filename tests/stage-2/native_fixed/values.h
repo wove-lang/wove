@@ -20,6 +20,10 @@ static inline int32_t check_empty_tail(const char **tail, int32_t code, ...) {
 	return tail == 0 && code == -1;
 }
 
+// A checked call must invoke the function even when the header also defines a macro.
+#define check_fixed(first, minimum, tail, hexadecimal, tag, maximum, last) 0
+#define check_empty_tail(tail, code) 0
+
 // The bridge's const char ** declaration must disagree with this signature.
 static inline int32_t wrong_tail(void **tail) {
 	return tail == 0;

@@ -84,7 +84,8 @@ empty-tail queries and named variadic updates are covered by the native
 fixtures. No other checked-in provider uses a fixed operand with a signed
 literal or typed null. The standalone SQLite fixture passes `-1` and
 `const char **` null to `sqlite3_prepare_v2` and tests its statement
-pointer-out contract. `strtold` still needs a native `long double` result
+pointer-out contract. A project bridge for `realpath` also exercises a fixed
+null with a copied C string result. `strtold` still needs a native `long double` result
 and a lifetime contract for an end pointer into the input string.
 
 ## Bundled math coverage
