@@ -419,6 +419,10 @@ by returning a call or explicitly moving a local optional. Use
 Unwrapping an absent value traps. Scope cleanup drops any payload
 that remains owned by the optional.
 
+An optional array of a native integer alias keeps the alias's defining
+type through allocation, absent construction, and forwarding. Local
+renames of the same imported type share that identity.
+
 On scope exit, remaining owners drop in reverse declaration order.
 A struct drops its remaining owning fields in reverse field order,
 including owners inside nested structs and arrays. A return evaluates
