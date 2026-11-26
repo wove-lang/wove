@@ -408,9 +408,13 @@ chosen expression. An arm can produce a fresh owner or move an existing one.
 
 Range bounds have the same type, `i32` or `u64`. They evaluate once, from
 left to right. An array loop can use `(bind index item)` for a zero-based
-`i32` index relative to its view. Shared iteration copies each element.
-Mutable iteration gives a writable place. Consuming iteration transfers
-each row to the loop body.
+`i32` index relative to its view. Shared iteration copies copyable elements.
+When iterating an array of owned rows with `borrow-shared`, the item is a
+shared view of the current populated row with its exact element type.
+It lasts through the iteration body, and the loop holds its parent loan
+until exit. An unfilled row traps when visited. Mutable iteration gives a
+writable place for copyable elements. Consuming iteration transfers each
+row to the loop body.
 
 `(break)` and `(continue)` act on the innermost loop. They release owners
 in the scopes they leave. Exiting consuming iteration also releases any
@@ -466,9 +470,9 @@ Indexes and range endpoints are exact `i32` values. The compiler checks
 elements relative to its own bounds. Equal endpoints give an empty view.
 A call loan lasts through later arguments and the call.
 
-Growable arrays use a named owner or a field of a named place
-as their receiver. Mutation requires writable storage with no overlapping
-live loan.
+Growable arrays can use a named owner, a field of a named place, or an
+indexed owning row as their receiver. Mutation requires writable storage
+with no overlapping live loan.
 
 | Form | Meaning |
 | --- | --- |
@@ -489,6 +493,11 @@ An array of owned rows accepts
 transfers the original owner to the vector. Removing a populated
 row transfers it to the result, and removing an unfilled slot traps.
 Truncation drops the owners in the removed suffix immediately.
+
+`(array.push (array.load (local batches) index) (move (local row)))`
+appends to a populated batch. An indexed receiver is checked before later
+operands run, and each index evaluates once. The outer slot keeps the row
+owner as its storage grows. Selecting an unfilled slot traps.
 
 `array.alloc` supports numeric elements, Wove records, and nested owners.
 For example, `(array.alloc (owned-array Digest) count)` creates an

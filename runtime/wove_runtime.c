@@ -610,6 +610,13 @@ wvrt_slice wvrt_array_borrow_row_at_span(wvrt_slice wvrtrows, int32_t wvrtindex,
 	return wvrt_array_borrow_shared(wvrt_array_live_row(wvrt_items, wvrt_offset, wvrtfile, wvrtstart, wvrtend));
 }
 
+// Select the backing descriptor owned by a populated slot without transferring it.
+wvrt_array *wvrt_array_row_owner_at_span(wvrt_array *rows, int32_t index,
+	int32_t file, int32_t start, int32_t end) {
+	size_t offset = wvrt_slice_offset_at_span(rows->wvrt_length, index, file, start, end);
+	return wvrt_array_live_row(rows->wvrt_items, offset, file, start, end);
+}
+
 // Transfer one fresh or moved row and retire the owner that previously occupied the slot.
 void wvrt_array_store_row_at_span(wvrt_mut_slice wvrtrows, int32_t wvrtindex, wvrt_array *wvrtrow,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
