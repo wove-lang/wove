@@ -27,7 +27,7 @@
 	(use wove-file "../source/generics.wove" (only function_generic_list))
 	(use wove-file "./generics/functions.wove" (only expand_graph_functions (type FunctionInstance)))
 	(use wove-file "./specializations.wove" (only register_module_specializations))
-	(use wove-file "./records.wove" (only scope_at read_template_parameters register_module_records register_module_record_arrays order_record_layouts declaration_kind find_native_node native_integer_type is_native_integer is_native_record is_record_type is_mutable_place_reference place_reference_target byte_rows_owner_type (type ScalarRecord)))
+	(use wove-file "./records.wove" (only scope_at read_template_parameters register_module_records register_module_record_arrays register_owned_rows order_record_layouts declaration_kind find_native_node native_integer_type is_native_integer is_native_record is_record_type is_mutable_place_reference place_reference_target byte_rows_owner_type (type ScalarRecord)))
 	(use wove-file "./owners.wove" (only native_owner_type optional_byte_owner_type))
 	(use wove-file "./c_types.wove" (only remember_native_type register_parameter_native_types register_record_dependencies))
 	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
@@ -887,6 +887,58 @@
 					(set (local row) (i32.inc (local row)))))
 			(return (call signatures_result (local count) (local params) (local records_used) (local entry) -1i32 0i32 0i32 0u32))))
 
+	(fn register_graph_owned_rows
+		(:doc "Resolve nested owner types in the file or instantiated function that contains their descriptors.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (files (shared-array SuppliedFile))
+			(modules (shared-array GraphModule)) (trees (shared-array ScalarTree)) (bindings (shared-array GraphBinding))
+			(instances (shared-array FunctionInstance)) (instance_count i32) (records (mut-array ScalarRecord)) (start i32))
+		(returns GraphSignatures)
+		(body
+			(let-mut next (local start))
+			(let-mut file 0i32)
+			(while
+				(:doc "Bridge-only and inactive modules cannot declare Wove array owners.")
+				(i32.lt (local file) (array.len (local files)))
+				(body
+					(if
+						(:doc "The original file's tree indices are already rebased.")
+						(struct.get (array.load (local modules) (local file)) active)
+						(then
+							(let tree (array.load (local trees) (local file)))
+							(let base (struct.get (local tree) base))
+							(let source_base (struct.get (array.load (local files) (local file)) source_start))
+							(let checked (call register_owned_rows (borrow-shared (local arena)) (borrow-shared (local nodes))
+								(local base) (i32.add (local base) (struct.get (local tree) rows)) (borrow-shared (local bindings))
+								(call scope_at (local file) (local source_base)) (borrow-mut (local records)) (local next)))
+							(if
+								(:doc "A full layout table reports the original descriptor's span.")
+								(u32.gtz (struct.get (local checked) error))
+								(then (return (call signatures_result 0i32 0i32 (local next) -1i32 (local file)
+									(i32.sub (struct.get (local checked) start) (local source_base))
+									(i32.sub (struct.get (local checked) end) (local source_base)) (struct.get (local checked) error)))))
+							(set (local next) (struct.get (local checked) operand))))
+					(set (local file) (i32.inc (local file)))))
+			(let-mut row 0i32)
+			(while
+				(:doc "Concrete function clones can introduce owners of substituted types.")
+				(i32.lt (local row) (local instance_count))
+				(body
+					(let instance (array.load (local instances) (local row)))
+					(let owner (struct.get (local instance) file))
+					(let source_base (struct.get (array.load (local files) (local owner)) source_start))
+					(let checked (call register_owned_rows (borrow-shared (local arena)) (borrow-shared (local nodes))
+						(struct.get (local instance) declaration) (struct.get (local instance) end) (borrow-shared (local bindings))
+						(call scope_at (local owner) (local source_base)) (borrow-mut (local records)) (local next)))
+					(if
+						(:doc "Keep clone diagnostics in the original defining file.")
+						(u32.gtz (struct.get (local checked) error))
+						(then (return (call signatures_result 0i32 0i32 (local next) -1i32 (local owner)
+							(i32.sub (struct.get (local checked) start) (local source_base))
+							(i32.sub (struct.get (local checked) end) (local source_base)) (struct.get (local checked) error)))))
+					(set (local next) (struct.get (local checked) operand))
+					(set (local row) (i32.inc (local row)))))
+			(return (call signatures_result 0i32 0i32 (local next) -1i32 -1i32 0i32 0i32 0u32))))
+
 	(fn prepare_graph
 		(:doc `Collect every defining layout before any reached function signature uses it.`)
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
@@ -976,6 +1028,14 @@
 				(then (return (call signatures_result 0i32 0i32 (local next_record) -1i32
 					(struct.get (local layouts) file) (struct.get (local layouts) start) (struct.get (local layouts) end)
 					(struct.get (local layouts) error)))))
+			(let owners (call register_graph_owned_rows (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local trees)) (borrow-shared (local bindings))
+				(borrow-shared (local function_instances)) (local function_count) (borrow-mut (local records)) (local next_record)))
+			(if
+				(:doc "Finish row identities before checking any type that refers to them.")
+				(u32.gtz (struct.get (local owners) error))
+				(then (return (local owners))))
+			(set (local next_record) (struct.get (local owners) records))
 			(let values (call prepare_graph_values (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local nodes)) (borrow-shared (local modules)) (borrow-shared (local trees))
 				(borrow-shared (local bindings)) (borrow-shared (local views)) (borrow-shared (local selected))
