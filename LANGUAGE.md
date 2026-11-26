@@ -512,8 +512,10 @@ call. An owning slot cannot be loaded by value or bound as an array
 iteration item.
 
 Fixed arrays keep their elements inline and copy by value. Use
-`(array T extent)` for a builtin scalar or copyable Wove record `T`.
-The extent is a nonnegative decimal or an immutable module integer.
+`(array T extent)` for a builtin scalar, copyable Wove record, or another
+fixed array. Each extent is a nonnegative decimal or an immutable module
+integer. For example, `(array (array i32 3) 2)` holds two rows of three
+`i32` values. The type includes the leaf type and every extent.
 
 - `(array.new (array u8 2) (u8 17) (u8 25))` lists the elements.
 - `(array.repeat (array u8 128) (u8 0))` evaluates one value and fills the array.
@@ -521,6 +523,9 @@ The extent is a nonnegative decimal or an immutable module integer.
 - `(array.store (local data) index value)` writes into a mutable local array.
 - `(array.store (struct.get (local state) block) index value)` writes into
   an inline array field of a writable record.
+- `(array.store (array.load (local grid) row) column value)` updates the
+  selected row in the original writable grid. In a value expression,
+  `(array.load (local grid) row)` returns a copy of the row.
 
 A fixed integer array or record field can lend a matching `shared-array` or
 `mut-array` view. Sibling field paths can lend independently. A whole-record

@@ -6,7 +6,7 @@
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "./records.wove" (only place_borrow_kind is_mutable_place_reference is_writable_slice))
 	(use wove-file "./flow.wove" (only (type ScalarStatement) (value fixed_shared_loan) (value fixed_mut_loan)))
-	(use wove-file "./syntax.wove" (only is_direct_call))
+	(use wove-file "./syntax.wove" (only is_direct_call (value fixed_subarray_place)))
 	(use wove-file "./owners.wove" (only native_handle_borrow_kind is_native_owner_write_loan owned_field_loan_kind))
 
 	(struct
@@ -121,7 +121,17 @@
 			(receiver i32) (target i32) (local_binding bool) (place i32))
 		(returns bool)
 		(body
-			(let root (struct.get (array.load (local expressions) (local receiver)) projection))
+			(let-mut base (local receiver))
+			(while
+				(:doc "Follow indexed addresses to the fixed local or the original record field.")
+				(u32.eq (struct.get (array.load (local expressions) (local base)) kind) (local fixed_subarray_place))
+				(body (set (local base) (struct.get (array.load (local expressions) (local base)) first))))
+			(let source (array.load (local expressions) (local base)))
+			(if
+				(:doc "Dynamic subscript paths into one local conservatively overlap the entire local.")
+				(bool.and (i32.not-eq (local base) (local receiver)) (u32.eq (struct.get (local source) kind) 6u32))
+				(then (return (call same_binding (local target) (local local_binding) (struct.get (local source) target) (bool true)))))
+			(let root (struct.get (local source) projection))
 			(if
 				(:doc "A whole fixed local uses the existing direct fixed-array store rules.")
 				(i32.ltz (local root))
@@ -131,7 +141,7 @@
 				(call same_binding (local target) (local local_binding) (struct.get (local binding) target)
 					(u32.eq (struct.get (local binding) kind) 6u32))
 				(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
-					(local place) (local receiver))))))
+					(local place) (local base))))))
 
 	(fn descriptor_receiver_conflicts
 		(:doc `A captured array descriptor keeps its backing storage lent until access completes.`)
@@ -284,8 +294,9 @@
 					(let first (struct.get (local operation) first))
 					(if
 						(:doc "An indexed field store excludes overlapping access while its later operands run.")
-						(bool.and (bool.and (u32.eq (local operation_kind) 74u32)
-							(i32.not-eq (local child) (local first)))
+						(bool.and (bool.and (bool.or (u32.eq (local operation_kind) 74u32)
+									(u32.eq (local operation_kind) (local fixed_subarray_place)))
+								(i32.not-eq (local child) (local first)))
 							(call projected_store_conflicts (borrow-shared (local nodes)) (borrow-shared (local expressions))
 								(local first) (local target) (local local_binding) (local place)))
 						(then (return (bool true))))
