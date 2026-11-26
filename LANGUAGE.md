@@ -486,6 +486,32 @@ report the submission span. An explicit join failure reports its join span.
 C code reached by multiple workers is responsible for synchronizing its shared
 state.
 
+## Worker receipt queues
+
+`(worker.receipt-queue digest_batch)` creates an empty local queue for
+receipts whose result type matches `digest_batch`. It starts no worker.
+Use a mutable binding to enqueue and move each receipt explicitly.
+
+```lisp
+(let-mut pending (worker.receipt-queue digest_batch))
+(let receipt (worker.spawn digest_batch (move (local batch))))
+(worker.push (local pending) (move (local receipt)))
+(let results (worker.join-all (local pending)))
+```
+
+`worker.join-all` consumes the queue and returns one owned result per
+receipt in enqueue order, even when workers finish in a different order.
+For a handler returning `(owned-array Digest)`, the result is
+`(owned-array (owned-array Digest))`. An empty queue returns an empty
+array of the same type. Moving a queue to a new local transfers its
+pending receipts.
+
+Exiting a queue's scope, including by early return, joins all uncollected
+receipts and drops their results. If collection fails, the runtime
+releases the collected results and retires the remaining receipts before
+reporting the join span. An implicit cleanup failure reports the failing
+worker's original submission span.
+
 ## C interop
 
 Use a C header's bundled declarations or provide Wove signatures in

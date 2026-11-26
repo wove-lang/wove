@@ -282,6 +282,11 @@ wvrt_worker_receipt *wvrt_worker_spawn_at_span(wvrt_array *(*handler)(wvrt_array
 wvrt_worker_receipt *wvrt_worker_receipt_take(wvrt_worker_receipt **slot);
 wvrt_array *wvrt_worker_join_at_span(wvrt_worker_receipt **slot, int32_t file, int32_t start, int32_t end);
 void wvrt_worker_receipt_drop(wvrt_worker_receipt *worker);
+wvrt_array *wvrt_worker_queue_at_span(int32_t file, int32_t start, int32_t end);
+void wvrt_worker_queue_push_at_span(wvrt_array **slot, wvrt_worker_receipt *receipt,
+	int32_t file, int32_t start, int32_t end);
+wvrt_array *wvrt_worker_join_all_at_span(wvrt_array **slot, int32_t file, int32_t start, int32_t end);
+void wvrt_worker_queue_drop(wvrt_array *queue);
 // Transfer a job to a fresh thread, then deliver its owned result on the caller's thread.
 wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*wvrt_handler)(wvrt_array *), wvrt_array *wvrt_job,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

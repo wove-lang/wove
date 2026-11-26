@@ -575,17 +575,22 @@ static void wvrt_drop_row(void *wvrt_slot) {
 	wvrt_array_drop(*(wvrt_array **)wvrt_slot);
 }
 
+// Initialize owned row slots and their recursive cleanup after a successful allocation.
+static wvrt_array *wvrt_prepare_rows(wvrt_array *rows) {
+	if (rows == NULL) { return NULL; }
+	wvrt_array **items = rows->wvrt_items;
+	// Give each slot a typed null pointer before any replacement or cleanup.
+	for (int32_t index = 0; index < rows->wvrt_length; ++index) {
+		items[index] = NULL;
+	}
+	rows->wvrt_drop_element = wvrt_drop_row;
+	return rows;
+}
+
 // Allocate initialized pointer slots and register their recursive cleanup.
 wvrt_array *wvrt_array_new_rows_at_span(int32_t wvrtlength, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	wvrt_array *wvrt_rows = wvrt_array_new_at_span(wvrtlength, sizeof(wvrt_array *), _Alignof(wvrt_array *),
-		wvrtfile, wvrtstart, wvrtend);
-	wvrt_array **wvrt_items = wvrt_rows->wvrt_items;
-	// Give each slot a typed null pointer before any replacement or cleanup.
-	for (int32_t wvrt_i = 0; wvrt_i < wvrtlength; ++wvrt_i) {
-		wvrt_items[wvrt_i] = NULL;
-	}
-	wvrt_rows->wvrt_drop_element = wvrt_drop_row;
-	return wvrt_rows;
+	return wvrt_prepare_rows(wvrt_array_new_at_span(wvrtlength, sizeof(wvrt_array *), _Alignof(wvrt_array *),
+		wvrtfile, wvrtstart, wvrtend));
 }
 
 // A missing row slot has no byte allocation to lend or transfer.
@@ -810,9 +815,10 @@ static void wvrt_worker_start(wvrt_worker_receipt *worker, wvrt_array *(*handler
 	}
 }
 
-// Retire a worker exactly once, delivering its result or dropping it at scope exit.
-static wvrt_array *wvrt_worker_finish(wvrt_worker_receipt *worker, WvrtWorkerSite site,
-	int previous_cancel, bool submitted, bool deliver) {
+// Wait for the frame's final access, then let the caller handle its result and any error.
+static const char *wvrt_worker_retire(wvrt_worker_receipt *worker, bool submitted, wvrt_array **result) {
+	*result = NULL;
+	if (worker == NULL) { return "cannot join an empty worker receipt"; }
 	const bool joined = pthread_join(worker->thread, NULL) == 0;
 	// Wait for publication if a failed join left the child running.
 	if (!joined) {
@@ -821,27 +827,38 @@ static wvrt_array *wvrt_worker_finish(wvrt_worker_receipt *worker, WvrtWorkerSit
 			(void)sched_yield();
 		}
 	}
-	wvrt_array *result = worker->result;
+	*result = worker->result;
 	if (submitted) { free(worker); }
-	// Even a failed join must release a result the handler produced.
-	if (!joined) {
+	if (!joined) { return "could not join worker"; }
+	if (*result == NULL) { return "joined worker exited without returning"; }
+	return NULL;
+}
+
+// Transfer the completed owner while releasing it if pending cancellation interrupts delivery.
+static wvrt_array *wvrt_worker_deliver(wvrt_array *result, int previous_cancel) {
+	pthread_cleanup_push(wvrt_worker_cancel_delivery, result);
+	(void)pthread_setcancelstate(previous_cancel, NULL);
+	pthread_testcancel();
+	pthread_cleanup_pop(0);
+	return result;
+}
+
+// Retire a single worker, delivering its result or dropping it at scope exit.
+static wvrt_array *wvrt_worker_finish(wvrt_worker_receipt *worker, WvrtWorkerSite site,
+	int previous_cancel, bool submitted, bool deliver) {
+	wvrt_array *result;
+	const char *error = wvrt_worker_retire(worker, submitted, &result);
+	// A failed join still releases the array the handler produced.
+	if (error != NULL) {
 		wvrt_array_drop(result);
-		wvrt_trap_at_span(site.file, site.start, site.end, "could not join worker");
-	}
-	// Native thread exit cannot furnish the result required by a Wove worker.
-	if (result == NULL) {
-		wvrt_trap_at_span(site.file, site.start, site.end, "joined worker exited without returning");
+		wvrt_trap_at_span(site.file, site.start, site.end, error);
 	}
 	// Scope cleanup takes responsibility for an unclaimed result.
 	if (!deliver) {
 		wvrt_array_drop(result);
 		result = NULL;
 	}
-	pthread_cleanup_push(wvrt_worker_cancel_delivery, result);
-	(void)pthread_setcancelstate(previous_cancel, NULL);
-	pthread_testcancel();
-	pthread_cleanup_pop(0);
-	return result;
+	return wvrt_worker_deliver(result, previous_cancel);
 }
 #endif
 
@@ -943,26 +960,132 @@ void wvrt_array_reserve_at_span(wvrt_array *wvrtbuffer, int32_t wvrtcapacity,
 	}
 }
 
+// Append a captured value, leaving the live prefix intact if storage cannot grow.
+static const char *wvrt_array_try_append(wvrt_array *buffer, const void *value) {
+	int32_t length = buffer->wvrt_length;
+	if (length == INT32_MAX) { return "array length overflow"; }
+	// Only allocate when the live prefix has filled the current storage.
+	if (length == buffer->wvrt_capacity) {
+		int32_t capacity = buffer->wvrt_capacity;
+		int32_t next = capacity > INT32_MAX / 2 ? INT32_MAX : capacity * 2;
+		if (next <= length) { next = length + 1; }
+		if (!wvrt_array_try_reserve(buffer, next)) { return "could not grow array"; }
+	}
+	size_t size = buffer->wvrt_element_size;
+	memcpy((unsigned char *)buffer->wvrt_items + (size_t)length * size, value, size);
+	buffer->wvrt_length = length + 1;
+	buffer->wvrt_spare = 0;
+	return NULL;
+}
+
 // Append a value captured outside the array, growing geometrically when needed.
 void wvrt_array_push_at_span(wvrt_array *wvrtbuffer, const void *wvrtvalue,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	int32_t wvrt_length = wvrtbuffer->wvrt_length;
-	// Check the largest representable length before adding the new element.
-	if (wvrt_length == INT32_MAX) {
-		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "array length overflow");
+	const char *error = wvrt_array_try_append(wvrtbuffer, wvrtvalue);
+	if (error != NULL) { wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, error); }
+}
+
+// Create the empty owner of a FIFO sequence of joinable worker frames.
+wvrt_array *wvrt_worker_queue_at_span(int32_t file, int32_t start, int32_t end) {
+	wvrt_array *queue = wvrt_array_try_new(0, sizeof(wvrt_worker_receipt *), _Alignof(wvrt_worker_receipt *));
+	if (queue == NULL) { wvrt_trap_at_span(file, start, end, "could not allocate worker receipt queue"); }
+	return queue;
+}
+
+#ifdef WVRT_POSIX_WORKERS
+// Retire every remaining receipt, remembering the first failed worker's submission span.
+static const char *wvrt_worker_queue_drain(wvrt_array *queue, WvrtWorkerSite *site) {
+	const char *first_error = NULL;
+	if (queue == NULL) { return NULL; }
+	wvrt_worker_receipt **items = queue->wvrt_items;
+	// Collection clears a slot before retiring it, so a partial drain skips completed frames.
+	for (int32_t index = 0; index < queue->wvrt_length; ++index) {
+		wvrt_worker_receipt *worker = items[index];
+		if (worker == NULL) { continue; }
+		WvrtWorkerSite origin = worker->origin;
+		wvrt_array *result;
+		const char *error = wvrt_worker_retire(worker, true, &result);
+		wvrt_array_drop(result);
+		// A later join error cannot prevent other frames from being retired.
+		if (error != NULL && first_error == NULL) {
+			first_error = error;
+			*site = origin;
+		}
 	}
-	// Only allocate when the live prefix has filled the current storage.
-	if (wvrt_length == wvrtbuffer->wvrt_capacity) {
-		int32_t wvrt_capacity = wvrtbuffer->wvrt_capacity;
-		int32_t wvrt_next = wvrt_capacity > INT32_MAX / 2 ? INT32_MAX : wvrt_capacity * 2;
-		if (wvrt_next <= wvrt_length) { wvrt_next = wvrt_length + 1; }
-		wvrt_array_reserve_at_span(wvrtbuffer, wvrt_next, wvrtfile, wvrtstart, wvrtend);
+	wvrt_array_drop(queue);
+	return first_error;
+}
+#endif
+
+// Release a lexical queue and discard every result that was never claimed.
+void wvrt_worker_queue_drop(wvrt_array *queue) {
+	if (queue == NULL) { return; }
+#ifdef WVRT_POSIX_WORKERS
+	wvrt_worker_receipt **items = queue->wvrt_items;
+	WvrtWorkerSite site = queue->wvrt_length == 0 ? (WvrtWorkerSite){0, 0, 0} : items[0]->origin;
+	const int previous = wvrt_worker_protect(site, NULL);
+	const char *error = wvrt_worker_queue_drain(queue, &site);
+	if (error != NULL) { wvrt_trap_at_span(site.file, site.start, site.end, error); }
+	(void)wvrt_worker_deliver(NULL, previous);
+#else
+	wvrt_array_drop(queue);
+#endif
+}
+
+// Append an evaluated receipt and preserve queue ownership until storage growth succeeds.
+void wvrt_worker_queue_push_at_span(wvrt_array **slot, wvrt_worker_receipt *receipt,
+	int32_t file, int32_t start, int32_t end) {
+	if (*slot != NULL && receipt != NULL && wvrt_array_try_append(*slot, &receipt) == NULL) { return; }
+#ifdef WVRT_POSIX_WORKERS
+	WvrtWorkerSite site = {file, start, end};
+	(void)wvrt_worker_protect(site, NULL);
+	(void)wvrt_worker_queue_drain(wvrt_array_take(slot), &site);
+	// The incoming receipt was transferred out of its lexical slot before the append.
+	if (receipt != NULL) {
+		wvrt_array *result;
+		(void)wvrt_worker_retire(receipt, true, &result);
+		wvrt_array_drop(result);
 	}
-	size_t wvrt_size = wvrtbuffer->wvrt_element_size;
-	memcpy((unsigned char *)wvrtbuffer->wvrt_items + (size_t)wvrt_length * wvrt_size,
-		wvrtvalue, wvrt_size);
-	wvrtbuffer->wvrt_length = wvrt_length + 1;
-	wvrtbuffer->wvrt_spare = 0;
+#else
+	wvrt_array_drop(wvrt_array_take(slot));
+#endif
+	wvrt_trap_at_span(file, start, end, "could not append worker receipt");
+}
+
+// Consume the receipt queue and transfer each result to its submission-order slot.
+wvrt_array *wvrt_worker_join_all_at_span(wvrt_array **slot, int32_t file, int32_t start, int32_t end) {
+	if (*slot == NULL) { wvrt_trap_at_span(file, start, end, "cannot join an empty worker queue slot"); }
+#ifdef WVRT_POSIX_WORKERS
+	WvrtWorkerSite site = {file, start, end};
+	const int previous = wvrt_worker_protect(site, NULL);
+	wvrt_array *queue = wvrt_array_take(slot);
+	wvrt_array *results = wvrt_prepare_rows(wvrt_array_try_new(queue->wvrt_length,
+		sizeof(wvrt_array *), _Alignof(wvrt_array *)));
+	// Output allocation failure still retires all the consumed receipts.
+	if (results == NULL) {
+		(void)wvrt_worker_queue_drain(queue, &site);
+		wvrt_trap_at_span(file, start, end, "could not allocate worker results");
+	}
+	wvrt_worker_receipt **pending = queue->wvrt_items;
+	wvrt_array **rows = results->wvrt_items;
+	// Published results remain owned by the output even when a later join fails.
+	for (int32_t index = 0; index < queue->wvrt_length; ++index) {
+		wvrt_worker_receipt *worker = pending[index];
+		pending[index] = NULL;
+		const char *error = wvrt_worker_retire(worker, true, &rows[index]);
+		// Release the collected prefix and all remaining receipts before reporting the failure.
+		if (error != NULL) {
+			wvrt_array_drop(results);
+			(void)wvrt_worker_queue_drain(queue, &site);
+			wvrt_trap_at_span(file, start, end, error);
+		}
+	}
+	wvrt_array_drop(queue);
+	return wvrt_worker_deliver(results, previous);
+#else
+	wvrt_array_drop(wvrt_array_take(slot));
+	return wvrt_array_new_rows_at_span(0, file, start, end);
+#endif
 }
 
 // Close an occupied slot without dropping owners moved into the surviving prefix.
