@@ -347,6 +347,28 @@ Equal arguments to the same defining declaration share one specialization,
 including when different import aliases name the same enum. Different
 variants distinguish nominal record types even when their fields match.
 
+A function template can also declare a compile-time operation with
+`(fn Before)`. Supply the bare name of a concrete Wove function in the
+specialization. The instantiated body checks a direct call against that
+function's exact parameter and result types.
+
+```lisp
+(fn choose (generic (type T) (fn Before))
+    (params (left T) (right T)) (returns T)
+    (body
+        (return (if (call Before (local right) (local left))
+            (then (local right))
+            (else (local left))))))
+
+(call (specialize choose Row before) (local first) (local second))
+```
+
+An enclosing template can forward `Before` as a bare specialization
+argument, for example `(specialize choose T Before)`. Aliases of the
+same defining function share an instance. Different functions select
+distinct instances even when their signatures match. An operation can
+be called or forwarded and has no runtime parameter or callable value.
+
 ### Records and ownership
 
 A struct defines a nominal type. Copyable fields can hold scalars,

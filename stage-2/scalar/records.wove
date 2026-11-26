@@ -9,8 +9,9 @@
 
 	(use wove-file "../source/generics.wove"
 		(only has_generic_head has_specialization_head function_generic_list read_generic_parameter generic_argument_kind
-			read_generic_i32 read_generic_bool constant_at constant_type_operand hash_generic_word is_checked_constant_operand
-			(value checked_type_operand) (value checked_i32_operand) (value checked_bool_operand) (value checked_enum_operand) (value generic_bool_kind) (value generic_enum_kind)
+			read_generic_i32 read_generic_bool constant_at constant_type_operand hash_generic_word is_checked_non_type_operand
+			(value checked_type_operand) (value checked_i32_operand) (value checked_bool_operand) (value checked_enum_operand) (value generic_bool_kind) (value generic_enum_kind) (value generic_operation_kind)
+			(value checked_operation_operand)
 			(type GenericConstant)))
 	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value variants_list) (value match_case)))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_encoder))
@@ -326,7 +327,7 @@
 			(if
 				(:doc "A non-i32 parameter cannot fall through to an identically spelled module integer.")
 				(bool.or (u8.eq (struct.get (local node) generic_kind) (local checked_type_operand))
-					(call is_checked_constant_operand (struct.get (local node) generic_kind)))
+					(call is_checked_non_type_operand (struct.get (local node) generic_kind)))
 				(then (return -1i32)))
 			(let start (struct.get (local node) start))
 			(let end (struct.get (local node) end))
@@ -1254,6 +1255,16 @@
 			(bindings (shared-array GraphBinding)) (scope TypeScope) (argument i32) (kind u32)) (returns GenericConstant)
 		(body
 			(let node (array.load (local nodes) (local argument)))
+			(let operation (u8.eq (struct.get (local node) generic_kind) (local checked_operation_operand)))
+			(if
+				(:doc "An operation must have been resolved to an ordinary defining function before checking the key.")
+				(bool.or (local operation) (u32.eq (local kind) (local generic_operation_kind)))
+				(then
+					(if
+						(:doc "Only a function parameter accepts a checked operation identity.")
+						(bool.and (local operation) (u32.eq (local kind) (local generic_operation_kind)))
+						(then (return (call constant_at (local node) (struct.get (local node) generic_value) 0u32))))
+					(return (call constant_at (local node) 0u32 23u32))))
 			(if
 				(:doc "Only explicitly typed i32 literals inhabit the constant parameter kind.")
 				(u32.eq (local kind) 2u32)
@@ -1353,6 +1364,11 @@
 						(u32.from-i32 (local ordinal))))))
 			(let prefix (call hash_generic_word (local identity) (local kind)))
 			(if
+				(:doc "Use the defining function's source-derived identity instead of its flattened row.")
+				(u32.eq (local kind) (local generic_operation_kind))
+				(then (return (call hash_generic_word (local prefix)
+					(struct.get (array.load (local nodes) (i32.from-u32 (local value))) generic_value)))))
+			(if
 				(:doc "The argument kind and nominal tag distinguish records from scalars and i32 bits.")
 				(bool.and (u32.eq (local kind) 1u32) (call is_record_type (local value)))
 				(then
@@ -1447,7 +1463,7 @@
 				(struct.get (local layout) identity)))))
 
 	(fn same_specialization_arguments
-		(:doc "Compare checked types, constant bits, and defining variant rows across application namespaces.")
+		(:doc "Compare checked types, constant bits, variant rows, and operation declarations across application namespaces.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
 			(bindings (shared-array GraphBinding)) (scope TypeScope) (use i32)
 			(previous_scope TypeScope) (previous i32) (parameters i32) (definition_scope TypeScope)) (returns bool)
@@ -1562,8 +1578,8 @@
 				(u8.eq (struct.get (local name) generic_kind) (local checked_type_operand))
 				(then (return (struct.get (local name) generic_value))))
 			(if
-				(:doc "A constant parameter cannot fall through to an identically spelled module type.")
-				(call is_checked_constant_operand (struct.get (local name) generic_kind))
+				(:doc "A compile-time value or operation cannot fall through to an identically spelled module type.")
+				(call is_checked_non_type_operand (struct.get (local name) generic_kind))
 				(then (return 0u32)))
 			(if
 				(:doc "A generic record type carries explicit arguments at its point of use.")
@@ -2214,7 +2230,7 @@
 
 	(fn read_template_parameters
 		(:doc "Validate a nonempty generic list and reserve each name only once.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (list SourceNode)) (returns EntryRead)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (list SourceNode) (functions bool)) (returns EntryRead)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local list)))
 			(let selected (call validate_form_metadata (borrow-shared (local source)) (borrow-shared (local nodes)) (local list) (local parts)))
@@ -2237,10 +2253,15 @@
 						(u32.gtz (struct.get (local parameter) error))
 						(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local parameter) start))
 							(end (struct.get (local parameter) end)) (error (struct.get (local parameter) error)) (related -1i32)))))
+					(if
+						(:doc "Only function templates can declare a compile-time operation.")
+						(bool.and (bool.not (local functions))
+							(u32.eq (struct.get (local parameter) kind) (local generic_operation_kind)))
+						(then (return (call entry_at (local form) -1i32 22u32))))
 					(let name (array.load (local nodes) (struct.get (local parameter) name)))
 					(let-mut prior (local first))
 					(while
-						(:doc "Type and constant parameters share the lexical substitution namespace.")
+						(:doc "All generic parameters share the lexical substitution namespace.")
 						(i32.lt (local prior) (local current))
 						(body
 							(let prior_form (array.load (local nodes) (local prior)))
@@ -2281,7 +2302,7 @@
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
 			(bindings (shared-array GraphBinding)) (scope TypeScope) (list SourceNode)) (returns EntryRead)
 		(body
-			(let form (call read_template_parameters (borrow-shared (local source)) (borrow-shared (local nodes)) (local list)))
+			(let form (call read_template_parameters (borrow-shared (local source)) (borrow-shared (local nodes)) (local list) (bool true)))
 			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
 			(return (call validate_template_constants (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (struct.get (local form) operand)))))
@@ -2310,7 +2331,7 @@
 							(array.load (local nodes) (local fields)))))
 				(then
 					(let list (array.load (local nodes) (local fields)))
-					(let checked (call read_template_parameters (borrow-shared (local source)) (borrow-shared (local nodes)) (local list)))
+					(let checked (call read_template_parameters (borrow-shared (local source)) (borrow-shared (local nodes)) (local list) (bool false)))
 					(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
 					(set (local generic) (struct.get (local checked) operand))
 					(set (local fields) (struct.get (local list) next_sibling))))
