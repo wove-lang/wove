@@ -14,6 +14,8 @@
 
 	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value enum_payload_constructor) (value match_statement)
 		(value pending_match_value) (value match_case_gate)))
+	(use wove-file "./slice_options.wove" (only plan_try_slice plan_view_option))
+	(use wove-file "../source/slice_options.wove" (only (value try_slice_kind) (value optional_view_type) (value optional_view_absent) (value optional_view_unwrap)))
 	(use wove-file "./locals.wove" (only find_local read_local_name))
 	(use wove-file "./integer_literals.wove" (only plan_integer_value))
 	(use wove-file "./matches.wove" (only plan_match_cases enter_case_owner match_continues seed_match_value seed_match_results finish_match_value find_match_binding))
@@ -56,7 +58,7 @@
 		(type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./function_refs.wove" (only register_function_references plan_function_reference))
 	(use wove-file "./value_types.wove" (only value_matches_type (value static_number)))
-	(use wove-file "./borrowed_results.wove" (only borrowed_result_view is_provenance_return invalid_return_origin))
+	(use wove-file "./borrowed_results.wove" (only borrowed_result_view is_provenance_return invalid_return_origin binding_initializer))
 	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
 	(use wove-file "../source/owned.wove" (only (value optional_none) (value optional_some) (value pending_optional_some)))
 	(use wove-file "./recoverable_growth.wove" (only read_push_outcome))
@@ -69,7 +71,7 @@
 	(use wove-file "./loans.wove" (only has_conflicting_loan has_scoped_array_loan indexed_owner_base expression_row borrowed_call_row
 		runtime_expression writable_place check_writable_field mutable_parameter_place call_loan_keyword inferred_array_loan
 		store_place_loan plan_owned_field_loan plan_scoped_field_loan read_borrow_source finish_indexed_array_loan
-		(value infer_shared_array) (value infer_mut_array) (value indirect_local_place) (value local_slice_view)
+		is_local_slice_view (value scoped_array_initializer) (value infer_shared_array) (value infer_mut_array) (value indirect_local_place) (value local_slice_view)
 		(value local_slice_projection) (value scoped_field_loan) (value indexed_record_loan) (type ScalarExpression)))
 	(use wove-file "./fixed.wove" (only plan_fixed_slice_loan plan_fixed_initializer seed_fixed_initializer finish_owned_fixed_access finish_fixed_access))
 	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding is_iteration_binding is_writable_local (type ScalarStatement)
@@ -104,7 +106,6 @@
 	(let owned_parameter_binding 571u32)
 	(let pending_row_move 106u32)
 	(let pending_member_move 248u32)
-	(let scoped_array_initializer 48u32)
 
 	(fn owned_result_type
 		(:doc "Resolve an owned parameter or result in the function's type namespace.")
@@ -2201,9 +2202,11 @@
 				(u32.eq (struct.get (local resolved) kind) 62u32)
 				(then
 					(if
-						(:doc "An iterator can read immutable module storage without a scoped binding loan.")
+						(:doc "Iteration and a fallible shared slice can refer to static storage without a local loan.")
 						(bool.and (local inferring)
-							(bool.not (call is_iteration_statement (borrow-shared (local source)) (borrow-shared (local nodes)) (local statement))))
+							(bool.not (bool.or
+								(u32.eq (struct.get (array.load (local expressions) (struct.get (local use) parent)) kind) (local try_slice_kind))
+								(call is_iteration_statement (borrow-shared (local source)) (borrow-shared (local nodes)) (local statement)))))
 						(then (return (call entry_at (local reference) -1i32 24u32))))
 					(return (local checked))))
 			(let-mut expected (local expectation))
@@ -2269,6 +2272,7 @@
 					(set (local kind) 35u32)
 					(if (call is_writable_slice (local type)) (then (set (local kind) 39u32)))))
 			(let local_source (bool.or (local owner) (local scoped)))
+			(let-mut extent -1i32)
 			(if
 				(:doc "A named view already contains a descriptor. A shared reborrow can project it.")
 				(local scoped)
@@ -2277,7 +2281,19 @@
 					(if
 						(:doc "Only a shared use of a mutable view needs a descriptor conversion.")
 						(bool.and (call is_writable_slice (local actual)) (bool.not (call is_writable_slice (local type))))
-						(then (set (local kind) (local local_slice_projection))))))
+						(then (set (local kind) (local local_slice_projection))))
+					(let initializer (call binding_initializer (borrow-shared (local nodes)) (borrow-shared (local statements))
+						(local target) (local index)))
+					(if
+						(:doc "An unwrap or a reborrow of an exact local view keeps the established extent.")
+						(i32.not-ltz (local initializer))
+						(then
+							(let value (array.load (local expressions) (local initializer)))
+							(let origin_kind (struct.get (local value) kind))
+							(if
+								(:doc "Only these checked view rows store a known length in asset_end.")
+								(bool.or (u32.eq (local origin_kind) (local optional_view_unwrap)) (call is_local_slice_view (local origin_kind)))
+								(then (set (local extent) (struct.get (local value) asset_end))))))))
 			(if
 				(:doc "Earlier operands and scoped declarations can retain a loan of the source.")
 				(bool.and (bool.or (local local_source) (call is_writable_slice (local actual)))
@@ -2287,7 +2303,7 @@
 			(array.store (local expressions) (local index)
 				(struct.new ScalarExpression (kind (local kind)) (type (local type)) (target (local target))
 					(first -1i32) (start 0i32) (end 0i32) (negative (bool false)) (borrowed_owner (local local_source))
-					(mutable_place (bool false)) (projection -1i32) (asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))
+					(mutable_place (bool false)) (projection -1i32) (asset_start 0i32) (asset_end (local extent)) (extent_check -1i32)))
 			(return (local checked))))
 
 	(fn plan_range_borrow
@@ -2740,6 +2756,12 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
 			(if
+				(:doc "An optional descriptor must be checked before its shared contents can be borrowed.")
+				(u32.eq (local tag) (call optional_unwrap_kind))
+				(then (return (call plan_view_option (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local reference) (local index) (local expected) (local tag) (local caller) (local statement) (local view_start)
+					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
+			(if
 				(:doc "A resource formal can lend a projected owner slot or a named handle.")
 				(call is_native_owner (local expected))
 				(then
@@ -2803,6 +2825,12 @@
 			(let reference (array.load (local nodes) (local reference_index)))
 			(let origin (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local origin) head)))
+			(if
+				(:doc "A checked shared unwrap can introduce an ordinary local view of the same extent.")
+				(bool.and (u32.eq (local tag) (call optional_unwrap_kind)) (u32.eq (local keyword) 35u32))
+				(then (return (call plan_view_option (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local reference) (local index) (local infer_shared_array) (local tag) (local caller) (local statement) (local view_start)
+					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A shared field loan infers its descriptor for this scope.")
 				(bool.and (u32.eq (local tag) 52u32) (u32.eq (local keyword) 35u32))
@@ -3781,6 +3809,18 @@
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let tag (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
 			(if
+				(:doc "Checked exact slices retain their source through an immutable optional local.")
+				(u32.eq (local tag) (local try_slice_kind))
+				(then (return (call plan_try_slice (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local expected) (local statement) (local caller)
+					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "Presence testing and read-only extraction resolve a lexical view option.")
+				(bool.or (u32.eq (local tag) (local optional_view_absent)) (u32.eq (local tag) (call optional_unwrap_kind)))
+				(then (return (call plan_view_option (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (local expected) (local tag) (local caller) (local statement) (local view_start)
+					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
+			(if
 				(:doc "A function reference yields the checked defining function's address.")
 				(u32.eq (local tag) (local fn_ref_kind))
 				(then (return (call plan_function_reference (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -4666,6 +4706,10 @@
 		(body
 			(let kind (struct.get (local row) kind))
 			(if
+				(:doc "A checked unwrap and later reborrows retain the constructor's exact requested size.")
+				(bool.or (u32.eq (local kind) (local optional_view_unwrap)) (call is_local_slice_view (local kind)))
+				(then (return (struct.get (local row) asset_end))))
+			(if
 				(:doc "Both inline-loan modes carry the layout's element count.")
 				(bool.or (u32.eq (local kind) (local fixed_shared_loan)) (u32.eq (local kind) (local fixed_mut_loan)))
 				(then (return (struct.get (local row) start))))
@@ -5354,7 +5398,9 @@
 								(then (set (local previous_owner) (local index))))
 							(if
 								(:doc "A view or scoped record holds its loans after checking the complete initializer.")
-								(bool.or (bool.and (u32.eq (local kind) 15u32) (call is_readable_slice (struct.get (local statement) type)))
+								(bool.or (bool.and (u32.eq (local kind) 15u32)
+										(bool.or (call is_readable_slice (struct.get (local statement) type))
+											(u32.eq (struct.get (local statement) type) (local optional_view_type))))
 									(bool.and (bool.or (u32.eq (local kind) 15u32) (u32.eq (local kind) 16u32))
 										(call is_scoped_record (borrow-shared (local records)) (struct.get (local statement) type))))
 								(then (set (local previous_loan) (local index))))

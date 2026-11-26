@@ -434,6 +434,9 @@ void wvrt_array_truncate_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_length,
 	})
 wvrt_slice wvrt_slice_range_u8(const void *wvrt_items, int32_t wvrt_length,
 	int32_t wvrt_start, int32_t wvrt_end, wvrt_location wvrt_site);
+// A negative descriptor length represents absence, including for a zero-extent request past the end.
+wvrt_slice wvrt_slice_try_exact(wvrt_slice view, int32_t offset, int32_t extent);
+wvrt_slice wvrt_slice_require_present_at_span(wvrt_slice view, int32_t file, int32_t start, int32_t end);
 wvrt_slice wvrt_slice_range_at_span(wvrt_slice wvrt_view, int32_t wvrt_start, int32_t wvrt_end,
 	int32_t wvrt_file, int32_t wvrt_span_start, int32_t wvrt_span_end);
 wvrt_slice wvrt_slice_range_u8_at_span(wvrt_slice wvrt_view, int32_t wvrt_start, int32_t wvrt_end,
