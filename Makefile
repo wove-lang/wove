@@ -44,7 +44,7 @@ C_STANDARD_MODULE := stage-2/c/standard.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
 C_EMITTER_SOURCES := $(BOOLEAN_TEXT_MODULE) $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/array_growth.wove source/numeric_ops.wove source/integer_ops.wove source/integer_bits.wove source/integer_compare.wove source/integer_checks.wove source/literals.wove source/extent.wove source/float_ops.wove source/enum_forms.wove source/generics.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/conditional.wove emit/matches.wove emit/loops.wove emit/arrays.wove emit/array_growth.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/integer_checks.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_prototype.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/owned_fields.wove emit/owned_aggregates.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
-	scalar/syntax.wove scalar/signatures.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/conditional.wove scalar/integer_literals.wove scalar/matches.wove scalar/match_patterns.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/specializations.wove scalar/generics/workspace.wove scalar/generics/clone.wove scalar/generics/functions.wove scalar/owners.wove) $(DECIMAL_WRITER)
+	scalar/syntax.wove scalar/signatures.wove scalar/worker.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/conditional.wove scalar/integer_literals.wove scalar/matches.wove scalar/match_patterns.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/specializations.wove scalar/generics/workspace.wove scalar/generics/clone.wove scalar/generics/functions.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_BITS := stage-2/hashing/bits.wove
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove) $(HASHING_BITS)
 HASHING_FIXTURES := tests/stage-2/hashing
@@ -93,6 +93,9 @@ NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/io/process_file.wove \
 	$(PROCESS_LAUNCHER_SOURCES) $(DRIVER_C_PROVIDERS) $(CLANG_QUERY_SOURCES))
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
+WORKER_FIXTURES := $(NATIVE_CLI_FIXTURES)/workers
+WORKER_RUNTIME := $(STAGE2)/workers/runtime.o
+WORKER_PROBE := $(STAGE2)/workers/failure
 PROCESS_MODULES := stage-2/io/process.wove stage-2/io/temporary.wove stage-2/io/capture/descriptors.wove stage-2/io/capture/child.wove
 PROCESS_FIXTURES := tests/stage-2/process
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
@@ -136,7 +139,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 	}' "$(OWNERSHIP_CASES)")
 
 .PHONY: all stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
-.PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-process test-stage-2-version force-build-info
+.PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-workers test-stage-2-process test-stage-2-version force-build-info
 .PHONY: test-stage-2-inventory
 .DELETE_ON_ERROR:
 .SECONDARY:
@@ -204,7 +207,7 @@ test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
 test-stage-2-native: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-native: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-native: export WOVE_BUILD_CLANG = $(CLANG)
-test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80
+test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80 test-stage-2-workers
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/discovery/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
@@ -227,6 +230,23 @@ test-stage-2-f80: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-f80: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-f80: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/extended/check.py" "$(NATIVE_COMPILER)"
+
+# Run the Wove transfer fixtures and the host probe for thread API failures.
+test-stage-2-workers: export WOVE_TEST_CLANG = $(CLANG)
+test-stage-2-workers: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2-workers: $(NATIVE_COMPILER) $(WORKER_PROBE)
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(WORKER_FIXTURES)/cases.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_PROBE)" "$(WORKER_FIXTURES)/failure.tsv"
+
+# Intercept thread creation and join in the runtime object used by the worker probe.
+$(WORKER_RUNTIME): $(RUNTIME) $(RUNTIME_HEADER)
+	mkdir -p "$(@D)"
+	$(CLANG) -std=c11 $(CFLAGS) -pthread -Dpthread_create=fixture_worker_create \
+		-Dpthread_join=fixture_worker_join -c "$<" -o "$@"
+
+# The probe can still call the original thread APIs when a case allows them.
+$(WORKER_PROBE): $(WORKER_FIXTURES)/failure.c $(WORKER_RUNTIME) $(RUNTIME_HEADER)
+	$(CLANG) -std=c11 $(CFLAGS) -pthread -I runtime $(filter-out %.h,$^) -o "$@"
 
 # Check generated metadata and version invalidation in an isolated build.
 test-stage-2-version: $(NATIVE_COMPILER) $(BUILD_VERSION)

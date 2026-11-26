@@ -249,6 +249,9 @@ wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrt_table,
 wvrt_array *wvrt_require_array_at_span(wvrt_array *wvrt_value, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_array_drop(wvrt_array *wvrt_buffer);
+// Transfer a job to a fresh thread, then deliver its owned result on the caller's thread.
+wvrt_array *wvrt_worker_spawn_join_at_span(wvrt_array *(*wvrt_handler)(wvrt_array *), wvrt_array *wvrt_job,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 bool wvrt_array_try_reserve(wvrt_array *wvrt_buffer, int32_t wvrt_capacity);
 void wvrt_array_reserve_at_span(wvrt_array *wvrt_buffer, int32_t wvrt_capacity,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

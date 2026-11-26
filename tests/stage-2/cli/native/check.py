@@ -1,7 +1,7 @@
 # Copyright (c) 2026 wove contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-"""Run the native compiler and check its declared files, output, and diagnostics."""
+"""Check native compiler scenarios and host probes against their manifests."""
 
 import json
 import os
@@ -279,8 +279,29 @@ def check_case(compiler, clang, runtime, fixtures, row):
 				run_program(root, program, label, fixtures, run_expected)
 
 
-# Run each external scenario with the same compiler settings as the suite.
+# Read tab-separated manifest rows, skipping headers and comments.
+def manifest_rows(manifest):
+	# Each row is independent and may contain JSON fields.
+	for line in manifest.read_text(encoding="utf-8").splitlines():
+		if line and not line.startswith("#"):
+			yield line.split("\t")
+
+
+# Execute a prebuilt host probe once per manifest row with isolated working directories.
+def check_host(program, manifest):
+	# Use the same argv, stdin, exit status, and exact stream checks as emitted programs.
+	for label, expected in manifest_rows(manifest):
+		with TemporaryDirectory(prefix="native-host-") as workspace:
+			run_program(Path(workspace), program, label, manifest.parent, json.loads(expected))
+
+
+# Run either a host probe or compiler scenarios using the suite's compiler settings.
 def main():
+	# A host probe is already executable and needs no compiler relocation or build phase.
+	if sys.argv[1:2] == ["--host"]:
+		program, manifest = (Path(value).resolve() for value in sys.argv[2:])
+		check_host(program, manifest)
+		return
 	compiler, manifest = (Path(value).resolve() for value in sys.argv[1:])
 	clang = [*shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang")), "-std=c11",
 		*shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))]
@@ -290,10 +311,8 @@ def main():
 		installed = Path(install) / compiler.name
 		shutil.copy2(compiler, installed)
 		# The manifest supplies paths, argv, artifacts, and diagnostics.
-		for line in manifest.read_text(encoding="utf-8").splitlines():
-			# Ignore the manifest header and comments.
-			if line and not line.startswith("#"):
-				check_case(installed, clang, runtime, manifest.parent, line.split("\t"))
+		for row in manifest_rows(manifest):
+			check_case(installed, clang, runtime, manifest.parent, row)
 
 
 if __name__ == "__main__":
