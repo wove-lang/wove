@@ -9,15 +9,16 @@
 
 	(use wove-file "./bundled.wove" (only load_bundled_providers bundled_file_count bundled_input_width write_bundled_sources))
 	(use wove-file "./diagnostics.wove" (only report_source (value invalid_source) (value unreadable_file)))
-	(use wove-file "./disk_files.wove" (only load_disk_edge disk_space (type DiskFile) (type DiskSpace)))
+	(use wove-file "./disk_files.wove" (only load_disk_edge duplicate_disk_failure disk_space (type DiskFile) (type DiskSpace)))
 	(use wove-file "./files.wove" (only invalid_file_stamp (type FileStamp)))
 	(use wove-file "./protection.wove" (only (type BuildProtection)))
 	(use wove-file "./platform.wove" (only native_selection))
 	(use wove-file "./graph_storage.wove" (only copy_disk_edges copy_graph_modules copy_graph_imports))
+	(use wove-file "./check_graph.wove" (only check_resolved_disk_graph))
 	(use wove-file "./graph.wove" (only report_graph_source report_graph_location compile_resolved_graph))
 	(use wove-file "../source/target.wove" (only (type SelectionContext)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
-	(use wove-file "../source/graph.wove" (only resolve_disk_graph (type GraphModule) (type GraphUse)
+	(use wove-file "../source/graph.wove" (only resolve_disk_graph graph_recoverable (type GraphModule) (type GraphUse)
 		(type GraphSelector) (type GraphBinding) (type GraphResult) (type DiskEdge) (type GraphProgress)))
 	(use wove-file "../text/copy.wove" (only append_bytes))
 
@@ -115,12 +116,66 @@
 		(params (arena (shared-array u8)) (length i32) (files (shared-array SuppliedFile)) (context SelectionContext)
 			(modules (mut-array GraphModule)) (bindings (mut-array GraphBinding)) (uses (mut-array GraphUse))
 			(selectors (mut-array GraphSelector)) (targets (shared-array DiskEdge))
-			(progress (mut-array GraphProgress))) (returns GraphResult)
+			(progress (mut-array GraphProgress)) (recover bool)) (returns GraphResult)
 		(body
 			(return (call resolve_disk_graph (borrow-shared (array.range (local arena) 0i32 (local length)))
 				(borrow-shared (local files)) 0i32 (local context) (borrow-mut (local modules))
 				(borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))
-				(borrow-shared (local targets)) (borrow-mut (local progress))))))
+				(borrow-shared (local targets)) (borrow-mut (local progress)) (local recover)))))
+
+	(fn report_disk_diagnostic
+		(:doc "Keep unreadable imports distinct from syntax and selection errors.")
+		(params (path (shared-array u8)) (arena (shared-array u8)) (files (shared-array SuppliedFile))
+			(file i32) (error u32) (start i32) (end i32) (human bool))
+		(returns i32)
+		(body
+			(if
+				(:doc "An unavailable provider is a file read error at the importing use.")
+				(u32.eq (local error) 27u32)
+				(then (return (call report_graph_location (borrow-shared (local path))
+					(borrow-shared (local arena)) (borrow-shared (local files)) (local file)
+					(local error) (local start) (local end) (borrow-shared (local unreadable_file)) (local human)))))
+			(return (call report_graph_source (borrow-shared (local path))
+				(borrow-shared (local arena)) (borrow-shared (local files)) (local file)
+				(local error) (local start) (local end) (local human)))))
+
+	(fn report_recovered_graph_error
+		(:doc "Use the missing-file message only for a cached host read failure.")
+		(params (path (shared-array u8)) (arena (shared-array u8)) (files (shared-array SuppliedFile))
+			(edges (shared-array DiskEdge)) (result GraphResult) (human bool))
+		(returns i32)
+		(body
+			(let file (struct.get (local result) file))
+			(let error (struct.get (local result) error))
+			(let start (struct.get (local result) start))
+			(let end (struct.get (local result) end))
+			(if
+				(:doc "Other graph failures with the same code keep their ordinary source diagnostic.")
+				(u32.eq (local error) 27u32)
+				(then
+					(let-mut index 0i32)
+					(while
+						(:doc "The read cache keeps the importing file and original operand or use span.")
+						(i32.lt (local index) (array.len (local edges)))
+						(body
+							(let edge (array.load (local edges) (local index)))
+							(if
+								(:doc "A matching cached read error retains the host message.")
+								(bool.and (u32.eq (struct.get (local edge) error) (local error))
+									(bool.and (i32.eq (struct.get (local edge) file) (local file))
+										(bool.and (i32.eq (struct.get (local edge) error_start) (local start))
+											(i32.eq (struct.get (local edge) error_end) (local end)))))
+								(then
+									(if
+										(:doc "Two importers can encounter the same unavailable path before it has a file identity.")
+										(call duplicate_disk_failure (borrow-shared (local arena)) (borrow-shared (local files))
+											(borrow-shared (local edges)) (local index))
+										(then (return 1i32)))
+									(return (call report_disk_diagnostic (borrow-shared (local path)) (borrow-shared (local arena))
+										(borrow-shared (local files)) (local file) (local error) (local start) (local end) (local human)))))
+							(set (local index) (i32.add.wrapping (local index) 1i32))))))
+			(return (call report_graph_source (borrow-shared (local path)) (borrow-shared (local arena))
+				(borrow-shared (local files)) (local file) (local error) (local start) (local end) (local human)))))
 
 	(fn walk_disk
 		(:doc `Drive the target-aware resolver until emission, a native read error, or a source error.`)
@@ -146,18 +201,36 @@
 					(let resolved (call resolve_loaded_edges (borrow-shared (local arena)) (local length)
 						(borrow-shared (local files)) (local context) (borrow-mut (local modules))
 						(borrow-mut (local bindings)) (borrow-mut (local uses)) (borrow-mut (local selectors))
-						(borrow-shared (local targets)) (borrow-mut (local progress))))
+						(borrow-shared (local targets)) (borrow-mut (local progress)) (local check_only)))
 					(let error (struct.get (local resolved) error))
 					(if
 						(:doc "One successful graph feeds one retained C translation unit.")
 						(u32.eq (local error) 0u32)
 						(then
+							(if
+								(:doc "Check independent files before releasing the source graph's failure state and loaded edges.")
+								(local check_only)
+								(then (return (call check_resolved_disk_graph (borrow-shared (local path)) (borrow-shared (local canonical))
+									(borrow-shared (local probe_options)) (local protection) (local target_index) (local resolved)
+									(borrow-shared (array.range (local arena) 0i32 (local length))) (borrow-shared (local files))
+									(borrow-shared (local targets)) (borrow-mut (local modules)) (borrow-shared (local bindings)) (local human)))))
 							(return (call compile_resolved_graph (borrow-shared (local path)) (borrow-shared (local canonical))
 								(borrow-shared (local destination)) (borrow-shared (local private_c)) (borrow-shared (local probe_options))
 								(local protection) (local target_index) (local check_only) (borrow-shared (local arena))
 								(borrow-shared (local files)) (borrow-shared (local modules)) (borrow-shared (local bindings))
 								(local resolved) (local length) (local human)))))
 					(let file (struct.get (local resolved) file))
+					(if
+						(:doc "Stream each primary diagnostic from the final header-aware pass and resume its checkpoint.")
+						(call graph_recoverable (local resolved))
+						(then
+							(if
+								(:doc "Discovery records the same failures for the final pass without reporting them twice.")
+								(struct.get (array.load (local progress) 0i32) binding)
+								(then
+									(let reported (call report_recovered_graph_error (borrow-shared (local path)) (borrow-shared (local arena))
+										(borrow-shared (local files)) (borrow-shared (local targets)) (local resolved) (local human)))))
+							(continue)))
 					(if
 						(:doc "Only the first unresolved active Wove edge may touch disk.")
 						(i32.lt -1i32 (struct.get (local resolved) path_start))
@@ -176,14 +249,17 @@
 									(let start (struct.get (local read) start))
 									(let end (struct.get (local read) end))
 									(if
-										(:doc "An unavailable provider is a file read error at the importing use.")
-										(u32.eq (local read_error) 27u32)
-										(then (return (call report_graph_location (borrow-shared (local path))
-											(borrow-shared (local arena)) (borrow-shared (local files)) (local file)
-											(local read_error) (local start) (local end) (borrow-shared (local unreadable_file)) (local human)))))
-									(return (call report_graph_source (borrow-shared (local path))
-										(borrow-shared (local arena)) (borrow-shared (local files)) (local file)
-										(local read_error) (local start) (local end) (local human)))))
+										(:doc "A failed read occupies one cached edge, so the final pass can replay its primary diagnostic.")
+										(bool.and (local check_only) (bool.not (u32.eq (local read_error) 16u32)))
+										(then
+											(array.store (local edges) (local edge_count)
+												(struct.new DiskEdge (file (local file)) (start (struct.get (local resolved) start))
+													(target -1i32) (path_start (struct.get (local resolved) path_start))
+													(path_end (struct.get (local resolved) path_end)) (error_start (local start)) (error_end (local end)) (error (local read_error))))
+											(set (local edge_count) (i32.add.wrapping (local edge_count) 1i32))
+											(continue)))
+									(return (call report_disk_diagnostic (borrow-shared (local path)) (borrow-shared (local arena))
+										(borrow-shared (local files)) (local file) (local read_error) (local start) (local end) (local human)))))
 							(if
 								(:doc "Reserve storage before opening the same read request again.")
 								(struct.get (local read) grow)
