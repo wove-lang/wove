@@ -145,7 +145,7 @@ the payload and drops it on exit unless it moves again. A discard or
 wildcard also releases any active owner at arm exit.
 
 A built-in integer match uses literal patterns and requires a final
-`(case _ ...)`. Bare decimal and hexadecimal patterns take the subject's
+`(case _ ...)`. Bare decimal, hexadecimal, and binary patterns take the subject's
 type. An explicit type, as in `1u32` or `(u32 1)`, must agree exactly
 with the subject. Duplicate integer values are errors across spellings.
 
