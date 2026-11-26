@@ -1,0 +1,117 @@
+(module scalar_constant_arithmetic
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Evaluate exact signed i32 arithmetic with the integer primitives available to the seed.")
+
+	(use wove-file "../source/integer_ops.wove" (only integer_operator is_checked_integer_operator is_integer_division is_integer_remainder))
+
+	(struct FoldedWord (fields (bits u32) (valid bool)))
+	(struct UnsignedDivision (fields (quotient u32) (remainder u32)))
+	(let sign_bit 2147483648u32)
+	(let max_positive 2147483647u32)
+
+	(fn signed_magnitude
+		(:doc "Take the unsigned magnitude, including a representable magnitude for INT32_MIN.")
+		(params (bits u32)) (returns u32)
+		(body
+			(if (u32.lt (local bits) (local sign_bit)) (then (return (local bits))))
+			(return (u32.sub 0u32 (local bits)))))
+
+	(fn divide_magnitudes
+		(:doc "Divide two i32 magnitudes by shifting the divisor only when it fits the remainder.")
+		(params (numerator u32) (denominator u32)) (returns UnsignedDivision)
+		(body
+			(let-mut quotient 0u32)
+			(let-mut remainder (local numerator))
+			(let-mut shift 31i32)
+			(while
+				(:doc "Each quotient bit removes a multiple that is representable as a word.")
+				(i32.not-ltz (local shift))
+				(body
+					(if
+						(:doc "Test the shifted comparison before shifting the divisor itself.")
+						(u32.not-lt (u32.shr (local remainder) (local shift)) (local denominator))
+						(then
+							(set (local remainder) (u32.sub (local remainder) (u32.shl (local denominator) (local shift))))
+							(set (local quotient) (u32.or (local quotient) (u32.shl 1u32 (local shift))))))
+					(set (local shift) (i32.dec (local shift)))))
+			(return (struct.new UnsignedDivision (quotient (local quotient)) (remainder (local remainder))))))
+
+	(fn multiply_words
+		(:doc "Multiply exact 32-bit bit patterns with modular doubling and addition.")
+		(params (left u32) (right u32)) (returns u32)
+		(body
+			(let-mut result 0u32)
+			(let-mut factor (local left))
+			(let-mut multiplier (local right))
+			(while
+				(:doc "An exhausted multiplier contributes no further bits.")
+				(u32.gtz (local multiplier))
+				(body
+					(if
+						(:doc "This set multiplier bit adds its factor modulo 2^32.")
+						(u32.not-eqz (u32.and (local multiplier) 1u32))
+						(then (set (local result) (u32.add (local result) (local factor)))))
+					(set (local factor) (u32.shl (local factor) 1i32))
+					(set (local multiplier) (u32.shr (local multiplier) 1i32))))
+			(return (local result))))
+
+	(fn apply_i32_constant_operation
+		(:doc "Match runtime wrapping, checked overflow, and signed division semantics for one decoded opcode.")
+		(params (kind u32) (left u32) (right u32)) (returns FoldedWord)
+		(body
+			(let negative_left (u32.not-lt (local left) (local sign_bit)))
+			(let different_sign (u32.not-eqz (u32.and (u32.xor (local left) (local right)) (local sign_bit))))
+			(let invalid (struct.new FoldedWord (bits 0u32) (valid (bool false))))
+			(if
+				(:doc "Only division overflows on INT32_MIN with a divisor of -1. The remainder is zero.")
+				(call is_integer_division (local kind))
+				(then
+					(let remainder (call is_integer_remainder (local kind)))
+					(if
+						(:doc "Reject the two invalid division inputs before computing any quotient.")
+						(bool.or (u32.eqz (local right))
+							(bool.and (bool.not (local remainder))
+								(bool.and (u32.eq (local left) (local sign_bit)) (u32.eq (local right) 4294967295u32))))
+						(then (return (local invalid))))
+					(let result (call divide_magnitudes (call signed_magnitude (local left)) (call signed_magnitude (local right))))
+					(let-mut bits (struct.get (local result) quotient))
+					(let-mut negative (local different_sign))
+					(if
+						(:doc "The quotient truncates toward zero, and the remainder takes the dividend's sign.")
+						(local remainder)
+						(then
+							(set (local bits) (struct.get (local result) remainder))
+							(set (local negative) (local negative_left))))
+					(if (local negative) (then (set (local bits) (u32.sub 0u32 (local bits)))))
+					(return (struct.new FoldedWord (bits (local bits)) (valid (bool true))))))
+			(let symbol (struct.get (call integer_operator (local kind)) symbol))
+			(let checked (call is_checked_integer_operator (local kind)))
+			(if
+				(:doc "Check a product by dividing the signed result limit by the second magnitude.")
+				(u8.eq (local symbol) 42u8)
+				(then
+					(if
+						(:doc "Only a nonzero checked operand requires a quotient limit.")
+						(bool.and (local checked) (u32.not-eqz (local right)))
+						(then
+							(let-mut limit (local max_positive))
+							(if (local different_sign) (then (set (local limit) (local sign_bit))))
+							(let bound (call divide_magnitudes (local limit) (call signed_magnitude (local right))))
+							(if
+								(:doc "Unsigned magnitudes compare before the product is formed.")
+								(u32.lt (struct.get (local bound) quotient) (call signed_magnitude (local left)))
+								(then (return (local invalid))))))
+					(return (struct.new FoldedWord (bits (call multiply_words (local left) (local right))) (valid (bool true))))))
+			(let addition (u8.eq (local symbol) 43u8))
+			(let-mut bits (u32.sub (local left) (local right)))
+			(if (local addition) (then (set (local bits) (u32.add (local left) (local right)))))
+			(let flipped (u32.not-eqz (u32.and (u32.xor (local left) (local bits)) (local sign_bit))))
+			(if
+				(:doc "A flipped result sign detects overflow for equal-sign sums and opposite-sign differences.")
+				(bool.and (bool.and (local checked) (local flipped))
+					(bool.or (bool.and (local addition) (bool.not (local different_sign)))
+						(bool.and (bool.not (local addition)) (local different_sign))))
+				(then (return (local invalid))))
+			(return (struct.new FoldedWord (bits (local bits)) (valid (bool true))))))
+)

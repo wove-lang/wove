@@ -246,8 +246,24 @@ represent all signed and unsigned integers of up to 64 bits exactly.
 A module-level `let` can hold an immutable scalar, a string, or an inline
 table. A quoted string gives a `(shared-array u8)` view whose length counts
 the decoded bytes. Declare an inline table with `array.new` or `array.repeat`.
-Its elements are exact scalar literals or constant constructors of a
+Its elements are exact scalar constants or constant constructors of a
 named Wove record. `array.load` can read the table directly.
+
+Stage 2 evaluates exact `i32` arithmetic in immutable module initializers,
+inline table elements, and fixed-array extents. Expressions can use
+`i32` literals, `(local name)` references to immutable `i32` module bindings
+(including selected imports), and `i32.add`, `i32.sub`, `i32.mul`,
+`i32.add-checked`, `i32.sub-checked`, `i32.mul-checked`, `i32.inc`,
+`i32.dec`, `i32.div`, and `i32.rem`. Bindings can refer forward to other
+constants. The compiler rejects cycles, overflow in checked arithmetic, zero divisors, and
+division of the signed minimum by −1. Plain arithmetic wraps and signed
+division truncates toward zero. A folded value retains type `i32`.
+
+```lisp
+(let BLOCK_SIZE 32768i32)
+(let PAYLOAD_SIZE
+    (i32.add (local BLOCK_SIZE) (i32.div (i32.add (local BLOCK_SIZE) 127i32) 128i32)))
+```
 
 ### Function values
 
@@ -587,8 +603,8 @@ iteration item.
 
 Fixed arrays keep their elements inline. Use
 `(array T extent)` for a builtin scalar, a Wove record, an owned array,
-or another fixed array. Each extent is a nonnegative decimal or an
-immutable module integer. For example, `(array (array i32 3) 2)` holds two
+or another fixed array. Each extent is a nonnegative decimal, an
+immutable module integer, or a constant `i32` expression. For example, `(array (array i32 3) 2)` holds two
 rows of three `i32` values. The type includes the leaf type and every extent.
 A fixed array of copyable elements copies by value.
 
