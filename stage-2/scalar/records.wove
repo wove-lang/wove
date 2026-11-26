@@ -16,6 +16,7 @@
 	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value variants_list) (value match_case)))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_encoder))
 	(use wove-file "../source/c_scope.wove" (only declaring_c_bridge project_bridge))
+	(use wove-file "../source/c_dependencies.wove" (only find_bridge_type_dependency))
 	(use wove-file "../source/scan.wove" (only is_disabled_form is_metadata_form (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts validate_form_metadata (type SelectedDeclaration)))
 	(use wove-file "../source/imports.wove" (only import_keyword))
@@ -756,20 +757,12 @@
 			(return (bool.and (i32.gtz (struct.get (local record) native))
 				(i32.lt -1i32 (struct.get (local record) count))))))
 
-	(fn native_field_type
-		(:doc `Resolve a checked field type in its defining bridge, independent of importer aliases.`)
+	(fn native_type_in_bridge
+		(:doc "Resolve a canonical type declared by the active providers for one header.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
-			(layout ScalarRecord) (field i32))
-		(returns u32)
+			(bridge i32) (name SourceNode))
+		(returns i32)
 		(body
-			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (array.load (local nodes) (local field))))
-			(let operand (struct.get (local parts) operands))
-			(let builtin (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
-			(if (u32.gtz (local builtin)) (then (return (local builtin))))
-			(let name (array.load (local nodes) (local operand)))
-			(let declaration (struct.get (array.load (local nodes) (struct.get (local layout) name)) parent))
-			(let bridge (call declaring_c_bridge (borrow-shared (local source)) (borrow-shared (local nodes))
-				(array.load (local nodes) (local declaration))))
 			(let project (call project_bridge (borrow-shared (local nodes)) (local bridge)))
 			(let-mut index 0i32)
 			(while
@@ -778,7 +771,7 @@
 				(body
 					(let row (array.load (local records) (local index)))
 					(let candidate (struct.get (local row) name))
-					(if (i32.eqz (local candidate)) (then (return 0u32)))
+					(if (i32.eqz (local candidate)) (then (return -1i32)))
 					(if
 						(:doc "Fixed-array rows have no source name. Inspect only defining C layouts and aliases.")
 						(i32.gtz (struct.get (local row) native))
@@ -793,11 +786,46 @@
 									(if
 										(:doc "Both providers contribute types to the same resolved bridge namespace.")
 										(i32.eq (local project) (call project_bridge (borrow-shared (local nodes)) (local owner)))
-										(then
-											(if (call is_native_record (local row)) (then (return (call record_type (local index)))))
-											(return (call native_integer_type (local index)))))))))
+									(then (return (local index))))))))
 					(set (local index) (i32.inc (local index)))))
-			(return 0u32)))
+			(return -1i32)))
+
+	(fn native_field_type
+		(:doc "Resolve a field in its defining C bridge, following an explicit import to its original declaration.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(layout ScalarRecord) (field i32))
+		(returns u32)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (array.load (local nodes) (local field))))
+			(let operand (struct.get (local parts) operands))
+			(let builtin (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+			(if (u32.gtz (local builtin)) (then (return (local builtin))))
+			(let name (array.load (local nodes) (local operand)))
+			(let declaration (struct.get (array.load (local nodes) (struct.get (local layout) name)) parent))
+			(let bridge (call declaring_c_bridge (borrow-shared (local source)) (borrow-shared (local nodes))
+				(array.load (local nodes) (local declaration))))
+			(let-mut row (call native_type_in_bridge (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local records)) (local bridge) (local name)))
+			(if
+				(:doc "A local definition takes precedence. An imported alias retains the linked defining type node.")
+				(i32.ltz (local row))
+				(then
+					(let dependency (call find_bridge_type_dependency (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local bridge) (struct.get (local name) start) (struct.get (local name) end)))
+					(let target (struct.get (local dependency) declaration))
+					(if
+						(:doc "The checked bridge must link the imported type to one declaration.")
+						(i32.ltz (local target))
+						(then (return 0u32)))
+					(let form (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local nodes) (local target))))
+					(set (local row) (call find_native_node (borrow-shared (local records)) (struct.get (local form) operands)))))
+			(if (i32.ltz (local row)) (then (return 0u32)))
+			(if
+				(:doc "By-value record fields keep their canonical layout identity.")
+				(call is_native_record (array.load (local records) (local row)))
+				(then (return (call record_type (local row)))))
+			(return (call native_integer_type (local row)))))
 
 	(fn is_array_owner
 		(:doc `Identify one local owner of an array allocation.`)
