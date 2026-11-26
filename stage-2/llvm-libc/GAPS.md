@@ -197,6 +197,34 @@ public C interfaces.
 
 [LLVM libc checklist](https://libc.llvm.org/headers/ctype.html) · [Debian arm64 headers](https://packages.debian.org/trixie/arm64/libc6-dev/download) · [Debian amd64 headers](https://packages.debian.org/trixie/amd64/libc6-dev/download)
 
+## Bundled dirent coverage
+
+Both drivers load the existing provider from `dirent.h.wove`. The
+installed-compiler fixtures cover ownership transfer from `fdopendir`,
+descriptor access through `dirfd`, ownership consumption through
+`closedir`, and a `telldir` position passed back to `seekdir`. They also
+verify that `rewinddir` returns to the first entry and that `readdir`
+snapshots remain valid after another call and after closing the stream.
+
+Clang exposed the same selected members in C11, C17, and C23 on arm64 and
+x86-64 with the macOS 27.2 SDK and Debian glibc 2.41. The audit used the
+driver's Darwin and GNU feature definitions. The supported members and
+remaining SDK differences are listed below.
+[LLVM libc dirent checklist](https://libc.llvm.org/headers/dirent.html)
+
+| Members | Coverage or outstanding contract |
+| --- | --- |
+| `DT_UNKNOWN`, `DT_FIFO`, `DT_CHR`, `DT_DIR`, `DT_BLK`, `DT_REG`, `DT_LNK`, `DT_SOCK`, `DT_WHT`, `IFTODT`, `DTTOIF` | Darwin and glibc expose these under the driver's feature flags. The fixture checks each type against its mode bits, including permission-bit masking. |
+| `MAXNAMLEN`, `DIRBLKSIZ` | The fixture checks the name limit on both SDKs and the Darwin-only block size. |
+| `DIR`, `opendir`, `fdopendir`, `closedir`, `dirfd`, `readdir`, `rewinddir`, `seekdir`, `telldir` | The provider owns `DIR *` and returns copied entry names. Installed fixtures exercise stream creation, descriptor transfer, navigation, and snapshot ownership. |
+| `struct dirent`, `struct dirent64`, `ino_t`, `ino64_t`, `size_t`, `ssize_t` | Raw entry binding is pending. Darwin's 64-bit record has `d_seekoff`, `d_namlen`, and a 1024-byte `d_name`. The audited glibc records have `d_off` and a 256-byte declared name field that can be followed by additional name bytes in a returned entry. Both expose `d_ino`, `d_reclen`, and `d_type`. |
+| `readdir64`, `getdents64`, `getdirentries`, `getdirentries64` | glibc extensions awaiting activation and runtime coverage. Darwin redirects its `getdirentries` declaration to an unavailable symbol under the current 64-bit inode ABI. A link with the macOS 27.2 SDK confirmed that failure. |
+| `fdclosedir` | The macOS SDK declares it starting at deployment 26.4. The installed driver does not yet supply a deployment version to the provider selector. |
+| `readdir_r`, `readdir64_r` | Deprecated interfaces require storage sized for the native name limit and return a nullable alias into caller storage. |
+| `scandir`, `scandirat`, `fdscandir`, `scandir64`, `scandirat64`, `alphasort`, `alphasort64`, `versionsort`, `versionsort64` | The scanning calls need ownership for the allocated pointer vector and entries, plus borrowed native-record callbacks. The comparators need indirect borrowed entry pointers. |
+| `scandir_b`, `scandirat_b`, `fdscandir_b` | The Darwin variants require a C Blocks callback ABI. |
+| `posix_getdents`, `struct posix_dent`, `reclen_t`, `DT_MQ`, `DT_SEM`, `DT_SHM`, `DT_TMO` | The audited SDKs do not expose these POSIX.1-2024 members. |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
