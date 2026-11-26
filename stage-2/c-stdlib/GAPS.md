@@ -77,6 +77,16 @@ verbatim disabled text. Counts below cover active declarations.
 | `c_snapshot` · 9 | `dirent.h` `readdir{,64}`, `stdio.h` `fgets`, `stdlib.h` `getenv`, `mkdtemp`, `realpath`, `string.h` `strerror`, `unistd.h` `mkdtemp` and `environ` | Stage 2 copies borrowed and allocating `cstr` function results and `cstrs` globals such as `environ`. Stage 2 also copies fixed inline `char` fields within their declared extent. The bundled `readdir` snapshots the terminated name returned by the native API, including extended entries. The archived `readdir64` extension needs named feature selection. |
 | `c_variadic` · 16 | `fcntl.h` `open`, `openat`, and `fcntl_*`, `stdio.h` `fprintf`, `printf`, and `snprintf` | Named and open tails verify the fixed prefix and result against the header and use native default promotions. The fixed-command `fcntl_getfd`, `fcntl_getfl`, and `fcntl_getown` queries use an empty tail. Fixtures cover those queries, typed `fcntl` updates and opening modes, and the three open stdio bindings. |
 
+## Native owner composition
+
+Ordinary Wove helpers can return the selected `File` and `Directory`
+pointer owners from the existing bundled stdio and directory providers.
+A returned handle can already be missing. A present handle is owned and
+released by its eventual caller. The SQLite fixture also transfers a
+statement acquired through a native output argument. Existing caller-owned
+storage contracts such as spawn `Actions` and `Attributes` retain their
+local allocation and initialization rules.
+
 ## Fixed native operands
 
 The eleven existing `fcntl.h` fixed commands use header constants. Both

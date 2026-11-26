@@ -722,6 +722,11 @@ A pointer-backed resource uses a destructor contract.
 
 A `File` result owns the native handle. Cleanup calls the destructor once
 for each present handle. Test presence with `(owner.is-null (local file))`.
+An ordinary Wove function can declare `(returns File)` after importing
+the native type. Return a fresh handle call or explicitly transfer a
+local with `(return (move (local file)))`. The caller owns the result,
+including the possibility of a null handle. Renamed type imports keep
+the same defining owner type.
 An exact `(shared-ref File)` parameter borrows a present handle. A consuming
 parameter of type `File` takes `(move (local file))` and makes the C callee
 responsible for cleanup, including when the call reports an error.

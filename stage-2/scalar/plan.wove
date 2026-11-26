@@ -46,7 +46,7 @@
 	(use wove-file "../source/generics.wove" (only has_specialization_head generic_i32_value is_checked_constant_operand
 		(value normalized_i32_literal) (value checked_i32_operand) (value checked_function_operand) (value checked_bool_operand) (value checked_enum_operand)))
 	(use wove-file "./records.wove"
-		(only scope_at checked_enum_value is_generic_template is_callable_type callable_index callable_layout_shape (value callable_alias_kind) declaration_kind register_module_records register_module_record_arrays register_owned_rows order_record_layouts validate_record_array_fields value_type copyable_type owned_array_leaf_type is_owning_struct_element is_owning_record is_scoped_record read_parameter_type read_view_parameter_extent find_record record_type record_index is_record_type
+		(only scope_at checked_enum_value is_generic_template is_callable_type callable_index callable_layout_shape (value callable_alias_kind) declaration_kind register_module_records register_module_record_arrays register_owned_rows order_record_layouts validate_record_array_fields value_type copyable_type owned_array_leaf_type is_owning_struct_element is_owning_record is_scoped_record read_parameter_type read_view_parameter_extent find_record pointer_owner_definition record_type record_index is_record_type
 			find_member member_value_type read_member_operand register_static_array find_fixed_array_type fixed_array_type named_extent_site is_fixed_array is_enum_layout is_payload_enum is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice
 			is_array_owner array_owner_type owning_array_type array_owner_element array_slot_code read_owned_array_type byte_rows_owner_type is_native_integer native_integer_type find_native_node (type ScalarRecord)
 			is_native_record native_field_type is_place_reference is_mutable_place_reference place_reference_type place_reference_code place_reference_target mutable_scalar_target record_receiver_type place_borrow_kind))
@@ -136,6 +136,17 @@
 						(then (set (local result) (call owned_result_type (borrow-shared (local source)) (borrow-shared (local nodes))
 							(array.load (local nodes) (local type_node)) (borrow-shared (local records))
 							(borrow-shared (local bindings)) (local scope)))))
+					(if
+						(:doc "An ordinary result can own the exact pointer handle selected in this module.")
+						(u32.eqz (local result))
+						(then
+							(let owner (call pointer_owner_definition (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-shared (local records)) (borrow-shared (local bindings)) (struct.get (local scope) file)
+								(struct.get (local scope) source_base) (array.load (local nodes) (local type_node))))
+							(if
+								(:doc "Encode the defining handle independently of local aliases.")
+								(i32.not-ltz (local owner))
+								(then (set (local result) (call native_owner_type (local owner)))))))
 					(if
 						(:doc "A scoped record needs a local binding whose lifetime contains its loans.")
 						(call is_scoped_record (borrow-shared (local records)) (local result))
@@ -1841,8 +1852,7 @@
 							(let-mut native_formal -1i32)
 							(if
 								(:doc "Keep the native owner argument mode on the unvisited row through its formal.")
-								(bool.or (call is_c_exclusive_owner_mode (local mode))
-									(bool.or (call is_c_storage_mode (local mode)) (call is_c_consuming_mode (local mode))))
+								(call is_native_owner (local argument_type))
 								(then (set (local native_formal) (local formal))))
 							(if
 								(:doc "Byte slice arguments use their reborrow keyword code. Typed slices keep the exact formal type.")
@@ -3755,8 +3765,8 @@
 		(returns EntryRead)
 		(body
 			(if
-				(:doc "A fresh native owner initializes a binding and names exactly one type.")
-				(bool.or (u32.not-eq (local expected) 42u32)
+				(:doc "A fresh owner names one type and needs an inferred binding or an exact pointer destination.")
+				(bool.or (bool.not (bool.or (u32.eq (local expected) 42u32) (call is_native_owner (local expected))))
 					(bool.or (i32.ltz (local operand))
 						(i32.lt -1i32 (struct.get (array.load (local nodes) (local operand)) next_sibling))))
 				(then (return (call entry_at (local node) -1i32 24u32))))
@@ -3773,8 +3783,9 @@
 			(let row (i32.add (struct.get (local alias) name_node) (struct.get (local caller) tree_base)))
 			(let type (struct.get (array.load (local expressions) (local row)) type))
 			(if
-				(:doc "The binding must resolve to a checked native owner type.")
-				(bool.not (call is_native_owner (local type)))
+				(:doc "The binding must resolve to the exact native owner type when a destination is known.")
+				(bool.or (bool.not (call is_native_owner (local type)))
+					(bool.and (call is_native_owner (local expected)) (u32.not-eq (local expected) (local type))))
 				(then (return (call entry_at (local name) -1i32 24u32))))
 			(let storage (call is_c_storage_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(call native_owner_declaration (local type))))
@@ -3980,10 +3991,11 @@
 					(borrow-shared (local bindings)) (borrow-shared (local records)) (borrow-shared (local statements))
 					(borrow-mut (local expressions))))))
 			(let formal (struct.get (array.load (local expressions) (local index)) target))
+			(let native_argument (bool.and (call is_native_owner (local expected)) (i32.not-ltz (local formal))))
 			(let-mut mode (call c_value_mode))
 			(if
 				(:doc "Only a planned native owner argument carries a formal mode here.")
-				(bool.and (call is_native_owner (local expected)) (i32.lt -1i32 (local formal)))
+				(local native_argument)
 				(then (set (local mode) (struct.get (array.load (local parameters) (local formal)) c_mode))))
 			(if
 				(:doc "A by-value native formal takes a checked move before the general borrow path.")
@@ -3993,7 +4005,7 @@
 					(borrow-shared (local parameters)) (borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "Resolve a call argument in its required reborrow mode and element type.")
-				(bool.or (bool.or (call is_native_owner (local expected)) (call is_place_reference (local expected)))
+				(bool.or (bool.or (local native_argument) (call is_place_reference (local expected)))
 					(bool.or (call is_reborrow_keyword (local expected)) (call is_typed_slice (local expected))))
 				(then (return (call plan_view (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (local caller) (local statement) (local expected) (local mode) (local view_start)
@@ -4521,9 +4533,9 @@
 							(call owner_take_row (call owned_array_take_kind) (local type) (local target) -1i32))))
 					(return (call body_success (local site_count)))))
 			(if
-				(:doc "An owned result requires the exact array or record type.")
-				(bool.or (call is_array_owner (local expected))
-					(call is_owning_record (borrow-shared (local records)) (local expected)))
+				(:doc "An owned result requires the exact array, record, or native owner type.")
+				(bool.or (call is_native_owner (local expected)) (bool.or (call is_array_owner (local expected))
+					(call is_owning_record (borrow-shared (local records)) (local expected))))
 				(then
 					(let actual (struct.get (array.load (local expressions) (local root)) type))
 					(if
@@ -4654,7 +4666,8 @@
 				(i32.ltz (local root))
 				(then (return (call body_success (local site_start)))))
 			(let returning_record (call is_owning_record (borrow-shared (local records)) (local expected)))
-			(let returning_owner (bool.or (call is_array_owner (local expected)) (local returning_record)))
+			(let returning_owner (bool.or (call is_native_owner (local expected))
+				(bool.or (call is_array_owner (local expected)) (local returning_record))))
 			(if
 				(:doc "A declaration initializer or owned return can perform a local ownership transfer.")
 				(bool.or (local returning_owner) (u32.eq (local expected) 42u32))
@@ -4683,7 +4696,8 @@
 					(let construct (bool.or (u32.eq (local tag) (local array_remove_kind))
 						(bool.or (bool.and (local returning_record) (bool.or (u32.eq (local tag) 50u32)
 							(u32.eq (local tag) (local enum_constructor))))
-							(bool.and (call is_array_owner (local expected)) (u32.eq (local tag) 41u32)))))
+							(bool.or (bool.and (call is_array_owner (local expected)) (u32.eq (local tag) 41u32))
+								(bool.and (call is_native_owner (local expected)) (call is_native_owner_constructor (local tag)))))))
 					(if
 						(:doc "An owned return needs a fresh value or a checked explicit transfer.")
 						(bool.and (local returning_owner) (bool.not (bool.or (local fresh) (local construct))))
