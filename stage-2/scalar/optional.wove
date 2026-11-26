@@ -1,0 +1,101 @@
+(module scalar_optional
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Check optional array constructors and keep the exact payload type through ownership transfer.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../source/owned.wove" (only optional_owned_operand
+		(value optional_none) (value optional_some) (value pending_optional_some)))
+	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
+	(use wove-file "./records.wove" (only read_owned_array_type (type ScalarRecord) (type TypeScope)))
+	(use wove-file "./owners.wove" (only optional_owner_type is_owner_take optional_unwrap_kind))
+	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
+	(use wove-file "./conditional.wove" (only conditional_arm_is_value))
+	(use wove-file "./syntax.wove" (only entry_at entry_form entry_keyword (value pending_exact_move)
+		(value fixed_owner_transfer) (type EntryRead)))
+
+	(fn read_optional_result
+		(:doc "Resolve the original owned array descriptor before mapping it to its optional result.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (scope TypeScope))
+		(returns u32)
+		(body
+			(let operand (call optional_owned_operand (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(if (i32.ltz (local operand)) (then (return 0u32)))
+			(return (call optional_owner_type (call read_owned_array_type (borrow-shared (local source))
+				(borrow-shared (local nodes)) (array.load (local nodes) (local operand))
+				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope))))))
+
+	(fn plan_optional_constructor
+		(:doc "Check an absent payload type or seed the one expression transferred into a present optional.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (kind u32) (expected u32) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local kind) 24u32))
+			(if (u32.gtz (struct.get (local form) error)) (then (return (local form))))
+			(let operand (struct.get (local form) operand))
+			(if
+				(:doc "Each constructor requires one operand and reports malformed arity at the form.")
+				(bool.or (i32.ltz (local operand))
+					(i32.not-ltz (struct.get (array.load (local nodes) (local operand)) next_sibling)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let child (array.load (local nodes) (local operand)))
+			(if
+				(:doc "An absent value specifies its exact payload type without evaluating an expression.")
+				(u32.eq (local kind) (local optional_none))
+				(then
+					(let result (call optional_owner_type (call read_owned_array_type (borrow-shared (local source))
+						(borrow-shared (local nodes)) (local child) (borrow-shared (local records))
+						(borrow-shared (local bindings)) (local scope))))
+					(if
+						(:doc "Reject an unsupported payload type at its written descriptor.")
+						(u32.eqz (local result))
+						(then (return (call entry_at (local child) -1i32 24u32))))
+					(if
+						(:doc "An absent optional still has an exact result type.")
+						(bool.not (bool.or (u32.eq (local expected) 42u32) (u32.eq (local expected) (local result))))
+						(then (return (call entry_at (local node) -1i32 24u32))))
+					(array.store (local expressions) (local index)
+						(call expression_row (local optional_none) (local result) -1i32 -1i32 0i32 0i32 (bool false)))
+					(return (call entry_at (local node) (local index) 0u32))))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local child)))
+			(let keyword (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
+			(let-mut seed 0u32)
+			(if
+				(:doc "An explicit move uses the normal evaluating transfer and loan check.")
+				(u32.eq (local keyword) 43u32)
+				(then (set (local seed) (local pending_exact_move))))
+			(array.store (local expressions) (local operand)
+				(call expression_row (local seed) 42u32 -1i32 -1i32 0i32 0i32 (bool false)))
+			(array.store (local expressions) (local index)
+				(call expression_row (local pending_optional_some) (local expected) -1i32 (local operand) 0i32 0i32 (bool false)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn finish_optional_some
+		(:doc "Wrap just a fresh or moved array owner and match the resulting optional type exactly.")
+		(params (nodes (shared-array SourceNode)) (index i32) (row ScalarExpression)
+			(records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let operand (struct.get (local row) first))
+			(let payload (array.load (local expressions) (local operand)))
+			(let kind (struct.get (local payload) kind))
+			(let result (call optional_owner_type (struct.get (local payload) type)))
+			(if
+				(:doc "A named owner can enter a present optional only through a checked transfer.")
+				(bool.not (bool.and (u32.gtz (local result))
+					(bool.or (call conditional_arm_is_value (borrow-shared (local records)) (local payload))
+						(bool.or (call is_owner_take (local kind))
+							(bool.or (u32.eq (local kind) (call optional_unwrap_kind)) (u32.eq (local kind) (local fixed_owner_transfer)))))))
+				(then (return (call entry_at (array.load (local nodes) (local operand)) -1i32 24u32))))
+			(if
+				(:doc "Check an explicit expected result after deriving the optional type from its payload.")
+				(bool.not (bool.or (u32.eq (struct.get (local row) type) 42u32) (u32.eq (struct.get (local row) type) (local result))))
+				(then (return (call entry_at (array.load (local nodes) (local index)) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(call expression_row (local optional_some) (local result) -1i32 (local operand) 0i32 0i32 (bool false)))
+			(return (call entry_at (array.load (local nodes) (local index)) (local index) 0u32))))
+)
