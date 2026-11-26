@@ -44,7 +44,7 @@ C_STANDARD_MODULE := stage-2/c/standard.wove
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
 C_EMITTER_SOURCES := $(BOOLEAN_TEXT_MODULE) $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/array_growth.wove source/numeric_ops.wove source/integer_ops.wove source/integer_bits.wove source/integer_compare.wove source/integer_checks.wove source/literals.wove source/extent.wove source/float_ops.wove source/enum_forms.wove source/generics.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/conditional.wove emit/matches.wove emit/loops.wove emit/arrays.wove emit/array_growth.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/integer_checks.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_prototype.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/owned_fields.wove emit/owned_aggregates.wove emit/graph.wove emit/headers.wove emit/names.wove emit/records.wove emit/text.wove \
-	scalar/syntax.wove scalar/signatures.wove scalar/worker.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/conditional.wove scalar/integer_literals.wove scalar/matches.wove scalar/match_patterns.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/specializations.wove scalar/generics/workspace.wove scalar/generics/clone.wove scalar/generics/functions.wove scalar/owners.wove) $(DECIMAL_WRITER)
+	scalar/syntax.wove scalar/signatures.wove scalar/worker.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/host_entry.wove scalar/plan.wove scalar/conditional.wove scalar/integer_literals.wove scalar/matches.wove scalar/match_patterns.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/type_sites.wove scalar/specializations.wove scalar/generics/workspace.wove scalar/generics/clone.wove scalar/generics/functions.wove scalar/owners.wove) $(DECIMAL_WRITER)
 HASHING_BITS := stage-2/hashing/bits.wove
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove) $(HASHING_BITS)
 HASHING_FIXTURES := tests/stage-2/hashing
@@ -83,7 +83,7 @@ CONFIG_SOURCES := $(C_STANDARD_MODULE) $(addprefix stage-2/config/,compiler.wove
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_storage.wove output.wove publication.wove platform.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove float_target.wove header_origin.wove clang.wove)
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_storage.wove output.wove publication.wove platform.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove numeric_target.wove header_origin.wove clang.wove)
 BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove unistd.wove spawn.wove fcntl.wove errno.wove sys_stat.wove sys_wait.wove dirent.wove)
 NATIVE_BUILD_ASSETS = runtime/wove_runtime.c runtime/wove_runtime.h $(CLANG_TEMPLATE)
 NATIVE_STDIO := stage-2/io/stdio.wove
@@ -180,7 +180,7 @@ test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o test-stage-2-ha
 		tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \
 		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_arrays/cases.tsv tests/stage-2/numeric_arrays/cases.tsv tests/stage-2/native_dirent/cases.tsv tests/stage-2/native_handle_out/cases.tsv \
 		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_rows/cases.tsv tests/stage-2/native_vectors/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
-		tests/stage-2/integer_compare/cases.tsv \
+		tests/stage-2/integer_compare/cases.tsv tests/stage-2/cli/native/int128/test-mode.tsv \
 		tests/stage-2/graph/targets/cases.tsv tests/stage-2/module_arrays/cases.tsv tests/stage-2/integer_conversions/cases.tsv tests/stage-2/integer_checks/cases.tsv tests/stage-2/integer_arithmetic/cases.tsv tests/stage-2/integer_division/cases.tsv tests/stage-2/integer_bits/cases.tsv tests/stage-2/generics/cases.tsv tests/stage-2/generic_functions/cases.tsv tests/stage-2/generic_booleans/cases.tsv tests/stage-2/enums/cases.tsv tests/stage-2/matches/cases.tsv tests/stage-2/floats/cases.tsv tests/stage-2/while/exits.tsv tests/stage-2/scoped_arrays/cases.tsv tests/stage-2/for/cases.tsv tests/stage-2/array_growth/cases.tsv
 	WOVE_TEST_RUNTIME="$(STAGE1)/runtime.tracked.o" $(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/owned_records/cases.tsv tests/stage-2/owned_record_arrays/cases.tsv tests/stage-2/owning_enums/cases.tsv tests/stage-2/array_growth/tracked.tsv tests/stage-2/for/consuming/tracked.tsv tests/stage-2/scoped_records/cases.tsv
 
@@ -216,6 +216,7 @@ test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80 test-stage-2-workers
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/literals.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/half/check.py" "$(NATIVE_COMPILER)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/quad/check.py" "$(NATIVE_COMPILER)"
+	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/int128/check.py" "$(NATIVE_COMPILER)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/extents.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/borrow_extents.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/dirent.tsv"

@@ -10,7 +10,8 @@
 
 	(struct IntegerSpelling (fields (digits i32) (negative bool) (radix i32)))
 	(struct IntegerAtom (fields (digits i32) (end i32) (radix i32)))
-	(struct IntegerMagnitude (fields (high u32) (low u32)))
+	(struct IntegerMagnitude (fields (highest u32) (upper u32) (high u32) (low u32)))
+	(struct ScaledWord (fields (value u32) (carry u32)))
 
 	(fn integer_magnitude_start
 		(:doc "Skip an optional leading minus within the supplied atom.")
@@ -83,6 +84,9 @@
 9223372036854775807
 9223372036854775808
 18446744073709551615
+170141183460469231731687303715884105727
+170141183460469231731687303715884105728
+340282366920938463463374607431768211455
 `)
 	(let hexadecimal_bounds `0
 7f
@@ -97,6 +101,9 @@ ffffffff
 7fffffffffffffff
 8000000000000000
 ffffffffffffffff
+7fffffffffffffffffffffffffffffff
+80000000000000000000000000000000
+ffffffffffffffffffffffffffffffff
 `)
 
 	(let binary_bounds `0
@@ -112,14 +119,18 @@ ffffffffffffffff
 111111111111111111111111111111111111111111111111111111111111111
 1000000000000000000000000000000000000000000000000000000000000000
 1111111111111111111111111111111111111111111111111111111111111111
+1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 `)
 
 	(fn integer_limit_slot
-		(:doc "Use the same limit order for zero and the 8-, 16-, 32-, and 64-bit bounds in both radices.")
+		(:doc "Use the same limit order for zero and integer widths through 128 in all radices.")
 		(params (type u32) (signed bool) (negative bool)) (returns i32)
 		(body
 			(let width (call integer_byte_width (local type)))
 			(let-mut slot 7i32)
+			(if (i32.eq (local width) 16i32) (then (set (local slot) 13i32)))
 			(if (i32.eq (local width) 8i32) (then (set (local slot) 10i32)))
 			(if (i32.eq (local width) 2i32) (then (set (local slot) 4i32)))
 			(if (i32.eq (local width) 1i32) (then (set (local slot) 1i32)))
@@ -260,28 +271,47 @@ ffffffffffffffff
 			(if (i32.eq (local radix) 16i32) (then (return (u32.add (u32.shl (local limb) 4i32) (local carry)))))
 			(return (u32.add (u32.add (u32.shl (local limb) 3i32) (u32.shl (local limb) 1i32)) (local carry)))))
 
+	(fn scale_integer_word
+		(:doc "Propagate a radix carry across two 16-bit limbs without widened arithmetic.")
+		(params (word u32) (radix i32) (carry u32)) (returns ScaledWord)
+		(body
+			(let low (call scale_integer_limb (u32.and (local word) 65535u32) (local radix) (local carry)))
+			(let high (call scale_integer_limb (u32.shr (local word) 16i32) (local radix) (u32.shr (local low) 16i32)))
+			(return (struct.new ScaledWord
+				(value (u32.or (u32.shl (local high) 16i32) (u32.and (local low) 65535u32)))
+				(carry (u32.shr (local high) 16i32))))))
+
 	(fn read_integer_magnitude
-		(:doc "Accumulate an already-validated magnitude as two u32 words, ignoring digit separators.")
-		(params (source (shared-array u8)) (start i32) (end i32) (radix i32)) (returns IntegerMagnitude)
+		(:doc "Accumulate validated digits as two or four u32 words. Separators contribute no bits.")
+		(params (source (shared-array u8)) (start i32) (end i32) (radix i32) (wide bool)) (returns IntegerMagnitude)
 		(body
 			(let-mut low 0u32)
 			(let-mut high 0u32)
+			(let-mut upper 0u32)
+			(let-mut highest 0u32)
 			(let-mut cursor (local start))
 			(while
-				(:doc "Visit the significant source digits in order and propagate carry across their limbs.")
+				(:doc "Visit the significant digits in source order and carry from the low word upward.")
 				(i32.lt (local cursor) (local end))
 				(body
 					(let digit (call hex_digit_value (array.load (local source) (local cursor))))
 					(if
-						(:doc "A digit advances the value. Validated underscores contribute no bits.")
-						(i32.lt -1i32 (local digit))
+						(:doc "Each digit scales the lower pair. Only a validated 128-bit literal needs the upper pair.")
+						(i32.not-ltz (local digit))
 						(then
-							(let a (call scale_integer_limb (u32.and (local low) 65535u32) (local radix) (u32.from-i32 (local digit))))
-							(let b (call scale_integer_limb (u32.shr (local low) 16i32) (local radix) (u32.shr (local a) 16i32)))
-							(let c (call scale_integer_limb (u32.and (local high) 65535u32) (local radix) (u32.shr (local b) 16i32)))
-							(let d (call scale_integer_limb (u32.shr (local high) 16i32) (local radix) (u32.shr (local c) 16i32)))
-							(set (local low) (u32.or (u32.shl (local b) 16i32) (u32.and (local a) 65535u32)))
-							(set (local high) (u32.or (u32.shl (local d) 16i32) (u32.and (local c) 65535u32)))))
+							(let a (call scale_integer_word (local low) (local radix) (u32.from-i32 (local digit))))
+							(let b (call scale_integer_word (local high) (local radix) (struct.get (local a) carry)))
+							(set (local low) (struct.get (local a) value))
+							(set (local high) (struct.get (local b) value))
+							(if
+								(:doc "Preserve carries across the 64-bit boundary.")
+								(local wide)
+								(then
+									(let c (call scale_integer_word (local upper) (local radix) (struct.get (local b) carry)))
+									(let d (call scale_integer_word (local highest) (local radix) (struct.get (local c) carry)))
+									(set (local upper) (struct.get (local c) value))
+									(set (local highest) (struct.get (local d) value))))))
 					(set (local cursor) (i32.inc (local cursor)))))
-			(return (struct.new IntegerMagnitude (high (local high)) (low (local low))))))
+			(return (struct.new IntegerMagnitude (highest (local highest)) (upper (local upper))
+				(high (local high)) (low (local low))))))
 )

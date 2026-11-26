@@ -28,6 +28,12 @@
 #define WVPR_HAS_FLOAT128 0
 #endif
 
+#ifdef __SIZEOF_INT128__
+#define WVPR_HAS_INT128 1
+#else
+#define WVPR_HAS_INT128 0
+#endif
+
 // Clang's JSON AST carries these constant values back to the Wove type mapper.
 enum wvpr_c_probe {
 	wvpr_header_present = WVPR_HEADER_PRESENT,
@@ -39,4 +45,5 @@ enum wvpr_c_probe {
 	wvpr_long_double_mantissa = __LDBL_MANT_DIG__,
 	wvpr_has_float16 = WVPR_HAS_FLOAT16,
 	wvpr_has_float128 = WVPR_HAS_FLOAT128,
+	wvpr_has_int128 = WVPR_HAS_INT128,
 };

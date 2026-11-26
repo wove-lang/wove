@@ -7,7 +7,7 @@
 	(use wove-file "../source/generics.wove" (only (value normalized_i32_literal)))
 	(use wove-file "../source/literals.wove" (only read_integer_magnitude))
 	(use wove-file "../hashing/base16.wove" (only (value base16_alphabet)))
-	(use wove-file "../source/types.wove" (only (value i64_type)))
+	(use wove-file "../source/types.wove" (only is_128bit_integer (value i64_type) (value i128_type)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "./runtime.wove" (only close_runtime_call write_c_number))
 	(use wove-file "./text.wove" (only c_byte c_literal_text c_type_text c_hex_byte write_temporary_name))
@@ -22,6 +22,9 @@
 	(let i64_wrap_open "wvrt_i64_from_wrapped_bits((uint64_t)")
 	(let u64_operand "(uint64_t)")
 	(let i64_constant "INT64_C(")
+	(let u128_constant "WVRT_U128_C(")
+	(let i128_constant "WVRT_I128_C(")
+	(let negative_i128_constant "WVRT_I128_NEG_C(")
 	(let negative_i64_open "(-INT64_C(1)-(int64_t)(")
 	(let negative_i64_close "ull-1ull))")
 
@@ -175,7 +178,7 @@
 		(params (source (shared-array u8)) (start i32) (end i32) (output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
-			(let magnitude (call read_integer_magnitude (borrow-shared (local source)) (local start) (local end) 2i32))
+			(let magnitude (call read_integer_magnitude (borrow-shared (local source)) (local start) (local end) 2i32 (bool false)))
 			(let high (struct.get (local magnitude) high))
 			(let-mut cursor (local offset))
 			(let wide (u32.gtz (local high)))
@@ -186,6 +189,52 @@
 					(borrow-mut (local output)) (local cursor) (local writing)))))
 			(return (call write_hex_word (struct.get (local magnitude) low) (local wide)
 				(borrow-mut (local output)) (local cursor) (local writing)))))
+
+	(fn write_hex_half
+		(:doc "Emit a portable unsigned 64-bit constant for one half of a wide value.")
+		(params (high u32) (low u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (call c_literal_text (borrow-shared (local hex_prefix))
+				(borrow-mut (local output)) (local offset) (local writing)))
+			(let padded (u32.gtz (local high)))
+			(if
+				(:doc "The low word contributes all eight places when a high word precedes it.")
+				(local padded)
+				(then (set (local cursor) (call write_hex_word (local high) (bool false)
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(let digits (call write_hex_word (local low) (local padded) (borrow-mut (local output)) (local cursor) (local writing)))
+			(return (call c_literal_text (borrow-shared (local unsigned_wide_suffix))
+				(borrow-mut (local output)) (local digits) (local writing)))))
+
+	(fn write_128bit_literal
+		(:doc "Write both checked halves into a C constant expression, including the signed minimum.")
+		(params (source (shared-array u8)) (row ScalarExpression) (radix i32)
+			(output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let magnitude (call read_integer_magnitude (borrow-shared (local source))
+				(struct.get (local row) start) (struct.get (local row) end) (local radix) (bool true)))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Signed negative inputs need the in-range negation formula from the runtime header.")
+				(u32.eq (struct.get (local row) type) (local i128_type))
+				(then
+					(if
+						(:doc "A checked zero never carries the negative flag.")
+						(struct.get (local row) negative)
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local negative_i128_constant))
+							(borrow-mut (local output)) (local cursor) (local writing))))
+						(else (set (local cursor) (call c_literal_text (borrow-shared (local i128_constant))
+							(borrow-mut (local output)) (local cursor) (local writing))))))
+				(else (set (local cursor) (call c_literal_text (borrow-shared (local u128_constant))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(let high (call write_hex_half (struct.get (local magnitude) highest) (struct.get (local magnitude) upper)
+				(borrow-mut (local output)) (local cursor) (local writing)))
+			(let comma (call c_byte (borrow-mut (local output)) (local high) 44u8 (local writing)))
+			(let low (call write_hex_half (struct.get (local magnitude) high) (struct.get (local magnitude) low)
+				(borrow-mut (local output)) (local comma) (local writing)))
+			(return (call c_byte (borrow-mut (local output)) (local low) 41u8 (local writing)))))
 
 	(fn write_integer_literal
 		(:doc "Emit the normalized magnitude or decoded character with a C-safe sign and suffix.")
@@ -209,6 +258,11 @@
 			(let hexadecimal (i32.not-eq (local radix) 10i32))
 			(let negative (struct.get (local row) negative))
 			(let type (struct.get (local row) type))
+			(if
+				(:doc "C integer tokens cannot directly represent the full magnitude on supported C modes.")
+				(call is_128bit_integer (local type))
+				(then (return (call write_128bit_literal (borrow-shared (local source)) (local row) (local radix)
+					(borrow-mut (local output)) (local offset) (local writing)))))
 			(let signed_wide (u32.eq (local type) (local i64_type)))
 			(let-mut cursor (local offset))
 			(if

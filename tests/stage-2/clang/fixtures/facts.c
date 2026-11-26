@@ -8,6 +8,11 @@ _Static_assert(wvpr_long_bits == sizeof(long) * 8, "long ABI");
 _Static_assert(wvpr_long_long_bits == sizeof(long long) * 8, "long long ABI");
 _Static_assert(wvpr_char_signed == ((char)-1 < 0), "char sign");
 _Static_assert(wvpr_long_double_mantissa == __LDBL_MANT_DIG__, "long double ABI");
+#ifdef __SIZEOF_INT128__
+_Static_assert(wvpr_has_int128 == 1, "int128 capability");
+#else
+_Static_assert(wvpr_has_int128 == 0, "int128 capability");
+#endif
 #if WOVE_EXPECT_PRESENT
 _Static_assert(sizeof(ProbeFixture) == sizeof(int), "included declaration");
 #endif
