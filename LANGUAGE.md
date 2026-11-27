@@ -277,6 +277,12 @@ with a 113-bit significand if available and otherwise uses Clang's
 `__float128` extension. Decimal literals use the matching C suffix. On
 unsupported targets the compiler reports a source diagnostic before emitting C.
 
+A C bridge may declare `(type LongDouble (c-type "long double"))` to keep
+the target's exact C type in macro values and function signatures. A Wove
+alias keeps its defining identity through imports and copies. Its native
+layout and calling convention follow Clang, including when `long double`
+and `double` share a representation.
+
 Use width-qualified `add`, `sub`, `mul`, `div`, and unary `neg` for native
 floating arithmetic. The `eq`, `not-eq`, `lt`, `le`, `gt`, and `ge` operators
 take two values of the named width and return `bool`. Eager operands evaluate
