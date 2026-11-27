@@ -1430,9 +1430,19 @@ allocation, and scope exit or owner replacement releases it.
 
 `(c_snapshot cstr)` copies a returned C string into
 `(optional (owned-array u8))`. Add `(drop free)` to release the original,
-or `(field name)` to copy a bounded inline character array. A null
-result stays absent. After testing presence, use
-`(move (optional.unwrap result))` to extract the byte owner.
+or `(field name)` to copy a bounded inline character array. Add
+`(extent bytes)` after the field to use an unsigned native record
+member as the readable byte extent from the record's start. The native
+record must supply that storage through the copy. Clang checks the
+character array and extent member. The copy starts at the actual C
+field offset and requires a terminator inside the reported extent.
+
+An extended-field snapshot can add `(from entry)` to copy from its
+sole named `(shared-ref Record)` parameter. The bridge declaration
+names a local projection and has no native callee. The returned-pointer
+form keeps a native null absent. After testing presence, use
+`(move (optional.unwrap result))` to extract the byte owner. The owner
+keeps the copied bytes after the native loan or storage ends.
 `(c_snapshot cstrs)` on a read-only native table copies it into an
 `(owned-array (owned-array u8))`.
 

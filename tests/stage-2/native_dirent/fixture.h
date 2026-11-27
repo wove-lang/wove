@@ -7,7 +7,6 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stddef.h>
-#include "wove_runtime.h"
 
 struct snapshot_record {
 	char name[4];
@@ -60,6 +59,7 @@ static inline struct flexible_record *snapshot_flexible(void) {
 }
 
 struct snapshot_nominal_dirent {
+	uint16_t extent;
 	char d_name[4];
 };
 
@@ -68,23 +68,19 @@ struct snapshot_extended_dirent {
 	char extension[6];
 };
 
+static int32_t snapshot_directory_reads;
+
 // Model a directory result whose terminated name continues into the returned record.
-static inline const struct snapshot_nominal_dirent *snapshot_readdir(int32_t *reads) {
-	static const struct snapshot_extended_dirent record = {{{'l', 'o', 'n', 'g'}}, {'-', 'n', 'a', 'm', 'e', '\0'}};
-	_Static_assert(offsetof(struct snapshot_extended_dirent, extension) == sizeof(record.entry.d_name),
+static inline const struct snapshot_nominal_dirent *snapshot_directory_name(void) {
+	static const struct snapshot_extended_dirent record = {
+		{sizeof(struct snapshot_extended_dirent), {'l', 'o', 'n', 'g'}}, {'-', 'n', 'a', 'm', 'e', '\0'}
+	};
+	_Static_assert(offsetof(struct snapshot_extended_dirent, extension)
+		== offsetof(struct snapshot_nominal_dirent, d_name) + sizeof(record.entry.d_name),
 		"the test record extends the nominal name without padding");
-	++*reads;
+	++snapshot_directory_reads;
 	errno = EDOM;
 	return &record.entry;
-}
-
-// Exercise the same directory adapter as the bundled provider with an extended record.
-static inline const char *snapshot_directory_name(void) {
-	int32_t reads = 0;
-#define readdir(directory) snapshot_readdir(directory)
-	const char *name = WVRT_READDIR_NAME(&reads);
-#undef readdir
-	return reads == 1 ? name : NULL;
 }
 
 #endif

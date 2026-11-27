@@ -10,7 +10,8 @@
 	(use wove-file "./owned.wove" (only optional_type_operand is_byte_rows_descriptor))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 
-	(struct CSnapshot (fields (active bool) (drop i32) (field i32) (record i32) (start i32) (end i32) (error u32)))
+	(struct CSnapshot (fields (active bool) (drop i32) (field i32) (extent i32) (from i32)
+			(record i32) (start i32) (end i32) (error u32)))
 
 	(let snapshot_keyword "c_snapshot")
 	(let vectors_kind "cstrs")
@@ -24,6 +25,8 @@
 	(let thread_local_lifetime "thread_local")
 	(let drop_keyword "drop")
 	(let field_keyword "field")
+	(let extent_keyword "extent")
+	(let from_keyword "from")
 	(let owner_keyword "owned-array")
 
 	(fn matches_atom
@@ -66,15 +69,68 @@
 		(:doc `Retain the snapshot shape, its optional release or field, and the source span.`)
 		(params (node SourceNode) (active bool) (drop i32) (field i32) (error u32))
 		(returns CSnapshot)
-		(body (return (struct.new CSnapshot (active active) (drop drop) (field field) (record -1i32) (start (struct.get node start))
+		(body (return (struct.new CSnapshot (active active) (drop drop) (field field) (extent -1i32) (from -1i32)
+			(record -1i32) (start (struct.get node start))
 			(end (struct.get node end)) (error error)))))
 
 	(fn record_snapshot_at
 		(:doc "Retain the named mapping on a borrowed record result.")
 		(params (node SourceNode) (name i32))
 		(returns CSnapshot)
-		(body (return (struct.new CSnapshot (active (bool true)) (drop -1i32) (field -1i32)
+		(body (return (struct.new CSnapshot (active (bool true)) (drop -1i32) (field -1i32) (extent -1i32) (from -1i32)
 			(record name) (start (struct.get node start)) (end (struct.get node end)) (error 0u32)))))
+
+	(fn field_snapshot_at
+		(:doc "Retain the native field and extent and the optional source loan name.")
+		(params (node SourceNode) (field i32) (extent i32) (from i32))
+		(returns CSnapshot)
+		(body (return (struct.new CSnapshot (active (bool true)) (drop -1i32) (field field)
+			(extent extent) (from from) (record -1i32) (start (struct.get node start))
+			(end (struct.get node end)) (error 0u32)))))
+
+	(fn snapshot_option_name
+		(:doc "Read one checked native member or borrow name from an attached clause.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (option SourceNode)
+			(keyword (shared-array u8))) (returns i32)
+		(body
+			(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) option))
+			(if
+				(:doc "The clause header fixes the role of its sole operand.")
+				(bool.not (call has_head (borrow-shared source) (borrow-shared nodes) parts
+					(borrow-shared keyword)))
+				(then (return -1i32)))
+			(let name (struct.get parts operands))
+			(let atom (array.load nodes name))
+			(if
+				(:doc "An option takes one identifier suitable for the native field or formal.")
+				(bool.or (i32.not-ltz (struct.get atom next_sibling))
+					(bool.not (call is_native_name (borrow-shared source) atom)))
+				(then (return -1i32)))
+			(return name)))
+
+	(fn read_field_snapshot
+		(:doc "Extend a fixed inline field with a native byte extent and an optional source loan.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (directive SourceNode)
+			(field i32) (after_field i32)) (returns CSnapshot)
+		(body
+			(if
+				(:doc "The existing field-only form keeps its nominal C array bound.")
+				(i32.ltz after_field)
+				(then (return (call snapshot_at directive (bool true) -1i32 field 0u32))))
+			(let bound (array.load nodes after_field))
+			(let extent (call snapshot_option_name (borrow-shared source) (borrow-shared nodes) bound
+				(borrow-shared extent_keyword)))
+			(if (i32.ltz extent) (then (return (call snapshot_at bound (bool false) -1i32 -1i32 23u32))))
+			(let after_extent (struct.get bound next_sibling))
+			(if (i32.ltz after_extent) (then (return (call field_snapshot_at directive field extent -1i32))))
+			(let origin (array.load nodes after_extent))
+			(let from (call snapshot_option_name (borrow-shared source) (borrow-shared nodes) origin
+				(borrow-shared from_keyword)))
+			(if
+				(:doc "The source-loan name is the final clause of the extended field contract.")
+				(bool.or (i32.ltz from) (i32.not-ltz (struct.get origin next_sibling)))
+				(then (return (call snapshot_at origin (bool false) -1i32 -1i32 23u32))))
+			(return (call field_snapshot_at directive field extent from))))
 
 	(fn read_snapshot_directive
 		(:doc `Read the snapshot kind and any release allowed at this declaration.`)
@@ -140,9 +196,9 @@
 			(let field (call has_head (borrow-shared source) (borrow-shared nodes) parts
 				(borrow-shared field_keyword)))
 			(if
-				(:doc "A C string snapshot can specify one field or one release symbol.")
-				(bool.or (i32.lt -1i32 (struct.get option next_sibling))
-					(bool.not (bool.or field
+				(:doc "A C string snapshot starts with an inline field or a single release symbol.")
+				(bool.not (bool.or field
+					(bool.and (i32.ltz (struct.get option next_sibling))
 						(call has_head (borrow-shared source) (borrow-shared nodes) parts
 							(borrow-shared drop_keyword)))))
 				(then (return (call snapshot_at option (bool false) -1i32 -1i32 23u32))))
@@ -153,7 +209,11 @@
 				(bool.or (i32.lt -1i32 (struct.get symbol next_sibling))
 					(bool.not (call is_native_name (borrow-shared source) symbol)))
 				(then (return (call snapshot_at symbol (bool false) -1i32 -1i32 23u32))))
-			(if field (then (return (call snapshot_at directive (bool true) -1i32 name 0u32))))
+			(if
+				(:doc "Only an inline field can have an explicit native extent and source loan.")
+				field
+				(then (return (call read_field_snapshot (borrow-shared source) (borrow-shared nodes)
+					directive name (struct.get option next_sibling)))))
 			(return (call snapshot_at directive (bool true) name -1i32 0u32))))
 
 	(fn read_snapshot_contract
@@ -165,6 +225,8 @@
 			(let-mut active (bool false))
 			(let-mut drop -1i32)
 			(let-mut field -1i32)
+			(let-mut extent -1i32)
+			(let-mut from -1i32)
 			(let-mut record -1i32)
 			(let-mut entry (struct.get declaration metadata))
 			(while
@@ -201,6 +263,8 @@
 											(set active (bool true))
 											(set drop (struct.get current drop))
 											(set field (struct.get current field))
+											(set extent (struct.get current extent))
+											(set from (struct.get current from))
 											(set record (struct.get current record))))
 									(set index (struct.get item next_sibling))))))
 					(set entry (call next_form_metadata (borrow-shared source) (borrow-shared nodes)
@@ -235,6 +299,7 @@
 				(bool.or (bool.and active (bool.not optional))
 					(bool.and optional (bool.not active)))
 				(then (return (call snapshot_at result (bool false) -1i32 -1i32 23u32))))
+			(if (i32.not-ltz extent) (then (return (call field_snapshot_at result field extent from))))
 			(return (call snapshot_at result active drop field 0u32))))
 
 	(fn read_c_snapshot

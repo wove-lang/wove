@@ -987,6 +987,18 @@ wvrt_array *wvrt_snapshot_bounded_cstr_at_span(const char *wvrttext, size_t wvrt
 	return wvrt_finish_cstr_snapshot(wvrt_result, wvrt_saved_errno, wvrtfile, wvrtstart, wvrtend);
 }
 
+// Use the already measured native byte extent without indexing the nominal field array.
+wvrt_array *wvrt_snapshot_extended_cstr_at_span(const void *record, uintmax_t extent,
+	size_t field_offset, size_t extent_end, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	const size_t size = (size_t)extent;
+	// The extent must fit its addressable type and contain both the extent field and the start of the text.
+	if ((uintmax_t)size != extent || size < extent_end || size <= field_offset) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "invalid C snapshot record extent");
+	}
+	const char *text = (const char *)record + field_offset;
+	return wvrt_snapshot_bounded_cstr_at_span(text, size - field_offset, wvrt_file, wvrt_start, wvrt_end);
+}
+
 // Copy the native text before invoking its release, including on copy failure.
 static wvrt_array *wvrt_snapshot_cstr(char *wvrttext, void (*wvrtrelease)(void *),
 	void (*wvrtchars_release)(char *), int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
