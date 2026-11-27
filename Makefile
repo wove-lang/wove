@@ -374,6 +374,7 @@ test-stage-2-inventory: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-inventory: export WOVE_TEST_RUNTIME = $(TEST_RUNTIME)
 test-stage-2-inventory: $(SOURCE_SCAN) $(TEST_RUNTIME)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/test_execution.tsv
+	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/test_dispatch.jsonc
 
 # Keep generated runner helpers local to their translation unit.
 $(TEST_RUNNER).c: $(TEST_RUNNER_ROOT) $(TEST_RUNNER_SOURCES) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
