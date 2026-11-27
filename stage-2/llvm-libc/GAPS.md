@@ -341,6 +341,13 @@ x86-64. The audited C11, C17, and C23 profiles use native snapshots for
 `fenv_t` and `fexcept_t` so their sizes, alignment, and original pointer types
 follow the selected header. [LLVM libc fenv checklist](https://libc.llvm.org/headers/fenv.html)
 
+Compile rounding-sensitive arithmetic with Clang's `--cflag=-frounding-math`
+in Wove. For full environment access, including exception-sensitive arithmetic,
+use `--cflag=-ffp-model=strict`. The rounding fixture uses
+`--cflag=-fno-builtin` to keep `nearbyint` as a native library call. Surrounding
+arithmetic needs its own floating-point environment settings.
+[Clang floating-point behavior](https://clang.llvm.org/docs/UsersManual.html#controlling-floating-point-behavior)
+
 | Members | Coverage or outstanding contract |
 | --- | --- |
 | `FE_ALL_EXCEPT`, `FE_DIVBYZERO`, `FE_DOWNWARD`, `FE_INEXACT`, `FE_INVALID`, `FE_OVERFLOW`, `FE_TONEAREST`, `FE_TOWARDZERO`, `FE_UNDERFLOW`, `FE_UPWARD` | The fixture compares every constant to C. It uses all four rounding modes for positive and negative halfway values and exercises each exception mask separately. |
