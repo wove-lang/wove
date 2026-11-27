@@ -1,0 +1,217 @@
+(module native_record_headers
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Recognize complete native records in the selected header's Clang AST.")
+
+	(use wove-file "./header_origin.wove" (only declaration_in_earlier_include))
+	(use wove-file "../clang/fields.wove" (only clang_field clang_inner (value clang_kind_key)))
+	(use wove-file "../clang/index.wove" (only clang_matches_declaration (type ClangDeclaration) (type ClangIndex)))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../source/c_owners.wove" (only c_type_word_end))
+	(use wove-file "../source/scan.wove" (only skip_whitespace))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(let record_kind "RecordDecl")
+	(let typedef_kind "TypedefDecl")
+	(let struct_word "struct")
+	(let union_word "union")
+	(let struct_tag "\"struct\"")
+	(let union_tag "\"union\"")
+	(let tag_key "tagUsed")
+	(let complete_key "completeDefinition")
+	(let declaration_key "decl")
+	(let id_key "id")
+	(let record_type "\"RecordType\"")
+	(let elaborated_type "\"ElaboratedType\"")
+	(let typedef_type "\"TypedefType\"")
+	(let qualified_type "\"QualType\"")
+	(let attributed_type "\"AttributedType\"")
+
+	(fn value_matches
+		(:doc "Compare a known AST string value with its complete quoted representation.")
+		(params (ast (shared-array u8)) (base i32) (nodes (shared-array JsonNode))
+			(row i32) (spelling (shared-array u8))) (returns bool)
+		(body
+			(if (i32.ltz (local row)) (then (return (bool false))))
+			(let value (array.load (local nodes) (local row)))
+			(return (call same_bytes (borrow-shared (local ast))
+				(i32.add (local base) (struct.get (local value) start))
+				(i32.add (local base) (struct.get (local value) end))
+				(borrow-shared (local spelling)) 0i32 (array.len (local spelling))))))
+
+	(fn complete_record
+		(:doc "A forward declaration has no completeDefinition truth value.")
+		(params (ast (shared-array u8)) (base i32) (nodes (shared-array JsonNode))
+			(node i32) (scratch (mut-array u8))) (returns bool)
+		(body
+			(let complete (call clang_field (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+				(local node) (borrow-shared (local complete_key)) (borrow-mut (local scratch))))
+			(return (bool.and (i32.not-ltz (local complete))
+				(u32.eq (struct.get (array.load (local nodes) (local complete)) kind) 5u32)))))
+
+	(fn from_selected_header
+		(:doc "Recognize declarations parsed after the header marker or from its already included subtree.")
+		(params (ast (shared-array u8)) (base i32) (nodes (shared-array JsonNode))
+			(node i32) (boundary i32) (trace (shared-array u8))) (returns bool)
+		(body
+			(return (bool.or (i32.lt (local boundary) (local node))
+				(call declaration_in_earlier_include (borrow-shared (local ast)) (local base)
+					(borrow-shared (local nodes)) (local node) (borrow-shared (local trace)))))))
+
+	(fn typedef_record_id
+		(:doc "Follow a typedef's value type to a RecordType, retaining Clang's exact declaration identity.")
+		(params (ast (shared-array u8)) (base i32) (nodes (shared-array JsonNode))
+			(declaration i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(let-mut node (call clang_inner (borrow-shared (local ast)) (local base)
+				(borrow-shared (local nodes)) (local declaration) (borrow-mut (local scratch))))
+			(while
+				(:doc "Transparent type wrappers contain the next value type. Pointer and array nodes terminate the search.")
+				(i32.not-ltz (local node))
+				(body
+					(let kind (call clang_field (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+						(local node) (borrow-shared (local clang_kind_key)) (borrow-mut (local scratch))))
+					(if
+						(:doc "The linked declaration identity also works for an anonymous struct or union.")
+						(call value_matches (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+							(local kind) (borrow-shared (local record_type)))
+						(then
+							(let tag (call clang_field (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+								(local node) (borrow-shared (local declaration_key)) (borrow-mut (local scratch))))
+							(return (call clang_field (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+								(local tag) (borrow-shared (local id_key)) (borrow-mut (local scratch))))))
+					(if
+						(:doc "Only inspect children of wrappers that preserve the underlying object type.")
+						(bool.not (bool.or
+							(call value_matches (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+								(local kind) (borrow-shared (local elaborated_type)))
+							(bool.or
+								(call value_matches (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+									(local kind) (borrow-shared (local typedef_type)))
+								(bool.or
+									(call value_matches (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+										(local kind) (borrow-shared (local qualified_type)))
+									(call value_matches (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+										(local kind) (borrow-shared (local attributed_type)))))))
+						(then (return -1i32)))
+					(set (local node) (call clang_inner (borrow-shared (local ast)) (local base)
+						(borrow-shared (local nodes)) (local node) (borrow-mut (local scratch))))))
+			(return -1i32)))
+
+	(fn record_id_complete
+		(:doc "Find the complete definition referenced by a typedef's final RecordType.")
+		(params (ast (shared-array u8)) (index ClangIndex) (nodes (shared-array JsonNode)) (identity JsonNode)
+			(declarations (shared-array ClangDeclaration)) (boundary i32) (trace (shared-array u8))
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let base (struct.get (local index) start))
+			(let start (i32.add (local base) (struct.get (local identity) start)))
+			(let end (i32.add (local base) (struct.get (local identity) end)))
+			(let-mut row (struct.get (local index) entries))
+			(while
+				(:doc "A complete definition can occur before or after its typedef.")
+				(i32.gtz (local row))
+				(body
+					(set (local row) (i32.dec (local row)))
+					(let node (struct.get (array.load (local declarations) (local row)) node))
+					(let id (call clang_field (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+						(local node) (borrow-shared (local id_key)) (borrow-mut (local scratch))))
+					(if
+						(:doc "Clang emits one identity for the definition linked from the final record type.")
+						(bool.and
+							(call value_matches (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+								(local id) (borrow-shared (array.range (local ast) (local start) (local end))))
+							(call complete_record (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+								(local node) (borrow-mut (local scratch))))
+						(then
+							(return (call from_selected_header (borrow-shared (local ast)) (local base)
+								(borrow-shared (local nodes)) (local node) (local boundary) (borrow-shared (local trace))))))))
+			(return (bool false))))
+
+	(fn lookup_native_record
+		(:doc "Select the exact typedef or tagged record and check that the header supplies its full definition.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (index ClangIndex) (boundary i32)
+			(declarations (shared-array ClangDeclaration)) (names (shared-array u8)) (spelling (shared-array u8))
+			(trace (shared-array u8))) (returns bool)
+		(body
+			(let first (call skip_whitespace (borrow-shared (local spelling)) 0i32))
+			(let first_end (call c_type_word_end (borrow-shared (local spelling)) (local first)))
+			(let second (call skip_whitespace (borrow-shared (local spelling)) (local first_end)))
+			(let typedef (i32.eq (local second) (array.len (local spelling))))
+			(let-mut start (local first))
+			(let-mut end (local first_end))
+			(let-mut tag (bool false))
+			(if
+				(:doc "A tagged name consists of struct or union followed by exactly one identifier.")
+				(bool.not (local typedef))
+				(then
+					(set (local tag) (call same_bytes (borrow-shared (local spelling)) (local first) (local first_end)
+						(borrow-shared (local struct_word)) 0i32 6i32))
+					(if
+						(:doc "Only the C record keywords are valid before a tag.")
+						(bool.not (bool.or (local tag)
+							(call same_bytes (borrow-shared (local spelling)) (local first) (local first_end)
+								(borrow-shared (local union_word)) 0i32 5i32)))
+						(then (return (bool false))))
+					(set (local start) (local second))
+					(set (local end) (call c_type_word_end (borrow-shared (local spelling)) (local second)))
+					(if
+						(:doc "Require the tag to be the final C word.")
+						(i32.not-eq (call skip_whitespace (borrow-shared (local spelling)) (local end))
+							(array.len (local spelling)))
+						(then (return (bool false))))))
+			(let name (borrow-shared (array.range (local spelling) (local start) (local end))))
+			(let base (struct.get (local index) start))
+			(let-mut scratch (array.alloc u8 (array.len (local complete_key))))
+			(let-mut row (struct.get (local index) entries))
+			(while
+				(:doc "Consider every matching declaration because headers may redeclare native tags or typedefs.")
+				(i32.gtz (local row))
+				(body
+					(set (local row) (i32.dec (local row)))
+					(let entry (array.load (local declarations) (local row)))
+					(let node (struct.get (local entry) node))
+					(if
+						(:doc "The typedef identifier and the definition must both belong to this header's declarations.")
+						(bool.and (local typedef)
+							(bool.and
+								(call clang_matches_declaration (local entry) (borrow-shared (local names))
+									(borrow-shared (local typedef_kind)) (borrow-shared (local name)))
+								(call from_selected_header (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+									(local node) (local boundary) (borrow-shared (local trace)))))
+						(then
+							(let id (call typedef_record_id (borrow-shared (local ast)) (local base)
+								(borrow-shared (local nodes)) (local node) (borrow-mut (local scratch))))
+							(if
+								(:doc "A typedef of an unavailable or incomplete record cannot supply the view.")
+								(bool.and (i32.not-ltz (local id))
+									(call record_id_complete (borrow-shared (local ast)) (local index) (borrow-shared (local nodes))
+										(array.load (local nodes) (local id))
+										(borrow-shared (local declarations))
+										(local boundary) (borrow-shared (local trace)) (borrow-mut (local scratch))))
+								(then (return (bool true))))))
+					(if
+						(:doc "A tagged match must have a definition of the requested kind in the selected header.")
+						(bool.and (bool.not (local typedef))
+							(bool.and
+								(call clang_matches_declaration (local entry) (borrow-shared (local names))
+									(borrow-shared (local record_kind)) (borrow-shared (local name)))
+								(bool.and
+									(call complete_record (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+										(local node) (borrow-mut (local scratch)))
+									(call from_selected_header (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+										(local node) (local boundary) (borrow-shared (local trace))))))
+						(then
+							(let kind (call clang_field (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+								(local node) (borrow-shared (local tag_key)) (borrow-mut (local scratch))))
+							(if
+								(:doc "The same spelling cannot satisfy the opposite record tag kind.")
+								(bool.or
+									(bool.and (local tag)
+										(call value_matches (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+											(local kind) (borrow-shared (local struct_tag))))
+									(bool.and (bool.not (local tag))
+										(call value_matches (borrow-shared (local ast)) (local base) (borrow-shared (local nodes))
+											(local kind) (borrow-shared (local union_tag)))))
+								(then (return (bool true))))))))
+			(return (bool false)))))

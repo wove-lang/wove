@@ -90,7 +90,7 @@ CONFIG_SOURCES := $(C_STANDARD_MODULE) stage-2/text/copy.wove $(addprefix stage-
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_storage.wove output.wove publication.wove platform.wove target.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/library.wove bin/image.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove numeric_target.wove int256_target.wove header_origin.wove clang.wove)
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_storage.wove output.wove publication.wove platform.wove target.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/library.wove bin/image.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove record_headers.wove numeric_target.wove int256_target.wove header_origin.wove clang.wove)
 BUNDLED_C_PROVIDERS := $(addprefix stage-2/llvm-libc/,stdlib.wove stdio.wove unistd.wove spawn.wove fcntl.wove errno.wove sys_stat.wove sys_wait.wove dirent.wove math.wove sys_file.wove)
 NATIVE_BUILD_ASSETS = runtime/wove_runtime.c runtime/wove_runtime.h runtime/probes/wide_integer.c $(CLANG_TEMPLATE)
 NATIVE_STDIO := stage-2/io/stdio.wove
@@ -184,7 +184,7 @@ NATIVE_CLI_CASES := \
 	cases.tsv check.tsv diagnostics.tsv literals.tsv function_values/cases.tsv \
 	callable_aliases/cases.tsv bin.tsv standard.tsv protection.tsv phases.tsv
 NATIVE_INTEROP_CASES := \
-	extents.tsv borrow_extents.tsv dirent.tsv deployment.tsv optional-macros.tsv \
+	extents.tsv borrow_extents.tsv dirent.tsv deployment.tsv optional-macros.tsv optional-records/cases.tsv \
 	intrinsic/cases.tsv nullable-cstr/cases.tsv static-cstr/cases.tsv record-init.tsv \
 	inline-fields/cases.tsv library/cross-target.tsv
 NATIVE_CLI_TESTS := $(addprefix test-native/,$(NATIVE_CLI_CASES))
