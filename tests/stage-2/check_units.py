@@ -183,6 +183,10 @@ def check_case(certifier, probe, case):
 		assert first.stdout == second.stdout, (case["name"], layout["requested"])
 		parts = read_parts(first.stdout)
 		assert list(parts) == layout["files"], (case["name"], list(parts), layout["files"])
+		# Check source-level identifiers that are absent from native symbol tables.
+		for name, snippets in layout.get("contains", {}).items():
+			for snippet in snippets:
+				assert snippet.encode() in parts[name], (case["name"], name, snippet)
 		# One effective unit must retain every byte of the default serial emission.
 		if len(parts) == 1:
 			assert next(iter(parts.values())) == baseline.stdout.split(b"\n", 1)[1], case["name"]

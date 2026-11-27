@@ -10,8 +10,8 @@
 #undef main
 
 // The graph emitter names these fixture entry functions by module and declaration.
-#define check_raw wgf2vh8tk2check_raw
-#define check_fields wgf23vehi7check_fields
+#define check_raw wgf3bptekdcheck_raw
+#define check_fields wgf39vr8micheck_fields
 
 // Decode one ASCII hex digit from a manifest field.
 static int digit(char byte) {

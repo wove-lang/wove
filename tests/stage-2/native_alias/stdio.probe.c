@@ -7,10 +7,10 @@
 #undef main
 
 int wove_fixture_main(int argc, char **argv);
-size_t wgf1eugu35retain_size(size_t);
+size_t wgf0b87498retain_size(size_t);
 
 // Pass a full-width value through the alias selected from the checked-in stdio bridge.
 int main(int argc, char **argv) {
-	if (wgf1eugu35retain_size(SIZE_MAX) != SIZE_MAX) { return 1; }
+	if (wgf0b87498retain_size(SIZE_MAX) != SIZE_MAX) { return 1; }
 	return wove_fixture_main(argc, argv);
 }
