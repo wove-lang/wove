@@ -341,8 +341,8 @@ x86-64. The audited C11, C17, and C23 profiles use native snapshots for
 `fenv_t` and `fexcept_t` so their sizes, alignment, and original pointer types
 follow the selected header. [LLVM libc fenv checklist](https://libc.llvm.org/headers/fenv.html)
 
-Compile rounding-sensitive arithmetic with Clang's `--cflag=-frounding-math`
-in Wove. For full environment access, including exception-sensitive arithmetic,
+Set Wove's `--cflag=-frounding-math` to make Clang honor the runtime rounding
+mode. For full environment access, including exception-sensitive arithmetic,
 use `--cflag=-ffp-model=strict`. The rounding fixture uses
 `--cflag=-fno-builtin` to keep `nearbyint` as a native library call. Surrounding
 arithmetic needs its own floating-point environment settings.
@@ -354,14 +354,16 @@ arithmetic needs its own floating-point environment settings.
 | `feclearexcept`, `fegetexceptflag`, `feraiseexcept`, `fesetexceptflag`, `fetestexcept` | Clear, raise, save, test, and restore flags through the native object. Restoring a selected flag subset preserves an unselected flag. |
 | `fegetround`, `fesetround`, `fegetenv`, `feholdexcept`, `fesetenv`, `feupdateenv` | Check the actual rounding effect through `nearbyint`. The fixture also saves, holds, and restores environments, tests flag propagation through `feupdateenv`, and restores its incoming environment. Linux links these calls through the driver's existing `-lm` input. |
 | `FE_DFL_ENV` | The fixed-operand setters use the exact `const fenv_t *` from the header. The fixture verifies clearing flags through `fesetenv` and propagating flags through `feupdateenv`. |
-| Darwin `FE_FLUSHTOZERO`, `FE_DENORMALOPERAND`, and alternate default environment macros | Visible on different Darwin architectures. The shared slice keeps these separate for guarded follow-up. |
-| glibc `fesetexcept`, `fetestexceptflag`, `femode_t`, `fegetmode`, `fesetmode`, `FE_DFL_MODE`, `FE_NOMASK_ENV`, `feenableexcept`, `fedisableexcept`, `fegetexcept`, `FE_EXCEPT_SHIFT` | The Wove driver's GNU feature set exposes the extra callables and presets in all three C modes. `FE_EXCEPT_SHIFT` is AArch64-only. These members have a guarded follow-up. |
+| Darwin `FE_FLUSHTOZERO` and `FE_DFL_DISABLE_DENORMS_ENV` | The arm64 group exposes the native flag and fixed setters for the Darwin flush-to-zero environment. The fixture verifies the preset changes the result of subnormal arithmetic and distinguishes installing the preset from raising the previous flags again. |
+| Darwin `FE_DENORMALOPERAND` and `FE_DFL_DISABLE_SSE_DENORMS_ENV` | The x86-64 group exposes the native flag and the fixed setters for the SSE preset. The SDK limits the preset to SSE arithmetic. The Darwin alternate presets and the common default use the public macros for their header-owned backing objects. |
+| glibc `fesetexcept`, `fetestexceptflag`, `femode_t`, `fegetmode`, `fesetmode`, and `FE_DFL_MODE` | The GNU feature profile exposes these through the Linux group in all three audited C modes. The fixture checks a saved flag independently of current flags and restores control modes while retaining active flags. The opaque `femode_t` preserves its native record or scalar storage as selected by the header. |
+| glibc `feenableexcept`, `fedisableexcept`, `fegetexcept`, `FE_NOMASK_ENV`, and `FE_EXCEPT_SHIFT` | The test exercises the enabled mask and calls the two no-mask preset forms with clear flags. Updating to an unmasked environment can trap when a flag was already active. Trap enable support can vary on arm64, where the group also exposes `FE_EXCEPT_SHIFT`. [GNU floating-point control functions](https://www.gnu.org/software/libc/manual/html_node/Control-Functions.html) |
 | Decimal round control, `FE_TONEARESTFROMZERO`, `__STDC_VERSION_FENV_H__`, `FE_SNANS_ALWAYS_SIGNAL` | Absent in the tested headers and Clang feature profiles. |
 
-In C11, C17, and C23, the shared runtime fixtures ran under ASan and UBSan
-on Darwin arm64 and linked on Darwin x86-64. The Debian glibc 2.41 fixtures
-linked on arm64 and x86-64 with a `libm.so.6` dependency. The Linux checks
-stop at link validation. [Debian glibc packages](https://deb.debian.org/debian/pool/main/g/glibc/)
+In C11, C17, and C23, the shared and Darwin fixtures ran under ASan and UBSan
+on Darwin arm64 and linked on Darwin x86-64. The shared and GNU fixtures
+linked against Debian glibc 2.41 on arm64 and x86-64 with a `libm.so.6`
+dependency. The Linux checks stop at link validation. [Debian glibc packages](https://deb.debian.org/debian/pool/main/g/glibc/)
 
 ## Bundled math coverage
 
