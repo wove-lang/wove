@@ -32,6 +32,15 @@ def run_phase(root, phase, variables, tools):
 	assert re.fullmatch(phase.get("stderr", ""), stderr, flags=re.DOTALL), (argv, stderr)
 
 
+# Keep the original inode and contents of a regular artifact or a blocking directory.
+def publication_snapshot(path):
+	info = path.stat()
+	# A directory fixture occupies a publication destination and must remain intact.
+	if path.is_dir():
+		return info.st_ino, tuple(sorted(entry.name for entry in path.iterdir()))
+	return info.st_ino, path.read_bytes()
+
+
 # Isolate the project, including the previous published artifact set for failure cases.
 def check_case(fixtures, common, case, variables, tools):
 	with TemporaryDirectory(prefix="wove-library-") as workspace:
@@ -47,10 +56,15 @@ def check_case(fixtures, common, case, variables, tools):
 		# Failure scenarios select different exports so even a retained-C rewrite is observable.
 		for destination, source in case.get("replace", {}).items():
 			shutil.copyfile(fixtures / source, root / destination.format_map(variables))
+		# A directory in place of a file forces a post-link publication failure.
+		for name in case.get("blocked_destinations", []):
+			path = root / name.format_map(variables)
+			path.unlink(missing_ok=True)
+			path.mkdir(parents=True)
 		paths = [root / name.format_map(variables) for name in case.get("preserve", [])]
-		before = {path: (path.stat().st_ino, path.read_bytes()) for path in paths}
+		before = {path: publication_snapshot(path) for path in paths}
 		run_phase(root, case["build"], variables, tools)
-		assert all((path.stat().st_ino, path.read_bytes()) == original for path, original in before.items()), case["name"]
+		assert all(publication_snapshot(path) == original for path, original in before.items()), case["name"]
 		# A rejected command may not leave the requested destinations or private stages behind.
 		for pattern in case.get("absent", []):
 			assert not list(root.glob(pattern.format_map(variables))), (case["name"], pattern)

@@ -5,12 +5,13 @@
 
 	(use c-header "<sys/stat.h>" (only lstat S_ISREG (type Stat)))
 	(use c-header "<stdio.h>" (only fopen fgetc rename))
-	(use c-header "<unistd.h>" (only link unlink close))
-	(use c-header "<fcntl.h>" (only open O_RDONLY O_CLOEXEC O_DIRECTORY (type Mode)))
+	(use c-header "<unistd.h>" (only linkat unlink close))
+	(use c-header "<fcntl.h>" (only open O_RDONLY O_CLOEXEC O_DIRECTORY AT_FDCWD (type Mode)))
 	(use c-header "<sys/file.h>" (only flock LOCK_EX))
 	(use c-header "<errno.h>" (only errno ENOENT EINTR))
 	(use wove-file "../paths.wove" (only directory_width join_file_path))
 	(use wove-file "../files.wove" (only path_identity same_path_identity))
+	(use wove-file "../output.wove" (only retain_checked_unit))
 	(use wove-file "../publication.wove" (only stage_file))
 	(use wove-file "../../json/reader.wove" (only json_decode_string (type JsonNode)))
 	(use wove-file "../../cli/command/resolve.wove" (only command_setting (type CommandInvocation)))
@@ -25,6 +26,7 @@
 	(let library_stage_header "library.h")
 	(let library_stage_exports "library.exports")
 	(let library_header_backup "library.previous.h")
+	(let library_image_backup "library.previous")
 	(let linux_library_suffix ".so")
 	(let macos_library_suffix ".dylib")
 	(let wove_suffix ".wove")
@@ -245,44 +247,95 @@
 							(let closed (call close (local descriptor)))
 							(return -1i32)))))))
 
-	(fn install_library
-		(:doc "Install the generated header and library, restoring the prior header if the binary rename fails.")
-		(params (binary (shared-array u8)) (target (shared-array u8)) (staged_header (shared-array u8)) (header (shared-array u8)))
-		(returns bool)
+	(fn link_entry
+		(:doc "Create a hard link to the entry itself, preserving a symlink's identity if it is the old binary.")
+		(params (source (shared-array u8)) (target (shared-array u8))) (returns bool)
+		(body (return (i32.eqz (call linkat (local AT_FDCWD) (borrow-shared (local source))
+			(local AT_FDCWD) (borrow-shared (local target)) 0i32)))))
+
+	(fn save_library_entry
+		(:doc "Keep an extant entry under a private name. Only a genuinely absent destination needs no backup.")
+		(params (path (shared-array u8)) (backup (shared-array u8))) (returns i32)
 		(body
-			(let state (call public_header_state (borrow-shared (local header))))
-			(if (i32.ltz (local state)) (then (return (bool false))))
-			(let backup (call join_file_path (borrow-shared (local staged_header)) (borrow-shared (local library_header_backup))))
+			(if (call link_entry (borrow-shared (local path)) (borrow-shared (local backup))) (then (return 1i32)))
+			(if (i32.eq (local errno) (local ENOENT)) (then (return 0i32)))
+			(return -1i32)))
+
+	(fn place_library_entry
+		(:doc "Replace a backed-up entry or publish without overwriting an unexpectedly occupied new name.")
+		(params (staged (shared-array u8)) (path (shared-array u8)) (saved i32)) (returns bool)
+		(body
 			(if
-				(:doc "Preserve the inode of an older generated header until both names are installed.")
-				(i32.gtz (local state))
+				(:doc "Existing files are ready for an atomic replacement after the backup succeeds.")
+				(i32.gtz (local saved))
+				(then (return (i32.eqz (call rename (borrow-shared (local staged)) (borrow-shared (local path)))))))
+			(return (call link_entry (borrow-shared (local staged)) (borrow-shared (local path))))))
+
+	(fn restore_library_entry
+		(:doc "Restore the previous inode or remove an entry created by the current publication.")
+		(params (backup (shared-array u8)) (path (shared-array u8)) (saved i32)) (returns void)
+		(body
+			(if
+				(:doc "A previous entry has a hard link under the private staging directory.")
+				(i32.gtz (local saved))
+				(then (let restored (call rename (borrow-shared (local backup)) (borrow-shared (local path)))))
+				(else (let removed (call unlink (borrow-shared (local path))))))))
+
+	(fn publish_library_entries
+		(:doc "Install the public pair before retaining C. Roll back changed entries if any operation fails.")
+		(params (path (shared-array u8)) (retained (shared-array u8)) (unit (shared-array u8))
+			(binary (shared-array u8)) (target (shared-array u8)) (saved_image (shared-array u8)) (image_state i32)
+			(staged_header (shared-array u8)) (header (shared-array u8)) (saved_header (shared-array u8)) (header_state i32)
+			(target_index i32) (human bool)) (returns i32)
+		(body
+			(if
+				(:doc "A failed header install leaves the image and retained C untouched.")
+				(bool.not (call place_library_entry (borrow-shared (local staged_header)) (borrow-shared (local header)) (local header_state)))
+				(then (return -1i32)))
+			(if
+				(:doc "An image install failure restores the header before opening the retained destination.")
+				(bool.not (call place_library_entry (borrow-shared (local binary)) (borrow-shared (local target)) (local image_state)))
 				(then
-					(if
-						(:doc "A backup failure leaves both published destinations intact.")
-						(i32.not-eqz (call link (borrow-shared (local header)) (borrow-shared (local backup))))
-						(then (return (bool false))))
-					(if
-						(:doc "Replace only the previously checked generated header.")
-						(i32.not-eqz (call rename (borrow-shared (local staged_header)) (borrow-shared (local header))))
-						(then
-							(let removed (call unlink (borrow-shared (local backup))))
-							(return (bool false)))))
-				(else
-					(if
-						(:doc "An initially absent header must still be absent at publication.")
-						(i32.not-eqz (call link (borrow-shared (local staged_header)) (borrow-shared (local header))))
-						(then (return (bool false))))))
-			(let installed (i32.eqz (call rename (borrow-shared (local binary)) (borrow-shared (local target)))))
+					(call restore_library_entry (borrow-shared (local saved_header)) (borrow-shared (local header)) (local header_state))
+					(return -1i32)))
+			(let status (call retain_checked_unit (borrow-shared (local path)) (borrow-shared (local retained))
+				(borrow-shared (local unit)) (local target_index) (local human)))
 			(if
-				(:doc "Commit the pair only when the binary rename succeeds.")
-				(local installed)
+				(:doc "Retained C replacement is atomic. Restore both public entries when it fails.")
+				(i32.not-eqz (local status))
 				(then
-					(let removed (call unlink (borrow-shared (local backup))))
-					(return (bool true))))
+					(call restore_library_entry (borrow-shared (local saved_image)) (borrow-shared (local target)) (local image_state))
+					(call restore_library_entry (borrow-shared (local saved_header)) (borrow-shared (local header)) (local header_state))))
+			(return (local status))))
+
+	(fn install_library
+		(:doc "Hold rollback links in the private stage and commit all three artifacts under the caller's directory lock.")
+		(params (path (shared-array u8)) (target (shared-array u8)) (retained (shared-array u8))
+			(unit (shared-array u8)) (binary (shared-array u8)) (header (shared-array u8)) (target_index i32) (human bool))
+		(returns i32)
+		(body
+			(let header_state (call public_header_state (borrow-shared (local header))))
+			(if (i32.ltz (local header_state)) (then (return -1i32)))
+			(let staged_header (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_stage_header))))
+			(let saved_header (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_header_backup))))
+			(let saved_image (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_image_backup))))
+			(let image_state (call save_library_entry (borrow-shared (local target)) (borrow-shared (local saved_image))))
 			(if
-				(:doc "Restore the old generated header or remove the newly published one.")
-				(i32.gtz (local state))
-				(then (let restored (call rename (borrow-shared (local backup)) (borrow-shared (local header)))))
-				(else (let removed (call unlink (borrow-shared (local header))))))
-			(return (bool false))))
+				(:doc "A directory or an inaccessible image destination must fail before modifying any artifacts.")
+				(i32.ltz (local image_state))
+				(then (return -1i32)))
+			(let actual_header (call save_library_entry (borrow-shared (local header)) (borrow-shared (local saved_header))))
+			(let-mut status -1i32)
+			(if
+				(:doc "Continue only when the header still has the observed presence and both rollback links are ready.")
+				(i32.eq (local actual_header) (local header_state))
+				(then
+					(set (local status) (call publish_library_entries (borrow-shared (local path)) (borrow-shared (local retained))
+						(borrow-shared (local unit)) (borrow-shared (local binary)) (borrow-shared (local target))
+						(borrow-shared (local saved_image)) (local image_state) (borrow-shared (local staged_header))
+						(borrow-shared (local header)) (borrow-shared (local saved_header)) (local header_state)
+						(local target_index) (local human)))))
+			(let removed_image (call unlink (borrow-shared (local saved_image))))
+			(let removed_header (call unlink (borrow-shared (local saved_header))))
+			(return (local status))))
 )

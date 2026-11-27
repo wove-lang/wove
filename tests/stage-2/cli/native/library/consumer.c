@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  */
 
+#include <stdio.h>
 #include <libscalars.h>
 
 /* Call each public C prototype through the dynamic library. */

@@ -70,7 +70,8 @@ wovec bin counter.wove
 A concrete function marked `(:pragma (c_export))` is callable from C under
 its original, case-sensitive name. This includes exports in reached Wove
 modules. A Wove import alias has no effect on the public symbol. Public
-names must be unique in the graph and available in the C interface.
+names must be unique in the graph. C and C++ keywords and reserved C
+library names are unavailable for export.
 Parameters and results use `bool`, exact-width integers up to 64 bits,
 `f32` as C `float`, and `f64` as C `double`, all by value. Results may
 also be `void`. A Wove runtime trap can terminate the calling process.
