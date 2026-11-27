@@ -194,14 +194,15 @@ C23 `_BitInt(256)`. These types support exact decimal, hexadecimal, and
 binary literals, including full-width extrema, and use the corresponding
 signed or unsigned C representation. When a checked graph uses either
 type, Wove requires the selected Clang toolchain to compile and link the
-wide-integer capability probe. The 256-bit types support checked integer
-conversions and `fits` across all supported widths, plus little- and
-big-endian encoding and decoding of exactly 32 bytes. The other integer
-operators below cover widths through 128 bits.
+wide-integer capability probe. The 256-bit types support wrapping,
+checked, and recoverable arithmetic, division and remainder, all
+integer comparisons, checked conversions and `fits`, and both endian
+conversions for exactly 32 bytes. Bitwise operations, shifts, rotations,
+and bit counts are available through 128 bits.
 
 Typed numeric operators use `type.operation`. In `(i32.add left right)`,
-`i32` specifies the exact operands and result. The same integer operators
-are available at every listed width.
+`i32` specifies the exact operands and result. The operators below are
+available at every width through 128 bits.
 
 | Operation | Words |
 | --- | --- |
