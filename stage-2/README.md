@@ -5,9 +5,9 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Stage 2 compiler
 
-The self-hosted compiler lives in this directory. Its sources use the
-[bootstrap language subset](LANGUAGE-SUBSET.md). For application code,
-use the [Wove language reference](../LANGUAGE.md).
+The self-hosted compiler lives in this directory. The shared graph checker
+and C emitter use the [seed language subset](LANGUAGE-SUBSET.md). For
+application code, use the [Wove language reference](../LANGUAGE.md).
 
 ## Source scanner, tree reader, and renderer
 

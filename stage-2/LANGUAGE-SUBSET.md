@@ -5,8 +5,9 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Bootstrap language subset
 
-Stage 2 is written in the subset the Python seed can compile. This reference
-records the limits that matter when editing the compiler. The
+The shared graph checker and C emitter use the subset the Python seed can
+compile. The rest of the compiler builds with that emitter and uses the
+full language. The
 [Wove language reference](../LANGUAGE.md) describes shared syntax and semantics.
 
 ## Forms and selection
@@ -22,17 +23,9 @@ between operands and after the last operand. For example,
 `(let index 42i32 (:doc "Initial index."))` declare the same value.
 Fields and function parameters still use their name as the head.
 
-The seed enables `bootstrap` during selection and excludes `(test)` forms.
-It evaluates selection on modules, declarations, and `decls` groups before
-opening providers or binding names. All `cfg` predicates on a form must pass.
-For example, use one import for the bootstrap driver and one for the native driver.
-
-```lisp
-(use (:pragma (cfg bootstrap)) wove-file "./driver/bootstrap/entry.wove"
-    (only (as run_bootstrap_command run_compiler)))
-(use (:pragma (cfg (not bootstrap))) wove-file "./driver/command.wove"
-    (only (as run_native_command run_compiler)))
-```
+The seed excludes test declarations before opening providers or binding
+names. The compiler entry uses ordinary imports to reach the same driver
+at every stage.
 
 An excluded module contributes no names or nested imports. An empty `(only)`
 can visit an excluded provider. A named selection reports the unavailable
@@ -48,8 +41,8 @@ before the prefix (`-0x80i8`). Write bytes as typed integers.
 
 | Family | Available forms |
 | --- | --- |
-| Wrapping arithmetic | `add`, `sub`, `inc`, and `dec` on `i32` and `u32`. `u32.mul` takes two `u32` operands and reduces the product modulo 2^32. |
-| Division and remainder | `u32.div` and `u32.rem` take two `u32` operands. Division rounds down, and both operations trap on a zero divisor. |
+| Wrapping arithmetic | `add`, `sub`, `mul`, `inc`, and `dec` on `i32` and `u32`. |
+| Division and remainder | `div` and `rem` on `i32` and `u32`. Both trap on a zero divisor. |
 | Comparisons | `eq`, `lt`, `eqz`, `ltz`, and `gtz` and their `not-` forms on `u8`, `i32`, and `u32` |
 | Bitwise operations | `u32.and`, `u32.or`, `u32.xor`, and `u32.not` |
 | Shifts | `u32.shl` and `u32.shr` with an exact `i32` count in `[0, 32)` |
@@ -77,8 +70,9 @@ path back to a `while` condition must preserve owners live on entry.
 Use `(array.alloc T count)` for a local owned array with `u8` or a
 copyable record as its element type. Use `array.len`, `array.load`, and
 `array.store` with exact element types and `i32` indices. A writable
-receiver is required for stores. Transfer a named owner with
-`(move name)`.
+receiver is required for stores. Fixed scalar arrays can be passed by
+value and read with `array.len` and `array.load`. Transfer or return an
+owned array with `(move name)`.
 
 Pass `(shared-array T)` and `(mut-array T)` parameters using
 `borrow-shared` and `borrow-mut` on an owner or received view. For a
@@ -108,5 +102,4 @@ first-use order through the depth-first Wove import walk. For an existing
 project header, the seed deduplicates by resolved containing directory and
 filename and keeps the first include spelling. C-header selections add
 no Wove names. Bridge bodies, other foreign providers, and their selections
-stay opaque to the seed. The private bootstrap runtime supplies its own
-fixed C bindings.
+stay opaque to the Python seed.

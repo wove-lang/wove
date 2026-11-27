@@ -5,19 +5,14 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Stage 1 seed
 
-The Python seed compiles the [bootstrap language subset](../stage-2/LANGUAGE-SUBSET.md)
-that Stage 2 is written in. It reads an entry module and its local imports,
-writes one C11 translation unit to stdout, and reports source errors by file
-and line.
+The Python seed lowers the [subset](../stage-2/LANGUAGE-SUBSET.md) used by
+the shared Wove graph checker and C emitter. The build then uses that emitter
+to compile [`stage-2/wovec.wove`](../stage-2/wovec.wove) and its imports.
 
 ```sh
-python3 stage-1/wovec.py SOURCE
 make stage-1
 ```
 
-The generated C includes `wove_runtime.h` and links with
-`runtime/wove_runtime.c`. `make test` runs the seed cases in the
-[case manifest](../tests/stage-1/cases.tsv).
-
-The [bootstrap guard inventory](../stage-2/driver/bootstrap/README.md) records
-which Stage 2 operations are shared and which depend on the selected driver.
+The resulting `build/stage-1/wovec` uses the ordinary driver and runtime.
+Make invokes its `bin` command to build the next compiler generation.
+The seed's standalone lowering cases are in the [case manifest](../tests/stage-1/cases.tsv).

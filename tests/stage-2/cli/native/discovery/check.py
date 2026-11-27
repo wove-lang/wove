@@ -4,7 +4,6 @@
 """Exercise both disk walkers after their source and graph tables grow."""
 
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,8 +23,7 @@ def write_module(path, name, forms):
 
 
 # Build a relative chain with a shared provider and enough files to grow both drivers' tables.
-def write_graph(root, bundled):
-	shutil.copytree(bundled, root / "llvm-libc")
+def write_graph(root):
 	chain = root / "chain"
 	chain.mkdir()
 	write_module(root / "shared.wove", "shared",
@@ -49,7 +47,7 @@ def write_graph(root, bundled):
 
 
 # Report the first failing edge at the final provider after both workspaces grow.
-def check_edge_failure(root, entry, bootstrap, native, requested, code):
+def check_edge_failure(root, entry, compilers, requested, code):
 	name = f"hop_{CHAIN_LENGTH - 1}"
 	terminal = root / "chain" / f"{name}.wove"
 	failed_use = f'(use wove-file "{requested}" (only unreachable))'
@@ -58,34 +56,33 @@ def check_edge_failure(root, entry, bootstrap, native, requested, code):
 		f"\t{failed_use}\n\t{later_use}\n\t(fn {name} (params) (returns i32) (body (return 0i32)))")
 	start = terminal.read_bytes().index(failed_use.encode())
 	end = start + len(failed_use)
-	private = subprocess.run([bootstrap, entry], cwd=root, capture_output=True, timeout=30)
-	assert private.returncode == 1 and not private.stdout, private
-	assert private.stderr == f"{terminal}:{start}-{end} wovec bootstrap error {code}\n".encode(), private
-	ordinary = subprocess.run([native, "cc", entry, "-o", "failed"], cwd=root, capture_output=True, timeout=30)
-	assert ordinary.returncode == 1 and not ordinary.stdout, ordinary
-	diagnostic = json.loads(ordinary.stderr)
-	assert diagnostic["code"] == code, diagnostic
-	assert diagnostic["location"] == {"kind": "source", "file": str(terminal), "start": start, "end": end}, diagnostic
+	for compiler in compilers:
+		result = subprocess.run([compiler, "cc", entry, "-o", "failed"], cwd=root, capture_output=True, timeout=30)
+		assert result.returncode == 1 and not result.stdout, result
+		diagnostic = json.loads(result.stderr)
+		assert diagnostic["code"] == code, diagnostic
+		assert diagnostic["location"] == {"kind": "source", "file": str(terminal), "start": start, "end": end}, diagnostic
 	assert not (root / ".wovec-cache/default/failed/bin/main.c").exists()
 
 
 # Compare both emitted units and execute the same reached call chain.
 def main():
-	bootstrap, native, bundled = (Path(arg).resolve() for arg in sys.argv[1:])
+	first, second = (Path(arg).resolve() for arg in sys.argv[1:])
 	with TemporaryDirectory(prefix="wove-discovery-") as directory:
 		root = Path(directory).resolve()
-		entry = write_graph(root, bundled)
+		entry = write_graph(root)
 		entries = set(root.rglob("*"))
-		checked = subprocess.run([native, "cc", "--check", entry], cwd=root, capture_output=True, check=True, timeout=30)
+		checked = subprocess.run([second, "cc", "--check", entry], cwd=root, capture_output=True, check=True, timeout=30)
 		assert not checked.stdout and not checked.stderr, checked
 		assert set(root.rglob("*")) == entries
-		seed = subprocess.run([bootstrap, entry], cwd=root, capture_output=True, check=True, timeout=30)
-		subprocess.run([native, "bin", entry, "-o", "discovery"], cwd=root, check=True, timeout=30)
-		assert seed.stdout == (root / ".wovec-cache/default/discovery/bin/main.c").read_bytes()
+		subprocess.run([first, "cc", entry, "-o", "first"], cwd=root, check=True, timeout=30)
+		subprocess.run([second, "bin", entry, "-o", "discovery"], cwd=root, check=True, timeout=30)
+		assert (root / ".wovec-cache/default/first/bin/main.c").read_bytes() == (
+			root / ".wovec-cache/default/discovery/bin/main.c").read_bytes()
 		run = subprocess.run([root / "discovery"], cwd=root, timeout=30)
 		assert run.returncode == 42, run
-		check_edge_failure(root, entry, bootstrap, native, "./missing.wove", 27)
-		check_edge_failure(root, entry, bootstrap, native, "./hop_0.wove", 28)
+		check_edge_failure(root, entry, (first, second), "./missing.wove", 27)
+		check_edge_failure(root, entry, (first, second), "./hop_0.wove", 28)
 
 
 if __name__ == "__main__":

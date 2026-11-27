@@ -16,13 +16,17 @@ cp -R Makefile stage-1 stage-2 runtime tools wovec.jsonc "$project/"
 # Make reads the seed manifest while loading targets, including for an all build.
 mkdir -p "$project/tests/stage-1"
 cp tests/stage-1/cases.tsv "$project/tests/stage-1/"
+# The seed uses the existing Wove emitter entry and its C interface.
+mkdir -p "$project/tests/stage-2"
+cp tests/stage-2/source_scan.wove tests/stage-2/source_scan.probe.c "$project/tests/stage-2/"
 
 output=custom-output
 snapshot="$output/self-host-source"
 native_import=stage-2/text/equal.wove
-seed_import=stage-2/driver/bootstrap/entry.wove
+seed_import=stage-2/source/scan.wove
 asset=stage-2/clang/templates/probe_header.tmpl.h
-products='stage-1/wovec.c stage-1/wovec self-host-source/.ready stage-2/wovec.c stage-2/wovec wovec'
+native_unit=stage-2/.wovec-cache/default/wovec/bin/main.c
+products="stage-1/wovec.c stage-1/wovec self-host-source/.ready $native_unit stage-2/wovec wovec"
 
 # Keep the version and output paths fixed while changing only source input bytes.
 build() {
@@ -33,7 +37,7 @@ build() {
 check_snapshot() {
 	diff -r stage-2 "$snapshot/stage-2"
 	diff -r runtime "$snapshot/runtime"
-	cmp "$output/stage-2/wovec.c" "$output/.wovec-cache/default/wovec/bin/main.c"
+	cmp "$output/$native_unit" "$output/.wovec-cache/default/wovec/bin/main.c"
 }
 
 # Record both artifact bytes and timestamps before a rebuild.
@@ -69,8 +73,8 @@ sleep 1
 printf '\n' >> "$native_import"
 build all
 check_snapshot
-# A native-only transitive edit must restage the input and rebuild both generations.
-for product in self-host-source/.ready stage-2/wovec.c stage-2/wovec wovec; do
+# A transitive driver edit must rebuild all compiler generations.
+for product in $products; do
 	test -n "$(find "$output/$product" -newer "$work/before/$product")"
 done
 

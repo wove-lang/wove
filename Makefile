@@ -133,10 +133,10 @@ SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
 BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
-BOOTSTRAP_RUNTIME := runtime/wove_bootstrap.c
 GRAPH_COMPILER_SOURCES := $(BOOTSTRAP_WOVE_SOURCES) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(TEST_DISCOVERY_MODULE) $(C_EMITTER_SOURCES) stage-2/emit/tests.wove $(HASHING_SOURCES)
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
+SEED_EMIT := stage-1/emit.py
 RUNTIME := runtime/wove_runtime.c
 RUNTIME_HEADER := runtime/wove_runtime.h
 OWNERSHIP_TESTS := tests/stage-1
@@ -222,10 +222,10 @@ stage-2: $(NATIVE_COMPILER)
 
 # Compare all native emissions from the same graph and exercise the final executable.
 self-host: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
-self-host: $(FINAL_COMPILER) $(STAGE2)/wovec.c $(SELF_HOST_SOURCE)/.ready
+self-host: $(FINAL_COMPILER) $(SELF_HOST_SOURCE)/.ready
 	CLANG="$(abspath $(BUILD_CLANG))" "$(FINAL_COMPILER)" cc "$(SELF_HOST_ENTRY)" -o "$(SELF_HOST_VERIFIED)"
-	cmp "$(STAGE2)/wovec.c" "$(BUILD_DIR)/.wovec-cache/default/wovec/bin/main.c"
-	cmp "$(STAGE2)/wovec.c" "$(STAGE2)/.wovec-cache/default/wovec-self-hosted/bin/main.c"
+	cmp "$(STAGE2)/.wovec-cache/default/wovec/bin/main.c" "$(BUILD_DIR)/.wovec-cache/default/wovec/bin/main.c"
+	cmp "$(STAGE2)/.wovec-cache/default/wovec/bin/main.c" "$(STAGE2)/.wovec-cache/default/wovec-self-hosted/bin/main.c"
 	CLANG="$(abspath $(BUILD_CLANG))" "$(FINAL_COMPILER)" bin "$(NATIVE_CLI_FIXTURES)/input.wove" -o "$(SELF_HOST_SMOKE)"
 	@status=0; "$(SELF_HOST_SMOKE)" || status=$$?; test "$$status" -eq 42
 
@@ -318,7 +318,7 @@ test-native-parallel:
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/parallel/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/parallel/cases.jsonc"
 
 test-native-discovery:
-	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/discovery/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))llvm-libc"
+	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/discovery/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)"
 
 test-native-debug:
 	sh "$(NATIVE_CLI_FIXTURES)/debug/check.sh" "$(PYTHON)" "$(abspath $(NATIVE_COMPILER))" "$(NATIVE_CLI_FIXTURES)/debug/cases.tsv"
@@ -334,7 +334,7 @@ test-native-library: $(SOURCE_SCAN)
 	$(PYTHON) tests/stage-2/check_library_units.py "$(SOURCE_SCAN)" "$(NATIVE_COMPILER)" tests/stage-2/numbered_units/library.jsonc
 
 test-native-emission:
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))llvm-libc" "$(NATIVE_CLI_FIXTURES)/emission/cases.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/emission/cases.tsv"
 
 test-native-macro-modes:
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/check_macro_modes.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/macro-modes.tsv"
@@ -375,7 +375,7 @@ $(WORKER_PROBE) $(WORKER_QUEUE_PROBE) $(WORKER_POOL_PROBE): $(STAGE2)/workers/%:
 # Check generated metadata and version invalidation in an isolated build.
 test-stage-2-version: $(NATIVE_COMPILER) $(BUILD_VERSION)
 	+sh "$(VERSION_FIXTURES)/check.sh" "$(MAKE)" "$(abspath $(BUILD_DIR))" "$(NATIVE_COMPILER)" "$(BUILD_VERSION)" \
-		"$(VERSION_FIXTURES)/cases.tsv" "$(abspath $(STAGE1))"
+		"$(VERSION_FIXTURES)/cases.tsv"
 
 # Exercise the project loader with the checked-in config and standalone cases.
 test-stage-2-config: $(CONFIG_PROGRAM)
@@ -390,9 +390,9 @@ test-stage-2-inventory: $(SOURCE_SCAN) $(TEST_RUNTIME) $(NUMBERED_HEADERS)
 	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/test_dispatch.jsonc "$(NUMBERED_HEADERS)"
 
 # Keep generated runner helpers local to their translation unit.
-$(TEST_RUNNER).c: $(TEST_RUNNER_ROOT) $(TEST_RUNNER_SOURCES) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
+$(TEST_RUNNER).c: $(TEST_RUNNER_ROOT) $(TEST_RUNNER_SOURCES) $(SOURCE_SCAN) $(SEED_EMIT) | $(BUILD_VERSION)
 	mkdir -p "$(@D)"
-	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" --private-helpers $(filter %.wove,$^)
+	$(PYTHON) "$(SEED_EMIT)" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" --private-helpers $(filter %.wove,$^)
 
 # Expose only the host argument entry under the test-specific C name.
 $(TEST_RUNNER).o: $(TEST_RUNNER).c $(RUNTIME_HEADER)
@@ -441,9 +441,9 @@ test-stage-2-clang: $(AST_PROBE) $(AST_LIVE) $(CLANG_TEMPLATE)
 	sh "$(CLANG_FIXTURES)/check-live.sh" "$(AST_LIVE)" "$(CLANG_FIXTURES)/live.tsv" $(CLANG)
 
 # Embed the C probe template in the live Clang query fixture.
-$(AST_LIVE).c: $(AST_FIXTURES)/live.wove $(AST_LIVE_SOURCES) $(CLANG_TEMPLATE) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
+$(AST_LIVE).c: $(AST_FIXTURES)/live.wove $(AST_LIVE_SOURCES) $(CLANG_TEMPLATE) $(SOURCE_SCAN) $(SEED_EMIT) | $(BUILD_VERSION)
 	mkdir -p "$(@D)"
-	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^) --asset "$(CLANG_TEMPLATE)"
+	$(PYTHON) "$(SEED_EMIT)" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^) --asset "$(CLANG_TEMPLATE)"
 
 $(AST_LIVE): $(AST_LIVE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime $^ -o "$@"
@@ -459,14 +459,17 @@ test-stage-1: stage-1 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TE
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 	sh "$(OWNERSHIP_TESTS)/check_includes.sh" "$(STAGE1)/imports.c_headers.c" "$(OWNERSHIP_TESTS)/imports/c_headers/includes.txt"
 
-# The seed builds the bootstrap-selected compiler from the same source tree.
-$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(COMPILER_INPUTS) $(SEED)
+# Build the compiler from its ordinary entry with the seed-built Wove emitter.
+$(STAGE1)/wovec.c: $(SOURCE_SCAN) $(SELF_HOST_SOURCE)/.ready stage-1/build.py $(SEED_EMIT) $(BUILD_VERSION) force-build-info
+	$(call build_versioned,mkdir -p "$(@D)"; c_output="$@.tmp.$$$$"; \
+		trap 'rm -f "$$c_output"' 0; WOVE_BUILD_DIR="$(abspath $(BUILD_DIR))" $(PYTHON) stage-1/build.py > "$$c_output"; \
+		mv "$$c_output" "$@")
 
 # Track the graph modules needed by the scanner fixture.
 $(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(GRAPH_COMPILER_SOURCES) $(SEED)
 
 # Replace the generated C only after the seed succeeds.
-$(STAGE1)/wovec.c $(SOURCE_PROBE_C):
+$(SOURCE_PROBE_C):
 	mkdir -p "$(@D)"
 	set -eu; \
 	c_output="$@.tmp.$$$$"; \
@@ -474,11 +477,11 @@ $(STAGE1)/wovec.c $(SOURCE_PROBE_C):
 	$(PYTHON) stage-1/wovec.py "$<" > "$$c_output"; \
 	mv "$$c_output" "$@"
 
-# Build the seed-selected entry and its fixed bootstrap runtime in one C translation unit.
-$(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(RUNTIME) $(RUNTIME_HEADER) $(BOOTSTRAP_RUNTIME)
+# Link the first compiler with the ordinary runtime.
+$(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(RUNTIME) $(RUNTIME_HEADER)
 	@printf 'Building %s\n' "$@"
 	$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime \
-		-include "$(RUNTIME)" -include "$(BOOTSTRAP_RUNTIME)" "$<" -o "$@"
+		-include "$(RUNTIME)" "$<" -o "$@"
 
 # Compile the C harness with its generated fixture and the shared runtime.
 $(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(SOURCE_PROBE_C) $(STAGE1)/runtime.o
@@ -508,22 +511,19 @@ endef
 $(SELF_HOST_SOURCE)/.ready: $(SELF_HOST_INPUTS) $(COMPILER_ROOT) $(SELF_HOST_TREE_INPUTS) $(BUILD_VERSION) force-build-info
 	$(call build_versioned,sh "$(SELF_HOST_INPUTS)" "$(@D)" "$(BUILD_VERSION)")
 
-# Give the seed-built Wove compiler one entry. It opens the selected imports and assets.
-$(STAGE2)/wovec.c: $(BOOTSTRAP_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_VERSION) force-build-info
-	$(call build_versioned,mkdir -p "$(@D)"; c_output="$@.tmp.$$$$"; \
-		trap 'rm -f "$$c_output"' 0; "$(BOOTSTRAP_COMPILER)" "$(SELF_HOST_ENTRY)" > "$$c_output"; mv "$$c_output" "$@")
-
-# Build the second compiler and the shared runtime in one C translation unit.
-$(NATIVE_COMPILER): $(STAGE2)/wovec.c $(RUNTIME) $(RUNTIME_HEADER) $(BUILD_VERSION) force-build-info
-	$(call build_versioned,printf 'Building %s\n' "$@"; stage=$$(mktemp -d "$(@D)/.wovec.XXXXXX"); trap 'rm -rf -- "$$stage"' 0; \
-		$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime \
-			-include "$(RUNTIME)" "$<" -o "$$stage/wovec"; mv "$$stage/wovec" "$@")
-
 # Preserve the configured Make command and forward each flag as one native CLI option.
-$(FINAL_COMPILER): export WOVE_BUILD_CLANG = $(CLANG)
+define build_with_wovec
+	$(call build_versioned,printf 'Building %s\n' "$@"; set -- $(CFLAGS); count=$$#; \
+		for flag do set -- "$$@" --cflag "$$flag"; done; shift "$$count"; \
+		CLANG="$(abspath $(BUILD_CLANG))" "$<" bin "$(SELF_HOST_ENTRY)" -o "$@" "$$@")
+endef
+
+$(NATIVE_COMPILER) $(FINAL_COMPILER): export WOVE_BUILD_CLANG = $(CLANG)
+$(NATIVE_COMPILER): $(BOOTSTRAP_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_CLANG) wovec.jsonc $(BUILD_VERSION) force-build-info
+	$(build_with_wovec)
+
 $(FINAL_COMPILER): $(NATIVE_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_CLANG) wovec.jsonc $(BUILD_VERSION) force-build-info
-	$(call build_versioned,set -- $(CFLAGS); count=$$#; for flag do set -- "$$@" --cflag "$$flag"; done; shift "$$count"; \
-		CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$(SELF_HOST_ENTRY)" -o "$@" "$$@")
+	$(build_with_wovec)
 
 # Build utility-only Wove programs with the ordinary Python seed and runtime.
 $(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o
@@ -543,9 +543,9 @@ $(STAGE2)/hashing/native/base32hex.c: $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)
 $(STAGE2)/hashing/native/base16.c: $(BASE16_SOURCES)
 $(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCE) $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)
 
-$(addsuffix .c,$(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE)): $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
+$(addsuffix .c,$(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE)): $(SOURCE_SCAN) $(SEED_EMIT) | $(BUILD_VERSION)
 	mkdir -p "$(@D)"
-	$(PYTHON) "$(NATIVE_DRIVER)/bootstrap.py" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^)
+	$(PYTHON) "$(SEED_EMIT)" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^)
 
 $(HASHING_NATIVE_PROGRAMS): %: %.c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$<" "$(STAGE1)/runtime.o" -o "$@"
@@ -634,7 +634,7 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
-REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(GRAPH_COMPILER_SOURCES) $(BOOTSTRAP_RUNTIME) \
+REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(GRAPH_COMPILER_SOURCES) \
 	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
 	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \

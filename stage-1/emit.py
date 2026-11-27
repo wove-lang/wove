@@ -1,7 +1,7 @@
 # Copyright (c) 2026 wove contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-"""Supply the native compiler's build-time graph to the seed-built Stage 2 emitter."""
+"""Pass build inputs to the shared Wove C emitter."""
 
 import platform
 import subprocess
@@ -18,16 +18,19 @@ def native_target():
 
 
 # Supply the compiler's full build graph to the seed-built emitter.
-def emit_native(probe, destination, version, paths, providers, private_helpers=False):
-	files = [(index, "/" + name, name) for index, name in enumerate(dict.fromkeys(paths))]
+def emit_native(probe, destination, version, paths, providers, private_helpers=False, root=Path("."), target=None):
+	files = [(index, "/" + name, str(root / name)) for index, name in enumerate(dict.fromkeys(paths))]
 	rows = [str(field) for entry in files for field in entry]
 	command = "--emit-private-graph" if private_helpers else "--emit-graph"
-	# The virtual path is relative to the Wove module even with a custom BUILD_DIR.
-	invocation = [probe, "--mode", "native", "--target", *native_target(), command, "0", "8192", "4194304", *rows,
-		"--asset", "/build/version.txt", version]
+	capacity = max(4194304, 4 * sum(Path(source).stat().st_size for _, _, source in files))
+	invocation = [probe, "--mode", "native", "--target", *(target or native_target()), command,
+		"0", "8192", str(capacity), *rows]
+	# The version keeps its virtual path even when Make uses a separate build directory.
+	if version is not None:
+		invocation.extend(("--asset", "/build/version.txt", version))
 	# Give bundled source assets the paths their Wove embeds resolve against.
 	for provider in providers:
-		invocation.extend(("--asset", "/" + provider, provider))
+		invocation.extend(("--asset", "/" + provider, str(root / provider)))
 	result = subprocess.run(invocation, capture_output=True)
 	header, separator, source = result.stdout.partition(b"\n")
 	# Keep a bootstrap failure at its repository-relative source path.
@@ -39,10 +42,10 @@ def emit_native(probe, destination, version, paths, providers, private_helpers=F
 		else:
 			sys.stderr.buffer.write(result.stderr or result.stdout)
 		return 1
-	if len(source) != int(header.split()[1]):
-		print("native compiler: incomplete C translation unit", file=sys.stderr)
-		return 1
-	Path(destination).write_bytes(source)
+	if destination is None:
+		sys.stdout.buffer.write(source)
+	else:
+		Path(destination).write_bytes(source)
 	return 0
 
 

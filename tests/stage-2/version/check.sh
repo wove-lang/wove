@@ -9,7 +9,6 @@ build=$2
 compiler=$3
 version=$4
 manifest=$5
-seed=$6
 generator=tools/build-info.sh
 work=$(mktemp -d "$build/version-check.XXXXXX")
 trap 'rm -rf -- "$work"' 0
@@ -41,15 +40,15 @@ check_compiler() {
 	done
 }
 
-# Build the real compiler under a separate build directory, reusing the checked seed.
+# Build every compiler artifact inside the isolated version fixture.
 build_compiler() {
-	"$make" -s stage-2 "BUILD_DIR=$work/native" "STAGE1=$seed" "WOVEC_BUILD_VERSION=$1"
+	"$make" -s stage-2 "BUILD_DIR=$work/native" "WOVEC_BUILD_VERSION=$1"
 }
 
 # Change only the version and exercise the real Make targets under equal timestamps.
 check_rebuild() {
 	native="$work/native/stage-2/wovec"
-	emitted="$native.c"
+	emitted="$work/native/stage-2/.wovec-cache/default/wovec/bin/main.c"
 	native_asset="$work/native/version.txt"
 	build_compiler "$1"
 	check_compiler "$native" "$1"
