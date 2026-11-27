@@ -18,12 +18,15 @@ as `let-mut` and `u32.add-checked`.
 
 ```lisp
 (module example
+    (:doc `Show how a program calls a helper and returns an exit status.`)
     (struct ArgSpan (fields (start i32) (end i32)))
 
     (fn twice (params (value i32)) (returns i32)
+        (:doc "Double the input with wrapping i32 addition.")
         (body (return (i32.add (local value) (local value)))))
 
     (fn main (params (bytes (shared-array u8)) (args (shared-array ArgSpan))) (returns i32)
+        (:doc "Double 21 and return the result as the process exit status.")
         (body (return (call twice 21i32)))))
 ```
 
