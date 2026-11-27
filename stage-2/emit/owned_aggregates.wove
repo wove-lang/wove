@@ -17,7 +17,8 @@
 	(use wove-file "./owner_checks.wove" (only has_owner_check mark_owner_check write_owner_check))
 	(use wove-file "./owners.wove" (only write_native_destructor))
 	(use wove-file "./owned_fields.wove" (only write_owner_slot))
-	(use wove-file "./records.wove" (only write_member_name write_record_name))
+	(use wove-file "./members.wove" (only write_member ordinal_member named_member (type CMember)))
+	(use wove-file "./records.wove" (only write_record_name))
 	(use wove-file "./runtime.wove" (only open_array_drop write_c_number))
 	(use wove-file "./text.wove" (only c_byte c_literal_text write_local_name))
 
@@ -39,7 +40,7 @@
 	(let c_owner_close "}\n")
 	(let c_arg_address "(&")
 	(let c_drop_end ");")
-	(struct OwnedMember (fields (type u32) (ordinal i32)))
+	(struct OwnedMember (fields (type u32) (field i32)))
 
 	(fn write_owner_helper_name
 		(:doc "Derive a unique helper symbol from the exact nominal type and operation.")
@@ -71,7 +72,7 @@
 	(fn write_aggregate_take
 		(:doc "Move an exact aggregate through its original local or projected slot.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord) (row ScalarExpression)
-			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression)) (tree_base i32)
+			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression)) (records (shared-array ScalarRecord)) (tree_base i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -79,7 +80,7 @@
 				(bool true) (borrow-mut output) offset name_prefix writing))
 			(let argument (call c_literal_text (borrow-shared c_arg_address) (borrow-mut output) function writing))
 			(let place (call write_owner_slot (borrow-shared source) (borrow-shared nodes) row
-				(borrow-shared parameters) (borrow-shared expressions) tree_base
+				(borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) tree_base
 				(borrow-mut output) argument name_prefix writing))
 			(return (call c_byte (borrow-mut output) place 41u8 writing))))
 
@@ -103,13 +104,13 @@
 
 	(fn write_native_member_drop
 		(:doc "Destroy a present C handle in place and skip a null or moved member.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (type u32) (ordinal i32)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (type u32) (name CMember)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let open (call c_literal_text (borrow-shared c_native_member_if)
 				(borrow-mut output) offset writing))
-			(let condition (call write_member_name (borrow-shared source) ordinal
+			(let condition (call write_member (borrow-shared source) name
 				(borrow-mut output) open name_prefix writing))
 			(let discard (call c_literal_text (borrow-shared c_native_member_close)
 				(borrow-mut output) condition writing))
@@ -117,7 +118,7 @@
 				(borrow-mut output) discard writing))
 			(let open_arg (call c_literal_text (borrow-shared c_native_member_arg)
 				(borrow-mut output) drop writing))
-			(let member (call write_member_name (borrow-shared source) ordinal
+			(let member (call write_member (borrow-shared source) name
 				(borrow-mut output) open_arg name_prefix writing))
 			(return (call c_literal_text (borrow-shared c_drop_end)
 				(borrow-mut output) member writing))))
@@ -125,14 +126,14 @@
 	(fn write_member_drop
 		(:doc "Drop a checked owning member through the array runtime or its nominal destructor.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
-			(type u32) (ordinal i32) (payload bool) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(type u32) (name CMember) (payload bool) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(if
 				(:doc "A native owner uses the destructor of its defining C declaration.")
 				(call is_native_owner type)
 				(then (return (call write_native_member_drop (borrow-shared source) (borrow-shared nodes)
-					type ordinal (borrow-mut output) offset name_prefix writing))))
+					type name (borrow-mut output) offset name_prefix writing))))
 			(let-mut cursor offset)
 			(if
 				(:doc "An aggregate helper takes the address of the original inline member.")
@@ -150,7 +151,7 @@
 					(borrow-mut output) cursor writing)))
 				(else (set cursor (call c_literal_text (borrow-shared c_owner_field)
 					(borrow-mut output) cursor writing))))
-			(let member (call write_member_name (borrow-shared source) ordinal
+			(let member (call write_member (borrow-shared source) name
 				(borrow-mut output) cursor name_prefix writing))
 			(return (call c_literal_text (borrow-shared c_drop_end)
 				(borrow-mut output) member writing))))
@@ -164,10 +165,9 @@
 		(body
 			(let-mut owned (array.alloc OwnedMember (struct.get layout count)))
 			(let-mut field (struct.get layout first))
-			(let-mut ordinal 0i32)
 			(let-mut count 0i32)
 			(while
-				(:doc "Retain each owning member's exact type and declaration ordinal.")
+				(:doc "Retain each owning member's exact type and source field row.")
 				(i32.not-ltz field)
 				(body
 					(let member (array.load nodes field))
@@ -178,9 +178,8 @@
 						(bool.or (call is_native_owner type)
 							(bool.or (call is_array_owner type) (call is_owning_record (borrow-shared records) type)))
 						(then
-							(array.store owned count (struct.new OwnedMember (type type) (ordinal ordinal)))
+							(array.store owned count (struct.new OwnedMember (type type) (field field)))
 							(set count (i32.inc count))))
-					(set ordinal (i32.inc ordinal))
 					(set field (struct.get member next_sibling))))
 			(let-mut cursor offset)
 			(while
@@ -189,8 +188,11 @@
 				(body
 					(set count (i32.dec count))
 					(let member (array.load owned count))
+					(let declaration (array.load nodes (struct.get member field)))
+					(let name (call named_member (borrow-shared source) layout
+						(array.load nodes (struct.get declaration first_child))))
 					(set cursor (call write_member_drop (borrow-shared source) (borrow-shared nodes)
-						(borrow-shared records) (struct.get member type) (struct.get member ordinal) (bool false)
+						(borrow-shared records) (struct.get member type) name (bool false)
 						(borrow-mut output) cursor name_prefix writing))))
 			(return cursor)))
 
@@ -221,7 +223,7 @@
 							(let number (call write_enum_ordinal ordinal (borrow-mut output) label writing))
 							(set cursor (call c_byte (borrow-mut output) number 58u8 writing))
 							(let close (call write_member_drop (borrow-shared source) (borrow-shared nodes)
-								(borrow-shared records) type ordinal (bool true)
+								(borrow-shared records) type (call ordinal_member ordinal) (bool true)
 								(borrow-mut output) cursor name_prefix writing))
 							(set cursor (call c_literal_text (borrow-shared c_break)
 								(borrow-mut output) close writing))))
