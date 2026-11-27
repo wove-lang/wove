@@ -10,7 +10,7 @@
 	(use wove-file "../source/graph.wove" (only find_binding binding_with_integer_constant (type GraphBinding)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../text/character.wove" (only decode_character))
-	(use wove-file "./syntax.wove" (only entry_form is_scalar_name entry_keyword (type EntryRead)))
+	(use wove-file "./syntax.wove" (only entry_at (value binding_reference) entry_form is_scalar_name (type EntryRead)))
 	(use wove-file "./trees.wove" (only (type ScalarTree)))
 	(use wove-file "./generics/workspace.wove" (only subtree_limit))
 	(use wove-file "./constant_arithmetic.wove" (only apply_i32_constant_operation))
@@ -27,53 +27,61 @@
 		(:doc "Retain the exact result or its original arena span.")
 		(params (bits u32) (file i32) (start i32) (end i32) (error u32)) (returns ConstantResult)
 		(body
-			(return (struct.new ConstantResult (bits (local bits)) (file (local file))
-				(start (local start)) (end (local end)) (error (local error))))))
+			(return (struct.new ConstantResult (bits bits) (file file)
+				(start start) (end end) (error error)))))
 
 	(fn constant_at_node
 		(:doc "Associate a result with one token or expression.")
 		(params (bits u32) (file i32) (node SourceNode) (error u32)) (returns ConstantResult)
-		(body (return (call constant_result (local bits) (local file)
-			(struct.get (local node) start) (struct.get (local node) end) (local error)))))
+		(body (return (call constant_result bits file
+			(struct.get node start) (struct.get node end) error))))
 
 	(fn constant_check
 		(:doc "Forward a constant diagnostic to the single-source checker.")
 		(params (result ConstantResult)) (returns EntryRead)
-		(body (return (struct.new EntryRead (operand -1i32) (start (struct.get (local result) start))
-			(end (struct.get (local result) end)) (error (struct.get (local result) error)) (related -1i32)))))
+		(body (return (struct.new EntryRead (operand -1i32) (start (struct.get result start))
+			(end (struct.get result end)) (error (struct.get result error)) (related -1i32)))))
 
 	(fn constant_operation
 		(:doc "Recognize module value references and the supported exact i32 operation heads.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)) (returns u32)
 		(body
-			(let index (struct.get (local node) first_child))
-			(if (i32.ltz (local index)) (then (return 0u32)))
-			(let head (array.load (local nodes) (local index)))
-			(let operation (call read_integer_operator (borrow-shared (local source))
-				(struct.get (local head) start) (struct.get (local head) end)))
+			(if
+				(:doc "A bare name in a constant expression resolves in the module value namespace.")
+				(call is_scalar_name (borrow-shared source) node)
+				(then (return binding_reference)))
+			(let index (struct.get node first_child))
+			(if (i32.ltz index) (then (return 0u32)))
+			(let head (array.load nodes index))
+			(let operation (call read_integer_operator (borrow-shared source)
+				(struct.get head start) (struct.get head end)))
 			(if
 				(:doc "Only exact i32 arithmetic is accepted by this evaluator.")
-				(u32.gtz (local operation))
+				(u32.gtz operation)
 				(then
 					(if
 						(:doc "Decoder types distinguish exact i32 operators from the other integer widths.")
-						(u32.eq (struct.get (call integer_operator (local operation)) operand) 5u32)
-						(then (return (local operation))))
+						(u32.eq (struct.get (call integer_operator operation) operand) 5u32)
+						(then (return operation)))
 					(return 0u32)))
-			(if
-				(:doc "Local references in constant contexts resolve only through the module value namespace.")
-				(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local index)) 8u32)
-				(then (return 8u32)))
 			(return 0u32)))
+
+	(fn constant_operands
+		(:doc "Keep a bare reference on its source row and read the operand list only for arithmetic.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(node SourceNode) (row i32) (operation u32)) (returns EntryRead)
+		(body
+			(if (u32.eq operation binding_reference) (then (return (call entry_at node row 0u32))))
+			(return (call entry_form (borrow-shared source) (borrow-shared nodes) node operation 24u32))))
 
 	(fn constant_character
 		(:doc "Read an unconverted character with its inferred i32 type.")
 		(params (source (shared-array u8)) (node SourceNode) (file i32)) (returns ConstantResult)
 		(body
-			(let value (call decode_character (borrow-shared (local source))
-				(struct.get (local node) start) (struct.get (local node) end)))
-			(if (i32.ltz (local value)) (then (return (call constant_at_node 0u32 (local file) (local node) 23u32))))
-			(return (call constant_at_node (u32.from-i32 (local value)) (local file) (local node) 0u32))))
+			(let value (call decode_character (borrow-shared source)
+				(struct.get node start) (struct.get node end)))
+			(if (i32.ltz value) (then (return (call constant_at_node 0u32 file node 23u32))))
+			(return (call constant_at_node (u32.from-i32 value) file node 0u32))))
 
 	(fn literal_i32_constant
 		(:doc "Read a literal with the same exact i32 spelling rules as constant generic arguments.")
@@ -82,57 +90,57 @@
 		(body
 			(if
 				(:doc "An unconverted character has type i32.")
-				(u32.eq (struct.get (local node) kind) (local character_token))
-				(then (return (call constant_character (borrow-shared (local source)) (local node) (local file)))))
+				(u32.eq (struct.get node kind) character_token)
+				(then (return (call constant_character (borrow-shared source) node file))))
 			(if
 				(:doc "The ordinary i32 constructor can also contain a character token.")
-				(u32.eq (struct.get (local node) kind) 40u32)
+				(u32.eq (struct.get node kind) 40u32)
 				(then
 					(if
 						(:doc "An empty form has no literal head.")
-						(i32.ltz (struct.get (local node) first_child))
-						(then (return (call constant_at_node 0u32 (local file) (local node) 23u32))))
-					(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) 5u32 23u32))
-					(let operand (struct.get (local form) operand))
+						(i32.ltz (struct.get node first_child))
+						(then (return (call constant_at_node 0u32 file node 23u32))))
+					(let form (call entry_form (borrow-shared source) (borrow-shared nodes) node 5u32 23u32))
+					(let operand (struct.get form operand))
 					(if
 						(:doc "Recognize only a complete one-operand i32 constructor.")
-						(i32.not-ltz (local operand))
+						(i32.not-ltz operand)
 						(then
-							(let child (array.load (local nodes) (local operand)))
+							(let child (array.load nodes operand))
 							(if
 								(:doc "Use the child character only within the exact literal form.")
-								(bool.and (i32.ltz (struct.get (local child) next_sibling))
-									(u32.eq (struct.get (local child) kind) (local character_token)))
-								(then (return (call constant_character (borrow-shared (local source)) (local child) (local file)))))))))
-			(let literal (call read_i32_constant (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (bool false)))
-			(return (call constant_result (struct.get (local literal) value) (local file)
-				(struct.get (local literal) start) (struct.get (local literal) end) (struct.get (local literal) error)))))
+								(bool.and (i32.ltz (struct.get child next_sibling))
+									(u32.eq (struct.get child kind) character_token))
+								(then (return (call constant_character (borrow-shared source) child file))))))))
+			(let literal (call read_i32_constant (borrow-shared source) (borrow-shared nodes) node (bool false)))
+			(return (call constant_result (struct.get literal value) file
+				(struct.get literal start) (struct.get literal end) (struct.get literal error)))))
 
 	(fn constant_initializer
 		(:doc "Find the original initializer shared by the local spelling and every imported alias.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (trees (shared-array ScalarTree))
 			(binding GraphBinding)) (returns i32)
 		(body
-			(let-mut row (struct.get (local binding) declaration))
+			(let-mut row (struct.get binding declaration))
 			(if
 				(:doc "Graph declarations use rows relative to their defining file.")
-				(i32.gtz (array.len (local trees)))
-				(then (set (local row) (i32.add (local row) (struct.get (array.load (local trees) (struct.get (local binding) file)) base)))))
-			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (array.load (local nodes) (local row))))
-			(return (struct.get (local parts) operands))))
+				(i32.gtz (array.len trees))
+				(then (set row (i32.add row (struct.get (array.load trees (struct.get binding file)) base)))))
+			(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) (array.load nodes row)))
+			(return (struct.get parts operands))))
 
 	(fn constant_frame
 		(:doc "Store the pending work for one expression or referenced definition.")
 		(params (node i32) (file i32) (definition bool) (phase u32) (operation u32) (site i32) (right i32) (left u32))
 		(returns ConstantFrame)
-		(body (return (struct.new ConstantFrame (node (local node)) (file (local file)) (definition (local definition))
-			(phase (local phase)) (operation (local operation)) (site (local site)) (right (local right)) (left (local left))))))
+		(body (return (struct.new ConstantFrame (node node) (file file) (definition definition)
+			(phase phase) (operation operation) (site site) (right right) (left left)))))
 
 	(fn module_integer_source
 		(:doc "Only an immutable Wove value has an initializer available for constant evaluation.")
 		(params (binding GraphBinding)) (returns bool)
-		(body (return (bool.and (u32.eq (struct.get (local binding) namespace) 2u32)
-			(u32.eq (struct.get (local binding) provider) 3u32)))))
+		(body (return (bool.and (u32.eq (struct.get binding namespace) 2u32)
+			(u32.eq (struct.get binding provider) 3u32)))))
 
 	(fn evaluate_i32
 		(:doc `Evaluate operands left to right with a bounded frame stack.
@@ -146,161 +154,161 @@
 			(root i32) (file i32) (source_base i32) (slots (mut-array ConstantSlot)) (stack (mut-array ConstantFrame)))
 		(returns ConstantResult)
 		(body
-			(let resolving (i32.gtz (array.len (local slots))))
+			(let resolving (i32.gtz (array.len slots)))
 			(if
 				(:doc "The first definition participates in cycle detection just like any dependency.")
-				(local resolving)
-				(then (array.store (local slots) (local root) (struct.new ConstantSlot (state 1u32) (bits 0u32)))))
-			(array.store (local stack) 0i32 (call constant_frame (local root) (local file) (local resolving) 0u32 0u32 -1i32 -1i32 0u32))
+				resolving
+				(then (array.store slots root (struct.new ConstantSlot (state 1u32) (bits 0u32)))))
+			(array.store stack 0i32 (call constant_frame root file resolving 0u32 0u32 -1i32 -1i32 0u32))
 			(let-mut top 0i32)
 			(let-mut result 0u32)
 			(while
 				(:doc "A completed child returns its value to the suspended parent in result.")
-				(i32.not-ltz (local top))
+				(i32.not-ltz top)
 				(body
-					(let frame (array.load (local stack) (local top)))
-					(let row (struct.get (local frame) node))
-					(let owner (struct.get (local frame) file))
-					(let definition (struct.get (local frame) definition))
-					(let phase (struct.get (local frame) phase))
-					(let site (struct.get (local frame) site))
-					(let right (struct.get (local frame) right))
-					(let-mut operation (struct.get (local frame) operation))
+					(let frame (array.load stack top))
+					(let row (struct.get frame node))
+					(let owner (struct.get frame file))
+					(let definition (struct.get frame definition))
+					(let phase (struct.get frame phase))
+					(let site (struct.get frame site))
+					(let right (struct.get frame right))
+					(let-mut operation (struct.get frame operation))
 					(let-mut child -1i32)
-					(let-mut child_file (local owner))
+					(let-mut child_file owner)
 					(let-mut child_definition (bool false))
 					(let-mut next_phase 0u32)
-					(let-mut next_site (local site))
-					(let-mut next_right (local right))
-					(let-mut left (struct.get (local frame) left))
-					(let node (array.load (local nodes) (local row)))
+					(let-mut next_site site)
+					(let-mut next_right right)
+					(let-mut left (struct.get frame left))
+					(let node (array.load nodes row))
 					(if
 						(:doc "An unvisited operand is a literal, a reference, or one exact arithmetic form.")
-						(u32.eqz (local phase))
+						(u32.eqz phase)
 						(then
-							(set (local operation) (call constant_operation (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+							(set operation (call constant_operation (borrow-shared source) (borrow-shared nodes) node))
 							(if
 								(:doc "Literal admission keeps the operand's own type and source span.")
-								(u32.eqz (local operation))
+								(u32.eqz operation)
 								(then
-									(let literal (call literal_i32_constant (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local owner)))
-									(if (u32.gtz (struct.get (local literal) error)) (then (return (local literal))))
-									(set (local result) (struct.get (local literal) bits)))
+									(let literal (call literal_i32_constant (borrow-shared source) (borrow-shared nodes) node owner))
+									(if (u32.gtz (struct.get literal error)) (then (return literal)))
+									(set result (struct.get literal bits)))
 								(else
-									(let form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local operation) 24u32))
+									(let reference (u32.eq operation binding_reference))
+									(let form (call constant_operands (borrow-shared source) (borrow-shared nodes) node row operation))
 									(if
 										(:doc "Preserve metadata errors on the expression that contains them.")
-										(u32.gtz (struct.get (local form) error))
-										(then (return (call constant_result 0u32 (local owner) (struct.get (local form) start)
-											(struct.get (local form) end) (struct.get (local form) error)))))
-									(let first (struct.get (local form) operand))
-									(if (i32.ltz (local first)) (then (return (call constant_at_node 0u32 (local owner) (local node) 24u32))))
-									(let operand (array.load (local nodes) (local first)))
-									(let second (struct.get (local operand) next_sibling))
-									(let reference (u32.eq (local operation) 8u32))
-									(let unary (bool.or (local reference) (call is_integer_step (local operation))))
+										(u32.gtz (struct.get form error))
+										(then (return (call constant_result 0u32 owner (struct.get form start)
+											(struct.get form end) (struct.get form error)))))
+									(let first (struct.get form operand))
+									(if (i32.ltz first) (then (return (call constant_at_node 0u32 owner node 24u32))))
+									(let operand (array.load nodes first))
+									(let-mut second -1i32)
+									(if
+										(:doc "Only a form has an operand list. Siblings of a bare reference belong to the enclosing expression.")
+										(bool.not reference)
+										(then (set second (struct.get operand next_sibling))))
+									(let unary (bool.or reference (call is_integer_step operation)))
 									(if
 										(:doc "Check operand arity before attempting any lookup or evaluation.")
-										(bool.or (bool.and (local unary) (i32.not-ltz (local second)))
-											(bool.and (bool.not (local unary))
-												(bool.or (i32.ltz (local second)) (i32.not-ltz (struct.get (array.load (local nodes) (local second)) next_sibling)))))
-										(then (return (call constant_at_node 0u32 (local owner) (local node) 24u32))))
+										(bool.or (bool.and unary (i32.not-ltz second))
+											(bool.and (bool.not unary)
+												(bool.or (i32.ltz second) (i32.not-ltz (struct.get (array.load nodes second) next_sibling)))))
+										(then (return (call constant_at_node 0u32 owner node 24u32))))
 									(if
 										(:doc "A module lookup uses the source namespace of this operand's defining file.")
-										(local reference)
+										reference
 										(then
-											(if
-												(:doc "A reference needs one bare Wove name.")
-												(bool.not (call is_scalar_name (borrow-shared (local source)) (local operand)))
-												(then (return (call constant_at_node 0u32 (local owner) (local operand) 24u32))))
-											(let-mut base (local source_base))
+											(let-mut base source_base)
 											(if
 												(:doc "Graph lookups rebase names into their defining file's byte range.")
-												(i32.gtz (array.len (local files)))
-												(then (set (local base) (struct.get (array.load (local files) (local owner)) source_start))))
-											(let target (call find_binding (borrow-shared (local source)) (borrow-shared (local source))
-												(struct.get (local operand) start) (struct.get (local operand) end)
-												(borrow-shared (local bindings)) (array.len (local bindings)) (local owner) (bool false) (local base) 2u32))
-											(if (i32.ltz (local target)) (then (return (call constant_at_node 0u32 (local owner) (local operand) 24u32))))
-											(let binding (array.load (local bindings) (local target)))
+												(i32.gtz (array.len files))
+												(then (set base (struct.get (array.load files owner) source_start))))
+											(let target (call find_binding (borrow-shared source) (borrow-shared source)
+												(struct.get operand start) (struct.get operand end)
+												(borrow-shared bindings) (array.len bindings) owner (bool false) base 2u32))
+											(if (i32.ltz target) (then (return (call constant_at_node 0u32 owner operand 24u32))))
+											(let binding (array.load bindings target))
 											(if
 												(:doc "C values and noninteger Wove values are unavailable in an i32 constant.")
-												(bool.not (call module_integer_source (local binding)))
-												(then (return (call constant_at_node 0u32 (local owner) (local node) 23u32))))
+												(bool.not (call module_integer_source binding))
+												(then (return (call constant_at_node 0u32 owner node 23u32))))
 											(if
 												(:doc "During discovery follow the canonical row, including forward and imported references.")
-												(local resolving)
+												resolving
 												(then
-													(let init (call constant_initializer (borrow-shared (local source)) (borrow-shared (local nodes))
-														(borrow-shared (local trees)) (local binding)))
-													(if (i32.ltz (local init)) (then (return (call constant_at_node 0u32 (local owner) (local node) 24u32))))
-													(let slot (array.load (local slots) (local init)))
-													(let state (struct.get (local slot) state))
+													(let init (call constant_initializer (borrow-shared source) (borrow-shared nodes)
+														(borrow-shared trees) binding))
+													(if (i32.ltz init) (then (return (call constant_at_node 0u32 owner node 24u32))))
+													(let slot (array.load slots init))
+													(let state (struct.get slot state))
 													(if
 														(:doc "Reaching a pending initializer closes a dependency cycle at this reference.")
-														(u32.eq (local state) 1u32)
-														(then (return (call constant_at_node 0u32 (local owner) (local operand) (local constant_cycle)))))
+														(u32.eq state 1u32)
+														(then (return (call constant_at_node 0u32 owner operand constant_cycle))))
 													(if
 														(:doc "An already evaluated initializer supplies its exact bits.")
-														(u32.eq (local state) 2u32)
-														(then (set (local result) (struct.get (local slot) bits)))
+														(u32.eq state 2u32)
+														(then (set result (struct.get slot bits)))
 														(else
-															(set (local child) (local init))
-															(set (local child_file) (struct.get (local binding) file))
-															(set (local child_definition) (bool true))
-															(set (local next_phase) 3u32)
-															(array.store (local slots) (local init) (struct.new ConstantSlot (state 1u32) (bits 0u32))))))
+															(set child init)
+															(set child_file (struct.get binding file))
+															(set child_definition (bool true))
+															(set next_phase 3u32)
+															(array.store slots init (struct.new ConstantSlot (state 1u32) (bits 0u32))))))
 												(else
 													(if
 														(:doc "A later check can read only previously published i32 definitions.")
-														(bool.not (struct.get (local binding) integer_constant))
-														(then (return (call constant_at_node 0u32 (local owner) (local node) 23u32))))
-													(set (local result) (struct.get (local binding) constant_bits)))))
+														(bool.not (struct.get binding integer_constant))
+														(then (return (call constant_at_node 0u32 owner node 23u32))))
+													(set result (struct.get binding constant_bits)))))
 										(else
-											(set (local child) (local first))
-											(set (local next_phase) 1u32)
-											(set (local next_site) (struct.get (local node) first_child))
-											(set (local next_right) (local second)))))))
+											(set child first)
+											(set next_phase 1u32)
+											(set next_site (struct.get node first_child))
+											(set next_right second))))))
 						(else
 							(if
 								(:doc "After the first operand either visit the second or apply a unary step.")
-								(u32.eq (local phase) 1u32)
+								(u32.eq phase 1u32)
 								(then
 									(if
 										(:doc "A unary step uses the same wrapping addition or subtraction with one.")
-										(i32.ltz (local right))
+										(i32.ltz right)
 										(then
-											(set (local result) (struct.get (call apply_i32_constant_operation (local operation) (local result) 1u32) bits)))
+											(set result (struct.get (call apply_i32_constant_operation operation result 1u32) bits)))
 										(else
-											(set (local left) (local result))
-											(set (local child) (local right))
-											(set (local next_phase) 2u32))))
+											(set left result)
+											(set child right)
+											(set next_phase 2u32))))
 								(else
 									(if
 										(:doc "Binary failures select the operation head. A completed reference just forwards the result.")
-										(u32.eq (local phase) 2u32)
+										(u32.eq phase 2u32)
 										(then
-											(let folded (call apply_i32_constant_operation (local operation) (local left) (local result)))
+											(let folded (call apply_i32_constant_operation operation left result))
 											(if
 												(:doc "The original operation token explains a rejected arithmetic result.")
-												(bool.not (struct.get (local folded) valid))
-												(then (return (call constant_at_node 0u32 (local owner) (array.load (local nodes) (local site)) (local constant_arithmetic_failed)))))
-											(set (local result) (struct.get (local folded) bits))))))))
+												(bool.not (struct.get folded valid))
+												(then (return (call constant_at_node 0u32 owner (array.load nodes site) constant_arithmetic_failed))))
+											(set result (struct.get folded bits))))))))
 					(if
 						(:doc "Suspend the parent while visiting a child, or publish the completed definition before popping.")
-						(i32.not-ltz (local child))
+						(i32.not-ltz child)
 						(then
-							(array.store (local stack) (local top) (call constant_frame (local row) (local owner) (local definition)
-								(local next_phase) (local operation) (local next_site) (local next_right) (local left)))
-							(set (local top) (i32.inc (local top)))
-							(array.store (local stack) (local top) (call constant_frame (local child) (local child_file) (local child_definition) 0u32 0u32 -1i32 -1i32 0u32)))
+							(array.store stack top (call constant_frame row owner definition
+								next_phase operation next_site next_right left))
+							(set top (i32.inc top))
+							(array.store stack top (call constant_frame child child_file child_definition 0u32 0u32 -1i32 -1i32 0u32)))
 						(else
 							(if
 								(:doc "Remember each definition once for all of its importing names.")
-								(local definition)
-								(then (array.store (local slots) (local row) (struct.new ConstantSlot (state 2u32) (bits (local result))))))
-							(set (local top) (i32.dec (local top)))))))
-			(return (call constant_result (local result) (local file) 0i32 0i32 0u32))))
+								definition
+								(then (array.store slots row (struct.new ConstantSlot (state 2u32) (bits result)))))
+							(set top (i32.dec top))))))
+			(return (call constant_result result file 0i32 0i32 0u32))))
 
 	(fn fold_i32
 		(:doc "Fold one static value using already checked module bindings.")
@@ -310,72 +318,72 @@
 			(let empty_files (array.alloc SuppliedFile 0i32))
 			(let empty_trees (array.alloc ScalarTree 0i32))
 			(let-mut slots (array.alloc ConstantSlot 0i32))
-			(let limit (call subtree_limit (borrow-shared (local nodes)) (local root) (array.len (local nodes))))
-			(let-mut stack (array.alloc ConstantFrame (i32.sub (local limit) (local root))))
-			(return (call evaluate_i32 (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local empty_files)) (borrow-shared (local empty_trees)) (borrow-shared (local bindings))
-				(local root) (local file) (local source_base) (borrow-mut (local slots)) (borrow-mut (local stack))))))
+			(let limit (call subtree_limit (borrow-shared nodes) root (array.len nodes)))
+			(let-mut stack (array.alloc ConstantFrame (i32.sub limit root)))
+			(return (call evaluate_i32 (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared empty_files) (borrow-shared empty_trees) (borrow-shared bindings)
+				root file source_base (borrow-mut slots) (borrow-mut stack)))))
 
 	(fn register_integer_constants
 		(:doc `Resolve immutable values before array layouts and publish a result for every local spelling.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (files (shared-array SuppliedFile))
 			(trees (shared-array ScalarTree)) (bindings (mut-array GraphBinding))) (returns ConstantResult)
 		(body
-			(let-mut slots (array.alloc ConstantSlot (array.len (local nodes))))
-			(let-mut stack (array.alloc ConstantFrame (array.len (local nodes))))
+			(let-mut slots (array.alloc ConstantSlot (array.len nodes)))
+			(let-mut stack (array.alloc ConstantFrame (array.len nodes)))
 			(let-mut index 0i32)
 			(while
 				(:doc "Evaluate each computed definition once, allowing dependencies in either file or declaration order.")
-				(i32.lt (local index) (array.len (local bindings)))
+				(i32.lt index (array.len bindings))
 				(body
-					(let binding (array.load (local bindings) (local index)))
+					(let binding (array.load bindings index))
 					(if
 						(:doc "An alias may precede its definition, but both use the defining initializer slot.")
-						(call module_integer_source (local binding))
+						(call module_integer_source binding)
 						(then
-							(let init (call constant_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local trees)) (local binding)))
+							(let init (call constant_initializer (borrow-shared source) (borrow-shared nodes) (borrow-shared trees) binding))
 							(if
 								(:doc "Leave incomplete declarations and unrelated values to ordinary static validation.")
-								(bool.and (i32.not-ltz (local init)) (u32.eqz (struct.get (array.load (local slots) (local init)) state)))
+								(bool.and (i32.not-ltz init) (u32.eqz (struct.get (array.load slots init) state)))
 								(then
-									(let node (array.load (local nodes) (local init)))
-									(let file (struct.get (local binding) file))
+									(let node (array.load nodes init))
+									(let file (struct.get binding file))
 									(if
 										(:doc "Computed expressions require a successful exact i32 evaluation.")
-										(u32.gtz (call constant_operation (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+										(u32.gtz (call constant_operation (borrow-shared source) (borrow-shared nodes) node))
 										(then
-											(let checked (call evaluate_i32 (borrow-shared (local source)) (borrow-shared (local nodes))
-												(borrow-shared (local files)) (borrow-shared (local trees)) (borrow-shared (local bindings))
-												(local init) (local file) 0i32 (borrow-mut (local slots)) (borrow-mut (local stack))))
-											(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked)))))
+											(let checked (call evaluate_i32 (borrow-shared source) (borrow-shared nodes)
+												(borrow-shared files) (borrow-shared trees) (borrow-shared bindings)
+												init file 0i32 (borrow-mut slots) (borrow-mut stack)))
+											(if (u32.gtz (struct.get checked error)) (then (return checked))))
 										(else
-											(let literal (call literal_i32_constant (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local file)))
+											(let literal (call literal_i32_constant (borrow-shared source) (borrow-shared nodes) node file))
 											(if
 												(:doc "Only a successful i32 literal can supply a later i32 operand.")
-												(u32.eqz (struct.get (local literal) error))
-												(then (array.store (local slots) (local init)
-													(struct.new ConstantSlot (state 2u32) (bits (struct.get (local literal) bits))))))))))))
-					(set (local index) (i32.inc (local index)))))
-			(set (local index) 0i32)
+												(u32.eqz (struct.get literal error))
+												(then (array.store slots init
+													(struct.new ConstantSlot (state 2u32) (bits (struct.get literal bits))))))))))))
+					(set index (i32.inc index))))
+			(set index 0i32)
 			(while
 				(:doc "Every alias receives the same bits and nonnegative extent as the original declaration.")
-				(i32.lt (local index) (array.len (local bindings)))
+				(i32.lt index (array.len bindings))
 				(body
-					(let binding (array.load (local bindings) (local index)))
+					(let binding (array.load bindings index))
 					(if
 						(:doc "Only exact Wove i32 definitions have a completed slot.")
-						(call module_integer_source (local binding))
+						(call module_integer_source binding)
 						(then
-							(let init (call constant_initializer (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local trees)) (local binding)))
+							(let init (call constant_initializer (borrow-shared source) (borrow-shared nodes) (borrow-shared trees) binding))
 							(if
 								(:doc "Other static values keep their previous type and extent handling.")
-								(bool.and (i32.not-ltz (local init)) (u32.eq (struct.get (array.load (local slots) (local init)) state) 2u32))
+								(bool.and (i32.not-ltz init) (u32.eq (struct.get (array.load slots init) state) 2u32))
 								(then
-									(let bits (struct.get (array.load (local slots) (local init)) bits))
+									(let bits (struct.get (array.load slots init) bits))
 									(let-mut extent -1i32)
-									(if (u32.not-lt 2147483647u32 (local bits)) (then (set (local extent) (i32.from-u32 (local bits)))))
-									(array.store (local bindings) (local index) (call binding_with_integer_constant (local binding) (local bits) (local extent)))))))
-					(set (local index) (i32.inc (local index)))))
+									(if (u32.not-lt 2147483647u32 bits) (then (set extent (i32.from-u32 bits))))
+									(array.store bindings index (call binding_with_integer_constant binding bits extent))))))
+					(set index (i32.inc index))))
 			(return (call constant_result 0u32 0i32 0i32 0i32 0u32))))
 
 	(fn register_standalone_constants
@@ -384,6 +392,6 @@
 		(body
 			(let files (array.alloc SuppliedFile 0i32))
 			(let trees (array.alloc ScalarTree 0i32))
-			(return (call constant_check (call register_integer_constants (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local files)) (borrow-shared (local trees)) (borrow-mut (local bindings)))))))
+			(return (call constant_check (call register_integer_constants (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared files) (borrow-shared trees) (borrow-mut bindings))))))
 )

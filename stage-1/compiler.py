@@ -406,10 +406,9 @@ class FunctionEmitter:
 		self.emit_line(f"{c_type(kind)} {name} = {expression};")
 		return Value(kind, name)
 
-	# Resolve a live place and report failures at the operation using it.
-	def local(self, node: Node, line: int) -> Binding:
-		name, = checked_form(node, "local", 1).operands
-		symbol = identifier(name)
+	# Resolve the nearest live binding at the written operand.
+	def binding(self, node: Node) -> Binding:
+		symbol = identifier(node)
 		# The nearest declaration shadows any outer binding with the same name.
 		for scope in reversed(self.scopes):
 			binding = scope.get(symbol)
@@ -417,13 +416,13 @@ class FunctionEmitter:
 			if binding is not None:
 				# A move on any incoming path makes this place unavailable.
 				if binding in self.moved:
-					raise SourceError(line)
+					raise SourceError(node.line)
 				return binding
 		declaration = self.values.get(symbol)
 		# A lexical lookup can fall back to a defining or selected module binding.
 		if declaration is not None:
 			return declaration.binding
-		raise SourceError(line)
+		raise SourceError(node.line)
 
 	# Require the exact result type at the operation that consumes it.
 	def typed(self, node: Node, kind: Type) -> Value:
@@ -447,7 +446,7 @@ class FunctionEmitter:
 		if isinstance(node, Form) and node.tag == "array.load" and not writable:
 			value = self.typed(node, _BYTE_VIEW)
 			return Binding(value), _BYTE_VIEW, value.c + "."
-		binding = self.local(node, line)
+		binding = self.binding(node)
 		value = binding.value
 		kind = value.kind
 		# Only array owners and views carry an element descriptor.
@@ -477,21 +476,20 @@ class FunctionEmitter:
 	def borrow(self, node: Node, kind: BufferType) -> Value:
 		exclusive = kind.access == MUT
 		tag = "borrow-mut" if exclusive else "borrow-shared"
-		target_node, = checked_form(node, tag, 1).operands
-		target = checked_form(target_node)
+		target, = checked_form(node, tag, 1).operands
 		# A row selected from a shared outer view already has the shared descriptor ABI.
-		if kind == _BYTE_VIEW and target.tag == "array.load":
+		if kind == _BYTE_VIEW and isinstance(target, Form) and target.tag == "array.load":
 			return self.typed(target, _BYTE_VIEW)
 		source = target
 		range_bounds = None
 		# A range projects the named source for a byte-array call argument.
-		if target.tag == "array.range":
+		if isinstance(target, Form) and target.tag == "array.range":
 			# Range projection uses the runtime byte stride.
 			if kind.element != U8:
 				raise SourceError(node.line)
 			source, start, end = form(target, arity=3).operands
 			range_bounds = (start, end)
-		binding = self.local(source, node.line)
+		binding = self.binding(source)
 		origin = binding.value
 		origin_kind = origin.kind
 		# The loan and its source must agree on the exact element type.
@@ -624,6 +622,17 @@ class FunctionEmitter:
 
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
+		# A bare name reads a scalar or record before the enclosing operation uses it.
+		if isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text):
+			binding = self.binding(node)
+			# Array and slice places need an explicit operation.
+			if not copyable(binding.value.kind):
+				raise SourceError(node.line)
+			# Capture the value now even if a later statement writes to its slot.
+			if binding.writable:
+				return self.temporary(binding.value.kind, binding.value.c)
+			return binding.value
+
 		expr = node = value_form(node)
 		# A boolean literal carries the same type as a comparison result.
 		if expr.tag == BOOL:
@@ -690,17 +699,6 @@ class FunctionEmitter:
 		if expr.tag == "struct.get":
 			return self.record_field(expr)
 
-		# An ordinary value use copies a scalar or record binding.
-		if expr.tag == "local":
-			binding = self.local(expr, node.line)
-			# Array and slice places need an explicit operation.
-			if not copyable(binding.value.kind):
-				raise SourceError(node.line)
-			# Capture the value now even if a later statement writes to its slot.
-			if binding.writable:
-				return self.temporary(binding.value.kind, binding.value.c)
-			return binding.value
-
 		# Allocate one runtime array with the source location for traps.
 		if expr.tag == "array.alloc":
 			element_node, length = form(expr, arity=2).operands
@@ -719,7 +717,7 @@ class FunctionEmitter:
 		# Transfer the pointer and invalidate the original owner slot.
 		if expr.tag == "move":
 			target, = form(expr, arity=1).operands
-			binding = self.local(target, node.line)
+			binding = self.binding(target)
 			kind = binding.value.kind
 			# Only an owner can transfer its allocation.
 			if not isinstance(kind, BufferType) or kind.access != OWNED:
@@ -917,7 +915,7 @@ class FunctionEmitter:
 		# Assignment updates the named scalar's own C slot.
 		if statement.tag == "set":
 			target, operand = form(statement, arity=2).operands
-			binding = self.local(target, node.line)
+			binding = self.binding(target)
 			# Only writable scalar locals have assignable slots.
 			if not binding.writable or binding.value.kind not in SCALAR_TYPES:
 				raise SourceError(node.line)
