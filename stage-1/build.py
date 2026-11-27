@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 from emit import emit_native
-from syntax import Form, parse
+from inputs import collect_inputs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,44 +17,9 @@ ENTRY = "stage-2/wovec.wove"
 VERSION_ASSET = "build/version.txt"
 
 
-# Follow the compiler's explicit Wove imports and collect its embedded assets.
+# Collect the fixed compiler graph, including its embedded bridge providers.
 def compiler_inputs():
-	sources = {}
-	assets = {}
-
-	# Preserve first encounter order across the compiler's relative imports.
-	def visit(path):
-		# A shared dependency contributes its source and assets once.
-		if path in sources:
-			return
-		sources[path] = None
-		parent = Path(path).parent
-
-		# Only Wove imports and embed forms contribute further source paths.
-		def walk(node):
-			# Atoms and disabled forms cannot contribute active inputs.
-			if not isinstance(node, Form) or node.tag == "disabled":
-				return
-			# Follow a Wove import relative to its defining module.
-			if node.tag == "use" and node.operands[0].text == "wove-file":
-				visit(os.path.normpath(parent / node.operands[1].text))
-			# Record embedded files at the same relative path used by the emitter.
-			elif node.tag == "embed":
-				assets[os.path.normpath(parent / node.operands[0].text)] = None
-			# Imports and embeds can appear beneath other forms.
-			else:
-				# Visit operands in source order.
-				for child in node.operands:
-					walk(child)
-
-		walk(parse((ROOT / path).read_text(encoding="utf-8")))
-
-	visit(ENTRY)
-	# The compiler's own embeds supply its bundled Wove bridge declarations.
-	for path in tuple(assets):
-		# Only embedded Wove modules can also supply graph declarations.
-		if Path(path).suffix == ".wove":
-			visit(path)
+	sources, assets, _ = collect_inputs(ROOT, [ENTRY], embedded_providers=True)
 	assets.pop(VERSION_ASSET, None)
 	return sources, assets
 
@@ -85,7 +50,7 @@ def compiler_target():
 def main():
 	build = ROOT / os.environ.get("WOVE_BUILD_DIR", "build")
 	paths, assets = compiler_inputs()
-	return emit_native(build / "stage-2/source_scan", None, build / "version.txt", paths, assets,
+	return emit_native(build / "stage-2/source_scan", build / "version.txt", paths, assets,
 		root=ROOT, target=compiler_target())
 
 
