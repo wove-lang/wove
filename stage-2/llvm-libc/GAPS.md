@@ -445,6 +445,20 @@ below on arm64 and x86-64 in C11, C17, and C23.
 | `ftw`, `nftw` | The native prototypes lend the original path and native records for one callback invocation. A null status or an `FTW_NS` visit yields an absent Wove status. Early results and GNU `FTW_ACTIONRETVAL` values pass through. glibc also needs extended X/Open to select `nftw`. [Synchronous callbacks #597](https://github.com/wove-lang/wove/issues/597) |
 | `ftw64`, `nftw64` | The SDK must expose the glibc large-file declarations. `nftw64` also needs extended X/Open. Import the callback's `Stat64` type from `<sys/stat.h>`. It exposes ten stable native fields and retains the original C record layout. The `st_atim`, `st_mtim`, and `st_ctim` fields and the scalar seconds and nanoseconds forms need native feature checks for X/Open 2008. Explicit 64-bit file offsets can redirect the ordinary glibc names to these symbols. |
 
+## Audited `<glob.h>` members
+
+The live audit covered both Clangs, Darwin and glibc on arm64 and x86-64, C11, C17, C23, and ten feature profiles. The SDK supplies eleven base flags/statuses and twelve optional spellings across the two systems. Values differ across platforms, including the sign of the error results. [LLVM glob.h checklist](https://libc.llvm.org/headers/glob.html)
+
+| Member | Availability and contract |
+| --- | --- |
+| `GLOB_ABEND`, `GLOB_ALTDIRFUNC`, `GLOB_BRACE`, `GLOB_MAGCHAR`, `GLOB_NOMAGIC`, `GLOB_TILDE` | The native feature profile controls these shared extensions. `GLOB_ALTDIRFUNC` requires a complete alternate directory callback table. |
+| `GLOB_LIMIT`, `GLOB_MAXPATH`, `GLOB_QUOTE` | Exposed by the audited Darwin header. The native SDK supplies the alias and flags. |
+| `GLOB_ONLYDIR`, `GLOB_PERIOD`, `GLOB_TILDE_CHECK`, `glob_pattern_p` | Exposed by selected glibc profiles. The classifier has the exact native `int(const char *, int)` prototype. |
+| `glob_t`, `glob64_t`, `globfree`, `globfree64` | The result owns the path table even on some errors. Darwin `glob_t` occupies 88 bytes with `gl_pathv` at offset 32. Both glibc result types occupy 72 bytes with the table at offset 8. Cleanup and scoped table access await [#624](https://github.com/wove-lang/wove/issues/624). |
+| `glob`, `glob64` | These functions need the native result owner and an optional synchronous `int (*)(const char *, int)` error callback. [Result ownership #624](https://github.com/wove-lang/wove/issues/624) · [Error callback #623](https://github.com/wove-lang/wove/issues/623) |
+| `glob_b`, `gl_errblk` | The Darwin Blocks ABI exposes a noescape error block. The compiler's synchronous C function-pointer contract requires a separate Blocks representation. |
+| `gl_closedir`, `gl_readdir`, `gl_opendir`, `gl_lstat`, `gl_stat` | These fields require checked alternate directory callbacks. Record tags and pointer qualifiers depend on the selected SDK and feature profile. |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
