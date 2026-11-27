@@ -65,7 +65,7 @@ typedef wv_seed_record_111 ExpectationLink;
 typedef wv_seed_record_112 ExpectationResult;
 typedef wv_seed_record_113 ExpectationQuery;
 
-enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
+enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2, MODE_LIBRARY = 3 };
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(int, char **): 1, default: 0), "source probe entry type");
 _Static_assert(_Generic(&source_offset, int32_t (*)(wvrt_slice): 1, default: 0), "source offset type");
@@ -1289,12 +1289,13 @@ static int probe_command(int argc, char **argv) {
 		if (strcmp(argv[1], "--mode") == 0) {
 			// Validate the mode before advancing to the next prefix.
 			if (argc < 4 || (strcmp(argv[2], "bootstrap") != 0 && strcmp(argv[2], "native") != 0 &&
-					strcmp(argv[2], "test") != 0)) {
-				fputs("usage: source_scan --mode {bootstrap|native|test} COMMAND ...\n", stderr);
+					strcmp(argv[2], "test") != 0 && strcmp(argv[2], "library") != 0)) {
+				fputs("usage: source_scan --mode {bootstrap|native|test|library} COMMAND ...\n", stderr);
 				return EXIT_FAILURE;
 			}
 			context.wv_field_0 = strcmp(argv[2], "test") == 0 ? MODE_TEST :
-				(strcmp(argv[2], "native") == 0 ? MODE_NATIVE : MODE_BOOTSTRAP);
+				strcmp(argv[2], "native") == 0 ? MODE_NATIVE :
+				strcmp(argv[2], "library") == 0 ? MODE_LIBRARY : MODE_BOOTSTRAP;
 			argc -= 2;
 			argv += 2;
 			continue;
@@ -1311,6 +1312,11 @@ static int probe_command(int argc, char **argv) {
 			continue;
 		}
 		break;
+	}
+	// Public wrappers require the same explicit library target as the native driver.
+	if (context.wv_field_0 == MODE_LIBRARY && context.wv_field_1 == 0) {
+		fputs("library mode requires --target {linux|macos} ARCH DEPLOYMENT\n", stderr);
+		return EXIT_FAILURE;
 	}
 	// Test emission needs the supplied graph for inventory and defining-file paths.
 	if (context.wv_field_0 == MODE_TEST && strcmp(argv[1], "--emit-c") == 0) {

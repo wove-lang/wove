@@ -80,6 +80,8 @@ def emit(probe, case, requested=None, capacity=None, prefix=b""):
 			bounds.extend(("--verified-c-prefix", prefix.decode()))
 	if "mode" in case:
 		options[:0] = ["--mode", case["mode"]]
+	if "target" in case:
+		options[:0] = ["--target", *case["target"]]
 	files = [str(value) for row in case["files"] for value in row]
 	assets = []
 	# Only emission can see the supplied assets. The later native build uses the emitted bytes.

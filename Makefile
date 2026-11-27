@@ -322,8 +322,9 @@ test-native-numeric:
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/int128/check.py" "$(NATIVE_COMPILER)"
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/int256/check.py" "$(NATIVE_COMPILER)" runtime/probes/wide_integer.c
 
-test-native-library:
+test-native-library: $(SOURCE_SCAN)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/library/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/library/cases.jsonc"
+	$(PYTHON) tests/stage-2/check_library_units.py "$(SOURCE_SCAN)" "$(NATIVE_COMPILER)" tests/stage-2/numbered_units/library.jsonc
 
 test-native-emission:
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))llvm-libc" "$(NATIVE_CLI_FIXTURES)/emission/cases.tsv"
