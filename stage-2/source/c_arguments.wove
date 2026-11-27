@@ -198,7 +198,7 @@
 			(start (struct.get site start)) (end (struct.get site end))))))
 
 	(fn mark_c_argument_type
-		(:doc `Record resolved argument types before applying the contracts.`)
+		(:doc `Record the scalar or scalar pointee classification before applying native contracts.`)
 		(params (contracts (mut-array CArgument)) (index i32) (integer bool) (scalar_ref u32) (owner_mode u8))
 		(returns void)
 		(body
@@ -213,9 +213,9 @@
 		(returns bool)
 		(body
 			(if
-				(:doc "Both extent operands must have resolved to integer types.")
+				(:doc "A by-value extent operand must be an integer value.")
 				(call is_c_value_mode mode)
-				(then (return (struct.get formal integer))))
+				(then (return (bool.and (struct.get formal integer) (u32.eqz (struct.get formal scalar_ref))))))
 			(if
 				(:doc "A native void pointer borrows a scalar place, exact-length byte view, or shared handle slot.")
 				(u8.eq mode c_void_pointer_mode)
@@ -410,7 +410,7 @@
 				(call c_bytes_mode) size (struct.get count position)))))
 
 	(fn read_c_array_extent
-		(:doc `Bind a view to a literal element count or an integer formal.`)
+		(:doc `Bind a view to a literal, a by-value integer formal, or a writable integer loan.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32)
 			(directive SourceNode) (begin i32) (contracts (mut-array CArgument)))
 		(returns CArguments)
@@ -436,12 +436,20 @@
 				(i32.lt -1i32 (struct.get literal digits))
 				(then (return (call reserve_c_argument (borrow-mut contracts) view (call c_array_mode)
 					(i32.from-u32 (struct.get literal magnitude)) -1i32))))
-			(let formal (call find_c_formal (borrow-shared source) (borrow-shared nodes)
-				first count (call c_value_mode) (borrow-shared contracts)))
+			(let formal (call find_named_c_formal (borrow-shared source) (borrow-shared nodes) first count))
 			(if
-				(:doc "Report an invalid named count at the name or its declared type.")
+				(:doc "Report an unknown count at its name.")
 				(i32.ltz (struct.get formal position))
 				(then (return (call c_argument_error (struct.get formal start) (struct.get formal end)))))
+			(let slot (array.load contracts (struct.get formal position)))
+			(let reference (struct.get slot scalar_ref))
+			(let writable (u32.eq (struct.get (call read_c_view_type (borrow-shared source) (borrow-shared nodes)
+				(array.load nodes (struct.get view type_node)) (bool false)) access) 38u32))
+			(if
+				(:doc "An integer loan is valid only as a mutable count for a writable array.")
+				(bool.not (bool.and (struct.get slot integer)
+					(bool.or (u32.eqz reference) (bool.and (u32.eq reference 2u32) writable))))
+				(then (return (call c_argument_error_at (array.load nodes (struct.get formal type_node))))))
 			(return (call reserve_c_argument (borrow-mut contracts) view (call c_array_mode)
 				-1i32 (struct.get formal position)))))
 
@@ -768,6 +776,17 @@
 					(let type (array.load nodes (struct.get parts operands)))
 					(let slot (array.load contracts index))
 					(let-mut mode (struct.get slot mode))
+					(let count (struct.get slot count))
+					(if
+						(:doc "An in-out array count always passes a concrete typed pointer. Check this after all adaptations have bound.")
+						(bool.and (call is_c_array_mode mode) (i32.not-ltz count))
+						(then
+							(let bound (array.load contracts count))
+							(if
+								(:doc "Null and void-pointer adaptations cannot replace the checked count loan.")
+								(bool.and (u32.eq (struct.get bound scalar_ref) 2u32)
+									(bool.not (call is_c_value_mode (struct.get bound mode))))
+								(then (return (call c_argument_error_at type))))))
 					(if
 						(:doc "Give each nullable conversion its exact native argument mode.")
 						(struct.get slot nullable)
