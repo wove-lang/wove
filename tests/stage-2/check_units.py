@@ -19,7 +19,14 @@ def emit(probe, case, requested=None, capacity=None):
 		options[0] = "--emit-graph-units"
 		bounds.append(str(requested))
 	files = [str(value) for row in case["files"] for value in row]
-	return subprocess.run([probe, *options, *bounds, *files], capture_output=True, timeout=30)
+	assets = []
+	# Only emission can see the supplied assets. The later native build uses the emitted bytes.
+	with TemporaryDirectory(prefix="unit-assets-") as temporary:
+		for index, (virtual, payload) in enumerate(case.get("assets", [])):
+			path = Path(temporary) / str(index)
+			path.write_bytes(bytes.fromhex(payload))
+			assets.extend(("--asset", virtual, str(path)))
+		return subprocess.run([probe, *options, *bounds, *files, *assets], capture_output=True, timeout=30)
 
 
 # Recover complete C parts without relying on line breaks in the generated bodies.
@@ -74,6 +81,9 @@ def check_native(probe, case, layout, parts):
 				str(root / unit), "-o", str(object_file)], check=True, timeout=30)
 			table = symbols(object_file)
 			assert {name for name, kind in table.items() if kind == "T" and name.startswith("wgf")} == set(names), (unit, table, names)
+			# Shared descriptors and values are external. Their byte backing arrays remain private.
+			data = {name for name, kind in table.items() if kind != "U" and name.startswith(("wgb", "wga"))}
+			assert data == set(layout.get("data", {}).get(unit, [])), (unit, data)
 			for dependency in layout.get("imports", {}).get(unit, []):
 				assert table.get(dependency) == "U", (unit, dependency, table)
 			objects.append(str(object_file))

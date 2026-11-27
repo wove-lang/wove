@@ -1,7 +1,7 @@
 (module emit_bindings
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Write one static C definition for each referenced immutable module binding.")
+	(:doc "Write C storage and declarations for referenced immutable module bindings.")
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
 	(use wove-file "../source/strings.wove" (only decode_string))
@@ -12,9 +12,32 @@
 	(use wove-file "./runtime.wove" (only write_site_number))
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./static.wove" (only write_static_initializer))
-	(use wove-file "./text.wove" (only c_byte c_literal_text write_c_name open_static_storage open_static_value write_static_bytes (type CNameRole)))
+	(use wove-file "./text.wove" (only c_byte c_literal_text write_c_name c_type_text open_static_storage open_static_value write_static_bytes (type CNameRole)))
 
 	(let c_extension "__extension__ ")
+	(let c_const "const ")
+	(let c_extern_const "extern const ")
+	(let c_binding_end ";\n")
+
+	(let static_module_bindings 0u8)
+	(let declared_module_bindings 1u8)
+	(let linked_module_bindings 2u8)
+
+	(fn open_binding_storage
+		(:doc "Use matching const qualifiers for the shared declaration and its unique definition.")
+		(params (mode u8) (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(if
+				(:doc "The common header declares the binding without reserving storage.")
+				(u8.eq (local mode) (local declared_module_bindings))
+				(then (return (call c_literal_text (borrow-shared (local c_extern_const))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Only the designated numbered unit defines externally linked storage.")
+				(u8.eq (local mode) (local linked_module_bindings))
+				(then (return (call c_literal_text (borrow-shared (local c_const))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call open_static_storage (borrow-mut (local output)) (local offset) (local writing)))))
 
 	(fn write_binding_name
 		(:doc "Generate a private name from the defining node with separate roles for views and bytes.")
@@ -34,14 +57,14 @@
 
 	(fn write_binding_bytes
 		(:doc "Write the exact byte table and its shared descriptor without adding a terminator.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name i32) (bytes (shared-array u8))
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name i32) (bytes (shared-array u8)) (mode u8)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let length (array.len (local bytes)))
 			(let-mut cursor (local offset))
 			(if
-				(:doc "A nonempty view points to exactly one static table.")
+				(:doc "Keep the bytes private to the translation unit that defines their descriptor.")
 				(i32.gtz (local length))
 				(then
 					(set (local cursor) (call open_static_value (borrow-mut (local output)) (local cursor) 10u32 (local writing)))
@@ -50,7 +73,9 @@
 					(set (local cursor) (call write_static_bytes (borrow-shared (local bytes)) 0i32 (local length)
 						(borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 10u8 (local writing)))))
-			(set (local cursor) (call open_static_value (borrow-mut (local output)) (local cursor) 34u32 (local writing)))
+			(set (local cursor) (call open_binding_storage (local mode) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call c_type_text (borrow-mut (local output)) (local cursor) 34u32 (local writing)))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 32u8 (local writing)))
 			(set (local cursor) (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local name) (bool false) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 61u8 (local writing)))
@@ -71,7 +96,7 @@
 
 	(fn write_binding_view
 		(:doc "Use the original asset bytes or the decoded bytes of a checked string literal.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name i32) (value ScalarExpression)
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name i32) (value ScalarExpression) (mode u8)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -79,7 +104,7 @@
 				(:doc "A bound embed already points to the exact byte range in the source arena.")
 				(u32.eq (struct.get (local value) kind) 60u32)
 				(then (return (call write_binding_bytes (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local name) (borrow-shared (array.range (local source) (struct.get (local value) asset_start) (struct.get (local value) asset_end)))
+					(local name) (borrow-shared (array.range (local source) (struct.get (local value) asset_start) (struct.get (local value) asset_end))) (local mode)
 					(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(let start (struct.get (local value) start))
 			(let end (struct.get (local value) end))
@@ -88,29 +113,35 @@
 				(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
 				(borrow-mut (local bytes))))
 			(return (call write_binding_bytes (borrow-shared (local source)) (borrow-shared (local nodes))
-				(local name) (borrow-shared (array.range (local bytes) 0i32 (struct.get (local decoded) written)))
+				(local name) (borrow-shared (array.range (local bytes) 0i32 (struct.get (local decoded) written))) (local mode)
 				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 
-	(fn write_static_binding
-		(:doc `Emit an immutable scalar or fixed array with its exact native layout.`)
+	(fn write_typed_binding
+		(:doc "Declare or define the checked C object type. Byte views have a separate definition path.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name i32) (value i32)
-			(expressions (shared-array ScalarExpression)) (records (shared-array ScalarRecord))
+			(expressions (shared-array ScalarExpression)) (records (shared-array ScalarRecord)) (mode u8)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let type (struct.get (array.load (local expressions) (local value)) type))
+			(let declaring (u8.eq (local mode) (local declared_module_bindings)))
 			(let-mut start (local offset))
 			(if
 				(:doc "Clang accepts aggregate range initializers under strict flags with this qualifier.")
-				(call is_record_type (local type))
+				(bool.and (bool.not (local declaring)) (call is_record_type (local type)))
 				(then (set (local start) (call c_literal_text (borrow-shared (local c_extension))
 					(borrow-mut (local output)) (local start) (local writing)))))
-			(let prefix (call open_static_storage (borrow-mut (local output)) (local start) (local writing)))
+			(let prefix (call open_binding_storage (local mode) (borrow-mut (local output)) (local start) (local writing)))
 			(let typed (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local prefix) (local name_prefix) (local writing)))
 			(let space (call c_byte (borrow-mut (local output)) (local typed) 32u8 (local writing)))
 			(let named (call write_binding_name (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local name) (bool false) (borrow-mut (local output)) (local space) (local name_prefix) (local writing)))
+			(if
+				(:doc "The header needs the exact object type and no initializer or backing bytes.")
+				(local declaring)
+				(then (return (call c_literal_text (borrow-shared (local c_binding_end))
+					(borrow-mut (local output)) (local named) (local writing)))))
 			(let equal (call c_byte (borrow-mut (local output)) (local named) 61u8 (local writing)))
 			(let initialized (call write_static_initializer (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local expressions)) (borrow-shared (local records)) (local value)
@@ -119,7 +150,7 @@
 			(return (call c_byte (borrow-mut (local output)) (local end) 10u8 (local writing)))))
 
 	(fn emits_module_storage
-		(:doc "A referenced Wove module binding owns one static definition in the generated C.")
+		(:doc "Select a checked immutable declaration that has at least one generated use.")
 		(params (row ScalarStatement) (use ScalarExpression))
 		(returns bool)
 		(body
@@ -127,10 +158,10 @@
 				(u32.eq (struct.get (local use) kind) 62u32)))))
 
 	(fn write_module_bindings
-		(:doc "Emit each referenced declaration once in its original tree order.")
+		(:doc "Emit referenced module declarations or definitions in their original tree order.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
 			(statements (shared-array ScalarStatement)) (expressions (shared-array ScalarExpression))
-			(records (shared-array ScalarRecord))
+			(records (shared-array ScalarRecord)) (mode u8)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -143,7 +174,8 @@
 					(let row (array.load (local statements) (local index)))
 					(if
 						(:doc "The C header supplies native values and objects. Check their types without allocating Wove storage.")
-						(call is_c_value_binding (struct.get (local row) kind))
+						(bool.and (u8.eq (local mode) (local static_module_bindings))
+							(call is_c_value_binding (struct.get (local row) kind)))
 						(then (set (local cursor) (call write_c_value_contract (borrow-shared (local source)) (borrow-shared (local nodes))
 							(borrow-shared (local records)) (local row) (borrow-mut (local output))
 							(local cursor) (local name_prefix) (local writing)))))
@@ -155,13 +187,14 @@
 							(let value (array.load (local expressions) (struct.get (local row) value)))
 							(let type (struct.get (local value) type))
 							(if
-								(:doc "Strings and embeds both use a static shared byte descriptor.")
-								(u32.eq (local type) 34u32)
+								(:doc "Only the defining unit decodes and emits the backing payload for byte views.")
+								(bool.and (u32.eq (local type) 34u32)
+									(u8.not-eq (local mode) (local declared_module_bindings)))
 								(then (set (local cursor) (call write_binding_view (borrow-shared (local source))
-									(borrow-shared (local nodes)) (local name) (local value)
+									(borrow-shared (local nodes)) (local name) (local value) (local mode)
 									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing))))
-								(else (set (local cursor) (call write_static_binding (borrow-shared (local source)) (borrow-shared (local nodes))
-									(local name) (struct.get (local row) value) (borrow-shared (local expressions)) (borrow-shared (local records))
+								(else (set (local cursor) (call write_typed_binding (borrow-shared (local source)) (borrow-shared (local nodes))
+									(local name) (struct.get (local row) value) (borrow-shared (local expressions)) (borrow-shared (local records)) (local mode)
 									(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))))
 					(set (local index) (i32.inc (local index)))))
 			(return (local cursor)))))
