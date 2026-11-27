@@ -1,0 +1,81 @@
+(module nullable_glibc_references
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+
+	(use (:pragma (cfg (os "linux"))) c-header "<time.h>" (only (type Time) (type Nanos) (type Timespec)))
+	(use (:pragma (cfg (os "linux"))) c-header "<signal.h>" (only (type SignalSet) sigemptyset))
+	(use (:pragma (cfg (os "linux"))) c-header "<poll.h>" (only (type PollFd) (type PollCount) ppoll))
+	(use (:pragma (cfg (os "linux"))) c-header "<sys/resource.h>"
+		(only (type Pid) (type Resource) (type Rlim) (type Limit) RLIMIT_NOFILE prlimit))
+
+	(bridge c-header "<time.h>" (:pragma (cfg (os "linux")))
+		(type Time (c-type "time_t"))
+		(type Nanos (c-type "long"))
+		(struct Timespec (c-type "struct timespec") (fields (tv_sec Time) (tv_nsec Nanos))))
+
+	(bridge c-header "<signal.h>" (:pragma (cfg (os "linux")))
+		(struct SignalSet (c-type "sigset_t") (fields))
+		(fn sigemptyset (params (set (mut-ref SignalSet))) (returns i32)))
+
+	(bridge c-header "<poll.h>" (:pragma (cfg (os "linux")))
+		(use c-header "<time.h>" (only (type Timespec)))
+		(use c-header "<signal.h>" (only (type SignalSet)))
+		(type PollCount (c-type "nfds_t"))
+		(struct PollFd (c-type "struct pollfd") (fields (fd i32) (events i16) (revents i16)))
+		(fn ppoll
+			(:pragma (c_array descriptors count) (c_nullable timeout mask))
+			(params (descriptors (mut-array PollFd)) (count PollCount) (timeout (shared-ref Timespec))
+				(mask (shared-ref SignalSet)))
+			(returns i32)))
+
+	(bridge c-header "<sys/resource.h>" (:pragma (cfg (os "linux")))
+		(type Pid (c-type "__pid_t"))
+		(type Resource (c-type "__rlimit_resource_t"))
+		(type Rlim (c-type "rlim_t"))
+		(struct Limit (c-type "struct rlimit") (fields (rlim_cur Rlim) (rlim_max Rlim)))
+		(const RLIMIT_NOFILE Resource)
+		(fn prlimit
+			(:pragma (c_nullable requested previous))
+			(params (pid Pid) (resource Resource) (requested (shared-ref Limit)) (previous (mut-ref Limit)))
+			(returns i32)))
+
+	(fn check_poll (:pragma (cfg (os "linux")))
+		(params) (returns i32)
+		(body
+			(let-mut mask (struct.new SignalSet))
+			(if (i32.not-eqz (call sigemptyset (borrow-mut mask))) (then (return 1i32)))
+			(let timeout (struct.new Timespec (tv_sec (int.convert Time 0i32)) (tv_nsec (int.convert Nanos 0i32))))
+			(let-mut descriptors (array.alloc PollFd 1i32))
+			(array.store descriptors 0i32 (struct.new PollFd (fd -1i32) (events 0i16) (revents 0i16)))
+			(let count (int.convert PollCount 1i32))
+			(if (i32.not-eqz (call ppoll (borrow-mut descriptors) count (borrow-shared timeout) null))
+				(then (return 2i32)))
+			(if (i32.not-eqz (call ppoll (borrow-mut descriptors) count (borrow-shared timeout) (borrow-shared mask)))
+				(then (return 3i32)))
+			(return 0i32)))
+
+	(fn check_native (:pragma (cfg (os "linux")))
+		(params) (returns i32)
+		(body
+			(let poll_status (call check_poll))
+			(if (i32.not-eqz poll_status) (then (return poll_status)))
+			(let pid (int.convert Pid 0i32))
+			(let-mut original (struct.new Limit))
+			(if (i32.not-eqz (call prlimit pid RLIMIT_NOFILE null (borrow-mut original))) (then (return 4i32)))
+			(if (i32.not-eqz (call prlimit pid RLIMIT_NOFILE null null)) (then (return 5i32)))
+			(if (i32.not-eqz (call prlimit pid RLIMIT_NOFILE (borrow-shared original) null)) (then (return 6i32)))
+			(let-mut previous (struct.new Limit))
+			(if (i32.not-eqz (call prlimit pid RLIMIT_NOFILE (borrow-shared original) (borrow-mut previous)))
+				(then (return 7i32)))
+			(if (u64.not-eq (int.convert u64 (struct.get previous rlim_cur)) (int.convert u64 (struct.get original rlim_cur)))
+				(then (return 8i32)))
+			(if (u64.not-eq (int.convert u64 (struct.get previous rlim_max)) (int.convert u64 (struct.get original rlim_max)))
+				(then (return 9i32)))
+			(return 42i32)))
+
+	(fn check_native (:pragma (cfg (not (os "linux"))))
+		(params) (returns i32)
+		(body (return 42i32)))
+
+	(fn main (params (args (shared-array (shared-array u8)))) (returns i32)
+		(body (return (call check_native)))))

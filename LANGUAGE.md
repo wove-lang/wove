@@ -1208,12 +1208,19 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_variadic ...)` | Keep all declared parameters fixed and accept zero or more scalar arguments after them. |
 | `(c_callback_sync parameter)` | Lend a Wove callable to a C function for the duration of the call. The C header must match the declared function pointer. |
 | `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
-| `(c_nullable parameter)` | Accept literal `null` for a mutable scalar reference, a shared byte view with `c_cstr`, or a function pointer with `c_callback_sync`. A present string still receives a checked, call-scoped NUL-terminated copy. An empty view supplies an empty C string. |
+| `(c_nullable parameter ...)` | Accept literal `null` for mutable scalar references, shared native scalar aliases, shared or mutable references to complete native records, shared byte views with `c_cstr`, and function pointers with `c_callback_sync`. A present string receives a checked, call-scoped NUL-terminated copy. An empty view supplies an empty C string. |
 
 A bare `null` in an argument slot that accepts C NULL selects the native
 null value. In other expression and place positions, `null` is an ordinary
 binding name. To supply a nullable byte view from a binding named `null`,
 pass `(borrow-shared null)`.
+
+For a nullable shared native scalar alias or a nullable native record
+reference, a present argument uses the original address and the normal
+shared or exclusive loan checks. An absent argument uses the exact C
+pointer type. Clang checks that the pointee is complete and that the fixed,
+nonvariadic C function prototype matches the bridge, including `const`
+on a shared pointee.
 
 A synchronous error callback can declare
 `(fn-type (params c-cstr i32) (returns i32))` for a native

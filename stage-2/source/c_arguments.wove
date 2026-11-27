@@ -17,10 +17,10 @@
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "../c/arguments.wove"
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
-			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode) (value c_storage_init_always_mode)
+			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode) (value c_storage_init_always_mode) (value c_nullable_native_reference_mode)
 			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode) (value c_nullable_sync_callback_mode) is_c_sync_callback_mode))
 
-	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (scalar_ref u32) (owner_mode u8) (nullable bool)))
+	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (scalar_ref u32) (nullable_reference bool) (owner_mode u8) (nullable bool)))
 	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (handle_out bool) (void_pointer bool) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
 	(struct CFormal (fields (row i32) (position i32) (type_node i32) (start i32) (end i32)))
 
@@ -198,13 +198,13 @@
 			(start (struct.get site start)) (end (struct.get site end))))))
 
 	(fn mark_c_argument_type
-		(:doc `Record the scalar or scalar pointee classification before applying native contracts.`)
-		(params (contracts (mut-array CArgument)) (index i32) (integer bool) (scalar_ref u32) (owner_mode u8))
+		(:doc `Record the native formal shape before applying argument contracts.`)
+		(params (contracts (mut-array CArgument)) (index i32) (integer bool) (scalar_ref u32) (nullable_reference bool) (owner_mode u8))
 		(returns void)
 		(body
 			(array.store contracts index
 				(struct.new CArgument (mode (call c_value_mode)) (size 0i32) (count 0i32)
-					(integer integer) (scalar_ref scalar_ref)
+					(integer integer) (scalar_ref scalar_ref) (nullable_reference nullable_reference)
 					(owner_mode owner_mode) (nullable (bool false))))))
 
 	(fn accepts_c_formal
@@ -252,8 +252,9 @@
 				(call is_c_nullable_mode mode)
 				(then
 					(if
-						(:doc "Shared scalar void pointers always borrow a concrete place.")
-						(u32.eq (struct.get formal scalar_ref) 1u32)
+						(:doc "Shared built-in scalar loans do not opt into typed nullable native references.")
+						(bool.and (u32.eq (struct.get formal scalar_ref) 1u32)
+							(bool.not (struct.get formal nullable_reference)))
 						(then (return (bool false))))
 					(if
 						(:doc "A callback with a separate synchronous pragma can have an absent receiver.")
@@ -345,6 +346,7 @@
 			(array.store contracts index
 				(struct.new CArgument (mode mode) (size size) (count count)
 					(integer (struct.get prior integer)) (scalar_ref (struct.get prior scalar_ref))
+					(nullable_reference (struct.get prior nullable_reference))
 					(owner_mode (struct.get prior owner_mode)) (nullable (struct.get prior nullable))))
 			(if
 				(:doc "Each bounded pointer contributes one extent check.")
@@ -485,6 +487,10 @@
 						(bool.and (u8.eq mode c_void_pointer_mode)
 							(u8.eq owner_mode c_shared_handle_slot_mode))
 						(then (set bound_mode c_shared_handle_slot_mode)))
+					(if
+						(:doc "Complete native records and shared native scalar aliases use their declared pointer types.")
+						(bool.and (call is_c_nullable_mode mode) (struct.get slot nullable_reference))
+						(then (set bound_mode c_nullable_native_reference_mode)))
 					(let callback (call is_c_callback_type (borrow-shared source) (borrow-shared nodes)
 						(array.load nodes (struct.get formal type_node))))
 					(if
@@ -502,10 +508,11 @@
 								(struct.new CArgument (mode (struct.get slot mode))
 									(size (struct.get slot size)) (count (struct.get slot count))
 									(integer (struct.get slot integer)) (scalar_ref (struct.get slot scalar_ref))
+									(nullable_reference (struct.get slot nullable_reference))
 									(owner_mode owner_mode) (nullable (bool true))))))
 					(if
 						(:doc "Other nullable pointer shapes keep their existing lowering until their contracts are implemented.")
-						(bool.or (bool.not (call is_c_nullable_mode mode)) (u32.eq (struct.get slot scalar_ref) 2u32))
+						(bool.or (bool.not (call is_c_nullable_mode bound_mode)) (u32.eq (struct.get slot scalar_ref) 2u32))
 						(then
 							(let bound (call reserve_c_argument (borrow-mut contracts) formal bound_mode -1i32 -1i32))
 							(if
@@ -807,6 +814,7 @@
 								(then (array.store contracts index
 									(struct.new CArgument (mode mode) (size (struct.get slot size)) (count (struct.get slot count))
 										(integer (struct.get slot integer)) (scalar_ref (struct.get slot scalar_ref))
+										(nullable_reference (struct.get slot nullable_reference))
 										(owner_mode (struct.get slot owner_mode)) (nullable (bool true))))))))
 					(if
 						(:doc "A callback formal needs an explicit synchronous contract and a fixed C prototype.")
@@ -816,6 +824,7 @@
 						(then (return (call c_argument_error_at type))))
 					(let vector (call is_c_vector_mode mode))
 					(let retained (u8.eq mode c_static_string_mode))
+					(let typed_nullable (u8.eq mode c_nullable_native_reference_mode))
 					(if
 						(:doc "Fixed null removal uses a separate bridge and cannot share the retained string formal.")
 						(bool.and retained (struct.get slot nullable))
@@ -830,17 +839,18 @@
 					(set vectors (bool.or vectors vector))
 					(set void_pointer (bool.or void_pointer void_formal))
 					(if
-						(:doc "Borrowed void pointers and retained strings require exact nonvariadic C functions.")
+						(:doc "Checked native pointer contracts require a matching C function prototype.")
 						(bool.and (bool.or (bool.or void_formal retained) (bool.or vector
 								(bool.or (call accepts_c_null mode) (call is_c_init_mode mode))))
 							(bool.or (struct.get arguments macro)
 								(bool.or (i32.gtz (struct.get arguments variadic))
-									(bool.and (bool.or void_formal retained)
+									(bool.and (bool.or typed_nullable (bool.or void_formal retained))
 										(i32.ltz (struct.get arguments variadic))))))
 						(then (return (call c_argument_error_at type))))
 					(if
-						(:doc "A shared scalar formal requires an explicit native void pointer contract.")
-						(bool.and (u32.eq (struct.get slot scalar_ref) 1u32) (bool.not void_formal))
+						(:doc "A shared scalar formal needs an explicit typed nullable or void pointer contract.")
+						(bool.and (u32.eq (struct.get slot scalar_ref) 1u32)
+							(bool.not (bool.or typed_nullable void_formal)))
 						(then
 							(let reference (call form_parts (borrow-shared source) (borrow-shared nodes) type))
 							(return (call c_argument_error_at (array.load nodes (struct.get reference operands))))))
