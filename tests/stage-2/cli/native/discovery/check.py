@@ -25,7 +25,7 @@ def write_module(path, name, forms):
 
 # Build a relative chain with a shared provider and enough files to grow both drivers' tables.
 def write_graph(root, bundled):
-	shutil.copytree(bundled, root / "c-stdlib")
+	shutil.copytree(bundled, root / "llvm-libc")
 	chain = root / "chain"
 	chain.mkdir()
 	write_module(root / "shared.wove", "shared",
