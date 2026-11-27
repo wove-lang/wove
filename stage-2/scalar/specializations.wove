@@ -8,6 +8,7 @@
 	available for diagnostics and inspection.`)
 
 	(use wove-file "../source/generics.wove" (only has_specialization_head function_generic_list))
+	(use wove-file "../source/owned.wove" (only owned_element_node))
 	(use wove-file "../source/scan.wove" (only is_metadata_form (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts (type SelectedDeclaration)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
@@ -16,7 +17,7 @@
 	(use wove-file "./syntax.wove" (only entry_at entry_keyword (type EntryRead)))
 	(use wove-file "./records.wove" (only declaration_kind declaration_generic_list read_specialization_key find_specialization
 		specialization_alias specialization_layout specialization_type is_specialization_alias register_specialized_arrays
-		is_member_array register_fixed_arrays scope_at use_scope
+		is_member_array register_fixed_arrays register_owned_rows generic_owner_leaf_node specialization_first scope_at use_scope
 		is_disabled_statement is_generic_template validate_template_constants (type TypeScope) (type ScalarRecord)))
 
 	(struct SpecializationRead (fields (next i32) (file i32) (start i32) (end i32) (error u32)))
@@ -69,16 +70,63 @@
 				(then (return (i32.eq (local index) (struct.get (local parts) operands)))))
 			(return (bool true))))
 
+	(fn register_argument_owner
+		(:doc "Intern just the owner layers of one compound type argument from its element out.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (mut-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (argument i32) (start i32)) (returns EntryRead)
+		(body
+			(let leaf (call generic_owner_leaf_node (borrow-shared (local source)) (borrow-shared (local nodes)) (local argument)))
+			(let-mut count (local start))
+			(let-mut row (struct.get (array.load (local nodes) (local leaf)) parent))
+			(while
+				(:doc "Each inner descriptor is available by the time its enclosing type needs a row code.")
+				(i32.lt (local argument) (local row))
+				(body
+					(let owners (call register_owned_rows (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local row) (i32.inc (local row)) (borrow-shared (local bindings)) (local scope) (borrow-mut (local records)) (local count)))
+					(if (u32.gtz (struct.get (local owners) error)) (then (return (local owners))))
+					(set (local count) (struct.get (local owners) operand))
+					(set (local row) (struct.get (array.load (local nodes) (local row)) parent))))
+			(return (call entry_at (array.load (local nodes) (local argument)) (local count) 0u32))))
+
+	(fn register_argument_owners
+		(:doc "Intern nested ownership layers of explicit type arguments before resolving the specialization key.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (mut-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (site i32) (start i32)) (returns EntryRead)
+		(body
+			(let-mut argument (call specialization_first (borrow-shared (local source)) (borrow-shared (local nodes)) (local site)))
+			(let-mut next (local start))
+			(while
+				(:doc "Only an explicit heap descriptor can require structural row identities here.")
+				(i32.not-ltz (local argument))
+				(body
+					(let node (array.load (local nodes) (local argument)))
+					(let child (call owned_element_node (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+					(if
+						(:doc "A descriptor's encoded type can depend on a registered inner owner.")
+						(i32.not-ltz (local child))
+						(then
+							(let owners (call register_argument_owner (borrow-shared (local source)) (borrow-shared (local nodes))
+								(borrow-mut (local records)) (borrow-shared (local bindings)) (local scope) (local argument) (local next)))
+							(if (u32.gtz (struct.get (local owners) error)) (then (return (local owners))))
+							(set (local next) (struct.get (local owners) operand))))
+					(set (local argument) (struct.get (local node) next_sibling))))
+			(return (call entry_at (array.load (local nodes) (local site)) (local next) 0u32))))
+
 	(fn register_specialization
 		(:doc "Register a checked source application and publish its canonical row for field discovery.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (mut-array ScalarRecord))
-			(bindings (shared-array GraphBinding)) (scope TypeScope) (site i32) (enclosing i32) (next i32)) (returns EntryRead)
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (site i32) (enclosing i32) (start i32)) (returns EntryRead)
 		(body
 			(let node (array.load (local nodes) (local site)))
 			(if
 				(:doc "A closed field application has one source mapping across all instances of its template.")
 				(u32.gtz (call specialization_type (borrow-shared (local records)) (local site)))
-				(then (return (call entry_at (local node) (local next) 0u32))))
+				(then (return (call entry_at (local node) (local start) 0u32))))
+			(let owners (call register_argument_owners (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-mut (local records)) (borrow-shared (local bindings)) (local scope) (local site) (local start)))
+			(if (u32.gtz (struct.get (local owners) error)) (then (return (local owners))))
+			(let next (struct.get (local owners) operand))
 			(let key (call read_specialization_key (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (local scope) (local site) (local enclosing)))
 			(if

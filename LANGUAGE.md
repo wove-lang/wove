@@ -321,9 +321,13 @@ parameters of type `i32`, `bool`, or a fieldless enum.
     (items (array.new (array u8 4) 1u8 2u8 3u8 4u8)))
 ```
 
-In a record template, a type parameter can name a copyable field or fixed
-array element, and an `i32` constant parameter can set an extent at any
-fixed array layer.
+In a record template, a type parameter can name a field or fixed array
+element. Record type arguments include built-in types, named Wove types,
+and explicit `(owned-array ...)` types. Owner descriptors can be nested
+over a supported built-in or named Wove element.
+A field or fixed array element that resolves to an owning type gives the
+instance the usual explicit move, borrow, and recursive cleanup rules. An
+`i32` constant parameter can set an extent at any fixed array layer.
 Apply the template explicitly in type positions and as the first operand of
 `struct.new`. Each argument must match its declared kind. A specialization
 is identified by its defining record and normalized arguments. Different
