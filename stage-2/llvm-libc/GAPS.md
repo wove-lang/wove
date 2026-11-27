@@ -489,6 +489,32 @@ Across the 240 SDK configurations, both bridge origins passed 11,928
 value comparisons and 72 unavailable-selector diagnostics. The fixtures
 also link under the host C mode and feature profile matrix.
 
+## Bundled `<sys/utsname.h>` identification
+
+Apple Clang 21 and LLVM Clang 22 verified the `int uname(struct utsname *)`
+prototype and native layout on macOS SDK 27.2 and Debian glibc 2.41, on arm64
+and x86-64. The audit covered C11, C17, and C23 across ten feature profiles
+per frontend and target. [LLVM libc uname checklist](https://libc.llvm.org/headers/sys/utsname.html)
+
+The bridge writes into a caller-owned `UtsName` through a mutable reference
+and returns the native status. The five exposed fields are `sysname`,
+`nodename`, `release`, `version`, and `machine`. Darwin uses 256-byte
+character arrays and a 1280-byte record. Glibc uses 65-byte character
+arrays and a 390-byte record. Both allocate the complete native C type.
+The bundled and project fixtures compare the raw status, each field's
+extent, and the bytes through its terminator to a direct C call.
+
+Both origins ran those comparisons in 12 host profiles. The relocated
+compiler checked their native layouts across the 240 SDK configurations.
+The optional constant had 96 value checks and 384 unavailable-selector
+checks across both origins.
+
+| Native member | Coverage or outstanding contract |
+| --- | --- |
+| `SYS_NMLN` | Glibc exposes the `i32` width constant (65) in the tested default-source and GNU profiles. A public optional declaration follows native availability, including the original selector diagnostic on Darwin and in strict glibc profiles. |
+| `domainname` | The sixth glibc slot is 65 bytes. GNU profiles expose the public spelling and other profiles name the slot `__domainname`. Adding `domainname` to an equivalent project record passes with GNU features and fails the compiler-emitted field check in strict POSIX. A record-field `c_optional` annotation does not gate that check. The public field needs a generic feature-selected native field contract. |
+| `_SYS_NAMELEN` and glibc `_UTSNAME_*` | SDK layout macros used to declare the native extents. The bridge exposes the checked field widths directly. |
+
 ## Bundled message formatting
 
 The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public

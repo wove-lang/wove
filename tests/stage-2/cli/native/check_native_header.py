@@ -10,7 +10,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
-from check import check_phase, manifest_rows
+from check import check_phase, manifest_rows, run_program
 from check_macro_modes import macro_inventory
 from constant_result import folded_i32_result
 
@@ -28,9 +28,9 @@ def stage_project(fixtures, project, header, source, standard, flags):
 	(project / "wovec.jsonc").write_text(json.dumps(config))
 
 
-# Check the native values or the exact selector diagnostic for a hidden macro.
+# Verify values through the fixture result or check the original diagnostic.
 def check_case(compiler, clang, runtime, fixtures, project, header, standard, flags, *,
-		source="probe.wove", unavailable=None):
+		source="probe.wove", unavailable=None, execute=False):
 	flags = [*flags, "-I.", "-Wall", "-Wextra", "-Wpedantic", "-Werror"]
 	stage_project(fixtures, project, header, source, standard, flags)
 	env = {**os.environ, "CLANG": clang}
@@ -43,6 +43,10 @@ def check_case(compiler, clang, runtime, fixtures, project, header, standard, fl
 	result = subprocess.run([compiler, "bin", "main.wove", "-o", "out"],
 		cwd=project, env=env, capture_output=True, timeout=30)
 	assert result.returncode == 0, (project.name, result.stderr)
+	# Runtime controls read the active native record and compare each bounded view.
+	if execute:
+		run_program(project, project / "out", project.name, fixtures, {"exit": 42})
+		return
 	# Give the optimizer the existing borrow guards for these constant views.
 	status = folded_i32_result(clang, runtime, project, standard,
 		[*flags, "-include", str(runtime / "wove_runtime.c")])
@@ -51,13 +55,14 @@ def check_case(compiler, clang, runtime, fixtures, project, header, standard, fl
 
 # Run both fixture origins under all selected standard and feature profiles.
 def main():
-	compiler, runtime, fixtures = (Path(value).resolve() for value in sys.argv[1:])
+	compiler, runtime, fixtures = (Path(value).resolve() for value in sys.argv[1:4])
+	execute = sys.argv[4] == "run"
 	clang = os.environ.get("CLANG", "clang")
 	cases = list(manifest_rows(fixtures / "cases.tsv"))
 	optional = fixtures / "optional.tsv"
 	optional_cases = list(manifest_rows(optional)) if optional.is_file() else []
 	profiles = [(label, json.loads(flags))
-		for label, flags in manifest_rows(fixtures.parent / "archive-profiles.tsv")]
+		for label, flags in manifest_rows(fixtures.parent / "header-profiles.tsv")]
 	# Move the compiler and every project outside the source checkout.
 	with TemporaryDirectory(prefix=f"wove-{fixtures.name}-") as directory:
 		stage = Path(directory)
@@ -66,15 +71,15 @@ def main():
 		# Hold each origin to the same C flags and shared native oracle.
 		for (origin, header), standard, (profile, flags) in product(cases, ("c11", "c17", "c23"), profiles):
 			project = stage / f"{origin}-{standard}-{profile}"
-			check_case(installed, clang, runtime, fixtures, project, header, standard, flags)
+			check_case(installed, clang, runtime, fixtures, project, header, standard, flags, execute=execute)
 			# Test optional declarations according to the configured compiler's header.
 			for case_origin, native, macro, source, diagnostic in optional_cases:
 				if case_origin != origin:
 					continue
 				present = macro.encode() in macro_inventory(clang, standard, native, tuple(flags))
 				check_case(installed, clang, runtime, fixtures, project.with_name(f"{project.name}-{macro}"),
-					header, standard, flags, source=source, unavailable=None if present else diagnostic)
-	print(f"{fixtures.name}.h: bundled and project macros checked in {3 * len(profiles)} host profiles")
+					header, standard, flags, source=source, unavailable=None if present else diagnostic, execute=execute)
+	print(f"{fixtures.name}.h: bundled and project values checked in {3 * len(profiles)} host profiles")
 
 
 if __name__ == "__main__":
