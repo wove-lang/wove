@@ -158,6 +158,10 @@ int32_t wvrt_bootstrap_deployment(void);
 		return wvrt_run_host_entry(argc, argv, entry); \
 	}
 
+// Lend the original terminated callback path without exposing its terminator.
+wvrt_slice wvrt_borrow_callback_path(const char *wvrt_path, int32_t wvrt_file,
+	int32_t wvrt_start, int32_t wvrt_end);
+
 typedef struct {
 	wvrt_slice wvrt_view;
 	bool wvrt_checked;

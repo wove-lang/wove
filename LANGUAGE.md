@@ -1151,6 +1151,32 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
 | `(c_nullable parameter)` | Accept literal `null` in place of a mutable scalar reference or a shared byte view with `c_cstr`. A present string still receives a checked, call-scoped NUL-terminated copy. An empty view supplies an empty C string. |
 
+A synchronous file-walk callback declares its native signature in the bridge.
+
+```wove
+(fn nftw
+    (:pragma (c_cstr path) (c_callback_sync visitor))
+    (params (path (shared-array u8))
+        (visitor (fn-type (params c-cstr (c-optional-record stat FTW_NS) i32
+            (c-mut-record FTW)) (returns i32)))
+        (descriptors i32) (flags i32))
+    (returns i32))
+```
+
+Pass a direct `(fn-ref visitor)` whose Wove parameters are a
+`(shared-array u8)`, an `(optional (shared-ref Stat))`, an `i32`,
+and a `(shared-ref Ftw)` for the extended form. The native structs must
+have the declared C tags. The plain form omits the fourth parameter.
+For a large-file bridge, declare the `stat64` tag and receive its
+corresponding native struct.
+
+The path view lends the original bytes up to the C terminator. The
+status option is absent for a null native pointer or the declared
+unavailable visit code. The extended callback receives a mutable
+`struct FTW *` in C and reads it through a shared Wove reference.
+Each loan lasts for one invocation. The receiver's `i32` result is
+returned to C unchanged.
+
 A native function can lend a nullable, read-only record from an exclusive
 native handle parameter. For example, a bridge for `readdir` can declare
 `(returns (optional (shared-ref Entry)) (from directory))` when

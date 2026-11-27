@@ -1,0 +1,130 @@
+(module scalar_callback_types
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Read the C-side signature of synchronous file-walk callbacks.")
+
+	(use wove-file "../c/arguments.wove" (only (value c_sync_callback_mode)))
+	(use wove-file "../source/types.wove" (only void_type))
+	(use wove-file "../c/identifiers.wove" (only is_c_identifier))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "./signatures.wove" (only read_signature_head))
+	(use wove-file "./syntax.wove" (only entry_form scalar_type (value fn_type_kind)))
+
+	(struct CallbackShape
+		(fields (status i32) (unavailable i32) (walk i32) (start i32) (end i32) (error u32)))
+
+	(let c_string "c-cstr")
+	(let optional_record "c-optional-record")
+	(let mutable_record "c-mut-record")
+
+	(fn callback_shape_at
+		(:doc "Initialize a shape without any registered C operands.")
+		(params (node SourceNode) (error u32)) (returns CallbackShape)
+		(body
+			(return (struct.new CallbackShape (status -1i32) (unavailable -1i32) (walk -1i32)
+				(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error (local error))))))
+
+	(fn callback_word
+		(:doc "Match a bare native callback word by its original bytes.")
+		(params (source (shared-array u8)) (node SourceNode) (word (shared-array u8))) (returns bool)
+		(body
+			(return (bool.and (u32.eq (struct.get (local node) kind) 1u32)
+				(call same_bytes (borrow-shared (local source)) (struct.get (local node) start) (struct.get (local node) end)
+					(borrow-shared (local word)) 0i32 (array.len (local word)))))))
+
+	(fn callback_identifier
+		(:doc "Require an identifier token that can be emitted unchanged into C.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32)) (returns bool)
+		(body
+			(if (i32.ltz (local index)) (then (return (bool false))))
+			(let node (array.load (local nodes) (local index)))
+			(return (bool.and (u32.eq (struct.get (local node) kind) 1u32)
+				(call is_c_identifier (borrow-shared (local source)) (struct.get (local node) start) (struct.get (local node) end))))))
+
+	(fn callback_record_tag
+		(:doc "Read the first operand of the requested native struct parameter form.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(word (shared-array u8))) (returns i32)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (struct.get (local parts) head))
+			(let tag (struct.get (local parts) operands))
+			(if
+				(:doc "Require the correct pointer shape and a portable C struct tag.")
+				(bool.and (i32.not-ltz (local head))
+					(bool.and (call callback_word (borrow-shared (local source)) (array.load (local nodes) (local head)) (borrow-shared (local word)))
+						(call callback_identifier (borrow-shared (local source)) (borrow-shared (local nodes)) (local tag))))
+				(then (return (local tag))))
+			(return -1i32)))
+
+	(fn read_callback_shape
+		(:doc "Read a path, optional status, visit code, and optional mutable walk record from an adapted fn-type.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)) (returns CallbackShape)
+		(body
+			(let type (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (local fn_type_kind) 23u32))
+			(if (u32.gtz (struct.get (local type) error)) (then (return (call callback_shape_at (local node) 0u32))))
+			(let signature (call read_signature_head (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local node) (struct.get (local type) operand) (bool false) (bool false)))
+			(let first (struct.get (local signature) params))
+			(if
+				(:doc "A c-cstr formal distinguishes the adapted native shape from an ordinary scalar signature.")
+				(bool.or (i32.ltz (local first)) (bool.not (call callback_word (borrow-shared (local source))
+					(array.load (local nodes) (local first)) (borrow-shared (local c_string)))))
+				(then (return (call callback_shape_at (local node) 0u32))))
+			(let result (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local signature) type_node)))
+			(let second (struct.get (array.load (local nodes) (local first)) next_sibling))
+			(if
+				(:doc "This synchronous native signature returns int and has no Wove body.")
+				(bool.or (u32.not-eq (local result) 5u32)
+					(bool.or (i32.not-ltz (struct.get (local signature) body)) (i32.ltz (local second))))
+				(then (return (call callback_shape_at (local node) 23u32))))
+			(let optional (array.load (local nodes) (local second)))
+			(let status (call callback_record_tag (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local optional) (borrow-shared (local optional_record))))
+			(if (i32.ltz (local status)) (then (return (call callback_shape_at (local optional) 23u32))))
+			(let unavailable (struct.get (array.load (local nodes) (local status)) next_sibling))
+			(if
+				(:doc "The third native argument is compared with this header constant before exposing status storage.")
+				(bool.or (bool.not (call callback_identifier (borrow-shared (local source)) (borrow-shared (local nodes)) (local unavailable)))
+					(i32.not-ltz (struct.get (array.load (local nodes) (local unavailable)) next_sibling)))
+				(then (return (call callback_shape_at (local optional) 23u32))))
+			(let visit (struct.get (local optional) next_sibling))
+			(if
+				(:doc "Keep the visit discriminator in its original signed C int domain.")
+				(u32.not-eq (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local visit)) 5u32)
+				(then (return (call callback_shape_at (local node) 23u32))))
+			(let fourth (struct.get (array.load (local nodes) (local visit)) next_sibling))
+			(let-mut walk -1i32)
+			(if
+				(:doc "The extended form has one additional non-const struct pointer in the C ABI.")
+				(i32.not-ltz (local fourth))
+				(then
+					(let field (array.load (local nodes) (local fourth)))
+					(set (local walk) (call callback_record_tag (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local field) (borrow-shared (local mutable_record))))
+					(if
+						(:doc "The walk record has an exact tag and ends the fixed signature.")
+						(bool.or (i32.ltz (local walk)) (bool.or (i32.not-ltz (struct.get (local field) next_sibling))
+							(i32.not-ltz (struct.get (array.load (local nodes) (local walk)) next_sibling))))
+						(then (return (call callback_shape_at (local field) 23u32))))))
+			(return (struct.new CallbackShape (status (local status)) (unavailable (local unavailable)) (walk (local walk))
+				(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 0u32)))))
+
+	(fn is_adapted_callback
+		(:doc "Distinguish a foreign-only callback slot from a first-class scalar function value.")
+		(params (mode u8) (type u32)) (returns bool)
+		(body
+			(return (bool.and (u8.eq (local mode) (local c_sync_callback_mode)) (u32.eq (local type) (call void_type))))))
+
+	(fn callback_formal_shape
+		(:doc "Recover the validated native callback signature from its containing parameter form.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name i32)) (returns CallbackShape)
+		(body
+			(let parameter (array.load (local nodes) (struct.get (array.load (local nodes) (local name)) parent)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local parameter)))
+			(return (call read_callback_shape (borrow-shared (local source)) (borrow-shared (local nodes))
+				(array.load (local nodes) (struct.get (local parts) operands))))))
+)

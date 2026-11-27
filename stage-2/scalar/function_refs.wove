@@ -3,6 +3,9 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc "Check named Wove function references and intern the signatures they introduce.")
 
+	(use wove-file "../c/arguments.wove" (only (value c_adapted_callback_argument)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "./callback_types.wove" (only callback_formal_shape))
 	(use wove-file "../source/scan.wove" (only is_metadata_form (type SourceNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/generics.wove" (only (value checked_operation_operand)))
@@ -11,7 +14,8 @@
 	(use wove-file "./function_rows.wove" (only resolve_call_target (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
 	(use wove-file "./records.wove" (only find_callable_type intern_callable_layout layout_count next_layout_node
-		is_disabled_statement (type ScalarRecord)))
+		is_disabled_statement is_record_type record_index is_native_record is_optional_record_borrow optional_record_borrow_reference
+		is_place_reference is_mutable_place_reference place_reference_target (type ScalarRecord)))
 	(use wove-file "./syntax.wove" (only callable_keyword entry_at entry_form is_scalar_name (value fn_ref_kind) (type EntryRead)))
 	(use wove-file "./value_types.wove" (only value_matches_type))
 
@@ -44,6 +48,90 @@
 				(bool.or (struct.get (local callee) entry) (i32.ltz (struct.get (local callee) body)))
 				(then (return (call entry_at (local name) -1i32 24u32))))
 			(return (call entry_at (local name) (local target) 0u32))))
+
+	(let native_struct_prefix "struct ")
+
+	(fn callback_record_matches
+		(:doc "Check that a scoped Wove reference names the exact C struct in the foreign prototype.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(reference u32) (tag_row i32)) (returns bool)
+		(body
+			(if
+				(:doc "The Wove receiver only reads the callback's original record storage.")
+				(bool.or (bool.not (call is_place_reference (local reference))) (call is_mutable_place_reference (local reference)))
+				(then (return (bool false))))
+			(let type (call place_reference_target (borrow-shared (local records)) (local reference)))
+			(if (bool.not (call is_record_type (local type))) (then (return (bool false))))
+			(let layout (array.load (local records) (call record_index (local type))))
+			(if (bool.not (call is_native_record (local layout))) (then (return (bool false))))
+			(let literal (array.load (local nodes) (struct.get (local layout) native)))
+			(let tag (array.load (local nodes) (local tag_row)))
+			(let start (i32.inc (struct.get (local literal) start)))
+			(let boundary (i32.add (local start) (array.len (local native_struct_prefix))))
+			(let end (i32.dec (struct.get (local literal) end)))
+			(return (bool.and (i32.not-lt (local end) (local boundary))
+				(bool.and (call same_bytes (borrow-shared (local source)) (local start) (local boundary)
+					(borrow-shared (local native_struct_prefix)) 0i32 (array.len (local native_struct_prefix)))
+					(call same_bytes (borrow-shared (local source)) (local boundary) (local end)
+						(borrow-shared (local source)) (struct.get (local tag) start) (struct.get (local tag) end)))))))
+
+	(fn plan_adapted_callback
+		(:doc "Resolve a direct fn-ref against the checked borrowed receiver signature.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (operand SourceNode)
+			(caller ScalarFunction) (index i32) (formal i32) (view_start i32)
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(bindings (shared-array GraphBinding)) (records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let receiver (call read_function_reference (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local operand) (local caller) (borrow-shared (local functions)) (borrow-shared (local bindings))))
+			(if (u32.gtz (struct.get (local receiver) error)) (then (return (local receiver))))
+			(let target (struct.get (local receiver) operand))
+			(let function (array.load (local functions) (local target)))
+			(let shape (call callback_formal_shape (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (array.load (local parameters) (local formal)) name)))
+			(let invalid (call entry_at (local operand) -1i32 24u32))
+			(let extended (i32.not-ltz (struct.get (local shape) walk)))
+			(let-mut arity 3i32)
+			(if (local extended) (then (set (local arity) 4i32)))
+			(if
+				(:doc "The receiver's result and arity match the C call exactly.")
+				(bool.or (i32.not-eq (struct.get (local function) arity) (local arity))
+					(u32.not-eq (struct.get (local function) result) 5u32))
+				(then (return (local invalid))))
+			(let first (struct.get (local function) params))
+			(let path (array.load (local parameters) (local first)))
+			(let status (struct.get (array.load (local parameters) (i32.inc (local first))) type))
+			(let visit (struct.get (array.load (local parameters) (i32.add (local first) 2i32)) type))
+			(if
+				(:doc "A dynamic path view, nullable record, and exact signed code stay in the call scope.")
+				(bool.or (bool.or (u32.not-eq (struct.get (local path) type) 34u32) (i32.not-ltz (struct.get (local path) extent)))
+					(bool.or (bool.not (call is_optional_record_borrow (local status))) (u32.not-eq (local visit) 5u32)))
+				(then (return (local invalid))))
+			(if
+				(:doc "The optional status preserves the declared platform tag, including large-file variants.")
+				(bool.not (call callback_record_matches (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local records))
+					(call optional_record_borrow_reference (local status) (bool false)) (struct.get (local shape) status)))
+				(then (return (local invalid))))
+			(if
+				(:doc "An extended walk receiver sees the exact fourth record through a shared loan.")
+				(local extended)
+				(then
+					(let walk (struct.get (array.load (local parameters) (i32.add (local first) 3i32)) type))
+					(if
+						(:doc "A mutable C parameter grants no write access to the Wove receiver.")
+						(bool.not (call callback_record_matches (borrow-shared (local source)) (borrow-shared (local nodes)) (borrow-shared (local records))
+							(local walk) (struct.get (local shape) walk)))
+						(then (return (local invalid))))))
+			(let source_base (struct.get (local caller) source_base))
+			(let start (i32.add (local view_start) (i32.sub (struct.get (local operand) start) (local source_base))))
+			(let end (i32.add (local view_start) (i32.sub (struct.get (local operand) end) (local source_base))))
+			(array.store (local expressions) (local index)
+				(struct.new ScalarExpression (kind (local c_adapted_callback_argument)) (type 0u32) (target (local target))
+					(first -1i32) (start (local start)) (end (local end)) (negative (bool false))
+					(borrowed_owner (bool false)) (mutable_place (bool false)) (projection -1i32)
+					(asset_start (struct.get (local caller) file)) (asset_end (local formal)) (extent_check -1i32)))
+			(return (call entry_at (local operand) (local index) 0u32))))
 
 	(fn function_reference_shape
 		(:doc "Read the scalar callable signature of a previously checked Wove definition.")

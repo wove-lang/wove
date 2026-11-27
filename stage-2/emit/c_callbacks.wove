@@ -1,0 +1,148 @@
+(module emit_c_callbacks
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Emit synchronous C callbacks with exact native prototypes and scoped Wove views.")
+
+	(use wove-file "../c/arguments.wove" (only (value c_adapted_callback_argument)))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../scalar/callback_types.wove" (only callback_formal_shape (type CallbackShape)))
+	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "./function_names.wove" (only write_function_name))
+	(use wove-file "./runtime.wove" (only close_runtime_call))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text write_callback_adapter_name))
+
+	(let callback_pointer "int (*)(const char *,const struct ")
+	(let callback_formals "(const char *wvrt_path,const struct ")
+	(let pointer_visit " *,int")
+	(let named_visit " *wvrt_status,int wvrt_visit")
+	(let walk_prefix ",struct ")
+	(let walk_pointer " *")
+	(let named_walk " *wvrt_walk")
+	(let adapter_definition "static __attribute__((unused)) int ")
+	(let check_walk "{wvrt_check_c_handle(wvrt_walk")
+	(let return_expression "return ")
+	(let open_path "(wvrt_borrow_callback_path(wvrt_path")
+	(let omit_status ",wvrt_visit==(")
+	(let status_and_visit ")?NULL:wvrt_status,wvrt_visit")
+	(let pass_walk ",wvrt_walk")
+	(let adapter_end ");}\n")
+
+	(fn write_callback_token
+		(:doc "Emit a C identifier checked as part of the native callback signature.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let token (array.load (local nodes) (local index)))
+			(return (call c_span (borrow-shared (local source)) (struct.get (local token) start) (struct.get (local token) end)
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_callback_formals
+		(:doc "Share the precise C callback types between the pointer assertion and the adapter definition.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (shape CallbackShape) (named bool)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(if
+				(:doc "A definition names its operands, while the prototype uses an abstract pointer declarator.")
+				(local named)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local callback_formals))
+					(borrow-mut (local output)) (local cursor) (local writing))))
+				(else (set (local cursor) (call c_literal_text (borrow-shared (local callback_pointer))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call write_callback_token (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local shape) status) (borrow-mut (local output)) (local cursor) (local writing)))
+			(if
+				(:doc "The status record is const and the next operand keeps the C int type.")
+				(local named)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local named_visit))
+					(borrow-mut (local output)) (local cursor) (local writing))))
+				(else (set (local cursor) (call c_literal_text (borrow-shared (local pointer_visit))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(let walk (struct.get (local shape) walk))
+			(if
+				(:doc "An extended walk receives the position record as a mutable C pointer.")
+				(i32.not-ltz (local walk))
+				(then
+					(set (local cursor) (call c_literal_text (borrow-shared (local walk_prefix)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call write_callback_token (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local walk) (borrow-mut (local output)) (local cursor) (local writing)))
+					(if
+						(:doc "Use the same pointer qualification with or without a parameter name.")
+						(local named)
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local named_walk))
+							(borrow-mut (local output)) (local cursor) (local writing))))
+						(else (set (local cursor) (call c_literal_text (borrow-shared (local walk_pointer))
+							(borrow-mut (local output)) (local cursor) (local writing)))))))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
+
+	(fn write_callback_pointer_type
+		(:doc "Write the exact adapted parameter type within the containing C prototype.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (param ScalarParameter)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let shape (call callback_formal_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local param) name)))
+			(return (call write_callback_formals (borrow-shared (local source)) (borrow-shared (local nodes)) (local shape) (bool false)
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn write_callback_adapter
+		(:doc "Lend the original path and native records for one visit and return its result unchanged.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (shape CallbackShape) (function ScalarFunction)
+			(row ScalarExpression) (index i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let-mut cursor (call c_literal_text (borrow-shared (local adapter_definition)) (borrow-mut (local output)) (local offset) (local writing)))
+			(set (local cursor) (call write_callback_adapter_name (local index) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call write_callback_formals (borrow-shared (local source)) (borrow-shared (local nodes)) (local shape) (bool true)
+				(borrow-mut (local output)) (local cursor) (local writing)))
+			(let file (struct.get (local row) asset_start))
+			(let start (struct.get (local row) start))
+			(let end (struct.get (local row) end))
+			(let extended (i32.not-ltz (struct.get (local shape) walk)))
+			(if
+				(:doc "The extended callback contract supplies a present position record.")
+				(local extended)
+				(then
+					(set (local cursor) (call c_literal_text (borrow-shared (local check_walk)) (borrow-mut (local output)) (local cursor) (local writing)))
+					(set (local cursor) (call close_runtime_call (borrow-mut (local output)) (local cursor) (local file) (local start) (local end) (local writing)))
+					(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 59u8 (local writing))))
+				(else (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 123u8 (local writing)))))
+			(set (local cursor) (call c_literal_text (borrow-shared (local return_expression)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local function)
+				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+			(set (local cursor) (call c_literal_text (borrow-shared (local open_path)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call close_runtime_call (borrow-mut (local output)) (local cursor) (local file) (local start) (local end) (local writing)))
+			(set (local cursor) (call c_literal_text (borrow-shared (local omit_status)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call write_callback_token (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local shape) unavailable) (borrow-mut (local output)) (local cursor) (local writing)))
+			(set (local cursor) (call c_literal_text (borrow-shared (local status_and_visit)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(if
+				(:doc "C and Wove retain the same original fourth pointer with their respective access modes.")
+				(local extended)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local pass_walk)) (borrow-mut (local output)) (local cursor) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local adapter_end)) (borrow-mut (local output)) (local cursor) (local writing)))))
+
+	(fn write_callback_adapters
+		(:doc "Emit a direct private adapter for each planned borrowed callback actual.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
+			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let-mut cursor (local offset))
+			(let-mut index 0i32)
+			(while
+				(:doc "A source argument row uniquely identifies its adapter, including calls to different native declarations.")
+				(i32.lt (local index) (array.len (local expressions)))
+				(body
+					(let row (array.load (local expressions) (local index)))
+					(if
+						(:doc "Only adapted callbacks need a separate C function.")
+						(u32.eq (struct.get (local row) kind) (local c_adapted_callback_argument))
+						(then
+							(let param (array.load (local parameters) (struct.get (local row) asset_end)))
+							(let shape (call callback_formal_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local param) name)))
+							(set (local cursor) (call write_callback_adapter (borrow-shared (local source)) (borrow-shared (local nodes)) (local shape)
+								(array.load (local functions) (struct.get (local row) target)) (local row) (local index)
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+					(set (local index) (i32.inc (local index)))))
+			(return (local cursor))))
+)

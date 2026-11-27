@@ -56,7 +56,8 @@
 	(use wove-file "./callable_types.wove" (only callable_parameter_type))
 	(use wove-file "./function_rows.wove" (only checked_function_count resolve_call_target find_function_instance find_parameter find_function_parameter
 		(type ScalarFunction) (type ScalarParameter)))
-	(use wove-file "./function_refs.wove" (only register_function_references plan_function_reference))
+	(use wove-file "./function_refs.wove" (only register_function_references plan_function_reference plan_adapted_callback))
+	(use wove-file "./callback_types.wove" (only read_callback_shape is_adapted_callback))
 	(use wove-file "./value_types.wove" (only value_matches_type (value static_number)))
 	(use wove-file "./borrowed_results.wove" (only borrowed_result_view is_provenance_return invalid_return_origin binding_initializer))
 	(use wove-file "./signatures.wove" (only read_signature_head complete_signature (type ScalarSignature)))
@@ -251,6 +252,20 @@
 						(struct.get (local scope) file) (struct.get (local scope) source_base) (local operand) (i32.ltz (local bridge))))
 					(let type_node (array.load (local nodes) (local operand)))
 					(let-mut declared_type 0u32)
+					(if
+						(:doc "The adapted signature is a direct native-only argument and has no Wove function value.")
+						(bool.and (local native) (u32.gtz (struct.get (local checked) error)))
+						(then
+							(let callback (call read_callback_shape (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node)))
+							(if
+								(:doc "Report the malformed native operand at its declaration.")
+								(u32.gtz (struct.get (local callback) error))
+								(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local callback) start))
+									(end (struct.get (local callback) end)) (error (struct.get (local callback) error)) (related -1i32)))))
+							(if
+								(:doc "The source bridge already requires the synchronous lifetime contract.")
+								(i32.not-ltz (struct.get (local callback) status))
+								(then (set (local declared_type) (call void_type))))))
 					(if
 						(:doc "Keep an incoming record loan in the full-width parameter type field.")
 						(bool.not (local native))
@@ -2093,49 +2108,59 @@
 						(:doc "A null-only slot cannot take caller-owned storage.")
 						(bool.and (call is_c_null_mode (local mode)) (bool.not (local null)))
 						(then (return (call entry_at (local operand) -1i32 24u32))))
-					(let retained (u8.eq (local mode) (local c_static_string_mode)))
 					(if
-						(:doc "Retained literals and explicit nulls require no evaluated temporary.")
-						(bool.or (local retained) (local null))
+						(:doc "An adapted callback must be a checked direct receiver with no storable function value.")
+						(call is_adapted_callback (local mode) (struct.get (local param) type))
 						(then
-							(if
-								(:doc "A native static literal supplies initialized backing storage.")
-								(local retained)
-								(then
-									(let checked (call plan_static_c_string (borrow-shared (local source)) (local operand)
-										(local argument) (local caller) (borrow-mut (local expressions))))
-									(if
-										(:doc "A borrowed or malformed argument keeps its original span.")
-										(u32.gtz (struct.get (local checked) error))
-										(then (return (local checked)))))
-								(else
-									(array.store (local expressions) (local argument)
-										(call expression_row (call c_null_argument_kind) 0u32 -1i32 -1i32 0i32 0i32 (bool false))))))
+							(let checked (call plan_adapted_callback (borrow-shared (local source)) (borrow-shared (local nodes))
+								(local operand) (local caller) (local argument) (local formal) (local view_start) (borrow-shared (local functions))
+								(borrow-shared (local parameters)) (borrow-shared (local bindings)) (borrow-shared (local records))
+								(borrow-mut (local expressions))))
+							(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked)))))
 						(else
-							(let-mut argument_type (struct.get (local param) type))
-							(let-mut native_formal -1i32)
+							(let retained (u8.eq (local mode) (local c_static_string_mode)))
 							(if
-								(:doc "Keep the native owner argument mode on the unvisited row through its formal.")
-								(call is_native_owner (local argument_type))
-								(then (set (local native_formal) (local formal))))
-							(if
-								(:doc "Byte slice arguments use their reborrow keyword code. Typed slices keep the exact formal type.")
-								(call is_byte_view_type (local argument_type))
-								(then (set (local argument_type) (u32.inc (local argument_type)))))
-							(let-mut pending 0u32)
-							(if
-								(:doc "An explicit move empties the source slot while this consuming argument evaluates.")
-								(call is_owned_parameter (borrow-shared (local records)) (local argument_type))
+								(:doc "Retained literals and explicit nulls require no evaluated temporary.")
+								(bool.or (local retained) (local null))
 								(then
-									(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
 									(if
-										(:doc "The move checker rejects mismatched types and active loans.")
-										(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
-											(struct.get (local parts) head)) 43u32)
-										(then (set (local pending) (local pending_exact_move))))))
-							(array.store (local expressions) (local argument)
-								(call expression_row (local pending) (local argument_type)
-									(local native_formal) -1i32 0i32 0i32 (bool false)))))
+										(:doc "A native static literal supplies initialized backing storage.")
+										(local retained)
+										(then
+											(let checked (call plan_static_c_string (borrow-shared (local source)) (local operand)
+												(local argument) (local caller) (borrow-mut (local expressions))))
+											(if
+												(:doc "A borrowed or malformed argument keeps its original span.")
+												(u32.gtz (struct.get (local checked) error))
+												(then (return (local checked)))))
+										(else
+											(array.store (local expressions) (local argument)
+												(call expression_row (call c_null_argument_kind) 0u32 -1i32 -1i32 0i32 0i32 (bool false))))))
+								(else
+									(let-mut argument_type (struct.get (local param) type))
+									(let-mut native_formal -1i32)
+									(if
+										(:doc "Keep the native owner argument mode on the unvisited row through its formal.")
+										(call is_native_owner (local argument_type))
+										(then (set (local native_formal) (local formal))))
+									(if
+										(:doc "Byte slice arguments use their reborrow keyword code. Typed slices keep the exact formal type.")
+										(call is_byte_view_type (local argument_type))
+										(then (set (local argument_type) (u32.inc (local argument_type)))))
+									(let-mut pending 0u32)
+									(if
+										(:doc "An explicit move empties the source slot while this consuming argument evaluates.")
+										(call is_owned_parameter (borrow-shared (local records)) (local argument_type))
+										(then
+											(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand)))
+											(if
+												(:doc "The move checker rejects mismatched types and active loans.")
+												(u32.eq (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+													(struct.get (local parts) head)) 43u32)
+												(then (set (local pending) (local pending_exact_move))))))
+									(array.store (local expressions) (local argument)
+										(call expression_row (local pending) (local argument_type)
+											(local native_formal) -1i32 0i32 0i32 (bool false)))))))
 					(set (local argument) (struct.get (local operand) next_sibling))
 					(set (local formal) (i32.inc (local formal)))))
 			(let open_tail (i32.eq (struct.get (local callee) c_variadic) (local c_open_variadic_tail)))
