@@ -2087,6 +2087,11 @@ _Noreturn void wvrt_int_conversion_trap(int32_t wvrtfile, int32_t wvrtstart, int
 	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer conversion out of range");
 }
 
+// Report a finite integer-to-float overflow at its original span.
+_Noreturn void wvrt_float_conversion_trap(int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "floating conversion out of range");
+}
+
 // Check the exact byte view before touching any element.
 const uint8_t *wvrt_integer_bytes(wvrt_slice wvrtview, int32_t wvrtwidth,
 	bool wvrtvalid, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {

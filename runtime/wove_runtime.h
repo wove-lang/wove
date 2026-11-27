@@ -571,6 +571,30 @@ void wvrt_slice_store_u8_at_span(wvrt_mut_slice wvrt_view, int32_t wvrt_index, u
 int64_t wvrt_int_convert(int64_t wvrt_value, int64_t wvrt_min, int64_t wvrt_max,
 	wvrt_location wvrt_site);
 _Noreturn void wvrt_int_conversion_trap(int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+_Noreturn void wvrt_float_conversion_trap(int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+// Compare the original floating value before the generated cast truncates it.
+#define wvrt_check_float_to_wide_int(value, lower, upper, is_signed, file, start, end) \
+	__extension__ ({ \
+		__typeof__(value) wvrt_input = (value); \
+		/* Signed limits include the minimum. Unsigned inputs must exceed -1. */ \
+		if (!(((is_signed) ? wvrt_input >= (lower) : wvrt_input > (lower)) && wvrt_input < (upper))) { \
+			wvrt_int_conversion_trap((file), (start), (end)); \
+		} \
+		wvrt_input; \
+	})
+
+// Test the finite limit in the original integer type before rounding to float.
+#define wvrt_check_wide_int_to_float(value, limit, is_signed, file, start, end) \
+	__extension__ ({ \
+		__typeof__(value) wvrt_input = (value); \
+		const __typeof__(value) wvrt_limit = (__typeof__(value))(limit); \
+		/* Unsigned words have no negative bound. */ \
+		if (wvrt_input > wvrt_limit || ((is_signed) && wvrt_input < -wvrt_limit)) { \
+			wvrt_float_conversion_trap((file), (start), (end)); \
+		} \
+		wvrt_input; \
+	})
 uint64_t wvrt_int_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int64_t wvrt_signed_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
