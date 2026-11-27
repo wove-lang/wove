@@ -78,6 +78,8 @@ def emit(probe, case, requested=None, capacity=None, prefix=b""):
 		bounds.append(str(requested))
 		if prefix:
 			bounds.extend(("--verified-c-prefix", prefix.decode()))
+	if "mode" in case:
+		options[:0] = ["--mode", case["mode"]]
 	files = [str(value) for row in case["files"] for value in row]
 	assets = []
 	# Only emission can see the supplied assets. The later native build uses the emitted bytes.
@@ -141,6 +143,8 @@ def check_native(probe, case, layout, parts):
 			subprocess.run([*native_command(case, root), "-c",
 				str(root / unit), "-o", str(object_file)], check=True, timeout=30)
 			table = symbols(object_file)
+			if "entry_unit" in layout:
+				assert (table.get("main") == "T") == (unit == layout["entry_unit"]), (unit, table)
 			assert {name for name, kind in table.items() if kind == "T" and name.startswith("wgf")} == set(names), (unit, table, names)
 			# Shared descriptors and values are external. Their byte backing arrays remain private.
 			data = {name for name, kind in table.items() if kind != "U" and name.startswith(("wgb", "wga"))}
@@ -149,10 +153,14 @@ def check_native(probe, case, layout, parts):
 				assert table.get(dependency) == "U", (unit, dependency, table)
 			objects.append(str(object_file))
 		program = root / "linked"
-		subprocess.run([*compiler, "-std=c11", *flags, *objects, runtime, *case.get("link", []),
-			"-o", str(program)], check=True, timeout=30)
-		result = subprocess.run([program], capture_output=True, timeout=30)
-	assert (result.returncode, result.stdout.decode(), result.stderr.decode()) == tuple(case["execution"]), (case["name"], result)
+		# Fixture sources supply symbols before the runtime archive. Link options follow it.
+		subprocess.run([*compiler, "-std=c11", *flags, *objects, *case.get("sources", []), runtime,
+			*case.get("link", []), "-o", str(program)], check=True, timeout=30)
+		executions = case["executions"] if "executions" in case else [([], *case["execution"])]
+		for args, status, stdout, stderr in executions:
+			result = subprocess.run([program, *args], capture_output=True, timeout=30)
+			assert (result.returncode, result.stdout.decode(), result.stderr.decode()) == (status, stdout, stderr), (
+				case["name"], result)
 
 
 # Verify determinism, one-unit compatibility, real linkage, and atomic output on rejection.
