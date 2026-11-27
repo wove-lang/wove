@@ -12,7 +12,9 @@ the current `c-header` provider. Native fixtures select bundled members from
 
 The bundled `sys_file.wove` provider exposes `flock` and `LOCK_EX` for
 serializing shared-library publication. The `c_export` pragma applies to
-Wove definitions with bodies.
+Wove definitions with bodies. Checked pointer/count export adapters lend
+caller storage to those definitions. Bundled C imports use their own
+bridge contracts.
 
 ## Source forms
 
