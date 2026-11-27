@@ -207,12 +207,12 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 
 | Tag | Role | ID | Suffix | Scope and agreement |
 | --- | --- | --- | --- | --- |
-| `f` | Function | Defining declaration fingerprint, including specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
+| `f` | Function | Module fingerprint extended by the function role, name, and specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
 | `r` | Named struct or enum | Defining declaration fingerprint, including specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
 | `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
 | `m` | Record member or enum payload member | Zero-based position in its layout | Empty | Within its C aggregate. Each access uses the same ordinal as the layout declaration. |
-| `p` | Parameter | Zero-based position in its signature | Parameter name | Within its C function or prototype. A body reference uses its checked formal. |
+| `p` | Parameter | Concrete function fingerprint extended by the parameter role and spelling | Parameter name | Within its C definition. A body reference uses its checked formal. |
 | `l` | Local | Declared name's original file-local tree row | Local name | Within its C function. Shadowed bindings have distinct rows. |
 | `t` | Expression temporary | Expression's original file-local tree row | Empty | Within its C function. A use and its temporary declaration share the row. |
 | `j` | Loop break label | Loop statement's original file-local tree row | Empty | Within its C function. A break uses the row of its target loop. |
@@ -227,13 +227,22 @@ name. Where the common header exposes a helper, its definition and uses share
 that owner's name. A native callback adapter uses a separate private prefix and
 the checked argument row within its emitted C unit.
 
-For a single module, hash its declared name, the four-byte little-endian
-declaration kind, and the original declaration name using standard
-32-bit FNV-1a. Records use the archive's struct kind 1, and functions use
-kind 2. For a source graph, the canonical file path also contributes
-to the fingerprint. Each resolved call keeps the callee's exact defining
-row and its own source node. Specializations compare the defining
-template and normalized arguments even when their fingerprints match.
+Function names use a hierarchy of 32-bit FNV-1a states. Seed a source graph's
+path key with the canonical file path and a zero delimiter. Resume that state
+with `m`, the declared module name, and a zero delimiter, and cache the result
+on the canonical tree. A pathless module starts its `m` step from the FNV-1a
+seed. A function resumes the module key with `f` and its original name and
+delimiter. Its checked specialization arguments, if any, extend that key in
+normalized form. A parameter resumes the concrete function key with `p`, its
+original name, and a zero delimiter. Its exact checked formal row determines
+each reference's name.
+
+Named record and enum fingerprints still use the legacy module key and
+four-byte little-endian declaration kind. The source graph's record module key
+includes the canonical file path and declared module name. Resolved calls
+keep the callee's exact defining row and their own source nodes.
+Specializations compare the defining template and normalized arguments even
+when their fingerprints match.
 
 Different readable suffixes can share a fingerprint. When the complete
 generated spelling coincides, the two roles use `F` and `R` and place a
