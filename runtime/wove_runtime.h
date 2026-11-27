@@ -133,8 +133,7 @@ _Float16 wvrt_f128_to_f16(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtsta
 #endif
 #endif
 
-int wvrt_run_host_entry(int argc, char **argv, size_t span_size,
-	void (*write_span)(void *, int32_t, int32_t, int32_t), int32_t (*entry)(wvrt_slice, wvrt_slice));
+int wvrt_run_host_entry(int argc, char **argv, int32_t (*entry)(wvrt_slice));
 
 // Bootstrap-only file and stream operations implemented outside the shipped runtime.
 int32_t wvrt_bootstrap_canonical_path(wvrt_slice path, wvrt_mut_slice out);
@@ -145,13 +144,10 @@ uint8_t wvrt_bootstrap_os(void);
 uint8_t wvrt_bootstrap_arch(void);
 int32_t wvrt_bootstrap_deployment(void);
 
-// Store each row as the generated Wove type before exposing the two borrowed views.
-#define WVRT_HOST_ENTRY(entry, span) \
-	static void entry ## _arg_span(void *items, int32_t index, int32_t start, int32_t end) { \
-		((span *)items)[index] = (span){start, end}; \
-	} \
+// Lend the host arguments through the same entry ABI in both compilers.
+#define WVRT_HOST_ENTRY(entry) \
 	int main(int argc, char **argv) { \
-		return wvrt_run_host_entry(argc, argv, sizeof(span), entry ## _arg_span, entry); \
+		return wvrt_run_host_entry(argc, argv, entry); \
 	}
 
 typedef struct {

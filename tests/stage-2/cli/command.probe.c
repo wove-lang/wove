@@ -9,7 +9,7 @@
 #include "command.c"
 #undef main
 
-typedef wv_seed_record_1 ArgSpan;
+typedef wv_seed_record_0 ArgSpan;
 
 // Match the seed's first Wove function to the fixture entry.
 #define check_invocation wv_seed_fn_0

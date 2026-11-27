@@ -64,7 +64,8 @@ def read_cases(manifest):
 		elif kind == "native-argv" and native is not None:
 			status, argv, *display = fields
 			argv0, = display or ["null"]
-			native[2].append((int(status), json.loads(argv), json.loads(argv0), b"", b""))
+			argv = [value if isinstance(value, str) else bytes.fromhex(value["hex"]) for value in json.loads(argv)]
+			native[2].append((int(status), argv, json.loads(argv0), b"", b""))
 		# A signaled process has a portable signal name and may print host-specific diagnostics.
 		elif kind == "native-signal" and native is not None:
 			signum, argv = fields

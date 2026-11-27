@@ -43,8 +43,7 @@ def write_graph(root, bundled):
 			f"{uses}\n\t(fn {name} (params) (returns i32) (body (return {value})))")
 	entry = root / "main.wove"
 	write_module(entry, "discovery_entry", '''	(use wove-file "./chain/hop_0.wove" (only hop_0))
-	(struct EntryArgSpan (fields (start i32) (end i32)))
-	(fn main (params (entry_bytes (shared-array u8)) (entry_spans (shared-array EntryArgSpan)))
+	(fn main (params (argv (shared-array (shared-array u8))))
 		(returns i32) (body (return (call hop_0))))''')
 	return entry
 

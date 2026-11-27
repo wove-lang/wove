@@ -54,7 +54,7 @@ static int list_inventory(const wove_test_case *tests, size_t count) {
 	return fflush(stdout) == EOF || ferror(stdout);
 }
 
-// Pass the running image path as the Wove runner's sole user argument.
+// Pass the display name and the separately resolved program path to the Wove runner.
 static int run_parent(char *display_name) {
 	char *program = NULL;
 	// Resolve the executable independently of the invocation's display name.
