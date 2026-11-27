@@ -61,7 +61,7 @@ HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
-HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,base32hex base16)
+HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,fnv1a base32hex base16)
 BASE32HEX_SOURCE := stage-2/hashing/base32hex.wove
 BASE16_SOURCES = stage-2/emit/text.wove stage-2/hashing/base16.wove $(C_IDENTIFIER_MODULE) $(SOURCE_TYPE_MODULE) $(BASE32HEX_SOURCE) $(BOOTSTRAP_WOVE_SOURCES)
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
@@ -276,6 +276,7 @@ $(GRAPH_TRACKED_TESTS): $(STAGE1)/runtime.tracked.o
 # Exercise the same byte and ID encoders in both stages and the native word digest.
 test-stage-2-hashing: $(HASHING_PROGRAMS) $(HASHING_NATIVE_PROGRAMS)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/hashing" "$(HASHING_CASES)"
+	"$(STAGE2)/hashing/native/fnv1a"
 	"$(STAGE2)/hashing/native/base16"
 	"$(STAGE2)/hashing/native/base32hex"
 
@@ -537,6 +538,7 @@ $(STAGE2)/hashing/base16: $(BASE16_SOURCES)
 
 # Use the supplied native graph to exercise the shared encoders and fixed-array digest.
 $(addsuffix .c,$(HASHING_NATIVE_PROGRAMS)): $(STAGE2)/hashing/native/%.c: $(HASHING_FIXTURES)/%.wove
+$(STAGE2)/hashing/native/fnv1a.c: stage-2/hashing/fnv1a.wove
 $(STAGE2)/hashing/native/base32hex.c: $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)
 $(STAGE2)/hashing/native/base16.c: $(BASE16_SOURCES)
 $(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCE) $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)

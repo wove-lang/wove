@@ -66,6 +66,7 @@ BINARY_OPS = {
 	"u32.not-eq": (U32, BOOL, "!="),
 	"u32.lt": (U32, BOOL, "<"),
 	"u32.not-lt": (U32, BOOL, ">="),
+	"u32.mul": (U32, U32, "*"),
 	"u32.and": (U32, U32, "&"),
 	"u32.or": (U32, U32, "|"),
 	"u32.xor": (U32, U32, "^"),
@@ -786,12 +787,15 @@ class FunctionEmitter:
 				return self.temporary(result, f"{left} {operator} {right}")
 
 		binary = BINARY_OPS.get(expr.tag)
-		# Check both operand types before applying the comparison or mask.
+		# Evaluate both exact-type operands in source order.
 		if binary is not None:
 			kind, result, operator = binary
 			left, right = form(expr, arity=2).operands
 			first = self.typed(left, kind)
 			second = self.typed(right, kind)
+			# Keep the full unsigned product before reducing it to the low word.
+			if expr.tag == "u32.mul":
+				return self.temporary(U32, f"(uint32_t)((uint64_t){first.c} * {second.c})")
 			return self.temporary(result, f"{first.c} {operator} {second.c}")
 
 		shift = U32_SHIFT_OPS.get(expr.tag)

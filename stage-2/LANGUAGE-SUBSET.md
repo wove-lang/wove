@@ -41,7 +41,7 @@ before the prefix (`-0x80i8`). Write bytes as typed integers.
 
 | Family | Available forms |
 | --- | --- |
-| Wrapping arithmetic | `add`, `sub`, `inc`, and `dec` on `i32` and `u32` |
+| Wrapping arithmetic | `add`, `sub`, `inc`, and `dec` on `i32` and `u32`. `u32.mul` takes two `u32` operands and reduces the product modulo 2^32. |
 | Comparisons | `eq`, `lt`, `eqz`, `ltz`, and `gtz` and their `not-` forms on `u8`, `i32`, and `u32` |
 | Bitwise operations | `u32.and`, `u32.or`, `u32.xor`, and `u32.not` |
 | Shifts | `u32.shl` and `u32.shr` with an exact `i32` count in `[0, 32)` |
