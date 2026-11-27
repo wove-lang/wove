@@ -212,7 +212,8 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
 | `m` | Named record field | Concrete layout fingerprint extended by the member role and exact field spelling | Field name | Within its C struct. Definitions, designators, accesses, and cleanup use the same key. |
-| `m` | Enum payload member or empty-record placeholder | Zero-based position in its layout | Empty | Within its C aggregate. |
+| `m` | Enum payload member | Concrete enum fingerprint extended by the member role and exact variant spelling | Variant name | Within its C union. Tags retain their declaration ordinals. |
+| `m` | Empty-record placeholder | Zero | Empty | Within its C struct. |
 | `p` | Parameter | Concrete function fingerprint extended by the parameter role and spelling | Parameter name | Within its C definition. A body reference uses its checked formal. |
 | `l` | Local | Declared name's original file-local tree row | Local name | Within its C function. Shadowed bindings have distinct rows. |
 | `t` | Expression temporary | Expression's original file-local tree row | Empty | Within its C function. A use and its temporary declaration share the row. |
@@ -248,9 +249,10 @@ original type name, and a zero delimiter. A concrete specialization extends
 the template key with its normalized arguments. Layout references and owner
 helpers share the resolved type. Collision handling compares the exact
 defining declaration and specialization arguments even when fingerprints
-match. A named field resumes the concrete layout's fingerprint with `m`,
-the exact field name, and a zero delimiter. C member names live in their own
-aggregate namespaces. The readable suffix distinguishes different fields
+match. A named field or enum payload resumes the concrete layout's
+fingerprint with `m`, the exact field or variant name, and a zero delimiter.
+C member names live in their own aggregate namespaces. The readable suffix
+distinguishes different fields or variants
 even when their fingerprints match.
 
 Different readable suffixes can share a fingerprint. When the complete
