@@ -60,25 +60,19 @@ BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
 BLAKE2B_SOURCE := stage-2/hashing/blake2b.wove
 JSON_KEYWORDS_MODULE := stage-2/json/keywords.wove
-JSON_WRITER_SOURCES := stage-2/json/writer.wove stage-2/json/text.wove \
-	$(JSON_KEYWORDS_MODULE) $(UTF8_MODULE) $(BYTE_TEXT_MODULE) $(DECIMAL_WRITER)
 JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove \
 	$(JSON_KEYWORDS_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(UTF8_MODULE)
 JSON_FRAME_MODULE := stage-2/json/frame.wove
 JSON_FIXTURES := tests/stage-2/json
 JSON_CASES := $(JSON_FIXTURES)/cases.tsv
-JSON_WRITER_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors)
-JSON_READER_PROGRAMS := $(addprefix $(STAGE2)/json/,reader reader_errors)
-JSON_PROGRAMS := $(JSON_WRITER_PROGRAMS) $(JSON_READER_PROGRAMS) $(STAGE2)/json/utf8 $(STAGE2)/json/frame
+JSON_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors reader reader_errors utf8 frame)
 DIAGNOSTIC_FIXTURES := tests/stage-2/diagnostics
 DIAGNOSTIC_PROGRAM := $(STAGE2)/diagnostics/json
 DIAGNOSTIC_SOURCES := stage-2/diagnostics/record.wove stage-2/diagnostics/json.wove
 HUMAN_DIAGNOSTIC := stage-2/diagnostics/human.wove stage-2/text/display_width.wove
-CLI_SOURCES := stage-2/cli/argv.wove stage-2/cli/values.wove $(VALUE_TEXT_MODULES)
 CLI_FIXTURES := tests/stage-2/cli
 CLI_CASES := $(CLI_FIXTURES)/cases.tsv
-CLI_OPTION_PROGRAMS := $(addprefix $(STAGE2)/cli/,options options_errors)
-CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors host_entry jobs) $(CLI_OPTION_PROGRAMS)
+CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors host_entry jobs options options_errors)
 JOB_BUDGET_MODULE := $(NATIVE_DRIVER)/jobs.wove
 CONFIG_FIXTURES := tests/stage-2/config
 CONFIG_PROGRAM := $(STAGE2)/config/project
@@ -123,7 +117,9 @@ AST_PROBE := $(STAGE2)/ast/probe
 SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
-SOURCE_PROBE_DEPS := $(SOURCE_PROBE_C).d
+SEED_UTILITY_PROGRAMS := $(HASHING_PROGRAMS) $(JSON_PROGRAMS) $(CLI_PROGRAMS) $(DIAGNOSTIC_PROGRAM)
+SEED_UTILITY_C := $(addsuffix .c,$(SEED_UTILITY_PROGRAMS) $(CONFIG_PROGRAM) $(COMMAND_PROGRAM))
+SEED_GRAPH_C := $(SOURCE_PROBE_C) $(SEED_UTILITY_C)
 BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 SEED_EMIT := stage-1/emit.py
@@ -456,21 +452,31 @@ $(STAGE1)/wovec.c: $(SOURCE_SCAN) $(SELF_HOST_SOURCE)/.ready stage-1/build.py $(
 		trap 'rm -f "$$c_output"' 0; WOVE_BUILD_DIR="$(abspath $(BUILD_DIR))" $(PYTHON) stage-1/build.py > "$$c_output"; \
 		mv "$$c_output" "$@")
 
-# An old build without a dependency file needs one successful seed invocation.
-.PHONY: force-source-probe-deps
-$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SEED) $(wildcard $(SOURCE_PROBE_DEPS)) \
-	$(if $(wildcard $(SOURCE_PROBE_DEPS)),,force-source-probe-deps)
-	mkdir -p "$(@D)"
-	set -eu; \
-	c_output="$@.tmp.$$$$"; deps="$(SOURCE_PROBE_DEPS).tmp.$$$$"; \
-	trap 'rm -f "$$c_output" "$$deps"' 0; \
-	$(PYTHON) stage-1/wovec.py --make-deps "$$deps" "$<" > "$$c_output"; \
-	mv "$$deps" "$(SOURCE_PROBE_DEPS)"; \
-	mv "$$c_output" "$@"
+# Publish the generated pair after the seed has resolved and emitted its graph.
+define emit_seed_graph
+mkdir -p "$(@D)"
+set -eu; \
+c_output="$@.tmp.$$$$"; deps="$@.d.tmp.$$$$"; \
+trap 'rm -f "$$c_output" "$$deps"' 0; \
+$(PYTHON) stage-1/wovec.py --make-deps "$$deps" "$<" > "$$c_output"; \
+mv "$$deps" "$@.d"; \
+mv "$$c_output" "$@"
+endef
 
-# Load the last successful import graph without remaking it for unrelated goals.
-wove_seed_target := $(SOURCE_PROBE_C)
--include $(wildcard $(SOURCE_PROBE_DEPS))
+$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SEED)
+	$(emit_seed_graph)
+
+$(SEED_UTILITY_C): $(STAGE2)/%.c: tests/stage-2/%.wove $(SEED)
+	$(emit_seed_graph)
+
+# Read each sidecar for its own target and create it on the next build if missing.
+.PHONY: force-seed-deps
+define seed_graph_dependencies
+$(1): $(wildcard $(1).d) $(if $(wildcard $(1).d),,force-seed-deps)
+wove_seed_target := $(1)
+-include $(wildcard $(1).d)
+endef
+$(foreach unit,$(SEED_GRAPH_C),$(eval $(call seed_graph_dependencies,$(unit))))
 
 # Link the first compiler with the ordinary runtime.
 $(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(RUNTIME) $(RUNTIME_HEADER)
@@ -521,16 +527,9 @@ $(NATIVE_COMPILER): $(BOOTSTRAP_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_CLA
 $(FINAL_COMPILER): $(NATIVE_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_CLANG) wovec.jsonc $(BUILD_VERSION) force-build-info
 	$(build_with_wovec)
 
-# Build utility-only Wove programs with the ordinary Python seed and runtime.
-$(HASHING_PROGRAMS): $(STAGE2)/hashing/%: $(HASHING_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o
-	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
-
-# Track the lookup modules reached by the seed-built hashing fixtures.
-$(STAGE2)/hashing/fnv1a: stage-2/hashing/fnv1a.wove
-$(STAGE2)/hashing/base32hex: $(BASE32HEX_SOURCE)
-$(STAGE2)/hashing/base16: $(BASE16_SOURCES)
+# Link the standalone seed utilities against the same runtime.
+$(SEED_UTILITY_PROGRAMS): %: %.c $(STAGE1)/runtime.o
+	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Use the supplied native graph to exercise the shared encoders and fixed-array digest.
 $(addsuffix .c,$(HASHING_NATIVE_PROGRAMS)): $(STAGE2)/hashing/native/%.c: $(HASHING_FIXTURES)/%.wove
@@ -549,50 +548,11 @@ $(HASHING_NATIVE_PROGRAMS): %: %.c $(STAGE1)/runtime.o
 $(BLAKE2B_PROBE): $(BLAKE2B_FIXTURES)/probe.probe.c $(BLAKE2B_PROBE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
-# Build JSON fixtures separately from the Stage 2 compiler entry.
-$(JSON_PROGRAMS): $(STAGE2)/json/%: $(JSON_FIXTURES)/%.wove $(SEED) $(STAGE1)/runtime.o
-	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
-
-# Track each standalone JSON fixture's shared text inputs.
-$(JSON_WRITER_PROGRAMS): $(JSON_WRITER_SOURCES)
-$(JSON_READER_PROGRAMS): $(JSON_READER_SOURCES)
-$(STAGE2)/json/frame: $(JSON_FRAME_MODULE) $(JSON_READER_SOURCES)
-$(STAGE2)/json/utf8: $(UTF8_MODULE)
-
-# Build the serializer fixture without importing it into the CLI.
-$(DIAGNOSTIC_PROGRAM): $(DIAGNOSTIC_FIXTURES)/json.wove $(DIAGNOSTIC_SOURCES) $(JSON_WRITER_SOURCES) \
-	$(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED) $(STAGE1)/runtime.o
-	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
-
-# Build each argv fixture with its own test entry and the seed.
-$(CLI_PROGRAMS): $(STAGE2)/cli/%: $(CLI_FIXTURES)/%.wove $(CLI_FIXTURES)/fixture_data.wove $(CLI_SOURCES) $(SEED) $(STAGE1)/runtime.o
-	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@.c"
-	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$@.c" "$(STAGE1)/runtime.o" -o "$@"
-
-# Only the compiler-options fixtures load and validate JSONC configuration.
-$(CLI_OPTION_PROGRAMS): stage-2/cli/options.wove stage-2/config/compiler.wove $(JSON_READER_SOURCES)
-
-$(STAGE2)/cli/jobs: $(JOB_BUDGET_MODULE)
-
 # Build the project fixture with file input supplied by the probe.
-$(CONFIG_PROGRAM).c: $(CONFIG_FIXTURES)/project.wove $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED)
-	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@"
-
 $(CONFIG_PROGRAM): $(CONFIG_FIXTURES)/project.probe.c $(CONFIG_PROGRAM).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Supply an argv arena and config bytes to the standalone command fixture.
-$(COMMAND_PROGRAM).c: $(CLI_FIXTURES)/command.wove $(COMMAND_SOURCES) $(CLI_SOURCES) $(CONFIG_SOURCES) $(JOB_BUDGET_MODULE) \
-	$(JSON_READER_SOURCES) $(SOURCE_SCAN_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(SEED)
-	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@"
-
 $(COMMAND_PROGRAM): $(CLI_FIXTURES)/command.probe.c $(COMMAND_PROGRAM).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
@@ -631,7 +591,7 @@ $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
 REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) \
-	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
+	$(patsubst $(STAGE2)/%.c,tests/stage-2/%.wove,$(SEED_UTILITY_C)) $(JOB_BUDGET_MODULE) \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
 	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \
 	$(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT) $(C_HEADER_IMPORT_SOURCES) $(C_HEADER_PROJECT_HEADERS)
