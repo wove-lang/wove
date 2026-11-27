@@ -284,6 +284,37 @@ _Bool wvrt_c_storage_active(const wvrt_c_storage *wvrt_storage);
 void wvrt_c_storage_finish_init(wvrt_c_storage *wvrt_storage, int32_t wvrt_status);
 void wvrt_c_storage_free(wvrt_c_storage *wvrt_storage);
 
+typedef struct {
+	const void *wvrt_record;
+	wvrt_slice wvrt_bytes;
+} wvrt_c_buffered_record;
+
+typedef struct {
+	const unsigned char *wvrt_table;
+	int32_t wvrt_length;
+	wvrt_slice wvrt_bytes;
+} wvrt_c_buffered_strings;
+
+wvrt_c_buffered_record wvrt_c_buffered_record_out(const void *wvrt_storage, const void *wvrt_result,
+	wvrt_mut_slice wvrt_scratch, size_t wvrt_extent, int32_t wvrt_status,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_c_buffered_record wvrt_c_buffered_record_require(wvrt_c_buffered_record wvrt_value,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_slice wvrt_c_buffered_string(wvrt_slice wvrt_bytes, const char *wvrt_value,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_c_buffered_strings wvrt_c_buffered_string_table(wvrt_slice wvrt_bytes, char *const *wvrt_table,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+void wvrt_c_buffered_string_table_require_aligned(wvrt_slice wvrt_bytes, char *const *wvrt_table,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_slice wvrt_c_buffered_string_load(wvrt_c_buffered_strings wvrt_strings, int32_t wvrt_index,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+// Take the field's address so C checks the complete pointer type without array decay.
+#define WVRT_C_FIELD_IS_CSTR(type, field) \
+	_Generic(&((type *)0)->field, char **: 1, const char **: 1, default: 0)
+#define WVRT_C_FIELD_IS_CSTRS(type, field) \
+	_Generic(&((type *)0)->field, char ***: 1, default: 0)
+
 // Use the selected C layout to initialize only the native reserved prefix.
 #define WVRT_CSTR_VECTOR_ALLOC(type, offset, reserved, file, start, end) \
 	__extension__ ({ \
@@ -299,7 +330,7 @@ void wvrt_c_storage_free(wvrt_c_storage *wvrt_storage);
 // Check each native member before lending the original array of pointers.
 #define WVRT_CSTR_VECTOR_VIEW(type, paths, count, offset, owner, file, start, end) \
 	__extension__ ({ \
-		_Static_assert(_Generic(&((type *)0)->paths, char ***: 1, default: 0), \
+		_Static_assert(WVRT_C_FIELD_IS_CSTRS(type, paths), \
 			"Wove C string vector field must be char **"); \
 		_Static_assert(_Generic(&((type *)0)->count, size_t *: 1, default: 0), \
 			"Wove C string vector count must be size_t"); \

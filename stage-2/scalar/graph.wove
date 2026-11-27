@@ -15,6 +15,7 @@
 	(use wove-file "../source/target.wove" (only (value library_mode) (type SelectionContext)))
 	(use wove-file "../source/exports.wove" (only c_export_directive))
 	(use wove-file "../source/imports.wove" (only import_keyword))
+	(use wove-file "../source/c_record_out.wove" (only read_c_record_out (type CRecordOut)))
 	(use wove-file "../source/c_snapshots.wove" (only read_c_snapshot))
 	(use wove-file "./c_record_snapshots.wove" (only check_record_snapshot))
 	(use wove-file "../source/tree_copy.wove" (only copy_tree))
@@ -28,13 +29,13 @@
 	(use wove-file "../source/c_names.wove" (only c_function_opening))
 	(use wove-file "../source/c_formals.wove" (only find_c_fixed_formal))
 	(use wove-file "../source/c_arguments.wove" (only read_c_arguments mark_c_argument_type (type CArgument)))
-	(use wove-file "../c/arguments.wove" (only is_c_value_mode is_c_storage_mode c_value_mode c_storage_mut_mode c_handle_mut_mode c_storage_init_mode c_handle_init_mode (value c_shared_handle_slot_mode)))
+	(use wove-file "../c/arguments.wove" (only is_c_value_mode is_c_bytes_mode is_c_storage_mode c_value_mode c_storage_mut_mode c_handle_mut_mode c_storage_init_mode c_handle_init_mode (value c_shared_handle_slot_mode)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "../source/graph.wove" (only is_wove_type_definition references_c_header (value c_dependency_provider) (type GraphModule) (type GraphBinding)))
 	(use wove-file "../source/generics.wove" (only function_generic_list))
 	(use wove-file "./generics/functions.wove" (only expand_graph_functions (type FunctionInstance)))
 	(use wove-file "./specializations.wove" (only register_module_specializations validate_record_template_constants))
-	(use wove-file "./records.wove" (only scope_at read_checked_template_parameters register_module_records register_module_record_arrays register_owned_rows order_record_layouts validate_record_array_fields declaration_kind find_native_node native_row_type is_native_integer is_native_record is_record_type record_type optional_record_borrow_type is_place_reference is_mutable_place_reference place_reference_target byte_rows_owner_type (type ScalarRecord)))
+	(use wove-file "./records.wove" (only scope_at read_checked_template_parameters register_module_records register_module_record_arrays register_owned_rows order_record_layouts validate_record_array_fields declaration_kind find_native_node native_row_type is_native_integer is_native_record is_record_type record_type buffered_record_type optional_record_borrow_type is_place_reference is_mutable_place_reference place_reference_target byte_rows_owner_type (type ScalarRecord)))
 	(use wove-file "./owners.wove" (only optional_byte_owner_type))
 	(use wove-file "./native_owner_types.wove" (only native_owner_type native_owner_row_limit is_native_owner))
 	(use wove-file "./c_types.wove" (only remember_native_type register_parameter_native_types register_record_dependencies))
@@ -559,6 +560,51 @@
 									(extent (struct.get previous extent))))))
 					(set index (i32.inc index))))))
 
+	(fn checked_record_out_scratch
+		(:doc "Match the record result to an exclusive native record place and a bounded mutable byte view.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(parameters (shared-array ScalarParameter)) (out CRecordOut) (record i32)
+			(layout u32) (first i32) (limit i32)) (returns EntryRead)
+		(body
+			(let record_type (struct.get (array.load parameters record) type))
+			(if
+				(:doc "The record out slot points at the exact mutable caller record, including its native identity.")
+				(bool.or (bool.not (call is_mutable_place_reference record_type))
+					(u32.not-eq (call place_reference_target (borrow-shared records) record_type) layout))
+				(then (return (call entry_at (array.load nodes (struct.get (array.load parameters record) name)) -1i32 23u32))))
+			(let name (array.load nodes (struct.get out scratch)))
+			(let scratch (call find_parameter (borrow-shared source) (borrow-shared nodes)
+				name (borrow-shared parameters) first limit))
+			(if (i32.ltz scratch) (then (return (call entry_at name -1i32 23u32))))
+			(let buffer (array.load parameters scratch))
+			(if
+				(:doc "Use the checked c_bytes extent. A caller-backed record accepts one byte count by value.")
+				(bool.or (u32.not-eq (struct.get buffer type) 38u32)
+					(bool.or (bool.not (call is_c_bytes_mode (struct.get buffer c_mode)))
+						(bool.or (i32.not-ltz (struct.get buffer c_size)) (i32.ltz (struct.get buffer c_count)))))
+				(then (return (call entry_at name -1i32 23u32))))
+			(let count (array.load parameters (i32.add first (struct.get buffer c_count))))
+			(if
+				(:doc "The bounded length is captured by value before the native call can mutate either store.")
+				(call is_place_reference (struct.get count type))
+				(then (return (call entry_at name -1i32 23u32))))
+			(let status_name (array.load nodes (struct.get out status)))
+			(let status (call find_parameter (borrow-shared source) (borrow-shared nodes)
+				status_name (borrow-shared parameters) first limit))
+			(if
+				(:doc "The last Wove formal receives the original i32 status from C.")
+				(i32.not-eq status (i32.dec limit))
+				(then (return (call entry_at status_name -1i32 23u32))))
+			(let param (array.load parameters status))
+			(let type (struct.get param type))
+			(if
+				(:doc "The status place must be an ordinary non-null exclusive scalar argument.")
+				(bool.or (bool.not (call is_mutable_place_reference type))
+					(bool.or (u32.not-eq (call place_reference_target (borrow-shared records) type) 5u32)
+						(bool.not (call is_c_value_mode (struct.get param c_mode)))))
+				(then (return (call entry_at status_name -1i32 23u32))))
+			(return (call entry_at name scratch 0u32))))
+
 	(fn register_bridge_signature
 		(:doc `Register a checked C bridge signature using the same parameter rows as Wove functions.`)
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (declaration i32) (resource i32) (copy_result bool) (scope FunctionScope) (context SelectionContext)
@@ -655,6 +701,22 @@
 			(let-mut return_source -1i32)
 			(let-mut snapshot_schema -1i32)
 			(let-mut snapshot_field (struct.get snapshot field))
+			(let-mut return_scratch -1i32)
+			(let out (call read_c_record_out (borrow-shared arena) (borrow-shared nodes) parts))
+			(if
+				(:doc "A malformed record-out marker keeps its original directive span.")
+				(u32.gtz (struct.get out error))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get out start))
+					(end (struct.get out end)) (error (struct.get out error)) (related -1i32)))))
+			(let caller_backed (i32.not-ltz (struct.get out scratch)))
+			(if
+				(:doc "A caller-backed result requires an explicit source and a fixed native function.")
+				(bool.and caller_backed
+					(bool.or (i32.ltz from) (bool.or (struct.get snapshot active)
+						(bool.or (struct.get contracts macro) (bool.or (struct.get contracts handle_out)
+							(i32.not-eqz (struct.get contracts variadic)))))))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get out start))
+					(end (struct.get out end)) (error 23u32) (related -1i32)))))
 			(if
 				(:doc "A record snapshot produces the declared owned outcome before the native borrow expires.")
 				(i32.not-ltz (struct.get snapshot record))
@@ -681,17 +743,28 @@
 					(set return_source (call find_parameter (borrow-shared arena) (borrow-shared nodes)
 						name (borrow-shared parameters) next_param limit))
 					(if (i32.ltz return_source) (then (return (call entry_at name -1i32 23u32))))
-					(let param (array.load parameters return_source))
-					(if
-						(:doc "The original native handle must remain exclusively lent for the result's scope.")
-						(bool.not (bool.and (call is_native_owner (struct.get param type))
-							(u8.eq (struct.get param c_mode) (call c_handle_mut_mode))))
-						(then (return (call entry_at name -1i32 23u32))))
 					(let target (call form_parts (borrow-shared arena) (borrow-shared nodes)
 						(array.load nodes resource)))
 					(let row (call find_native_node (borrow-shared records) (struct.get target name)))
 					(if (i32.ltz row) (then (return (call entry_at result_node -1i32 23u32))))
-					(set result_type (call optional_record_borrow_type (call record_type row)))))
+					(let layout (call record_type row))
+					(if
+						(:doc "Both caller places remain exclusively lent until the optional result leaves scope.")
+						caller_backed
+						(then
+							(let buffer (call checked_record_out_scratch (borrow-shared arena) (borrow-shared nodes)
+								(borrow-shared records) (borrow-shared parameters) out return_source layout next_param limit))
+							(if (u32.gtz (struct.get buffer error)) (then (return buffer)))
+							(set return_scratch (struct.get buffer operand))
+							(set result_type (call buffered_record_type layout (bool true))))
+						(else
+							(let param (array.load parameters return_source))
+							(if
+								(:doc "A direct native pointer result borrows its original handle exclusively.")
+								(bool.not (bool.and (call is_native_owner (struct.get param type))
+									(u8.eq (struct.get param c_mode) (call c_handle_mut_mode))))
+								(then (return (call entry_at name -1i32 23u32))))
+							(set result_type (call optional_record_borrow_type layout))))))
 			(if
 				(:doc "Use the defining native type for each selected result.")
 				(bool.and (i32.gtz resource) (i32.ltz from))
@@ -710,7 +783,7 @@
 			(array.store functions index
 				(struct.new ScalarFunction (c_name_slot 0i32) (declaration declaration) (origin declaration) (name name)
 					(params next_param) (arity arity)
-					(result result_type) (return_source return_source)
+					(result result_type) (return_source return_source) (return_scratch return_scratch)
 					(body -1i32) (first_statement -1i32) (identity 0u32) (entry (bool false))
 					(c_strings strings) (c_vectors (struct.get contracts vectors)) (c_extents extents) (c_macro (struct.get contracts macro))
 					(c_variadic (struct.get contracts variadic)) (c_nulls nulls) (c_storage storage) (c_handle_out (struct.get contracts handle_out))
