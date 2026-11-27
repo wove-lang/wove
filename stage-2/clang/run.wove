@@ -17,8 +17,11 @@
 	(let source_suffix "/probe.c")
 	(let ast_flags "-Wno-everything\u0000-Xclang\u0000-ast-dump=json\u0000-fsyntax-only\u0000-x\u0000c\u0000--\u0000")
 	(let macro_flags "-Wno-everything\u0000-dM\u0000-E\u0000-x\u0000c\u0000--\u0000")
+	(let replay_flags "-Wno-everything\u0000-E\u0000-P\u0000-dD\u0000--\u0000")
+	(let replay_ast_flags "-Wno-everything\u0000-Xclang\u0000-ast-dump=json\u0000-fsyntax-only\u0000--\u0000")
 
 	(let trace_suffix ".stderr")
+	(let detached_trace "/trace")
 	(let native_flags "-Xclang\u0000-dependency-file\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-MT\u0000-Xclang\u0000wove-probe\u0000-MJ\u0000/dev/null\u0000-Xclang\u0000-dependency-dot\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-header-include-file\u0000-Xclang\u0000/dev/null\u0000-H\u0000-fshow-skipped-includes\u0000")
 
 	(fn clang_run_at
@@ -83,6 +86,16 @@
 			(let-mut diagnostics (array.alloc u8 (i32.add size suffix)))
 			(let next (call append_bytes (borrow-shared path) (borrow-mut diagnostics) 0i32))
 			(let end (call append_bytes (borrow-shared trace_suffix) (borrow-mut diagnostics) next))
+			(return (call invoke_traced (borrow-shared program) (borrow-shared options)
+				(borrow-shared flags) (borrow-shared path) (borrow-shared diagnostics)
+				(borrow-mut output) (borrow-mut trace) (bool false)))))
+
+	(fn invoke_traced
+		(:doc "Keep the caller's selected stderr path private and retain the complete include trace.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8))
+			(diagnostics (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8)) (quiet bool))
+		(returns ClangRun)
+		(body
 			(let created (call open_new_output (borrow-shared diagnostics)))
 			(if
 				(:doc "A failed exclusive open leaves the existing path alone.")
@@ -115,7 +128,7 @@
 						(else
 							(if
 								(:doc "Preserve Clang's actual diagnostics when its invocation failed.")
-								(u32.eqz traced)
+								(bool.and (u32.eqz traced) (bool.not quiet))
 								(then (call relay_trace_diagnostics (borrow-shared trace))))))))
 			(let removed (call unlink (borrow-shared diagnostics)))
 			(if
@@ -213,4 +226,40 @@
 			(source (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8))) (returns ClangRun)
 		(body (return (call capture_clang_source (borrow-shared program) (borrow-shared options)
 			(borrow-shared macro_flags) (borrow-shared directory) (borrow-shared source)
-			(borrow-mut output) (borrow-mut trace))))))
+			(borrow-mut output) (borrow-mut trace)))))
+
+	(fn run_clang_replay
+		(:doc "Inspect an already staged C path without reporting a failed speculative eligibility check.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
+			(preprocess bool) (output (mut-array u8)) (trace (mut-array u8))) (returns ClangRun)
+		(body
+			(if
+				(:doc "Replay uses complete compiler options and always captures diagnostics privately.")
+				(bool.or (i32.eqz (array.len trace))
+					(bool.not (call probe_options_complete (borrow-shared options))))
+				(then (return (call clang_run_at 2u32 -1i32 0i32))))
+			(let directory (call create_temporary_directory (borrow-shared directory_suffix)))
+			(let width (array.len directory))
+			(let suffix (array.len detached_trace))
+			(if
+				(:doc "The trace must stay outside the build directory so include lookup never sees it.")
+				(bool.or (i32.eqz width) (i32.lt (i32.sub 2147483647i32 suffix) width))
+				(then (return (call clang_run_at 3u32 -1i32 0i32))))
+			(let-mut diagnostics (array.alloc u8 (i32.add width suffix)))
+			(let next (call append_bytes (borrow-shared directory) (borrow-mut diagnostics) 0i32))
+			(let end (call append_bytes (borrow-shared detached_trace) (borrow-mut diagnostics) next))
+			(let result (if
+				(:doc "Capture emitted preprocessing lines or the same AST queried for ordinary native headers.")
+				preprocess
+				(then (call invoke_traced (borrow-shared program) (borrow-shared options)
+					(borrow-shared replay_flags) (borrow-shared path) (borrow-shared diagnostics)
+					(borrow-mut output) (borrow-mut trace) (bool true)))
+				(else (call invoke_traced (borrow-shared program) (borrow-shared options)
+					(borrow-shared replay_ast_flags) (borrow-shared path) (borrow-shared diagnostics)
+					(borrow-mut output) (borrow-mut trace) (bool true)))))
+			(let removed (call rmdir (borrow-shared directory)))
+			(if
+				(:doc "An unsuccessful cleanup is a failed certification even after a complete capture.")
+				(bool.and (i32.not-eqz removed) (u32.eqz (struct.get result error)))
+				(then (return (call clang_run_at 3u32 -1i32 0i32))))
+			(return result))))

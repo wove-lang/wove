@@ -126,6 +126,8 @@ CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove field
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
 CLANG_QUERY_SOURCES := $(CLANG_SOURCES) $(C_STANDARD_MODULE) $(JSON_FRAME_MODULE) stage-2/c/probe.wove stage-2/clang/query.wove stage-2/clang/run.wove stage-2/clang/trace.wove
 AST_LIVE := $(STAGE2)/ast/live
+NUMBERED_HEADERS := $(STAGE2)/numbered-headers
+NUMBERED_HEADER_SOURCES := stage-2/driver/numbered_headers.wove stage-2/clang/replay.wove stage-2/driver/files.wove stage-2/driver/paths.wove
 AST_LIVE_SOURCES := $(sort $(CLANG_QUERY_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) \
 	$(PROCESS_LAUNCHER_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/llvm-libc/stdio.wove)
 AST_FIXTURES := tests/support/ast
@@ -248,9 +250,9 @@ test-stage-2-source: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-source: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-source: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2-source: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2-source: $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o
+test-stage-2-source: $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o $(NUMBERED_HEADERS)
 	"$(SOURCE_SCAN)"
-	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/cases.jsonc
+	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/cases.jsonc "$(NUMBERED_HEADERS)"
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
@@ -346,10 +348,10 @@ test-stage-2-workers: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-workers: export WOVE_BUILD_CLANG = $(CLANG)
 test-stage-2-workers: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2-workers: export WOVE_TEST_WORKER_RUNTIME = $(WORKER_RUNTIME)
-test-stage-2-workers: $(NATIVE_COMPILER) $(SOURCE_SCAN) $(WORKER_PROBE) $(WORKER_QUEUE_PROBE) $(WORKER_POOL_PROBE)
+test-stage-2-workers: $(NATIVE_COMPILER) $(SOURCE_SCAN) $(WORKER_PROBE) $(WORKER_QUEUE_PROBE) $(WORKER_POOL_PROBE) $(NUMBERED_HEADERS)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/worker_records/cases.tsv
 	WOVE_TEST_RUNTIME="$(WORKER_RUNTIME)" $(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/worker_records/ledger.tsv
-	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/workers.jsonc
+	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/workers.jsonc "$(NUMBERED_HEADERS)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(WORKER_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_PROBE)" "$(WORKER_FIXTURES)/failure.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_QUEUE_PROBE)" "$(WORKER_FIXTURES)/queue-failure.tsv"
@@ -379,9 +381,9 @@ test-stage-2-config: $(CONFIG_PROGRAM)
 test-stage-2-inventory: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-inventory: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-inventory: export WOVE_TEST_RUNTIME = $(TEST_RUNTIME)
-test-stage-2-inventory: $(SOURCE_SCAN) $(TEST_RUNTIME)
+test-stage-2-inventory: $(SOURCE_SCAN) $(TEST_RUNTIME) $(NUMBERED_HEADERS)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/test_execution.tsv
-	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/test_dispatch.jsonc
+	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/test_dispatch.jsonc "$(NUMBERED_HEADERS)"
 
 # Keep generated runner helpers local to their translation unit.
 $(TEST_RUNNER).c: $(TEST_RUNNER_ROOT) $(TEST_RUNNER_SOURCES) $(SOURCE_SCAN) $(NATIVE_DRIVER)/bootstrap.py | $(BUILD_VERSION)
@@ -475,6 +477,10 @@ $(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(RUNTIME) $(RUNTIME_HEADER) $(BOOTSTRA
 # Compile the C harness with its generated fixture and the shared runtime.
 $(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(SOURCE_PROBE_C) $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+
+$(NUMBERED_HEADERS): export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
+$(NUMBERED_HEADERS): tests/stage-2/numbered_units/bridges/check.wove $(NUMBERED_HEADER_SOURCES) $(GRAPH_COMPILER_SOURCES) $(AST_LIVE_SOURCES) $(NATIVE_COMPILER)
+	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
 
 # Check the current Git commit or explicit override on each native build.
 force-build-info:
