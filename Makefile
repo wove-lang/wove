@@ -110,6 +110,7 @@ PROCESS_FIXTURES := tests/stage-2/process
 OBJECT_JOB_FIXTURES := tests/stage-2/cli/native/object_jobs
 OBJECT_JOB_SOURCES := $(NATIVE_DRIVER)/bin/object_jobs.wove $(JOB_BUDGET_MODULE) stage-2/llvm-libc/time.wove \
 	stage-2/io/process_file.wove $(PROCESS_MODULES) stage-2/text/copy.wove stage-2/cli/values.wove stage-2/text/decimal.wove
+STAGED_BUILD_FIXTURES := $(NATIVE_CLI_FIXTURES)/staged_build
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
 PROCESS_DESCRIPTOR_CASES := $(PROCESS_FIXTURES)/descriptors.tsv
 PROCESS_INHERITANCE_CASES := $(PROCESS_FIXTURES)/inheritance.tsv
@@ -239,7 +240,7 @@ test-stage-2-language: test-stage-2-source $(GRAPH_LANGUAGE_TESTS) $(GRAPH_TRACK
 test-stage-2-utilities: test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config \
 	test-stage-2-diagnostics test-stage-2-blake2b
 test-stage-2-interop: $(GRAPH_INTEROP_TESTS) test-stage-2-clang test-stage-2-native-interop test-stage-2-f80
-test-stage-2-runtime: test-stage-2-array-copy test-stage-2-process test-stage-2-workers test-stage-2-inventory test-stage-2-object-jobs
+test-stage-2-runtime: test-stage-2-array-copy test-stage-2-process test-stage-2-workers test-stage-2-inventory test-stage-2-object-jobs test-stage-2-staged-build
 test-stage-2-self-host: self-host test-stage-2-version
 
 # Preserve quoting in compiler settings until the runner splits them into arguments.
@@ -416,6 +417,16 @@ test-stage-2-object-jobs: $(STAGE2)/object-jobs
 
 $(STAGE2)/object-jobs: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
 $(STAGE2)/object-jobs: $(addprefix $(OBJECT_JOB_FIXTURES)/,main.wove tool.py scenarios.jsonc) $(OBJECT_JOB_SOURCES) $(NATIVE_COMPILER)
+	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
+
+# Exercise object compilation and linking from an already prepared private directory.
+.PHONY: test-stage-2-staged-build
+test-stage-2-staged-build: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
+test-stage-2-staged-build: $(STAGE2)/staged-build
+	$(PYTHON) "$(STAGED_BUILD_FIXTURES)/check.py" "$<" "$(abspath $(BUILD_CLANG))" "$(STAGED_BUILD_FIXTURES)/cases.jsonc"
+
+$(STAGE2)/staged-build: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
+$(STAGE2)/staged-build: $(STAGED_BUILD_FIXTURES)/main.wove $(NATIVE_DRIVER)/bin/staged.wove $(OBJECT_JOB_SOURCES) $(NATIVE_WOVE_SOURCES) $(NATIVE_COMPILER)
 	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
 
 # Check generated C, archived JSON, and live tool invocation.

@@ -1,0 +1,245 @@
+(module staged_native_build
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Compile ordered staged C units with the bounded runner and link their private objects once.")
+
+	(use wove-file "../arguments.wove" (only frontend_capacity write_probe_options write_plain_argument
+		write_library_compile_options write_library_link_options write_link_inputs write_clang_standard write_native_output))
+	(use wove-file "../paths.wove" (only directory_width join_file_path))
+	(use wove-file "./object_jobs.wove" (only run_object_jobs (type ObjectJob)))
+	(use wove-file "../../io/process.wove" (only copy_argument valid_program))
+	(use wove-file "../../io/process_file.wove" (only start_process_files))
+	(use wove-file "../../io/capture/child.wove" (only reap_capture_child))
+	(use wove-file "../../text/copy.wove" (only append_bytes))
+	(use wove-file "../../text/equal.wove" (only equal_bytes))
+	(use wove-file "../../text/decimal_write.wove" (only write_decimal_i32))
+	(use wove-file "../../cli/command/args.wove" (only (type CommandArgument)))
+	(use wove-file "../../cli/command/resolve.wove" (only (type CommandInvocation)))
+	(use wove-file "../../config/project.wove" (only (type ProjectSetting)))
+	(use wove-file "../../json/reader.wove" (only (type JsonNode)))
+	(use c-header "<errno.h>" (only errno ENOENT))
+	(use c-header "<sys/stat.h>" (only lstat S_ISREG (type Stat)))
+	(use c-header "<unistd.h>" (only environ))
+
+	(struct StagedBuild (fields (status i32) (failed_unit i32) (attempted i32) (link_attempted bool)))
+
+	(let object_prefix "object-")
+	(let object_suffix ".o")
+	(let stdout_suffix ".stdout")
+	(let stderr_suffix ".stderr")
+	(let linker_stdout "link.stdout")
+	(let linker_stderr "link.stderr")
+	(let compile_only "-c")
+	(let language_flag "-x")
+	(let c_language "c")
+	(let detect_language "none")
+	(let quiet_unused "-Qunused-arguments")
+
+	(fn staged_result
+		(:doc "Keep the attempted unit prefix and the original child status for diagnostic replay.")
+		(params (status i32) (failed_unit i32) (attempted i32) (link_attempted bool)) (returns StagedBuild)
+		(body (return (struct.new StagedBuild (status status) (failed_unit failed_unit)
+			(attempted attempted) (link_attempted link_attempted)))))
+
+	(fn indexed_object_path
+		(:doc "Use the original ordinal for a sibling object or log, independent of completion order.")
+		(params (binary (shared-array u8)) (index i32) (suffix (shared-array u8))) (returns (owned-array u8))
+		(body
+			(let-mut name (array.alloc u8 24i32))
+			(let start (call append_bytes (borrow-shared object_prefix) (borrow-mut name) 0i32))
+			(let digits (call write_decimal_i32 (borrow-mut name) start index))
+			(let end (call append_bytes (borrow-shared suffix) (borrow-mut name) digits))
+			(return (call join_file_path (borrow-shared binary) (borrow-shared (array.range name 0i32 end))))))
+
+	(fn vacant_output
+		(:doc "Detect a conflicting private entry before starting Clang, including dangling symlinks.")
+		(params (path (shared-array u8))) (returns bool)
+		(body
+			(let-mut info (struct.new Stat))
+			(return (bool.and (i32.ltz (call lstat (borrow-shared path) (borrow-mut info))) (i32.eq errno ENOENT)))))
+
+	(fn vacant_image
+		(:doc "Reserve the link output separately from the files which capture the process streams.")
+		(params (binary (shared-array u8)) (directory i32)) (returns bool)
+		(body
+			(if
+				(:doc "A staged image must have an absolute path with a nonempty basename.")
+				(bool.or (i32.not-lt directory (array.len binary))
+					(bool.or (bool.not (call valid_program (borrow-shared binary)))
+						(u8.not-eq (array.load binary 0i32) 47u8)))
+				(then (return (bool false))))
+			(let name (borrow-shared (array.range binary directory (array.len binary))))
+			(return (bool.and
+				(bool.not (bool.or (call equal_bytes (borrow-shared name) (borrow-shared linker_stdout))
+					(call equal_bytes (borrow-shared name) (borrow-shared linker_stderr))))
+				(call vacant_output (borrow-shared binary))))))
+
+	(fn regular_output
+		(:doc "A successful tool must leave a regular staged file rather than a symlink or absent entry.")
+		(params (path (shared-array u8))) (returns bool)
+		(body
+			(let-mut info (struct.new Stat))
+			(return (bool.and (i32.eqz (call lstat (borrow-shared path) (borrow-mut info)))
+				(call S_ISREG (struct.get info st_mode))))))
+
+	(fn pack_object_arguments
+		(:doc "Carry effective driver options to the C compile, including target and SDK options supplied in ldflags.")
+		(params (prefix (shared-array u8)) (unit (shared-array u8)) (object (shared-array u8)) (library bool))
+		(returns (owned-array u8))
+		(body
+			(let width (u64.add 64u64 (u64.add (u64.from-i32 (array.len prefix))
+				(u64.add (u64.from-i32 (array.len unit)) (u64.from-i32 (array.len object))))))
+			(if
+				(:doc "All per-unit options and paths must fit one packed argv buffer.")
+				(u64.gt width 2147483647u64)
+				(then (return (array.alloc u8 0i32))))
+			(let-mut packed (array.alloc u8 (i32.from-u64 width)))
+			(let-mut start (call append_bytes (borrow-shared prefix) (borrow-mut packed) 0i32))
+			(if
+				(:doc "Only library objects require the library visibility and relocation defaults.")
+				library
+				(then (set start (call write_library_compile_options (borrow-mut packed) start))))
+			(let quiet (call write_plain_argument (borrow-shared quiet_unused) (borrow-mut packed) start))
+			(let phase (call write_plain_argument (borrow-shared compile_only) (borrow-mut packed) quiet))
+			(let language (call write_plain_argument (borrow-shared language_flag) (borrow-mut packed) phase))
+			(let dialect (call write_plain_argument (borrow-shared c_language) (borrow-mut packed) language))
+			(let input (call write_plain_argument (borrow-shared unit) (borrow-mut packed) dialect))
+			(let end (call write_native_output (borrow-shared object) (borrow-mut packed) input))
+			(if (i32.ltz end) (then (return (array.alloc u8 0i32))))
+			(return (call copy_argument (borrow-shared (array.range packed 0i32 end))))))
+
+	(fn write_objects
+		(:doc "Preserve staged unit order when assembling the object inputs. Reset any forwarded language override.")
+		(params (objects (shared-array (owned-array u8))) (output (mut-array u8)) (cursor i32)) (returns i32)
+		(body
+			(let quiet (call write_plain_argument (borrow-shared quiet_unused) (borrow-mut output) cursor))
+			(let lang (call write_plain_argument (borrow-shared language_flag) (borrow-mut output) quiet))
+			(let-mut end (call write_plain_argument (borrow-shared detect_language) (borrow-mut output) lang))
+			(for
+				(:doc "The object list uses the input ordinal even when compiler jobs finish out of order.")
+				(let object) (borrow-shared objects)
+				(body (set end (call write_plain_argument (borrow-shared object) (borrow-mut output) end))))
+			(return end)))
+
+	(fn link_staged_objects
+		(:doc "Run one link with private output and logs, waiting even if closing a parent descriptor failed.")
+		(params (program (shared-array u8)) (packed (shared-array u8)) (binary (shared-array u8)) (attempted i32))
+		(returns StagedBuild)
+		(body
+			(let trace (call join_file_path (borrow-shared binary) (borrow-shared linker_stdout)))
+			(let errors (call join_file_path (borrow-shared binary) (borrow-shared linker_stderr)))
+			(let environment environ)
+			(let child (call start_process_files (borrow-shared program) (borrow-shared packed)
+				(borrow-shared trace) (borrow-shared errors) (borrow-shared environment)))
+			(let pid (struct.get child pid))
+			(let-mut status -1i32)
+			(if
+				(:doc "Every positive PID belongs to this link invocation and must be collected.")
+				(i32.gtz pid)
+				(then
+					(let reaped (call reap_capture_child pid))
+					(if (struct.get child ok) (then (set status reaped)))))
+			(if
+				(:doc "Treat success without a new regular image as a failed staged output.")
+				(bool.and (i32.eqz status) (bool.not (call regular_output (borrow-shared binary))))
+				(then (set status -3i32)))
+			(return (call staged_result status -1i32 attempted (bool true)))))
+
+	(fn build_staged_units
+		(:doc `Give each staged C unit a private object and run a single link after all compiles succeed.
+
+		The caller supplies ordered C paths and an unused image path in an
+		absolute private directory, plus the effective target OS and resolved
+		bin options. For shared images it supplies the staged export list and
+		the final basename. Forwarded compiler options must support separate
+		compile and link phases. The caller owns stage cleanup, image validation
+		and publication. The object-N.stdout, object-N.stderr and link.* logs
+		remain in the stage for replay. Status -3 means missing or nonregular
+		tool output. failed_unit is -1 outside an identified compile.`)
+		(:expect (tests "stage-2/cli/native/staged_build/cases.jsonc") (issues "gh:wove-lang/wove:218"))
+		(params (program (shared-array u8)) (units (shared-array (owned-array u8))) (binary (shared-array u8))
+			(budget u32) (os u8) (library bool) (exports (shared-array u8)) (name (shared-array u8))
+			(bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
+			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting)))
+		(returns StagedBuild)
+		(body
+			(let count (array.len units))
+			(let directory (call directory_width (borrow-shared binary)))
+			(if
+				(:doc "Require a nonempty build, a resolved bin invocation and an unused private image path.")
+				(bool.or (bool.or (i32.eqz count) (u32.eqz budget))
+					(bool.or (u32.not-eq (struct.get invocation command) 2u32)
+						(bool.not (call vacant_image (borrow-shared binary) directory))))
+				(then (return (call staged_result -1i32 -1i32 0i32 (bool false)))))
+			(if
+				(:doc "A shared image requires the resolved platform, export list, and final basename.")
+				(bool.and library
+					(bool.or (bool.not (bool.or (u8.eq os 1u8) (u8.eq os 2u8)))
+						(bool.or (i32.eqz (array.len exports)) (i32.eqz (array.len name)))))
+				(then (return (call staged_result -1i32 -1i32 0i32 (bool false)))))
+			(let paths (u64.add (u64.mul (u64.from-i32 count) (u64.add 20u64 (u64.from-i32 directory)))
+				(u64.add (u64.from-i32 (array.len binary))
+					(u64.add (u64.from-i32 (array.len exports)) (u64.from-i32 (array.len name))))))
+			(let capacity (call frontend_capacity (array.len bytes) (array.len config)
+				(struct.get invocation rows) paths))
+			(let-mut options (array.alloc u8 capacity))
+			(let frontend (call write_probe_options (borrow-shared bytes) (borrow-shared config)
+				invocation (borrow-shared arguments) (borrow-shared nodes) (borrow-shared settings)
+				(borrow-shared (array.range binary 0i32 directory)) (bool false) (borrow-mut options)))
+			(let common (struct.get frontend common_end))
+			(if (i32.ltz common) (then (return (call staged_result -1i32 -1i32 0i32 (bool false)))))
+			(let-mut jobs (array.alloc ObjectJob count))
+			(let-mut objects (array.alloc (owned-array u8) count))
+			(for
+				(:doc "Prepare all jobs and validate argument packing before starting any child.")
+				(let index) (range 0i32 count)
+				(body
+					(let unit (borrow-shared (array.load units index)))
+					(let object (call indexed_object_path (borrow-shared binary) index (borrow-shared object_suffix)))
+					(if
+						(:doc "An input or reserved private object path cannot be silently interpreted as another option or overwritten.")
+						(bool.or (bool.not (call valid_program (borrow-shared unit)))
+							(bool.or (u8.not-eq (array.load unit 0i32) 47u8)
+								(bool.not (call vacant_output (borrow-shared object)))))
+						(then (return (call staged_result -1i32 index 0i32 (bool false)))))
+					(let packed (call pack_object_arguments
+						(borrow-shared (array.range options 0i32 (struct.get frontend probe_end)))
+						(borrow-shared unit) (borrow-shared object) library))
+					(if (i32.eqz (array.len packed)) (then (return (call staged_result -1i32 index 0i32 (bool false)))))
+					(let environment environ)
+					(array.store jobs index (struct.new ObjectJob (arguments (move packed))
+						(stdout_path (call indexed_object_path (borrow-shared binary) index (borrow-shared stdout_suffix)))
+						(stderr_path (call indexed_object_path (borrow-shared binary) index (borrow-shared stderr_suffix)))
+						(environment (move environment))))
+					(array.store objects index (move object))))
+			(let inputs (call write_objects (borrow-shared objects) (borrow-mut options) common))
+			(let-mut links (call write_link_inputs (borrow-shared bytes) (borrow-shared config)
+				invocation (borrow-shared arguments) (borrow-shared nodes) (borrow-shared settings) os (borrow-mut options) inputs))
+			(if
+				(:doc "A shared image uses only the platform's link options in this phase.")
+				library
+				(then (set links (call write_library_link_options os (borrow-shared exports) (borrow-shared name)
+					(borrow-mut options) links))))
+			(let standard (call write_clang_standard (struct.get frontend standard) (borrow-mut options) links))
+			(let end (call write_native_output (borrow-shared binary) (borrow-mut options) standard))
+			(if (i32.ltz end) (then (return (call staged_result -1i32 -1i32 0i32 (bool false)))))
+			(let compiled (call run_object_jobs (borrow-shared program) (borrow-shared jobs) budget))
+			(let attempted (struct.get compiled attempted))
+			(if
+				(:doc "The runner returns after reaping every started compiler. A failed compile prevents linking.")
+				(i32.not-eqz (struct.get compiled status))
+				(then (return (call staged_result (struct.get compiled status)
+					(struct.get compiled failed_job) attempted (bool false)))))
+			(for
+				(:doc "A wrapper can report success without compiling. Check every required object before the link.")
+				(let index) (range 0i32 count)
+				(body
+					(if (bool.not (call regular_output (borrow-shared (array.load objects index))))
+						(then (return (call staged_result -3i32 index attempted (bool false)))))))
+			(if
+				(:doc "The linker must receive its own absent destination even after compiler side outputs are created.")
+				(bool.not (call vacant_output (borrow-shared binary)))
+				(then (return (call staged_result -1i32 -1i32 attempted (bool false)))))
+			(return (call link_staged_objects (borrow-shared program)
+				(borrow-shared (array.range options 0i32 end)) (borrow-shared binary) attempted))))
+)

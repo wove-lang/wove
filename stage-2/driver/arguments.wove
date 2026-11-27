@@ -337,37 +337,40 @@
 			(let next (call write_plain_argument (borrow-shared linker_flag) (borrow-mut output) key))
 			(return (call write_argument (borrow-shared value) (borrow-shared prefix) (borrow-mut output) next))))
 
-	(fn write_library_options
-		(:doc "Link one position-independent C unit with an exact export list and the final library identity.")
-		(params (os u8) (exports (shared-array u8)) (name (shared-array u8)) (output (mut-array u8)) (cursor i32)) (returns i32)
+	(fn write_library_compile_options
+		(:doc "Build position-independent code and hide definitions unless explicitly exported.")
+		(params (output (mut-array u8)) (cursor i32)) (returns i32)
 		(body
 			(let relocation (call write_plain_argument (borrow-shared pic) (borrow-mut output) cursor))
-			(let hidden (call write_plain_argument (borrow-shared hidden_visibility) (borrow-mut output) relocation))
+			(return (call write_plain_argument (borrow-shared hidden_visibility) (borrow-mut output) relocation))))
+
+	(fn write_library_link_options
+		(:doc "Link a shared image with an exact export list and the final library identity.")
+		(params (os u8) (exports (shared-array u8)) (name (shared-array u8)) (output (mut-array u8)) (cursor i32)) (returns i32)
+		(body
 			(if
 				(:doc "Mach-O advertises the final basename relative to the consumer's runtime search paths.")
 				(u8.eq os 2u8)
 				(then
-					(let kind (call write_plain_argument (borrow-shared dylib_flag) (borrow-mut output) hidden))
+					(let kind (call write_plain_argument (borrow-shared dylib_flag) (borrow-mut output) cursor))
 					(let list (call write_linker_value (borrow-shared darwin_export_flag) (borrow-shared no_prefix)
 						(borrow-shared exports) (borrow-mut output) kind))
 					(return (call write_linker_value (borrow-shared darwin_identity_flag) (borrow-shared rpath_prefix)
 						(borrow-shared name) (borrow-mut output) list))))
-			(let kind (call write_plain_argument (borrow-shared shared_flag) (borrow-mut output) hidden))
+			(let kind (call write_plain_argument (borrow-shared shared_flag) (borrow-mut output) cursor))
 			(let list (call write_linker_value (borrow-shared elf_export_flag) (borrow-shared no_prefix)
 				(borrow-shared exports) (borrow-mut output) kind))
 			(return (call write_linker_value (borrow-shared elf_identity_flag) (borrow-shared no_prefix)
 				(borrow-shared name) (borrow-mut output) list))))
 
-	(fn write_clang_arguments
-		(:doc `Append the native input and linker options, then apply the resolved C standard.`)
+	(fn write_link_inputs
+		(:doc "Append the selected linker flags, files and library names after the native objects or sources.")
 		(params (bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
 			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting))
-			(unit (shared-array u8)) (binary (shared-array u8)) (library_os u8) (exports (shared-array u8)) (name (shared-array u8))
-			(output (mut-array u8)) (frontend FrontendOptions))
+			(os u8) (output (mut-array u8)) (cursor i32))
 		(returns i32)
 		(body
-			(let-mut end (call write_plain_argument (borrow-shared unit) (borrow-mut output)
-				(struct.get frontend common_end)))
+			(let-mut end cursor)
 			(let-mut index 0i32)
 			(while
 				(:doc "Link requests follow the source unit, with named libraries last.")
@@ -379,18 +382,40 @@
 						rule (borrow-mut output) end))
 					(set index (i32.inc index))))
 			(if
-				(:doc `Linux keeps the system math library as a separate link dependency.`)
-				(bool.or (u8.eq library_os 1u8) (bool.and (u8.eqz library_os) (u8.eq (call host_os) 1u8)))
-				(then
-					(set end (call write_plain_argument (borrow-shared math_library)
-						(borrow-mut output) end))))
+				(:doc "Linux keeps the system math library as a separate link dependency.")
+				(u8.eq os 1u8)
+				(then (return (call write_plain_argument (borrow-shared math_library) (borrow-mut output) end))))
+			(return end)))
+
+	(fn write_native_output
+		(:doc "Select the private output path for the native tool.")
+		(params (path (shared-array u8)) (output (mut-array u8)) (cursor i32)) (returns i32)
+		(body
+			(let prefix (call write_plain_argument (borrow-shared output_flag) (borrow-mut output) cursor))
+			(return (call write_plain_argument (borrow-shared path) (borrow-mut output) prefix))))
+
+	(fn write_clang_arguments
+		(:doc "Append the native input and linker options, then apply the resolved C standard.")
+		(params (bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
+			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting))
+			(unit (shared-array u8)) (binary (shared-array u8)) (library_os u8) (exports (shared-array u8)) (name (shared-array u8))
+			(output (mut-array u8)) (frontend FrontendOptions))
+		(returns i32)
+		(body
+			(let input (call write_plain_argument (borrow-shared unit) (borrow-mut output)
+				(struct.get frontend common_end)))
+			(let os (if (u8.eqz library_os) (then (call host_os)) (else library_os)))
+			(let-mut end (call write_link_inputs (borrow-shared bytes) (borrow-shared config) invocation
+				(borrow-shared arguments) (borrow-shared nodes) (borrow-shared settings) os
+				(borrow-mut output) input))
 			(if
-				(:doc "The native library link uses the target's export controls after user flags.")
+				(:doc "The serial invocation applies both compilation and link settings for a library.")
 				(u8.not-eqz library_os)
-				(then (set end (call write_library_options library_os (borrow-shared exports) (borrow-shared name)
-					(borrow-mut output) end))))
+				(then
+					(let relocation (call write_library_compile_options (borrow-mut output) end))
+					(set end (call write_library_link_options library_os (borrow-shared exports) (borrow-shared name)
+						(borrow-mut output) relocation))))
 			(let standard (call write_clang_standard (struct.get frontend standard) (borrow-mut output) end))
-			(let option (call write_plain_argument (borrow-shared output_flag) (borrow-mut output) standard))
-			(let binary_end (call write_plain_argument (borrow-shared binary) (borrow-mut output) option))
+			(let binary_end (call write_native_output (borrow-shared binary) (borrow-mut output) standard))
 			(return (call write_include_trace (borrow-mut output) binary_end))))
 )
