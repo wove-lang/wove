@@ -24,6 +24,12 @@ numbered_entry=tests/stage-2/numbered_units/bridges/check.wove
 mkdir -p "$project/$(dirname "$numbered_entry")"
 cp "$numbered_entry" "$project/$numbered_entry"
 
+# Keep two independent utility entries to check that each sidecar tracks its own graph.
+for entry in tests/stage-2/hashing/fnv1a.wove tests/stage-2/json/utf8.wove; do
+	mkdir -p "$project/$(dirname "$entry")"
+	cp "$entry" "$project/$entry"
+done
+
 output=custom-output
 snapshot="$output/self-host-source"
 numbered="$output/stage-2/numbered-headers"
@@ -179,3 +185,47 @@ cp -p "$scanner_unit" "$work/scanner-before"
 cp -p "$scanner_deps" "$work/scanner-deps-before"
 mv "$scanner_alias" "$work/scanner-hardlink"
 check_missing_scanner_import
+
+# Generate two utility dependency files and verify an unchanged parallel rebuild.
+hash=stage-2/hashing/fnv1a
+json=stage-2/json/utf8
+hash_products="$hash $hash.c $hash.c.d"
+json_products="$json $json.c $json.c.d"
+products="$hash_products $json_products"
+build "$output/$hash" "$output/$json"
+save_products
+build "$output/$hash" "$output/$json"
+check_unchanged
+
+# Add a transitive hashing import below a directory that Make has never seen.
+utility_importer=stage-2/hashing/fnv1a.wove
+utility_provider=stage-2/hashing/incremental/nested/provider.wove
+mkdir -p "$(dirname "$utility_provider")"
+cp stage-2/text/boolean.wove "$utility_provider"
+sleep 1
+sed '/(let fnv1a_seed/i\
+	(use wove-file "./incremental/nested/provider.wove" (only))
+' "$utility_importer" > "$work/utility-importer"
+cp "$work/utility-importer" "$utility_importer"
+build "$output/$hash" "$output/$json"
+grep -Fq "$utility_provider" "$output/$hash.c.d"
+
+# Only the hashing products should change when its newly discovered provider changes.
+cp -p "$output/$hash.c" "$work/hash-before.c"
+sleep 1
+cp stage-2/c/identifiers.wove "$utility_provider"
+build "$output/$hash" "$output/$json"
+! cmp -s "$output/$hash.c" "$work/hash-before.c"
+products="$json_products"
+check_unchanged
+
+# A missing utility provider must fail before replacing C, dependencies, or the executable.
+products="$hash_products $json_products"
+save_products
+mv "$utility_provider" "$work/utility-provider"
+if build "$output/$hash" > "$work/utility-failure" 2>&1; then
+	printf 'hashing fixture accepted a missing transitive import\n' >&2
+	exit 1
+fi
+grep -q "^$utility_importer:[0-9]" "$work/utility-failure"
+check_unchanged
