@@ -4,7 +4,7 @@
 	(:doc "Admit only declaration and macro forms that are safe to replay across C units.")
 
 	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_kind_key)))
-	(use wove-file "./native_replay.wove" (only function_parameters_only mark_lvalue_getters proved_lvalue_macro))
+	(use wove-file "./native_replay.wove" (only function_declaration_children mark_witnessed_declarations proved_lvalue_macro))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte))
 	(use wove-file "../json/reader.wove" (only json_parse (type JsonNode)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -236,11 +236,13 @@
 				(bool.or (i32.not-ltz inline) (bool.and (i32.not-ltz storage)
 					(bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) storage (borrow-shared extern_value)))))
 				(then (return (bool false))))
-			(return (call function_parameters_only (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch)))))
+			(return (call function_declaration_children (borrow-shared source) (borrow-shared nodes)
+				row (bool false) (borrow-mut scratch)))))
 
 	(fn replay_declarations_safe
 		(:doc "Validate the complete AST and check only the direct declarations of its translation unit.")
-		(params (source (shared-array u8)) (nodes (mut-array JsonNode)) (borrowed bool) (writable bool)) (returns bool)
+		(params (source (shared-array u8)) (nodes (mut-array JsonNode))
+			(borrowed bool) (writable bool) (record_calls bool)) (returns bool)
 		(body
 			(let result (call json_parse (borrow-shared source) (borrow-mut nodes)))
 			(if (u32.not-eqz (struct.get result error)) (then (return (bool false))))
@@ -249,11 +251,12 @@
 				(borrow-shared clang_kind_key) (borrow-mut scratch)))
 			(if (bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared unit_kind)))
 				(then (return (bool false))))
-			(let-mut getters (array.alloc u8 (if writable (then (struct.get result rows)) (else 0i32))))
+			(let permits_attributes (bool.or writable record_calls))
+			(let-mut approved (array.alloc u8 (if permits_attributes (then (struct.get result rows)) (else 0i32))))
 			(if
-				(:doc "Only getters certified by selected writable operands can carry extra attributes.")
-				(bool.and writable (bool.not (call mark_lvalue_getters (borrow-shared source) (borrow-shared nodes)
-					(borrow-mut getters) (borrow-mut scratch))))
+				(:doc "An attributed declaration must be resolved by an explicitly supported witness.")
+				(bool.and permits_attributes (bool.not (call mark_witnessed_declarations
+					(borrow-shared source) (borrow-shared nodes) (borrow-mut approved) writable record_calls (borrow-mut scratch))))
 				(then (return (bool false))))
 			(let-mut row (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
 			(while
@@ -262,7 +265,7 @@
 				(body
 					(if
 						(:doc "Every direct declaration must be safe to include in all numbered units.")
-						(bool.not (bool.or (bool.and writable (u8.gtz (array.load getters row)))
+						(bool.not (bool.or (bool.and permits_attributes (u8.gtz (array.load approved row)))
 							(call declaration_only (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch) borrowed)))
 						(then (return (bool false))))
 					(set row (struct.get (array.load nodes row) next_sibling))))

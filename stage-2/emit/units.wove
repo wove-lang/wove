@@ -9,10 +9,12 @@
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/native_owner_types.wove" (only is_native_owner native_owner_type))
 	(use wove-file "../scalar/owners.wove" (only optional_byte_owner_type))
-	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/function_rows.wove" (only checked_function_count is_record_input
+		(type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only find_native_definition is_native_integer
-		is_native_record is_writable_slice (type ScalarRecord)))
+		is_native_record is_writable_slice is_place_reference place_reference_target is_record_type record_index
+		(type ScalarRecord)))
 	(use wove-file "../scalar/syntax.wove" (only is_byte_view_type))
 	(use wove-file "../scalar/trees.wove" (only (type ScalarTree)))
 	(use wove-file "../source/graph.wove" (only includes_c_header (type GraphBinding)))
@@ -206,6 +208,14 @@
 				(then (return numbered_preamble_replay)))
 			(return 0u8)))
 
+	(fn checked_shared_cstr_parameter
+		(:doc "Use the existing NUL-checked conversion for an immutable input view.")
+		(params (parameter ScalarParameter)) (returns bool)
+		(body
+			(let type (struct.get parameter type))
+			(return (bool.and (u8.eq (struct.get parameter c_mode) (call c_checked_string_mode))
+				(bool.and (call is_byte_view_type type) (bool.not (call is_writable_slice type)))))))
+
 	(fn numbered_owned_cstr_call
 		(:doc "Admit one checked shared C string and one explicit null into a released nullable text result.")
 		(params (function ScalarFunction) (parameters (shared-array ScalarParameter))) (returns bool)
@@ -230,22 +240,71 @@
 			(let first (struct.get function params))
 			(let input (array.load parameters first))
 			(let output (array.load parameters (i32.inc first)))
-			(let input_type (struct.get input type))
 			(let output_type (struct.get output type))
 			(return (bool.and
-				(bool.and (u8.eq (struct.get input c_mode) (call c_checked_string_mode))
-					(bool.and (call is_byte_view_type input_type) (bool.not (call is_writable_slice input_type))))
+				(call checked_shared_cstr_parameter input)
 				(bool.and (call is_c_null_mode (struct.get output c_mode))
 					(bool.and (call is_byte_view_type output_type) (call is_writable_slice output_type)))))))
+
+	(fn numbered_native_record_reference
+		(:doc "Resolve an ordinary shared or mutable loan to its complete checked native record.")
+		(params (records (shared-array ScalarRecord)) (type u32)) (returns bool)
+		(body
+			(if (bool.not (call is_place_reference type)) (then (return (bool false))))
+			(let target (call place_reference_target (borrow-shared records) type))
+			(if (bool.not (call is_record_type target)) (then (return (bool false))))
+			(let layout (array.load records (call record_index target)))
+			(return (bool.and (call is_native_record layout) (i32.gtz (struct.get layout count))))))
+
+	(fn numbered_record_call
+		(:doc "Admit fixed calls with complete native record loans, direct scalars, and checked string inputs.")
+		(params (function ScalarFunction) (parameters (shared-array ScalarParameter))
+			(records (shared-array ScalarRecord))) (returns bool)
+		(body
+			(let result (struct.get function result))
+			(if
+				(:doc "Other native adaptations and indirect results do not belong to this call contract.")
+				(bool.or (bool.or (struct.get function c_snapshot)
+						(bool.or (i32.gtz (struct.get function c_nulls)) (i32.not-eqz (struct.get function c_variadic))))
+					(bool.or (bool.or (struct.get function c_storage) (i32.gtz (struct.get function c_extents)))
+						(bool.or (bool.or (call has_c_other_arguments function (bool true)) (call is_record_input function))
+							(bool.and (u32.not-eq result (call void_type)) (bool.not (call direct_scalar_abi result))))))
+				(then (return (bool false))))
+			(let-mut index (struct.get function params))
+			(let limit (i32.add index (struct.get function arity)))
+			(let-mut record (bool false))
+			(while
+				(:doc "Keep the full native type and each formal's original access mode.")
+				(i32.lt index limit)
+				(body
+					(let parameter (array.load parameters index))
+					(let type (struct.get parameter type))
+					(if
+						(:doc "A checked string uses its existing scratch conversion. Other parameters must pass directly.")
+						(bool.not (call checked_shared_cstr_parameter parameter))
+						(then
+							(if (bool.not (call is_c_value_mode (struct.get parameter c_mode))) (then (return (bool false))))
+							(if
+								(:doc "The call must have at least one checked complete native reference.")
+								(call numbered_native_record_reference (borrow-shared records) type)
+								(then (set record (bool true)))
+								(else (if (bool.not (call direct_scalar_abi type)) (then (return (bool false))))))))
+					(set index (i32.inc index))))
+			(return record)))
 
 	(fn ordinary_bridge_signature
 		(:doc "Admit direct scalar, pointer loan, fixed storage, and bounded byte contracts.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
-			(function ScalarFunction) (parameters (shared-array ScalarParameter)) (borrows bool)) (returns bool)
+			(function ScalarFunction) (parameters (shared-array ScalarParameter))
+			(records (shared-array ScalarRecord)) (borrows bool)) (returns bool)
 		(body
 			(if
 				(:doc "The existing allocating snapshot adapter carries its own arguments and cleanup.")
 				(call numbered_owned_cstr_call function (borrow-shared parameters))
+				(then (return (bool true))))
+			(if
+				(:doc "Native record calls reuse the checked layout and lend the original place.")
+				(call numbered_record_call function (borrow-shared parameters) (borrow-shared records))
 				(then (return (bool true))))
 			(let result (struct.get function result))
 			(if
@@ -320,12 +379,13 @@
 							(if
 								(:doc "A signature outside the supported ABI keeps the graph serial.")
 								(bool.not (call ordinary_bridge_signature (borrow-shared source) (borrow-shared nodes)
-									function (borrow-shared parameters) (u8.eq mode 2u8)))
+									function (borrow-shared parameters) (borrow-shared records) (u8.eq mode 2u8)))
 								(then (return 0u8)))
 							(if
 								(:doc "Checked native adapters require the effective preamble even without a selected type.")
-								(bool.and (u8.eq mode 1u8) (bool.or (struct.get function c_snapshot)
-									(bool.or (struct.get function c_storage) (i32.gtz (struct.get function c_extents)))))
+								(bool.and (u8.eq mode 1u8) (bool.or (bool.or (struct.get function c_snapshot)
+										(bool.or (struct.get function c_storage) (i32.gtz (struct.get function c_extents))))
+									(call numbered_record_call function (borrow-shared parameters) (borrow-shared records))))
 								(then (set mode numbered_preamble_replay)))))
 					(set index (i32.inc index))))
 			(return mode)))
