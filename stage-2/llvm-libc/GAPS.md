@@ -415,6 +415,21 @@ glibc profiles and the audited Darwin profiles.
 | `fmtmsg` | The complete-string and text-only calls print controlled output to stderr and return `MM_OK`. Explicit nulls for label, action, and tag produce the same text-only output and status as the fixed header operands. The fixture also checks the all-null, no-destination call and `MM_NOMSG` with stderr closed. |
 | `addseverity` | When glibc exposes the GNU declaration, register or replace a severity with a direct NUL-free string literal backed by immutable executable storage. The binding returns the native status. A later `fmtmsg` reads the original bytes under glibc's registry lock. The `addseverity_remove` alias passes a fixed native null. The fixture covers later output, replacement, a rejected standard severity, and removal. [glibc implementation](https://codebrowser.dev/glibc/glibc/stdlib/fmtmsg.c.html#303) · [Retained severity storage #585](https://github.com/wove-lang/wove/issues/585) |
 
+## Bundled filename matching
+
+macOS SDK 27.2 and Debian glibc 2.41 declare `int fnmatch(const char *, const char *, int)`
+on arm64 and x86-64 in C11, C17, and C23. The bridge passes checked, call-scoped
+C strings for both byte views and preserves the original integer result.
+[LLVM libc header inventory](https://libc.llvm.org/headers/fnmatch.html)
+
+| Members | Coverage and availability |
+| --- | --- |
+| `fnmatch` and `FNM_NOMATCH` | Match and no-match cases compare the native status with direct C. An empty byte view supplies an empty C string. An embedded NUL is rejected at the argument span before entering C. |
+| `FNM_PATHNAME`, `FNM_NOESCAPE`, `FNM_PERIOD` | The fixture compares each native value and tests slash matching, backslash escapes, and leading periods. Darwin uses pathname 2 and no-escape 1. glibc uses pathname 1 and no-escape 2. Both use period 4. |
+| `FNM_LEADING_DIR`, `FNM_CASEFOLD`, `FNM_FILE_NAME` | These optional macros are visible with the Wove feature defines. Darwin's strict POSIX.1-2008 and ANSI profiles and glibc's strict POSIX.1-2008 profile hide them. The fixture checks a leading directory, case folding, and the pathname alias. |
+| `FNM_IGNORECASE`, `FNM_EXTMATCH` | Darwin exposes the case-fold alias in its extended profile. glibc exposes the extended-pattern flag under the same conditions as its other GNU flags. Each selection has its own behavior case. |
+| `FNM_NOSYS` | Darwin reserves this historical status and exposes it unconditionally. glibc exposes it when `_XOPEN_SOURCE` is defined and documents that its implementation never returns it. The fixture compares the selected native value. |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
