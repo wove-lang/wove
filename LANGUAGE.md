@@ -1436,10 +1436,12 @@ result stays absent. After testing presence, use
 `(c_snapshot cstrs)` on a read-only native table copies it into an
 `(owned-array (owned-array u8))`.
 
-On Darwin a bridge can copy a nullable, thread-local native record into an
-owned Wove result. Define the field mapping once in the bridge and use it
-from each lookup declaration. A result enum has one unit variant for a
-native null and one variant carrying the exact mapped record.
+A bridge can copy a nullable native record into an owned Wove result. Define
+the field mapping once in the bridge and declare `(lifetime thread_local)`
+on each lookup's record snapshot. A result enum has one unit variant for a
+native null and one variant carrying the exact mapped record. Use `cfg` to
+select native declarations that depend on the target, such as Darwin's group
+lookups.
 
 ```wove
 (struct Text (fields (present bool) (bytes (owned-array u8))))
@@ -1452,7 +1454,7 @@ native null and one variant carrying the exact mapped record.
     (snapshot Group (c-type "struct group")
         (fields (gid gr_gid u32) (name gr_name cstr)
             (password gr_passwd (optional cstr)) (members gr_mem cstrs)))
-    (fn getgrgid (:pragma (c_snapshot record Group))
+    (fn getgrgid (:pragma (c_snapshot record Group (lifetime thread_local)))
         (params (gid Gid)) (returns GroupResult)))
 ```
 
@@ -1464,11 +1466,11 @@ presence `bool` followed by owned bytes. A null string has false presence
 and empty backing. `cstrs` copies every string from a null-terminated
 pointer table into an owned array of byte owners. A null table is empty.
 
-The native function runs once and the compiler finishes the copy on the
-calling thread before returning the enum. The bridge declaration requires
-the native result and its fields to remain valid during that copy.
-Later lookups and enumeration resets leave the owned result intact. This
-contract is available for Darwin targets.
+The native function runs once, and the compiler finishes the copy on the
+calling thread before returning the enum. The lifetime clause requires the
+record and all nested strings and pointer tables being read to remain valid
+and unchanged through the copy, including while other threads call the native
+library. Later lookups and enumeration resets leave the owned result intact.
 
 ## Shared libraries
 
