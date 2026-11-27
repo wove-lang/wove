@@ -384,7 +384,10 @@ targets cross-linked in those modes. The cross-link from macOS supplies
 
 The private `LongDouble` selection shares the native type with `<math.h>`
 without adding that header to float-only builds. Optional macro probes
-can still see an explicitly selected earlier header. [Private intrinsic types #576](https://github.com/wove-lang/wove/issues/576) · [Two-header macro scope #577](https://github.com/wove-lang/wove/issues/577)
+use the selected header and its declared prerequisites. Fixtures select
+`<math.h>` and `<float.h>` in both orders. The audited C11 and C17 profiles
+report unavailable float imports at `INFINITY` and `NAN`. The C23 fixtures
+verify both values and preserve the emitted include order. [Private intrinsic types #576](https://github.com/wove-lang/wove/issues/576) · [Optional macro scope #577](https://github.com/wove-lang/wove/issues/577)
 
 | Members | Coverage or outstanding contract |
 | --- | --- |
