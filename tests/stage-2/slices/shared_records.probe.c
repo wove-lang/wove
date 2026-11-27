@@ -16,8 +16,8 @@ typedef struct {
 
 #undef main
 int wove_emitted_main(int argc, char **argv);
-wgr1d5abitToken wgf1vpl7koforward_token(wvrt_slice view, int32_t index);
-int32_t wgf0qod78mtoken_count(wvrt_slice view);
+wgr1d5abitToken wgf1kgk0p7forward_token(wvrt_slice view, int32_t index);
+int32_t wgf1phblattoken_count(wvrt_slice view);
 
 // Pass typed C storage to the emitted slice readers and observe the copies.
 int main(int argc, char **argv) {
@@ -31,17 +31,17 @@ int main(int argc, char **argv) {
 	// An invalid index must trap even when the backing storage is inaccessible.
 	if (argc == 2) {
 		const wvrt_slice inaccessible = {NULL, full.wvrt_length, sizeof *data};
-		if (strcmp(argv[1], "negative") == 0) { (void)wgf1vpl7koforward_token(inaccessible, -1); }
-		if (strcmp(argv[1], "end") == 0) { (void)wgf1vpl7koforward_token(inaccessible, full.wvrt_length); }
+		if (strcmp(argv[1], "negative") == 0) { (void)wgf1kgk0p7forward_token(inaccessible, -1); }
+		if (strcmp(argv[1], "end") == 0) { (void)wgf1kgk0p7forward_token(inaccessible, full.wvrt_length); }
 		return 2;
 	}
 
-	const wgr1d5abitToken first = wgf1vpl7koforward_token(full, 0);
-	const wgr1d5abitToken second = wgf1vpl7koforward_token(full, 1);
+	const wgr1d5abitToken first = wgf1kgk0p7forward_token(full, 0);
+	const wgr1d5abitToken second = wgf1kgk0p7forward_token(full, 1);
 	data[0] = second;
-	const wgr1d5abitToken updated = wgf1vpl7koforward_token(full, 0);
+	const wgr1d5abitToken updated = wgf1kgk0p7forward_token(full, 0);
 	printf("%d %" PRId32 " %" PRId32 " %" PRIu32 " %" PRId32 " %d %u %" PRIu32 " %" PRId32 " %d %u %" PRIu32 "\n",
-		wove_emitted_main(argc, argv), wgf0qod78mtoken_count(full), wgf0qod78mtoken_count(empty),
+		wove_emitted_main(argc, argv), wgf1phblattoken_count(full), wgf1phblattoken_count(empty),
 		first.wgm0000000, first.wgm0000001, first.wgm0000002, (unsigned)first.wgm0000003,
 		second.wgm0000000, second.wgm0000001, second.wgm0000002, (unsigned)second.wgm0000003, updated.wgm0000000);
 	return 0;
