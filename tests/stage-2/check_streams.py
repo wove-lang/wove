@@ -231,28 +231,38 @@ def compare_form_parts(view, nodes, parts, form):
 	assert view[start:end].decode("utf-8") == form.tag
 	assert position(view, nodes[owner][2])[0] == form.line
 
+	# Source rows retain interleaved metadata and operands in their original order.
+	def metadata_tag(index):
+		_, kind, _, _, _, head, *_ = nodes[index]
+		if kind == 40:
+			_, _, start, end, *_ = nodes[head]
+			tag = view[start:end].decode("utf-8")
+			if tag.startswith(":"):
+				return tag
+		return None
+
 	tags = []
-	while metadata >= 0 and metadata != operands:
-		_, _, start, end, *_ = nodes[nodes[metadata][5]]
-		tags.append(view[start:end].decode("utf-8"))
+	while metadata >= 0:
+		tag = metadata_tag(metadata)
+		if tag is not None:
+			tags.append(tag)
 		metadata = nodes[metadata][6]
 	assert tags == [entry.tag for entry in form.metadata]
 
-	ordinary = form.operands
-	# A name slot consumes the seed's first logical operand separately.
+	# The declared name is independent of the seed's ordinary operands.
+	assert (name >= 0) == bool(form.names)
 	if name >= 0:
-		expected_name, *ordinary = ordinary
+		expected_name, = form.names
 		_, kind, start, end, *_ = nodes[name]
 		assert kind == 1 and not expected_name.quoted
 		assert view[start:end].decode("utf-8") == expected_name.text
 		assert position(view, start)[0] == expected_name.line
 
 	count = 0
-	# The remaining ordinary fields reach the end of the original sibling list.
 	while operands >= 0:
-		count += 1
+		count += metadata_tag(operands) is None
 		operands = nodes[operands][6]
-	assert count == len(ordinary)
+	assert count == len(form.operands)
 
 
 # Verify exact result rows and compare successful module selection with the seed.
@@ -271,14 +281,14 @@ def check_modules(executable, directory, manifest):
 			view = parent[start:stop]
 			module = parse(view.decode("utf-8"))
 			active = metadata_enabled(module, selectable=True)
-			selected = list(selected_declarations(module.operands[1:])) if active else []
+			selected = list(selected_declarations(module.operands)) if active else []
 			name, emitted_active = rows[1]
 			assert emitted_active == active and len(rows) == len(selected) + 3, label
 
 			tree, tree_status = probe_rows(executable, "--metadata", source, (start, stop))
 			assert tree_status == 0
 			nodes = tree[1:]
-			assert view[nodes[name][2]:nodes[name][3]].decode("utf-8") == module.operands[0].text
+			assert view[nodes[name][2]:nodes[name][3]].decode("utf-8") == module.names[0].text
 			for parts, form in zip(rows[2:], [module, *selected]):
 				compare_form_parts(view, nodes, parts, form)
 

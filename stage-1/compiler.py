@@ -212,7 +212,8 @@ def read_integer_literal(node: Form) -> Value:
 
 # Read an immutable scalar or byte table without evaluating runtime expressions.
 def read_module_value(node: Form, index: int) -> tuple[str, ModuleValue]:
-	name_node, initializer = form(node, "let", 2).operands
+	initializer, = form(node, "let", 1).operands
+	name_node, = node.names
 	name = identifier(name_node)
 	c_name = f"wv_seed_binding_{index}"
 	# A quoted string supplies the exact bytes of a shared u8 slice.
@@ -256,7 +257,8 @@ def module_value_definition(declaration: ModuleValue) -> list[str]:
 
 # Collect scalar fields in declaration order for the record's native layout.
 def read_record(node: Form, index: int) -> tuple[str, Record]:
-	name_node, fields_node = form(node, "struct", 2).operands
+	fields_node, = form(node, "struct", 1).operands
+	name_node, = node.names
 	name = identifier(name_node)
 	# Keep named records distinct from builtin value and loan types.
 	if name in C_TYPE:
@@ -320,7 +322,7 @@ def read_function(
 ) -> Function:
 	fields = {}
 	# Keep each tagged field at its original line for validation and lowering.
-	for child in node.operands[1:]:
+	for child in node.operands:
 		field = form(child)
 		# An unknown or repeated field is invalid at that occurrence.
 		if field.tag not in ("params", "returns", "body") or field.tag in fields:
@@ -971,7 +973,8 @@ class FunctionEmitter:
 		# Every other statement in the seed introduces a binding.
 		if statement.tag not in ("let", "let-mut"):
 			raise SourceError(node.line)
-		name, initializer = form(statement, arity=2).operands
+		initializer, = form(statement, arity=1).operands
+		name, = statement.names
 		symbol = identifier(name)
 		scope = self.scopes[-1]
 		# Each name can be declared once in the current lexical scope.
@@ -1112,10 +1115,6 @@ def read_module(
 	# Parsing and declaration selection belong to the defining file.
 	with source_file(filename):
 		module = form(parse(source), "module")
-		# The module name precedes its declarations.
-		if not module.operands:
-			raise SourceError(module.line)
-		identifier(module.operands[0])
 		# An excluded file contributes no declarations or edges to the import graph.
 		if not metadata_enabled(module, selectable=True):
 			# A build still needs its entry module to be active.
@@ -1127,7 +1126,7 @@ def read_module(
 		uses = []
 		values = {}
 		# Select active declarations before looking at any import's operands or path.
-		for node in selected_declarations(module.operands[1:], skip_host=True):
+		for node in selected_declarations(module.operands, skip_host=True):
 			# Collect imports for the dependency walk.
 			if node.tag == "use":
 				uses.append(node)
@@ -1147,7 +1146,7 @@ def read_module(
 				values[name] = value
 			# Collect function names now and check their signatures after imports bind.
 			else:
-				name = identifier(form(node, "fn").operands[0])
+				name = identifier(form(node, "fn").names[0])
 				# A file has one declaration per function name in its function namespace.
 				if name in function_declarations:
 					raise SourceError(node.line)
