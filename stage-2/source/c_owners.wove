@@ -14,11 +14,13 @@
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte is_c_identifier))
 
 	(struct COwnerRead (fields (native i32) (drop i32) (storage bool) (tail i32) (count i32)
+		(vector i32) (vector_count i32) (vector_offset i32)
 		(start i32) (end i32) (error u32)))
 
 	(let storage_flag "storage")
 	(let drop_void_pointer "void-pointer")
 	(let tail_clause "tail")
+	(let vector_clause "cstr-vector")
 	(let long_word "long")
 	(let double_word "double")
 
@@ -92,7 +94,7 @@
 		(params (native i32) (drop i32) (storage bool) (site SourceNode) (error u32))
 		(returns COwnerRead)
 		(body (return (struct.new COwnerRead (native native) (drop drop) (storage storage)
-			(tail -1i32) (count -1i32)
+			(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
 			(start (struct.get site start)) (end (struct.get site end)) (error error)))))
 
 	(fn owner_keyword
@@ -129,6 +131,11 @@
 				(call same_bytes (borrow-shared source) start (struct.get node end)
 					(borrow-shared tail_clause) 0i32 (array.len tail_clause))
 				(then (return 4u32)))
+			(if
+				(:doc "A native string vector names its pointer table, count, and reserved offset.")
+				(call same_bytes (borrow-shared source) start (struct.get node end)
+					(borrow-shared vector_clause) 0i32 (array.len vector_clause))
+				(then (return 5u32)))
 			(return 0u32)))
 
 	(fn owner_form_keyword
@@ -142,6 +149,44 @@
 				(u32.eq (struct.get node kind) 40u32)
 				(then (return (call owner_keyword (borrow-shared source) (array.load nodes child)))))
 			(return (call owner_keyword (borrow-shared source) node))))
+
+	(fn read_owned_vector
+		(:doc "Read the exact three native members and preserve the owner's destructor.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (clause SourceNode)
+			(destructor i32)) (returns COwnerRead)
+		(body
+			(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) clause))
+			(let data (struct.get parts operands))
+			(if
+				(:doc "The vector clause is the final part of a storage owner's contract.")
+				(bool.or (i32.ltz data)
+					(bool.or (i32.not-ltz (struct.get clause next_sibling))
+						(u32.not-eq (call owner_form_keyword (borrow-shared source)
+							(borrow-shared nodes) clause) 5u32)))
+				(then (return (call owner_read -1i32 -1i32 (bool false) clause 23u32))))
+			(let table (array.load nodes data))
+			(let count (struct.get table next_sibling))
+			(if
+				(:doc "The first token names the native pointer table.")
+				(bool.or (i32.ltz count) (bool.not (call is_native_name (borrow-shared source) table)))
+				(then (return (call owner_read -1i32 -1i32 (bool false) table 23u32))))
+			(let length (array.load nodes count))
+			(let offset (struct.get length next_sibling))
+			(if
+				(:doc "The second token names the number of actual strings.")
+				(bool.or (i32.ltz offset) (bool.not (call is_native_name (borrow-shared source) length)))
+				(then (return (call owner_read -1i32 -1i32 (bool false) length 23u32))))
+			(let skip (array.load nodes offset))
+			(if
+				(:doc "The last token names a distinct field for the reserved prefix.")
+				(bool.or (bool.or (i32.not-ltz (struct.get skip next_sibling))
+						(bool.not (call is_native_name (borrow-shared source) skip)))
+					(call same_bytes (borrow-shared source) (struct.get length start) (struct.get length end)
+						(borrow-shared source) (struct.get skip start) (struct.get skip end)))
+				(then (return (call owner_read -1i32 -1i32 (bool false) skip 23u32))))
+			(return (struct.new COwnerRead (native -1i32) (drop destructor) (storage (bool true))
+				(tail -1i32) (count -1i32) (vector data) (vector_count count) (vector_offset offset)
+				(start (struct.get clause start)) (end (struct.get clause end)) (error 0u32)))))
 
 	(fn read_owner_drop
 		(:doc `Read a native destructor contract or the caller-owned byte-tail members.`)
@@ -176,7 +221,7 @@
 							(bool.not (call is_native_name (borrow-shared source) tail_name)))
 						(then (return (call owner_read -1i32 -1i32 (bool false) tail_name 23u32))))
 					(return (struct.new COwnerRead (native -1i32) (drop -1i32) (storage (bool true))
-						(tail tail) (count count)
+						(tail tail) (count count) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
 						(start (struct.get drop start)) (end (struct.get drop end)) (error 0u32)))))
 			(if
 				(:doc "The contract starts with a single destructor clause.")
@@ -184,19 +229,20 @@
 				(then (return (call owner_read -1i32 -1i32 (bool false) directive 23u32))))
 			(let flag (struct.get drop next_sibling))
 			(let storage (i32.lt -1i32 flag))
+			(let-mut vector -1i32)
 			(if
-				(:doc "Only the bare storage flag may follow the destructor.")
+				(:doc "The storage flag can be followed by one native string vector clause.")
 				storage
 				(then
 					(let word (array.load nodes flag))
 					(if
-						(:doc "Reject unknown flags and a second trailing operand at the contract.")
+						(:doc "A pointer owner cannot declare fields in caller-owned storage.")
 						(bool.or (u32.not-eq (struct.get word kind) 1u32)
-							(bool.or (i32.lt -1i32 (struct.get word next_sibling))
-								(bool.not (call same_bytes (borrow-shared source)
-									(struct.get word start) (struct.get word end)
-									(borrow-shared storage_flag) 0i32 (array.len storage_flag)))))
-						(then (return (call owner_read -1i32 -1i32 (bool false) directive 23u32))))))
+							(bool.not (call same_bytes (borrow-shared source)
+								(struct.get word start) (struct.get word end)
+								(borrow-shared storage_flag) 0i32 (array.len storage_flag))))
+						(then (return (call owner_read -1i32 -1i32 (bool false) directive 23u32))))
+					(set vector (struct.get word next_sibling))))
 			(let name (struct.get (call form_parts (borrow-shared source) (borrow-shared nodes) drop) operands))
 			(if (i32.ltz name) (then (return (call owner_read -1i32 -1i32 (bool false) drop 23u32))))
 			(let symbol (array.load nodes name))
@@ -219,6 +265,11 @@
 										(struct.get word start) (struct.get word end)
 										(borrow-shared drop_void_pointer) 0i32 (array.len drop_void_pointer))))))
 						(then (return (call owner_read -1i32 -1i32 (bool false) word 23u32))))))
+			(if
+				(:doc "A declared vector shares the storage owner's exact layout and lifetime.")
+				(i32.not-ltz vector)
+				(then (return (call read_owned_vector (borrow-shared source) (borrow-shared nodes)
+					(array.load nodes vector) name))))
 			(return (call owner_read -1i32 name storage directive 0u32))))
 
 	(fn owner_destructor
@@ -231,6 +282,9 @@
 			(let-mut storage (bool false))
 			(let-mut tail -1i32)
 			(let-mut count -1i32)
+			(let-mut vector -1i32)
+			(let-mut vector_count -1i32)
+			(let-mut vector_offset -1i32)
 			(while
 				(:doc "Only :pragma metadata can supply the ownership directive.")
 				(bool.and (i32.not-ltz metadata)
@@ -264,11 +318,14 @@
 											(set drop (struct.get checked drop))
 											(set storage (struct.get checked storage))
 											(set tail (struct.get checked tail))
-											(set count (struct.get checked count))))
+											(set count (struct.get checked count))
+											(set vector (struct.get checked vector))
+											(set vector_count (struct.get checked vector_count))
+											(set vector_offset (struct.get checked vector_offset))))
 									(set index (struct.get directive next_sibling))))))
 					(set metadata (struct.get entry next_sibling))))
 			(return (struct.new COwnerRead (native -1i32) (drop drop) (storage storage)
-				(tail tail) (count count)
+				(tail tail) (count count) (vector vector) (vector_count vector_count) (vector_offset vector_offset)
 				(start (struct.get site start)) (end (struct.get site end)) (error 0u32)))))
 
 	(fn read_c_type_form
@@ -290,7 +347,7 @@
 				(:doc "Selection belongs to the enclosing declaration. Keep the directive's own span.")
 				(u32.gtz (struct.get choice error))
 				(then (return (struct.new COwnerRead (native -1i32) (drop -1i32) (storage (bool false))
-					(tail -1i32) (count -1i32)
+					(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
 					(start (struct.get choice start)) (end (struct.get choice end))
 					(error (struct.get choice error))))))
 			(let value (array.load nodes literal))
@@ -334,6 +391,8 @@
 			(return (struct.new COwnerRead (native (struct.get native native))
 				(drop (struct.get drop drop)) (storage (struct.get drop storage))
 				(tail (struct.get drop tail)) (count (struct.get drop count))
+				(vector (struct.get drop vector)) (vector_count (struct.get drop vector_count))
+				(vector_offset (struct.get drop vector_offset))
 				(start (struct.get node start)) (end (struct.get node end)) (error 0u32)))))
 
 	(fn is_c_storage_type

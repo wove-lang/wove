@@ -6,13 +6,15 @@
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
-	(use wove-file "../c/arguments.wove" (only c_storage_shared_mode c_storage_consume_mode is_c_storage_init_mode (value c_marked_handle_out_mode)))
+	(use wove-file "../c/arguments.wove" (only c_storage_shared_mode c_storage_consume_mode is_c_storage_init_mode (value c_marked_handle_out_mode) (value c_storage_init_always_mode)))
 	(use wove-file "./owners.wove" (only native_owner_contract write_native_type write_native_destructor))
 	(use wove-file "./runtime.wove" (only close_runtime_call))
 	(use wove-file "./text.wove" (only c_byte c_span c_literal_text write_local_name write_temporary_name))
 
 	(let alloc_open "wvrt_c_storage_new(sizeof(")
 	(let tail_alloc_open "WVRT_C_TAIL_ALLOC(")
+	(let vector_alloc_open "WVRT_CSTR_VECTOR_ALLOC(")
+	(let vector_view_open "WVRT_CSTR_VECTOR_VIEW(")
 	(let alloc_align "),_Alignof(")
 	(let storage_data "wvrt_c_storage_data(")
 	(let constant_type "const __typeof__(")
@@ -32,6 +34,54 @@
 				(array.load nodes (struct.get contract native))
 				(borrow-mut output) offset writing))))
 
+	(fn write_storage_member
+		(:doc "Emit one checked C member name followed by its argument separator.")
+		(params (source (shared-array u8)) (member SourceNode) (output (mut-array u8))
+			(offset u32) (writing bool)) (returns u32)
+		(body
+			(let name (call c_span (borrow-shared source) (struct.get member start) (struct.get member end)
+				(borrow-mut output) offset writing))
+			(return (call c_byte (borrow-mut output) name 44u8 writing))))
+
+	(fn write_string_vector_allocation
+		(:doc "Initialize the native reserved slot count before the first C call.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (site ScalarExpression)
+			(member i32) (tree_base i32) (output (mut-array u8)) (offset u32)
+			(name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared vector_alloc_open) (borrow-mut output) offset writing))
+			(let repr (call write_storage_type (borrow-shared source) (borrow-shared nodes) (struct.get site type)
+				(borrow-mut output) open writing))
+			(let comma (call c_byte (borrow-mut output) repr 44u8 writing))
+			(let field (call write_storage_member (borrow-shared source) (array.load nodes member)
+				(borrow-mut output) comma writing))
+			(let reserved (call write_temporary_name (borrow-shared source) (struct.get site first)
+				tree_base (borrow-mut output) field name_prefix writing))
+			(return (call close_runtime_call (borrow-mut output) reserved (struct.get site target)
+				(struct.get site start) (struct.get site end) writing))))
+
+	(fn write_string_vector_view
+		(:doc "Build the view from the exact member expressions of an active native owner.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (site ScalarExpression)
+			(owner_type u32) (tree_base i32) (output (mut-array u8)) (offset u32)
+			(name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let contract (call native_owner_contract (borrow-shared source) (borrow-shared nodes) owner_type))
+			(let open (call c_literal_text (borrow-shared vector_view_open) (borrow-mut output) offset writing))
+			(let repr (call write_storage_type (borrow-shared source) (borrow-shared nodes) owner_type
+				(borrow-mut output) open writing))
+			(let comma (call c_byte (borrow-mut output) repr 44u8 writing))
+			(let paths (call write_storage_member (borrow-shared source) (array.load nodes (struct.get contract vector))
+				(borrow-mut output) comma writing))
+			(let count (call write_storage_member (borrow-shared source) (array.load nodes (struct.get contract vector_count))
+				(borrow-mut output) paths writing))
+			(let reserved (call write_storage_member (borrow-shared source) (array.load nodes (struct.get contract vector_offset))
+				(borrow-mut output) count writing))
+			(let owner (call write_temporary_name (borrow-shared source) (struct.get site first)
+				tree_base (borrow-mut output) reserved name_prefix writing))
+			(return (call close_runtime_call (borrow-mut output) owner (struct.get site target)
+				(struct.get site start) (struct.get site end) writing))))
+
 	(fn write_storage_allocation
 		(:doc "Allocate a zeroed object using the defining C type's own size and alignment.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (site ScalarExpression)
@@ -44,6 +94,12 @@
 				(i32.not-ltz capacity)
 				(then
 					(let contract (call native_owner_contract (borrow-shared source) (borrow-shared nodes) type))
+					(let vector_offset (struct.get contract vector_offset))
+					(if
+						(:doc "An explicit string vector prefix initializes the selected size_t member.")
+						(i32.not-ltz vector_offset)
+						(then (return (call write_string_vector_allocation (borrow-shared source) (borrow-shared nodes)
+							site vector_offset tree_base (borrow-mut output) offset name_prefix writing))))
 					(let count (array.load nodes (struct.get contract count)))
 					(let tail (array.load nodes (struct.get contract tail)))
 					(let open (call c_literal_text (borrow-shared tail_alloc_open) (borrow-mut output) offset writing))
@@ -200,8 +256,12 @@
 							(set cursor (call write_temporary_name (borrow-shared source)
 								argument tree_base (borrow-mut output) cursor name_prefix writing))
 							(set cursor (call c_byte (borrow-mut output) cursor 44u8 writing))
-							(set cursor (call write_temporary_name (borrow-shared source)
-								index tree_base (borrow-mut output) cursor name_prefix writing))
+							(if
+								(:doc "Zero activates storage whose cleanup contract is independent of the result.")
+								(u8.eq mode c_storage_init_always_mode)
+								(then (set cursor (call c_byte (borrow-mut output) cursor 48u8 writing)))
+								(else (set cursor (call write_temporary_name (borrow-shared source)
+									index tree_base (borrow-mut output) cursor name_prefix writing))))
 							(set cursor (call c_literal_text (borrow-shared end_statement)
 								(borrow-mut output) cursor writing))))
 					(if

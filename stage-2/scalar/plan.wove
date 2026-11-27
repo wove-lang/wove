@@ -92,6 +92,7 @@
 			(value worker_spawn_on_kind) (value worker_try_spawn_kind) (value worker_open_pool_kind) (value worker_try_close_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) (value worker_pop_front_kind) is_worker_queue_access is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_list_kind) (value pending_exact_move) (value fixed_take_request)
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor
 			(value native_tail_report_kind) (value native_tail_load_kind) (value native_tail_report_borrow_kind)
+			(value native_cstrs_view_kind) (value native_cstrs_len_kind) (value native_cstrs_load_kind) (value native_cstrs_type)
 			(type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
 	(struct
@@ -3841,17 +3842,18 @@
 			(let capacity (struct.get name next_sibling))
 			(let has_capacity (i32.not-ltz capacity))
 			(let tail_storage (i32.not-ltz (struct.get contract tail)))
+			(let vector_storage (i32.not-ltz (struct.get contract vector)))
 			(if
-				(:doc "Only byte-tail storage takes exactly one signed capacity after the type.")
+				(:doc "Byte tails require capacity. String vectors can set their reserved prefix.")
 				(bool.or (bool.and tail_storage (bool.not has_capacity))
-					(bool.and has_capacity (bool.not tail_storage)))
+					(bool.and has_capacity (bool.not (bool.or tail_storage vector_storage))))
 				(then (return (call entry_at node -1i32 24u32))))
 			(if
-				(:doc "The capacity is evaluated once with the exact i64 type before allocation.")
+				(:doc "Evaluate the exact i64 capacity or prefix once before allocating storage.")
 				has_capacity
 				(then
 					(if
-						(:doc "No operands can follow the byte capacity.")
+						(:doc "A storage constructor accepts at most one allocation operand.")
 						(i32.not-ltz (struct.get (array.load nodes capacity) next_sibling))
 						(then (return (call entry_at node -1i32 24u32))))
 					(array.store expressions capacity
@@ -4187,6 +4189,85 @@
 				(call runtime_expression kind result node operand caller view_start))
 			(return (call entry_at node index 0u32))))
 
+	(fn plan_native_cstrs_view
+		(:doc "Tie an immutable native string vector binding to a checked shared loan of its storage owner.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (operand i32) (expected u32) (caller ScalarFunction) (statement i32) (view_start i32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "Only a direct immutable local can hold this scoped view.")
+				(bool.or (bool.or (i32.ltz operand) (u32.not-eq expected 42u32))
+					(bool.not (call shared_row_value_context (borrow-shared source) (borrow-shared nodes)
+						node expected statement)))
+				(then (return (call entry_at node -1i32 24u32))))
+			(let borrow (array.load nodes operand))
+			(if (i32.not-ltz (struct.get borrow next_sibling)) (then (return (call entry_at node -1i32 24u32))))
+			(let shared (call read_borrow_source (borrow-shared source) (borrow-shared nodes) borrow 35u32))
+			(if (u32.gtz (struct.get shared error)) (then (return shared)))
+			(let owner (struct.get shared operand))
+			(let reference (array.load nodes owner))
+			(let resolved (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes)
+				reference c_handle_reference owner caller statement (borrow-shared parameters)
+				(borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
+			(if (u32.gtz (struct.get resolved error)) (then (return (call at_owner_use resolved borrow))))
+			(let type (struct.get (array.load expressions owner) type))
+			(if
+				(:doc "Callers must name a native owner that declares the vector fields.")
+				(bool.not (call is_native_owner type))
+				(then (return (call entry_at borrow -1i32 24u32))))
+			(let contract (call read_c_owner (borrow-shared source) (borrow-shared nodes)
+				(array.load nodes (call native_owner_declaration type))))
+			(if (i32.ltz (struct.get contract vector)) (then (return (call entry_at borrow -1i32 24u32))))
+			(let loan (call plan_handle_borrow (borrow-shared source) (borrow-shared nodes) borrow operand
+				owner caller statement type (call c_storage_shared_mode) view_start
+				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
+			(if (u32.gtz (struct.get loan error)) (then (return loan)))
+			(array.store expressions index
+				(call runtime_expression native_cstrs_view_kind native_cstrs_type node operand caller view_start))
+			(return (call entry_at node index 0u32))))
+
+	(fn plan_native_cstrs_access
+		(:doc "Read the count or lend one row from a named, scoped native string vector.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (operand i32) (kind u32) (expected u32) (caller ScalarFunction) (statement i32) (view_start i32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let load (u32.eq kind native_cstrs_load_kind))
+			(if
+				(:doc "A loaded row is an immutable local view, and length is an ordinary i32.")
+				(bool.or (i32.ltz operand)
+					(bool.or (bool.and load (bool.not (call shared_row_value_context
+							(borrow-shared source) (borrow-shared nodes) node expected statement)))
+						(bool.and (bool.not load) (bool.not (call value_matches_type expected 5u32)))))
+				(then (return (call entry_at node -1i32 24u32))))
+			(let reference (array.load nodes operand))
+			(let subscript (struct.get reference next_sibling))
+			(if
+				(:doc "A row load takes exactly one index after its vector binding.")
+				(bool.or (bool.and (bool.not load) (i32.not-ltz subscript))
+					(bool.and load (bool.or (i32.ltz subscript)
+						(i32.not-ltz (struct.get (array.load nodes subscript) next_sibling)))))
+				(then (return (call entry_at node -1i32 24u32))))
+			(let checked (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes)
+				reference native_cstrs_type operand caller statement (borrow-shared parameters)
+				(borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
+			(if (u32.gtz (struct.get checked error)) (then (return checked)))
+			(let-mut result 5u32)
+			(if
+				(:doc "The checked row contains byte data and the index evaluates once.")
+				load
+				(then
+					(set result 34u32)
+					(array.store expressions subscript (call expression_row 0u32 5u32
+						-1i32 -1i32 0i32 0i32 (bool false)))))
+			(array.store expressions index (call runtime_expression kind result node operand caller view_start))
+			(return (call entry_at node index 0u32))))
+
 	(fn plan_expression
 		(:doc `Check the scalar expression at a source row and keep its actual type.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
@@ -4354,6 +4435,18 @@
 					node index (struct.get parts operands) tag expected caller
 					statement view_start (borrow-shared parameters) (borrow-shared records)
 					(borrow-shared statements) (borrow-mut expressions)))))
+			(if
+				(:doc "A native string vector borrows active storage for one immutable scope.")
+				(u32.eq tag native_cstrs_view_kind)
+				(then (return (call plan_native_cstrs_view (borrow-shared source) (borrow-shared nodes)
+					node index (struct.get parts operands) expected caller statement view_start
+					(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))))
+			(if
+				(:doc "Inspect a checked native string vector without exposing its C pointers.")
+				(bool.or (u32.eq tag native_cstrs_len_kind) (u32.eq tag native_cstrs_load_kind))
+				(then (return (call plan_native_cstrs_access (borrow-shared source) (borrow-shared nodes)
+					node index (struct.get parts operands) tag expected caller statement view_start
+					(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))))
 			(if
 				(:doc "The null predicate reads the presence of a native handle or an optional owner.")
 				(u32.eq tag (call owner_is_null_kind))
@@ -5882,7 +5975,8 @@
 							(if
 								(:doc "A view or scoped record holds its loans after checking the complete initializer.")
 								(bool.or (bool.and (u32.eq kind 15u32)
-									(bool.or (call is_readable_slice (struct.get statement type))
+									(bool.or (bool.or (call is_readable_slice (struct.get statement type))
+											(u32.eq (struct.get statement type) native_cstrs_type))
 										(bool.or (u32.eq (struct.get statement type) optional_view_type)
 											(call is_optional_record_borrow (struct.get statement type)))))
 									(bool.and (bool.or (u32.eq kind 15u32) (u32.eq kind 16u32))

@@ -1277,7 +1277,24 @@ initializers. For pointer handles, declare a mutable local with
 belongs to the local even when the call fails. For contracts declared
 with `(c_owned (drop destroy) storage)`, use `(native.alloc Actions)`.
 A successful initializer activates the object. Cleanup destroys active
-objects and releases their storage.
+objects and releases their storage. Use `(c_init_always output)` for
+a caller-allocated object whose native destructor is valid after every
+return from the initializing call. The native status remains available
+unchanged, including when the object contains a result from a failed call.
+
+A storage owner can name its counted C string table with
+`(c_owned (drop globfree) storage (cstr-vector gl_pathv gl_pathc gl_offs))`.
+The native fields have types `char **`, `size_t`, and `size_t` in that order.
+An optional `i64` argument to `native.alloc` sets the reserved offset before
+initialization. The C library controls the fields during the call.
+
+Bind `(native.cstrs.view (borrow-shared result))` with an immutable `let`.
+The vector lends the active owner for the binding's scope.
+`(native.cstrs.len paths)` counts the actual strings after the reserved slots.
+`(native.cstrs.load paths index)` checks an `i32` index and lends the original
+bytes through an immutable `(shared-array u8)` binding, excluding the NUL.
+The owner cannot be mutably borrowed, moved, or consumed while the vector
+binding is in scope.
 
 Declare a caller-owned record with a native unsigned 32-bit count and
 a trailing byte array using `(:pragma (c_owned (tail count bytes)))`.
