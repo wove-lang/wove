@@ -49,8 +49,9 @@ before the prefix (`-0x80i8`). Write bytes as typed integers.
 | Boolean logic | `bool.and`, `bool.or`, and `bool.not` |
 
 An immutable module `let` takes a typed integer literal or a quoted byte
-string. Read it with `local`. A local or parameter shadows the module name.
-A string or raw backtick string gives a static `(shared-array u8)`.
+string. Read it by its bare name, as in `(return count)`. A local or
+parameter shadows a module binding with the same name. A string or raw
+backtick string gives a static `(shared-array u8)`.
 
 A named `struct` has scalar fields of the types above. Use `struct.new` to
 supply every field exactly once and `struct.get` to read fields. Records copy
