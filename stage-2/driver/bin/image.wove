@@ -1,11 +1,16 @@
 (module driver_bin_image
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Recognize linked ELF and Mach-O libraries before publishing a staged native output.")
+	(:doc "Check the native image kind before publishing staged libraries or retained-string executables.")
 
 	(use c-header "<fcntl.h>" (only open O_RDONLY O_CLOEXEC O_NOFOLLOW O_NONBLOCK (type Mode)))
 	(use c-header "<unistd.h>" (only close read (type Size)))
 	(use c-header "<sys/stat.h>" (only fstat S_ISREG (type Stat)))
+
+	(use wove-file "../../c/arguments.wove" (only (value executable_string_marker)))
+	(use wove-file "../../text/bytes.wove" (only same_bytes))
+	(use wove-file "../files.wove" (only file_stamp read_source_file))
+	(use wove-file "../output.wove" (only (value runtime_include)))
 
 	(fn elf_shared_image
 		(:doc "Check ELF identification and ET_DYN at e_type in the encoded byte order.")
@@ -35,30 +40,218 @@
 			(return (bool.and (bool.or (u32.eq (local magic) 0xfeedfaceu32) (u32.eq (local magic) 0xfeedfacfu32))
 				(u32.eq (u32.from-be-bytes (borrow-shared (local kind))) 6u32)))))
 
-	(fn linked_image
-		(:doc "Reject nonregular and nonlibrary output even if the Clang driver reported success.")
-		(params (path (shared-array u8)) (os u8)) (returns bool)
+	(fn read_image_prefix
+		(:doc "Read an exact prefix from a regular staged file and close its descriptor.")
+		(params (path (shared-array u8)) (header (mut-array u8))) (returns bool)
 		(body
 			(let flags (i32.from-u32 (u32.or (u32.from-i32 (local O_RDONLY))
 				(u32.or (u32.from-i32 (local O_CLOEXEC))
 					(u32.or (u32.from-i32 (local O_NOFOLLOW)) (u32.from-i32 (local O_NONBLOCK)))))))
 			(let descriptor (call open (borrow-shared (local path)) (local flags) (int.convert Mode 0i32)))
-			(if (i32.ltz (local descriptor)) (then (return (bool false))))
-			(let-mut info (struct.new Stat))
-			(let-mut header (array.alloc u8 32i32))
-			(let width (int.convert Size (array.len (local header))))
-			(let-mut valid (bool false))
 			(if
-				(:doc "Only complete headers from regular staged files qualify for native format checking.")
-				(bool.and (bool.and (i32.eqz (call fstat (local descriptor) (borrow-mut (local info))))
-						(call S_ISREG (struct.get (local info) st_mode)))
-					(i64.eq (int.convert i64 (call read (local descriptor) (borrow-mut (local header)) (local width))) 32i64))
-				(then
-					(if
-						(:doc "Use the explicit Clang target's executable format.")
-						(u8.eq (local os) 2u8)
-						(then (set (local valid) (call mach_dylib_header (borrow-shared (local header)))))
-						(else (set (local valid) (call elf_shared_image (borrow-shared (local header))))))))
+				(:doc "An unopened path has no readable prefix.")
+				(i32.ltz (local descriptor))
+				(then (return (bool false))))
+			(let-mut info (struct.new Stat))
+			(let width (int.convert Size (array.len (local header))))
+			(let valid (bool.and
+				(bool.and (i32.eqz (call fstat (local descriptor) (borrow-mut (local info))))
+					(call S_ISREG (struct.get (local info) st_mode)))
+				(i64.eq (int.convert i64 (call read (local descriptor) (borrow-mut (local header)) (local width)))
+					(int.convert i64 (local width)))))
 			(let closed (call close (local descriptor)))
 			(return (bool.and (local valid) (i32.eqz (local closed))))))
+
+	(fn linked_image
+		(:doc "Reject nonregular and nonlibrary output even if the Clang driver reported success.")
+		(params (path (shared-array u8)) (os u8)) (returns bool)
+		(body
+			(let-mut header (array.alloc u8 32i32))
+			(if
+				(:doc "A regular staged file must contain its complete native header.")
+				(bool.not (call read_image_prefix (borrow-shared (local path)) (borrow-mut (local header))))
+				(then (return (bool false))))
+			(if
+				(:doc "Use the explicit Clang target's executable format.")
+				(u8.eq (local os) 2u8)
+				(then (return (call mach_dylib_header (borrow-shared (local header))))))
+			(return (call elf_shared_image (borrow-shared (local header))))))
+
+	(fn requires_executable_image
+		(:doc "Read the process-lifetime requirement from the checked C unit before invoking the linker.")
+		(params (path (shared-array u8))) (returns bool)
+		(body
+			(let width (array.len (local executable_string_marker)))
+			(let offset (array.len (local runtime_include)))
+			(let total (i32.add (local offset) (local width)))
+			(let-mut prefix (array.alloc u8 (local total)))
+			(return (bool.and (call read_image_prefix (borrow-shared (local path)) (borrow-mut (local prefix)))
+				(call same_bytes (borrow-shared (local prefix)) (local offset) (local total)
+					(borrow-shared (local executable_string_marker)) 0i32 (local width))))))
+
+	(fn image_word
+		(:doc "Read one checked binary field of two, four, or eight bytes.")
+		(params (bytes (shared-array u8)) (offset i32) (width i32) (little bool)) (returns u64)
+		(body
+			(let-mut value 0u64)
+			(let-mut index 0i32)
+			(while
+				(:doc "Accumulate bytes in network order regardless of their order in the image.")
+				(i32.lt (local index) (local width))
+				(body
+					(let-mut byte_index (local index))
+					(if
+						(:doc "A little-endian field starts with the least-significant byte.")
+						(local little)
+						(then (set (local byte_index) (i32.sub (i32.dec (local width)) (local index)))))
+					(let byte (array.load (local bytes) (i32.add (local offset) (local byte_index))))
+					(set (local value) (u64.or (u64.shl (local value) 8i32) (u64.from-u8 (local byte))))
+					(set (local index) (i32.inc (local index)))))
+			(return (local value))))
+
+	(fn elf_dynamic_pie
+		(:doc "Check that PT_DYNAMIC declares DF_1_PIE, which the ELF loader rejects as a shared library.")
+		(params (bytes (shared-array u8)) (start u64) (size u64) (width i32) (little bool)) (returns bool)
+		(body
+			(let length (u64.from-i32 (array.len (local bytes))))
+			(if
+				(:doc "Ignore incomplete dynamic tables before converting offsets to slice positions.")
+				(bool.or (u64.lt (local length) (local start))
+					(u64.lt (u64.sub (local length) (local start)) (local size)))
+				(then (return (bool false))))
+			(let-mut cursor (i32.from-u64 (local start)))
+			(let end (i32.from-u64 (u64.add (local start) (local size))))
+			(let stride (i32.add (local width) (local width)))
+			(let-mut saw_flags (bool false))
+			(let-mut pie (bool false))
+			(while
+				(:doc "Visit whole dynamic entries only, stopping at the first DT_NULL.")
+				(i32.not-lt (i32.sub (local end) (local cursor)) (local stride))
+				(body
+					(let tag (call image_word (borrow-shared (local bytes)) (local cursor) (local width) (local little)))
+					(if
+						(:doc "DT_NULL terminates the loader's view of this table.")
+						(u64.eqz (local tag))
+						(then (return (local pie))))
+					(if
+						(:doc "DT_FLAGS_1 carries DF_1_PIE in both ELF classes.")
+						(u64.eq (local tag) 0x6ffffffbu64)
+						(then
+							(if
+								(:doc "Duplicate flags make the loader interpretation ambiguous.")
+								(local saw_flags)
+								(then (return (bool false))))
+							(set (local saw_flags) (bool true))
+							(let flags (call image_word (borrow-shared (local bytes))
+								(i32.add (local cursor) (local width)) (local width) (local little)))
+							(set (local pie) (u64.not-eqz (u64.and (local flags) 0x08000000u64)))))
+					(set (local cursor) (i32.add (local cursor) (local stride)))))
+			(return (bool false))))
+
+	(fn elf_pie
+		(:doc "Find PT_DYNAMIC in a bounded ELF32 or ELF64 program-header table.")
+		(params (bytes (shared-array u8)) (wide bool) (little bool)) (returns bool)
+		(body
+			(let size (array.len (local bytes)))
+			(let-mut header 52i32)
+			(let-mut width 4i32)
+			(let-mut entries 32i32)
+			(let-mut program_offset 28i32)
+			(let-mut entry_width 42i32)
+			(let-mut dynamic_size 16i32)
+			(if
+				(:doc "ELF64 widens addresses, file offsets, and the program-header entry layout.")
+				(local wide)
+				(then
+					(set (local header) 64i32)
+					(set (local width) 8i32)
+					(set (local entries) 56i32)
+					(set (local program_offset) 32i32)
+					(set (local entry_width) 54i32)
+					(set (local dynamic_size) 32i32)))
+			(if
+				(:doc "The file must contain the complete ELF header before reading table coordinates.")
+				(i32.lt (local size) (local header))
+				(then (return (bool false))))
+			(let start (call image_word (borrow-shared (local bytes)) (local program_offset) (local width) (local little)))
+			(let stride (call image_word (borrow-shared (local bytes)) (local entry_width) 2i32 (local little)))
+			(let count (call image_word (borrow-shared (local bytes)) (i32.add (local entry_width) 2i32) 2i32 (local little)))
+			(let length (u64.from-i32 (local size)))
+			(let extent (u64.mul (local stride) (local count)))
+			(if
+				(:doc "Only complete entries within the file can describe a loadable segment.")
+				(bool.or (u64.not-eq (local stride) (u64.from-i32 (local entries)))
+					(bool.or (u64.lt (local length) (local start))
+						(u64.lt (u64.sub (local length) (local start)) (local extent))))
+				(then (return (bool false))))
+			(let-mut cursor (i32.from-u64 (local start)))
+			(let end (i32.from-u64 (u64.add (local start) (local extent))))
+			(let-mut found (bool false))
+			(let-mut position 0u64)
+			(let-mut filesize 0u64)
+			(while
+				(:doc "The dynamic segment carries loader flags even if the section table was stripped.")
+				(i32.lt (local cursor) (local end))
+				(body
+					(let kind (call image_word (borrow-shared (local bytes)) (local cursor) 4i32 (local little)))
+					(if
+						(:doc "PT_DYNAMIC selects the table consumed by the loader.")
+						(u64.eq (local kind) 2u64)
+						(then
+							(if
+								(:doc "Exactly one dynamic segment can supply loader flags.")
+								(local found)
+								(then (return (bool false))))
+							(set (local found) (bool true))
+							(set (local position) (call image_word (borrow-shared (local bytes))
+								(i32.add (local cursor) (local width)) (local width) (local little)))
+							(set (local filesize) (call image_word (borrow-shared (local bytes))
+								(i32.add (local cursor) (local dynamic_size)) (local width) (local little)))))
+					(set (local cursor) (i32.add (local cursor) (local entries)))))
+			(return (bool.and (local found) (call elf_dynamic_pie (borrow-shared (local bytes))
+				(local position) (local filesize) (local width) (local little))))))
+
+	(fn linked_executable_image
+		(:doc "Accept Mach-O executables and ELF executables, including PIEs that cannot be dlopened.")
+		(params (path (shared-array u8))) (returns bool)
+		(body
+			(let-mut header (array.alloc u8 32i32))
+			(if
+				(:doc "A failed tool artifact cannot provide process-lifetime storage.")
+				(bool.not (call read_image_prefix (borrow-shared (local path)) (borrow-mut (local header))))
+				(then (return (bool false))))
+			(let magic (call image_word (borrow-shared (local header)) 0i32 4i32 (bool false)))
+			(let mach_little (bool.or (u64.eq (local magic) 0xcefaedfeu64) (u64.eq (local magic) 0xcffaedfeu64)))
+			(if
+				(:doc "MH_EXECUTE is the only supported Mach-O type for retained storage.")
+				(bool.or (local mach_little)
+					(bool.or (u64.eq (local magic) 0xfeedfaceu64) (u64.eq (local magic) 0xfeedfacfu64)))
+				(then (return (u64.eq (call image_word (borrow-shared (local header)) 12i32 4i32 (local mach_little)) 2u64))))
+			(let class (array.load (local header) 4i32))
+			(let data (array.load (local header) 5i32))
+			(if
+				(:doc "Both supported ELF classes and byte orders carry the same object-kind field.")
+				(bool.not (bool.and (u64.eq (local magic) 0x7f454c46u64)
+					(bool.and (bool.or (u8.eq (local class) 1u8) (u8.eq (local class) 2u8))
+						(bool.or (u8.eq (local data) 1u8) (u8.eq (local data) 2u8)))))
+				(then (return (bool false))))
+			(let little (u8.eq (local data) 1u8))
+			(let kind (call image_word (borrow-shared (local header)) 16i32 2i32 (local little)))
+			(if
+				(:doc "ET_EXEC cannot be loaded as an ELF shared object.")
+				(u64.eq (local kind) 2u64)
+				(then (return (bool true))))
+			(if
+				(:doc "An ET_DYN image needs the loader's PIE flag before publication.")
+				(u64.not-eq (local kind) 3u64)
+				(then (return (bool false))))
+			(let stamp (call file_stamp (borrow-shared (local path))))
+			(let length (struct.get (local stamp) length))
+			(if
+				(:doc "Reject an unsuitable staged file before allocating its snapshot.")
+				(i32.lt (local length) 32i32)
+				(then (return (bool false))))
+			(let-mut bytes (array.alloc u8 (local length)))
+			(return (bool.and (call read_source_file (borrow-shared (local path)) (local stamp) (borrow-mut (local bytes)))
+				(call elf_pie (borrow-shared (local bytes)) (u8.eq (local class) 2u8) (local little))))))
 )

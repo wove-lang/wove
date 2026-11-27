@@ -26,6 +26,7 @@
 	(use wove-file "./c.wove" (only write_translation_unit))
 	(use wove-file "./units.wove" (only plan_unit_assignments can_share_program_preamble write_numbered_pass (type UnitIndex)))
 	(use wove-file "./library.wove" (only check_library_exports write_library_abi))
+	(use wove-file "../c/arguments.wove" (only (value c_static_string_argument)))
 	(use wove-file "../source/target.wove" (only (value library_mode)))
 	(use wove-file "./tests.wove" (only write_test_entry))
 	(use wove-file "./embeds.wove" (only bind_graph_embeds bind_module_embeds))
@@ -41,7 +42,7 @@
 	(struct
 		(:doc "Entry and inventory indices or the first error from checking the graph.")
 		GraphPlan
-		(fields (entry i32) (library_os u8) (test_count i32) (call_count i32) (file i32) (start i32) (end i32) (error u32)
+		(fields (entry i32) (library_os u8) (retained_strings bool) (test_count i32) (call_count i32) (file i32) (start i32) (end i32) (error u32)
 			(related_start i32) (related_end i32)))
 
 	(fn graph_output
@@ -622,9 +623,25 @@
 		(params (file i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32))
 		(returns GraphPlan)
 		(body
-			(return (struct.new GraphPlan (entry -1i32) (library_os 0u8) (test_count -1i32) (call_count 0i32)
+			(return (struct.new GraphPlan (entry -1i32) (library_os 0u8) (retained_strings (bool false)) (test_count -1i32) (call_count 0i32)
 				(file (local file)) (start (local start)) (end (local end)) (error (local error))
 				(related_start (local related_start)) (related_end (local related_end))))))
+
+	(fn first_retained_literal
+		(:doc "Find the first checked retained argument in this native image.")
+		(params (expressions (shared-array ScalarExpression))) (returns i32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Only checked retained arguments carry the original literal location.")
+				(i32.lt (local index) (array.len (local expressions)))
+				(body
+					(if
+						(:doc "This checked expression represents a retained native string.")
+						(u32.eq (struct.get (array.load (local expressions) (local index)) kind) (local c_static_string_argument))
+						(then (return (local index))))
+					(set (local index) (i32.inc (local index)))))
+			(return -1i32)))
 
 	(fn check_graph_plan
 		(:doc "Check the inventory, signatures, and bodies once in their original order.")
@@ -683,8 +700,20 @@
 				(then (return (call graph_plan_error (struct.get (local checked) file)
 					(struct.get (local checked) start) (struct.get (local checked) end) (struct.get (local checked) error)
 					(struct.get (local checked) related_start) (struct.get (local checked) related_end)))))
+			(let retained (call first_retained_literal (borrow-shared (local expressions))))
+			(if
+				(:doc "A retained literal needs process-lifetime backing, which a shared-library graph cannot provide.")
+				(u32.eq (struct.get (local resolved) mode) (local library_mode))
+				(then
+					(if
+						(:doc "Report the original literal even when a dependency made the call.")
+						(i32.not-ltz (local retained))
+						(then
+							(let argument (array.load (local expressions) (local retained)))
+							(return (call graph_plan_error (struct.get (local argument) target)
+								(struct.get (local argument) start) (struct.get (local argument) end) 24u32 -1i32 -1i32))))))
 			(return (struct.new GraphPlan (entry (struct.get (local signatures) entry))
-				(library_os (local library_os)) (test_count (local test_count))
+				(library_os (local library_os)) (retained_strings (i32.not-ltz (local retained))) (test_count (local test_count))
 				(call_count (struct.get (local checked) count)) (file (local root)) (start 0i32) (end 0i32) (error 0u32)
 				(related_start -1i32) (related_end -1i32)))))
 )

@@ -40,7 +40,8 @@
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null c_null_argument_kind
 		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode c_handle_mut_mode is_c_exclusive_owner_mode
-		is_c_storage_mode is_c_storage_init_mode is_c_handle_init_mode is_c_consuming_mode (value c_open_variadic_tail) (value c_shared_handle_slot_mode)))
+		is_c_storage_mode is_c_storage_init_mode is_c_handle_init_mode is_c_consuming_mode (value c_open_variadic_tail) (value c_shared_handle_slot_mode)
+		(value c_static_string_mode) (value c_static_string_argument)))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
 	(use wove-file "../source/types.wove" (only void_type is_builtin_integer_value is_builtin_float is_builtin_numeric is_builtin_scalar builtin_type_keyword reference_mode (value f128_type) (value worker_receipt_type) (value worker_queue_type) (value worker_pool_type) (value worker_permit_type)))
 	(use wove-file "../source/float_ops.wove" (only float_literal_shape is_float_conversion (value float_literal)))
@@ -1953,6 +1954,43 @@
 				(call expression_row (local indirect_call_kind) (local result) -1i32 (local operand) 0i32 0i32 (bool false)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
+	(fn plan_static_c_string
+		(:doc "Check a retained argument as a direct string literal and record its original file and span.")
+		(params (source (shared-array u8)) (argument SourceNode) (index i32) (caller ScalarFunction)
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(if
+				(:doc "Only a direct literal supplies static native storage.")
+				(u32.not-eq (struct.get (local argument) kind) 2u32)
+				(then (return (call entry_at (local argument) -1i32 24u32))))
+			(let start (struct.get (local argument) start))
+			(let end (struct.get (local argument) end))
+			(let-mut bytes (array.alloc u8 (i32.sub (local end) (local start))))
+			(let decoded (call decode_string (borrow-shared (local source))
+				(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
+				(borrow-mut (local bytes))))
+			(if
+				(:doc "Preserve the string decoder's original error location.")
+				(u32.gtz (struct.get (local decoded) error))
+				(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local decoded) start))
+					(end (struct.get (local decoded) end)) (error (struct.get (local decoded) error)) (related -1i32)))))
+			(let-mut byte_index 0i32)
+			(while
+				(:doc "An embedded NUL would truncate the registered text.")
+				(i32.lt (local byte_index) (struct.get (local decoded) written))
+				(body
+					(if
+						(:doc "Reject the original literal when its decoded bytes contain NUL.")
+						(u8.eqz (array.load (local bytes) (local byte_index)))
+						(then (return (call entry_at (local argument) -1i32 24u32))))
+					(set (local byte_index) (i32.inc (local byte_index)))))
+			(let base (struct.get (local caller) source_base))
+			(array.store (local expressions) (local index)
+				(call expression_row (local c_static_string_argument) 34u32 (struct.get (local caller) file) -1i32
+					(i32.sub (local start) (local base)) (i32.sub (local end) (local base)) (bool false)))
+			(return (call entry_at (local argument) (local index) 0u32))))
+
 	(fn plan_call
 		(:doc `Resolve a direct call and seed each argument from its formal type.
 
@@ -2080,12 +2118,24 @@
 						(:doc "A null-only slot cannot take caller-owned storage.")
 						(bool.and (call is_c_null_mode (local mode)) (bool.not (local null)))
 						(then (return (call entry_at (local operand) -1i32 24u32))))
+					(let retained (u8.eq (local mode) (local c_static_string_mode)))
 					(if
-						(:doc "An explicit null supplies no operand to evaluate or borrow.")
-						(local null)
+						(:doc "Retained literals and explicit nulls require no evaluated temporary.")
+						(bool.or (local retained) (local null))
 						(then
-							(array.store (local expressions) (local argument)
-								(call expression_row (call c_null_argument_kind) 0u32 -1i32 -1i32 0i32 0i32 (bool false))))
+							(if
+								(:doc "A native static literal supplies initialized backing storage.")
+								(local retained)
+								(then
+									(let checked (call plan_static_c_string (borrow-shared (local source)) (local operand)
+										(local argument) (local caller) (borrow-mut (local expressions))))
+									(if
+										(:doc "A borrowed or malformed argument keeps its original span.")
+										(u32.gtz (struct.get (local checked) error))
+										(then (return (local checked)))))
+								(else
+									(array.store (local expressions) (local argument)
+										(call expression_row (call c_null_argument_kind) 0u32 -1i32 -1i32 0i32 0i32 (bool false))))))
 						(else
 							(let-mut argument_type (struct.get (local param) type))
 							(let-mut native_formal -1i32)
