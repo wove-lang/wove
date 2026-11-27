@@ -277,6 +277,12 @@ compilation. The probe uses preceding C includes in emission order and
 checks for declarations introduced by the selected header. Dependency and compilation database output options apply to the final
 build. Availability errors use the importing source span.
 
+For `(type Name (:pragma (c_optional)) (c-type "name_t"))`, the selected
+header must supply the exact scalar typedef in the active feature
+profile. The driver accepts builtin numeric, bit-precise integer, and
+enumeration types. Optional native record views and caller-owned record
+storage require a complete record from the selected header.
+
 | Code | Meaning |
 | --- | --- |
 | 71 | Optional C function unavailable |
@@ -284,6 +290,10 @@ build. Availability errors use the importing source span.
 | 73 | C header probe output malformed |
 | 74 | C header probe workspace exhausted |
 | 75 | C header probe setup failed |
+| 76 | Optional C integer macro unavailable |
+| 77 | Optional C expression macro unavailable |
+| 91 | Optional C record unavailable or incomplete |
+| 92 | Optional C scalar typedef unavailable |
 
 The native `query_clang_header` API in `clang/query.wove` accepts a Clang
 executable, NUL-terminated target and include arguments, the header spelling,
