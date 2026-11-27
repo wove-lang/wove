@@ -732,14 +732,19 @@ owner explicitly with `(move (local input))`. The callee owns the incoming
 array for its function body and releases it at exit unless it transfers
 ownership again.
 
-A Wove parameter such as `(params (packet Packet))` can also take a
-named struct with owning fields and no borrowed fields. Pass a fresh
-`Packet` or transfer an existing one with `(move (local packet))`.
-The argument must have the exact declared struct type. A live loan or a
-partially moved struct prevents the transfer. After a successful move the
-caller cannot use the original value. On exit the callee releases every
-field it still owns, and any owner forwarded by move remains with its
-recipient.
+An ordinary Wove function can also take a struct with owning fields and no
+borrowed fields, or a fixed array of owning elements. A struct parameter
+can name an explicit record specialization. A fixed parameter such as
+`(params (rows (array (owned-array i32) 2)))` keeps its exact element type
+and extent at every level.
+
+Pass a fresh value or transfer a complete owner with `(move (local rows))`.
+A live overlapping loan prevents the move. A fixed-array argument checks
+that its inline owner slots are occupied before later arguments are
+evaluated. An empty slot traps at the argument's source span. After a
+successful move the caller's original value is unavailable. The callee
+drops every field or slot it still owns at exit and can forward owners to
+another ordinary Wove call by explicit move.
 
 ## Joined workers
 
