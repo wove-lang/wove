@@ -399,6 +399,22 @@ verify both values and preserve the emitted include order. [Private intrinsic ty
 | `FLT_SNAN`, `DBL_SNAN`, `LDBL_SNAN` | The Clang 22 resource header exposes the three exact signaling NaN expressions in C23. The fixtures compare their representations with the native macros and exclude the six x86-64 extended-format padding bytes. The Clang 21 profiles and Clang 22 C11/C17 profiles report unavailable imports at their original names. |
 | `FLT_IS_IEC_60559`, `DBL_IS_IEC_60559`, `LDBL_IS_IEC_60559`, `__STDC_VERSION_FLOAT_H__`, and decimal floating-point limit macros | Unavailable in the audited headers and feature profiles. |
 
+## Bundled message formatting
+
+The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public
+`MM_*` macros on arm64 and x86-64 in C11, C17, and C23. The function uses
+native `long` classification, `int` severity and result, and four
+`const char *` strings. The GNU `addseverity` declaration is visible on
+glibc with the Wove feature defines. It is absent in the strict default
+glibc profiles and the audited Darwin profiles.
+
+| Members | Coverage or outstanding contract |
+| --- | --- |
+| Classification flags, severities, and returned status codes | The installed fixture compares all 20 `int` selections to their C header values. Darwin and glibc differ for `MM_APPL` (16, 8), `MM_UTIL` (32, 16), `MM_OPSYS` (64, 32), `MM_RECOVER` (4096, 64), `MM_NRECOV` (8192, 128), `MM_NOCON` (2, 4), and `MM_NOTOK` (3, −1). |
+| `MM_NULLMC`, `MM_NULLSEV`, `MM_NULLLBL`, `MM_NULLTXT`, `MM_NULLACT`, `MM_NULLTAG` | `MM_NULLMC` is native `long` zero and `MM_NULLSEV` is `int` zero. `fmtmsg_text` fixes the label, severity, action, and tag omissions for text-only calls. Selecting any of the four string omissions at an individual call awaits nullable C strings. [Nullable C strings #584](https://github.com/wove-lang/wove/issues/584) |
+| `fmtmsg` | The complete-string and text-only calls print controlled output to stderr and return `MM_OK`. The fixture also checks the no-destination result and `MM_NOMSG` with stderr closed. |
+| `addseverity` | The guarded `addseverity_remove` alias passes a fixed null string and exposes the original status. Registration and replacement retain the supplied string in glibc, so they need storage that outlives the call. [glibc implementation](https://codebrowser.dev/glibc/glibc/stdlib/fmtmsg.c.html#303) · [Retained severity storage #585](https://github.com/wove-lang/wove/issues/585) |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
