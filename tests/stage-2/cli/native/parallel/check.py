@@ -21,16 +21,28 @@ def words(items, values, groups):
 		if item in groups else [item.format_map(values)])]
 
 
-# Require the expected compile actions before a single ordered link.
-def check_calls(log, expected, values, groups):
+# Match complete argv so a preflight can verify the same frontend settings as the objects.
+def check_arguments(actual, expected, values, groups):
+	pattern = words(expected, values, groups)
+	assert len(actual) == len(pattern) and all(re.fullmatch(p, a) for p, a in zip(pattern, actual)), (actual, pattern)
+
+
+# Require the expected preflight, compile actions, and single ordered link.
+def check_calls(log, phase, values, groups):
 	calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 	calls = [argv for argv in calls if "-###" not in argv]
+	preflight = [argv for argv in calls if "-o" not in argv]
+	assert calls[:len(preflight)] == preflight, calls
+	probes = phase.get("preflight", [])
+	assert len(preflight) == phase.get("preflight_count", len(probes)), (phase["argv"], preflight)
+	for actual, expected in zip(preflight, probes):
+		check_arguments(actual, expected, values, groups)
+	calls = calls[len(preflight):]
+	expected = phase["calls"]
 	written = {argv[argv.index("-o") + 1].rsplit("/", 1)[-1]: argv for argv in calls}
 	assert len(calls) == len(written) == len(expected), (calls, expected)
 	for output, pattern in expected.items():
-		actual = written[output]
-		pattern = words(pattern, values, groups)
-		assert len(actual) == len(pattern) and all(re.fullmatch(p, a) for p, a in zip(pattern, actual)), (actual, pattern)
+		check_arguments(written[output], pattern, values, groups)
 	assert all("-c" in argv for argv in calls[:-1]), calls
 
 
@@ -69,8 +81,9 @@ def check_phase(phase, compiler, clang, root, manifest, values, groups):
 		assert record["location"] == diagnostic["location"], record
 		stderr = prefix + "\n" if prefix else ""
 	assert stderr == phase.get("stderr", ""), result
-	check_calls(log, phase["calls"], values, groups)
-	assert all(entry_snapshot(root / path) == old for path, old in preserved.items()), preserved
+	check_calls(log, phase, values, groups)
+	for path, old in preserved.items():
+		assert entry_snapshot(root / path) == old, path
 	assert all((root / path).is_file() for path in phase.get("present", [])), phase
 	assert all(not (root / path).exists() for path in phase.get("absent", [])), phase
 	assert not list(root.rglob(".wovec-bin.*")), phase

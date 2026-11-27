@@ -573,6 +573,10 @@ The serial path also handles debug builds, graphs with unverified native
 headers, and Clang options that cannot safely be repeated per unit.
 The retained `main.c` is the complete serial C translation unit in
 either mode.
+For eligible ordinary C bridges, the include audit uses the object
+compile's Clang settings. A successful split into N units adds N + 3
+Clang invocations for the audit. A graph with no selected C headers adds
+zero, and an unsuccessful audit stops at its first failed check.
 Ordinary `cc` and `bin` builds take one explicit UTF-8 source path and
 require an output target with a basename. `cc --check` accepts one or
 more explicit UTF-8 source paths and checks each entry's imports, embeds,

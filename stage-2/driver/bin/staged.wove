@@ -4,7 +4,8 @@
 	(:doc "Compile ordered staged C units with the bounded runner and link their private objects once.")
 
 	(use wove-file "../arguments.wove" (only frontend_capacity write_probe_options write_plain_argument
-		write_library_compile_options write_library_link_options write_link_inputs write_clang_standard write_native_output write_include_trace))
+		write_library_compile_options write_library_link_options write_link_inputs write_clang_standard write_native_output write_include_trace
+		write_frontend_search (value quiet_unused_probe_inputs)))
 	(use wove-file "../paths.wove" (only directory_width join_file_path))
 	(use wove-file "./jobs.wove" (only clang_trace_environment))
 	(use wove-file "./object_jobs.wove" (only run_object_jobs (type ObjectJob)))
@@ -12,6 +13,7 @@
 	(use wove-file "../../io/process_file.wove" (only start_process_files))
 	(use wove-file "../../io/capture/child.wove" (only reap_capture_child))
 	(use wove-file "../../text/copy.wove" (only append_bytes))
+	(use wove-file "../../text/bytes.wove" (only same_bytes))
 	(use wove-file "../../text/equal.wove" (only equal_bytes))
 	(use wove-file "../../text/decimal_write.wove" (only write_decimal_i32))
 	(use wove-file "../../cli/command/args.wove" (only (type CommandArgument)))
@@ -85,6 +87,60 @@
 			(return (bool.and (i32.eqz (call lstat (borrow-shared path) (borrow-mut info)))
 				(call S_ISREG (struct.get info st_mode))))))
 
+	(fn write_object_frontend
+		(:doc "Apply the same library visibility, relocation, and C language flags to objects and their audit.")
+		(params (library bool) (output (mut-array u8)) (offset i32)) (returns i32)
+		(body
+			(let-mut start offset)
+			(if
+				(:doc "Only library objects need the library compilation defaults.")
+				library
+				(then (set start (call write_library_compile_options (borrow-mut output) start))))
+			(let quiet (call write_plain_argument (borrow-shared quiet_unused) (borrow-mut output) start))
+			(let phase (call write_plain_argument (borrow-shared compile_only) (borrow-mut output) quiet))
+			(let language (call write_plain_argument (borrow-shared language_flag) (borrow-mut output) phase))
+			(return (call write_plain_argument (borrow-shared c_language) (borrow-mut output) language))))
+
+	(fn numbered_probe_arguments
+		(:doc "Recover the exact frontend arguments for numbered objects from the checked serial probe arguments.")
+		(params (prefix (shared-array u8)) (serial (shared-array u8)) (library bool))
+		(returns (owned-array u8))
+		(body
+			(let size (array.len prefix))
+			(let directory (call directory_width (borrow-shared serial)))
+			(if
+				(:doc "Only a complete packed prefix and private stage can authorize header replay.")
+				(bool.or (i32.eqz directory) (i32.lt 2147483519i32 size))
+				(then (return (array.alloc u8 0i32))))
+			(let-mut packed (array.alloc u8 (i32.add size 128i32)))
+			(let original (call write_frontend_search (borrow-shared (array.range serial 0i32 (i32.dec directory)))
+				(borrow-mut packed)))
+			(let-mut end size)
+			(if
+				(:doc "The serial library probe already has a final quiet flag. Object compilation adds it after its PIC flags.")
+				library
+				(then
+					(let width (array.len quiet_unused_probe_inputs))
+					(set end (i32.sub end (i32.inc width)))
+					(if
+						(:doc "A prefix without the expected final argument cannot be repacked for object compilation.")
+						(bool.or (i32.ltz end)
+							(bool.or (u8.not-eqz (array.load prefix (i32.dec size)))
+								(bool.not (call same_bytes (borrow-shared prefix) end (i32.dec size)
+									(borrow-shared quiet_unused_probe_inputs) 0i32 width))))
+						(then (return (array.alloc u8 0i32))))))
+			(if
+				(:doc "Check that only the driver-owned search prefix is replaced. Keep every user argument in order.")
+				(bool.or (bool.or (i32.ltz original) (i32.lt end original))
+					(bool.not (call same_bytes (borrow-shared prefix) 0i32 original (borrow-shared packed) 0i32 original)))
+				(then (return (array.alloc u8 0i32))))
+			(let stage (call write_frontend_search (borrow-shared (array.range serial 0i32 directory)) (borrow-mut packed)))
+			(if (i32.ltz stage) (then (return (array.alloc u8 0i32))))
+			(let forwarded (call append_bytes (borrow-shared (array.range prefix original end)) (borrow-mut packed) stage))
+			(let written (call write_object_frontend library (borrow-mut packed) forwarded))
+			(if (i32.ltz written) (then (return (array.alloc u8 0i32))))
+			(return (call copy_argument (borrow-shared (array.range packed 0i32 written))))))
+
 	(fn pack_object_arguments
 		(:doc "Carry effective driver options to the C compile, including target and SDK options supplied in ldflags.")
 		(params (prefix (shared-array u8)) (unit (shared-array u8)) (object (shared-array u8)) (library bool) (traced bool))
@@ -97,15 +153,8 @@
 				(u64.gt width 2147483647u64)
 				(then (return (array.alloc u8 0i32))))
 			(let-mut packed (array.alloc u8 (i32.from-u64 width)))
-			(let-mut start (call append_bytes (borrow-shared prefix) (borrow-mut packed) 0i32))
-			(if
-				(:doc "Only library objects require the library visibility and relocation defaults.")
-				library
-				(then (set start (call write_library_compile_options (borrow-mut packed) start))))
-			(let quiet (call write_plain_argument (borrow-shared quiet_unused) (borrow-mut packed) start))
-			(let phase (call write_plain_argument (borrow-shared compile_only) (borrow-mut packed) quiet))
-			(let language (call write_plain_argument (borrow-shared language_flag) (borrow-mut packed) phase))
-			(let dialect (call write_plain_argument (borrow-shared c_language) (borrow-mut packed) language))
+			(let start (call append_bytes (borrow-shared prefix) (borrow-mut packed) 0i32))
+			(let dialect (call write_object_frontend library (borrow-mut packed) start))
 			(let input (call write_plain_argument (borrow-shared unit) (borrow-mut packed) dialect))
 			(let-mut end (call write_native_output (borrow-shared object) (borrow-mut packed) input))
 			(if
