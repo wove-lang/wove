@@ -272,6 +272,114 @@ wvrt_slice wvrt_borrow_callback_path(const char *wvrt_path, int32_t wvrt_file,
 	return (wvrt_slice){wvrt_path, (int32_t)wvrt_length, 1};
 }
 
+// Publish a nullable typed out pointer only when it names the original caller record.
+wvrt_c_buffered_record wvrt_c_buffered_record_out(const void *wvrt_storage, const void *wvrt_result,
+	wvrt_mut_slice wvrt_scratch, size_t wvrt_extent, int32_t wvrt_status,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	// The C buffer length may cover only a prefix of the mutable input view.
+	if (wvrt_scratch.wvrt_length < 0 || wvrt_scratch.wvrt_element_size != 1 ||
+		wvrt_extent > (size_t)wvrt_scratch.wvrt_length || (wvrt_extent != 0 && wvrt_scratch.wvrt_items == NULL)) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C record byte extent out of bounds");
+	}
+	// A C error must leave the nullable result absent.
+	if (wvrt_result != NULL && (wvrt_result != wvrt_storage || wvrt_status != 0)) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "invalid caller-backed C record result");
+	}
+	return (wvrt_c_buffered_record){wvrt_result, {wvrt_scratch.wvrt_items, (int32_t)wvrt_extent, 1}};
+}
+
+// Unwrapping keeps the original range and record address in the same descriptor.
+wvrt_c_buffered_record wvrt_c_buffered_record_require(wvrt_c_buffered_record wvrt_value,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	(void)wvrt_require_borrow_at_span(wvrt_value.wvrt_record, wvrt_file, wvrt_start, wvrt_end);
+	return wvrt_value;
+}
+
+// Reconstruct an in-bounds address from the original byte view without comparing unrelated pointers.
+static wvrt_slice wvrt_buffered_bytes_from(wvrt_slice wvrt_bytes, const void *wvrt_value, size_t wvrt_width,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	uintptr_t wvrt_base = (uintptr_t)wvrt_bytes.wvrt_items;
+	uintptr_t wvrt_address = (uintptr_t)wvrt_value;
+	// A valid value must leave room for a complete byte or pointer slot at this address.
+	if (wvrt_bytes.wvrt_length < 0 || wvrt_bytes.wvrt_element_size != 1 || wvrt_value == NULL ||
+		wvrt_bytes.wvrt_items == NULL || wvrt_address < wvrt_base ||
+		wvrt_width > (size_t)wvrt_bytes.wvrt_length ||
+		wvrt_address - wvrt_base > (size_t)wvrt_bytes.wvrt_length - wvrt_width) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C record member outside its byte storage");
+	}
+	size_t wvrt_offset = (size_t)(wvrt_address - wvrt_base);
+	return (wvrt_slice){(const unsigned char *)wvrt_bytes.wvrt_items + wvrt_offset,
+		wvrt_bytes.wvrt_length - (int32_t)wvrt_offset, 1};
+}
+
+// Lend the bytes before the first NUL in the original caller-provided range.
+wvrt_slice wvrt_c_buffered_string(wvrt_slice wvrt_bytes, const char *wvrt_value,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	wvrt_slice wvrt_tail = wvrt_buffered_bytes_from(wvrt_bytes, wvrt_value, 1, wvrt_file, wvrt_start, wvrt_end);
+	const unsigned char *wvrt_terminator = memchr(wvrt_tail.wvrt_items, 0, (size_t)wvrt_tail.wvrt_length);
+	// A terminating byte in an adjacent allocation cannot establish the string length.
+	if (wvrt_terminator == NULL) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C record string has no bounded terminator");
+	}
+	wvrt_tail.wvrt_length = (int32_t)(wvrt_terminator - (const unsigned char *)wvrt_tail.wvrt_items);
+	return wvrt_tail;
+}
+
+// Copy the exact pointer representation from a potentially unaligned native table.
+static char *wvrt_buffered_string_pointer(const unsigned char *wvrt_slot) {
+	char *wvrt_value;
+	memcpy(&wvrt_value, wvrt_slot, sizeof(wvrt_value));
+	return wvrt_value;
+}
+
+// Validate all member pointers before publishing the count of a terminated borrowed table.
+wvrt_c_buffered_strings wvrt_c_buffered_string_table(wvrt_slice wvrt_bytes, char *const *wvrt_table,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	wvrt_slice wvrt_tail = wvrt_buffered_bytes_from(wvrt_bytes, wvrt_table, sizeof(char *),
+		wvrt_file, wvrt_start, wvrt_end);
+	const unsigned char *wvrt_slots = wvrt_tail.wvrt_items;
+	size_t wvrt_capacity = (size_t)wvrt_tail.wvrt_length / sizeof(char *);
+	// Only complete in-range slots can be read, including the null pointer terminator.
+	for (size_t wvrt_index = 0; wvrt_index < wvrt_capacity; ++wvrt_index) {
+		char *wvrt_member = wvrt_buffered_string_pointer(wvrt_slots + wvrt_index * sizeof(char *));
+		// The absent member ends the table and is excluded from the readable count.
+		if (wvrt_member == NULL) {
+			return (wvrt_c_buffered_strings){wvrt_slots, (int32_t)wvrt_index, wvrt_bytes};
+		}
+		(void)wvrt_c_buffered_string(wvrt_bytes, wvrt_member, wvrt_file, wvrt_start, wvrt_end);
+	}
+	wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C record string table has no bounded terminator");
+}
+
+// A foreign reader may dereference the original table with its native alignment requirement.
+void wvrt_c_buffered_string_table_require_aligned(wvrt_slice wvrt_bytes, char *const *wvrt_table,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	wvrt_c_buffered_strings wvrt_strings = wvrt_c_buffered_string_table(wvrt_bytes, wvrt_table,
+		wvrt_file, wvrt_start, wvrt_end);
+	// Buffered Wove reads use byte copies. Ordinary C record readers require aligned pointers.
+	if ((uintptr_t)wvrt_strings.wvrt_table % _Alignof(char *) != 0) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "unaligned C record string table for native borrow");
+	}
+}
+
+// Lend a selected row after checking both its pointer slot and original string extent.
+wvrt_slice wvrt_c_buffered_string_load(wvrt_c_buffered_strings wvrt_strings, int32_t wvrt_index,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	// The checked count excludes the table's terminating null pointer.
+	if (wvrt_index < 0 || wvrt_index >= wvrt_strings.wvrt_length) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C record string table index out of bounds");
+	}
+	wvrt_slice wvrt_slots = wvrt_buffered_bytes_from(wvrt_strings.wvrt_bytes, wvrt_strings.wvrt_table,
+		sizeof(char *), wvrt_file, wvrt_start, wvrt_end);
+	// Verify enough whole slots exist before multiplying by the pointer width.
+	if ((size_t)wvrt_index >= (size_t)wvrt_slots.wvrt_length / sizeof(char *)) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C record member outside its byte storage");
+	}
+	size_t wvrt_offset = (size_t)wvrt_index * sizeof(char *);
+	char *wvrt_member = wvrt_buffered_string_pointer((const unsigned char *)wvrt_slots.wvrt_items + wvrt_offset);
+	return wvrt_c_buffered_string(wvrt_strings.wvrt_bytes, wvrt_member, wvrt_file, wvrt_start, wvrt_end);
+}
+
 // Check reserved entries before passing a native size to the owning library.
 size_t wvrt_c_string_vector_offset(int64_t wvrt_reserved, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end) {

@@ -1242,6 +1242,41 @@ original native record. A missing entry traps at the unwrap span. The
 reference uses the native layout and never releases the record. Once the
 option leaves scope, the stream can be read, rewound, or closed again.
 
+A reentrant C function can fill a native record and its caller-owned
+scratch bytes. Mark the byte view and status place with
+`(c_record_out buffer status)` and name the record parameter in the
+existing `from` clause.
+
+```wove
+(struct Group (c-type "struct group")
+    (fields (gr_gid Gid) (gr_name cstr) (gr_passwd cstr) (gr_mem cstrs)))
+
+(fn getgrgid_r
+    (:pragma (c_bytes buffer length) (c_record_out buffer status))
+    (params (gid Gid) (entry (mut-ref Group)) (buffer (mut-array u8))
+        (length Size) (status (mut-ref i32)))
+    (returns (optional (shared-ref Group)) (from entry)))
+```
+
+The C function returns an `i32` status and takes the exact native pointer
+to pointer in place of the final Wove status parameter. Wove writes the
+status unchanged and returns an absent option if C leaves the out
+pointer null. A present result must point to the original record and
+have zero status. The fixed call's buffer count is passed by value.
+Both the record and the byte view remain exclusively lent for the
+lexical scope of the immutable result binding, including when the
+option is absent. Two calls can keep their results live with separate
+records and buffers.
+
+After `optional.unwrap`, `struct.get` can read scalar fields and
+project declared `cstr` and `cstrs` fields. A `cstr` field yields the
+original bytes before its NUL. A `cstrs` field yields a table with
+`native.cstrs.len` and `native.cstrs.load`. Every string, pointer slot,
+and terminator must fit inside the exact range passed to C. Wove reads
+unaligned slots by copying their pointer representation. A read-only
+call such as `putgrent` can borrow the same record after Wove checks all
+declared pointer fields and the table's native alignment.
+
 A fixed C argument in `params` supplies a native operand at that position.
 Use `(const command i32 F_SETFL)` for a header constant,
 `(const property (c-type "filesec_property_t") FILESEC_MODE)` for a header

@@ -31,6 +31,7 @@
 		A place read links to its root binding expression in projection.
 		A projected loan links to the borrowed field expression there. A direct
 		Wove call with a borrowed result links to its selected actual argument.
+		A caller-backed C record also links to its scratch loan in extent_check.
 		An array growth operation links to its checked owner place there.
 		The indirect-local marker distinguishes a for item's backing pointer
 		from an ordinary local. Other negative projections have no field path. An integer literal
@@ -39,6 +40,7 @@
 		with the byte range to emit. A module binding reference (62) names its
 		defining name node. The same row at a declaration marks its storage used.
 		A native inline field projection carries its exact byte extent in asset_end.
+		A caller-backed pointer field marks that slot negative and keeps its diagnostic file in asset_start.
 		A checked local or scalar reference read records whether its place permits writes. An
 		exact call loan with unknown length carries extent_check and the
 		call argument's original runtime span. An inline owner argument uses a
@@ -73,18 +75,25 @@
 
 	(fn borrowed_call_row
 		(:doc "Retain the evaluated argument that lends storage to a call's result.")
-		(params (type u32) (callee i32) (first i32) (source i32))
+		(params (type u32) (callee i32) (first i32) (source i32) (scratch i32))
 		(returns ScalarExpression)
 		(body
 			(return (struct.new ScalarExpression (kind 3u32) (type type) (target callee)
 				(first first) (start 0i32) (end 0i32) (negative (bool false)) (borrowed_owner (bool false))
-				(mutable_place (bool false)) (projection source) (asset_start 0i32) (asset_end 0i32) (extent_check -1i32)))))
+				(mutable_place (bool false)) (projection source) (asset_start 0i32) (asset_end 0i32) (extent_check scratch)))))
 
 	(fn returned_call_argument
 		(:doc "Read provenance only from checked direct calls that carry an argument row.")
 		(params (value ScalarExpression)) (returns i32)
 		(body
 			(if (u32.eq (struct.get value kind) 3u32) (then (return (struct.get value projection))))
+			(return -1i32)))
+
+	(fn returned_call_scratch
+		(:doc "Read the second backing place only from a checked direct caller-backed record call.")
+		(params (value ScalarExpression)) (returns i32)
+		(body
+			(if (u32.eq (struct.get value kind) 3u32) (then (return (struct.get value extent_check))))
 			(return -1i32)))
 
 	(fn runtime_expression
@@ -105,6 +114,22 @@
 		(params (value ScalarExpression)) (returns bool)
 		(body (return (bool.and (u32.eq (struct.get value kind) 52u32)
 			(i32.gtz (struct.get value asset_end))))))
+
+	(fn is_buffered_field_projection
+		(:doc "A native pointer field needs the byte range of its caller-backed receiver.")
+		(params (value ScalarExpression)) (returns bool)
+		(body (return (bool.and (u32.eq (struct.get value kind) 52u32)
+			(i32.eq (struct.get value asset_end) -1i32)))))
+
+	(fn buffered_field_projection
+		(:doc "Retain the original native field and source span for its bounded runtime read.")
+		(params (type u32) (target i32) (receiver i32) (file i32) (start i32) (end i32))
+		(returns ScalarExpression)
+		(body
+			(return (struct.new ScalarExpression (kind 52u32) (type type) (target target)
+				(first receiver) (start start) (end end) (negative (bool false)) (borrowed_owner (bool false))
+				(mutable_place (bool false)) (projection -1i32) (asset_start file) (asset_end -1i32)
+				(extent_check -1i32)))))
 
 	(fn writable_place
 		(:doc `Identify a writable local or existing exclusive reference at the root of a place.`)
@@ -636,6 +661,16 @@
 					(set field (struct.get (array.load nodes field) next_sibling))))
 			(return (bool false))))
 
+	(fn exclusive_backing_conflicts
+		(:doc "An output record keeps each captured exclusive argument's original place locked.")
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression)) (index i32)
+			(target i32) (local_binding bool) (place i32)) (returns bool)
+		(body
+			(let origin (array.load expressions index))
+			(return (bool.and
+				(call same_binding target local_binding (struct.get origin target) (struct.get origin borrowed_owner))
+				(call paths_overlap (borrow-shared nodes) (borrow-shared expressions) place
+					(struct.get origin projection))))))
 	(fn has_scoped_place_loan
 		(:doc `Check active lexical loans of a local array, parameter, or parent view.
 
@@ -654,6 +689,16 @@
 					(let-mut value (struct.get declaration value))
 					(let initializer (array.load expressions value))
 					(let-mut argument (call returned_call_argument initializer))
+					(let scratch (call returned_call_scratch initializer))
+					(let pair (i32.not-ltz scratch))
+					(if
+						(:doc "Either backing store can invalidate a live caller-backed record.")
+						(bool.and pair
+							(bool.or (call exclusive_backing_conflicts (borrow-shared nodes) (borrow-shared expressions)
+									argument target local_binding place)
+								(call exclusive_backing_conflicts (borrow-shared nodes) (borrow-shared expressions)
+									scratch target local_binding place)))
+						(then (return (bool true))))
 					(let vector (u32.eq (struct.get initializer kind) native_cstrs_view_kind))
 					(if
 						(:doc "A native vector borrows its original storage owner for the binding's scope.")
@@ -674,8 +719,8 @@
 						(i32.not-ltz rows)
 						(then (set value rows)))
 					(let origin (array.load expressions value))
-					(let native (bool.and (i32.not-ltz argument)
-						(bool.or vector (call is_native_owner_write_loan (struct.get origin kind)))))
+					(let native (bool.or pair (bool.and (i32.not-ltz argument)
+						(bool.or vector (call is_native_owner_write_loan (struct.get origin kind))))))
 					(if
 						(:doc "A native record or vector holds its original owner loan until the binding leaves scope.")
 						(bool.and native

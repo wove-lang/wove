@@ -18,11 +18,12 @@
 	(use wove-file "../scalar/syntax.wove" (only is_byte_view_type))
 	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
-	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/function_rows.wove" (only is_record_out_status (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./text.wove" (only c_span c_byte c_literal_text c_text_fragment write_callback_adapter_name write_c_name write_temporary_name write_static_bytes (type CNameRole)))
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./runtime.wove" (only write_runtime_site write_c_number write_site_number write_slice_items))
 	(use wove-file "./c_formals.wove" (only fixed_c_needs_prototype native_owner_needs_prototype native_long_double_needs_prototype native_static_strings native_sync_callbacks write_fixed_c_argument))
+	(use wove-file "./c_record_out.wove" (only open_record_out close_record_out))
 	(use wove-file "./c_snapshots.wove" (only open_c_snapshot close_c_snapshot))
 	(use wove-file "./c_record_snapshots.wove" (only open_record_snapshot close_record_snapshot))
 	(use wove-file "./c_extents.wove" (only write_c_extent_checks write_c_array_pointer_type))
@@ -334,6 +335,7 @@
 			(return (call c_literal_text (borrow-shared close_variadic_target)
 				(borrow-mut output) target writing))))
 
+	(let record_out_address "&wvrt_record_out")
 	(let discarded_macro_operand "(void)(")
 
 	(fn write_c_native_invocation
@@ -355,7 +357,8 @@
 			(let macro_value (bool.and macro saves_result))
 			(let tail (struct.get callee c_variadic))
 			(let open (i32.eq tail c_open_variadic_tail))
-			(let checked (bool.or (bool.or (struct.get callee c_void_pointer)
+			(let record_out (i32.not-ltz (struct.get callee return_scratch)))
+			(let checked (bool.or (bool.or (bool.or record_out (struct.get callee c_void_pointer))
 					(bool.or (bool.or (struct.get callee c_handle_out) (i32.gtz tail))
 						(bool.or (call native_static_strings (borrow-shared parameters) callee)
 							(call native_sync_callbacks (borrow-shared parameters) callee))))
@@ -395,6 +398,11 @@
 						(borrow-mut output) cursor name_prefix writing))
 					(set cursor (call c_byte (borrow-mut output) cursor 61u8 writing))))
 			(if
+				(:doc "An adapted record-out call declares its typed nullable slot before entering C.")
+				record_out
+				(then (set cursor (call open_record_out (borrow-shared source) expression tree_base
+					(borrow-mut output) cursor name_prefix writing))))
+			(if
 				(:doc "The snapshot wrapper copies the native return into the Wove result temporary.")
 				snapshot
 				(then
@@ -429,11 +437,21 @@
 					(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) item))
 					(let fixed (bool.and (struct.get callee c_fixed)
 						(call is_c_fixed_formal (borrow-shared source) (borrow-shared nodes) parts)))
+					(let record_out_slot (bool.and (bool.not fixed) (call is_record_out_status callee formal)))
 					(if
-						(:doc "Use the captured Wove flag only after the native call.")
+						(:doc "Use the captured Wove status or flag only after the native call.")
 						(bool.and (bool.not fixed)
-							(u8.eq (struct.get (array.load parameters formal) c_mode) c_owner_marker_flag_mode))
+							(bool.or record_out_slot
+								(u8.eq (struct.get (array.load parameters formal) c_mode) c_owner_marker_flag_mode)))
 						(then
+							(if
+								(:doc "The typed out pointer replaces the status place in the C argument list.")
+								record_out_slot
+								(then
+									(if wrote_argument (then (set cursor (call c_byte (borrow-mut output) cursor 44u8 writing))))
+									(set cursor (call c_literal_text (borrow-shared record_out_address)
+										(borrow-mut output) cursor writing))
+									(set wrote_argument (bool true))))
 							(set argument (struct.get (array.load nodes argument) next_sibling))
 							(set formal (i32.inc formal)))
 						(else
@@ -546,6 +564,13 @@
 				(:doc "Close the extra parentheses around a value macro expansion.")
 				macro_value
 				(then (set cursor (call c_byte (borrow-mut output) cursor 41u8 writing))))
+			(if
+				(:doc "The finished expression retains the two original loans and the exact C status.")
+				record_out
+				(then
+					(let end (call close_record_out (borrow-shared source) (borrow-shared nodes) (borrow-shared parameters)
+						expression caller callee index (borrow-mut output) cursor name_prefix writing))
+					(return (call c_byte (borrow-mut output) end 59u8 writing))))
 			(if
 				(:doc "The native pointer never leaves the full expression that copies it.")
 				record_snapshot

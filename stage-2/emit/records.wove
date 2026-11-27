@@ -6,16 +6,16 @@
 	Definitions and member accesses share the native field ordinal.
 	Type names keep the defining declaration identity across source layouts.`)
 
-	(use wove-file "../scalar/syntax.wove" (only (value native_cstrs_type)))
+	(use wove-file "../scalar/syntax.wove" (only (value native_cstrs_type) (value buffered_cstrs_type)))
 	(use wove-file "../source/slice_options.wove" (only (value optional_view_type)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts))
-	(use wove-file "../source/c_records.wove" (only read_c_inline_field (type CInlineField)))
+	(use wove-file "../source/c_records.wove" (only read_c_inline_field c_pointer_field_kind (value cstrs_field_kind) (type CInlineField)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/types.wove" (only is_builtin_scalar (value worker_receipt_type) (value worker_queue_type) (value worker_pool_type) (value worker_permit_type)))
 	(use wove-file "../scalar/owners.wove" (only is_optional_owner))
 	(use wove-file "../scalar/records.wove" (only is_callable_type callable_index is_callable_layout is_callable_alias record_index member_value_type is_generic_template is_specialization_alias is_owned_row_layout is_record_type is_enum_layout is_payload_enum is_native_integer native_integer_index is_typed_slice is_writable_slice is_array_owner
-		is_fixed_array is_optional_record_borrow optional_record_borrow_reference is_native_pointer_owner_layout is_native_record is_native_long_double_layout native_field_type is_place_reference is_mutable_place_reference place_reference_target (type ScalarRecord)))
+		is_fixed_array is_optional_buffered_record is_buffered_record is_optional_record_borrow optional_record_borrow_reference is_native_pointer_owner_layout is_native_record is_native_long_double_layout native_field_type is_place_reference is_mutable_place_reference place_reference_target (type ScalarRecord)))
 	(use wove-file "../scalar/loans.wove" (only (value indirect_local_place) (type ScalarExpression)))
 	(use wove-file "../scalar/function_rows.wove" (only (type ScalarParameter)))
 	(use wove-file "./callable_types.wove" (only write_callable_name write_callable_layout))
@@ -60,6 +60,9 @@
 				(borrow-shared source)
 				(struct.get name start) (struct.get name end)))))
 
+	(let buffered_record_descriptor "wvrt_c_buffered_record")
+	(let buffered_strings_descriptor "wvrt_c_buffered_strings")
+
 	(fn write_value_type
 		(:doc `Write the exact C type of a checked value, including a local record.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
@@ -80,6 +83,16 @@
 					(return (call write_native_type (borrow-shared source)
 						(array.load nodes (struct.get row native))
 						(borrow-mut output) offset writing))))
+			(if
+				(:doc "A caller-backed record keeps both the native pointer and the restricted scratch range.")
+				(bool.or (call is_optional_buffered_record type) (call is_buffered_record type))
+				(then (return (call c_literal_text (borrow-shared buffered_record_descriptor)
+					(borrow-mut output) offset writing))))
+			(if
+				(:doc "A buffered string table retains both its checked length and original scratch range.")
+				(u32.eq type buffered_cstrs_type)
+				(then (return (call c_literal_text (borrow-shared buffered_strings_descriptor)
+					(borrow-mut output) offset writing))))
 			(if
 				(:doc "A nullable native borrow uses the same read-only pointer representation as its present reference.")
 				(call is_optional_record_borrow type)
@@ -451,6 +464,29 @@
 			(return (call c_literal_text (borrow-shared c_inline_check_end)
 				(borrow-mut output) last writing))))
 
+	(let native_string_field_check "_Static_assert(WVRT_C_FIELD_IS_CSTR(")
+	(let native_table_field_check "_Static_assert(WVRT_C_FIELD_IS_CSTRS(")
+	(let close_native_pointer_check "),\"Wove C pointer field does not match its declared native type\");\n")
+
+	(fn write_native_pointer_field_check
+		(:doc "Check the full native pointer type without evaluating the field or relying on decay.")
+		(params (source (shared-array u8)) (repr SourceNode) (member SourceNode) (kind u32)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let-mut open offset)
+			(if
+				(:doc "Capture char ** for a table and char * or const char * for an individual string.")
+				(u32.eq kind cstrs_field_kind)
+				(then (set open (call c_literal_text (borrow-shared native_table_field_check)
+					(borrow-mut output) open writing)))
+				(else (set open (call c_literal_text (borrow-shared native_string_field_check)
+					(borrow-mut output) open writing))))
+			(let type (call write_native_type (borrow-shared source) repr (borrow-mut output) open writing))
+			(let comma (call c_byte (borrow-mut output) type 44u8 writing))
+			(let name (call c_span (borrow-shared source) (struct.get member start) (struct.get member end)
+				(borrow-mut output) comma writing))
+			(return (call c_literal_text (borrow-shared close_native_pointer_check) (borrow-mut output) name writing))))
+
 	(fn write_native_field_checks
 		(:doc `Use C11 type selection to verify the header member names and compatible types without evaluating an access.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
@@ -467,27 +503,35 @@
 					(let node (array.load nodes field))
 					(let name (array.load nodes (struct.get node first_child)))
 					(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) node))
-					(let inline (call read_c_inline_field (borrow-shared source) (borrow-shared nodes)
-						(array.load nodes (struct.get parts operands))))
+					(let operand (array.load nodes (struct.get parts operands)))
+					(let pointer (call c_pointer_field_kind (borrow-shared source) operand))
 					(if
-						(:doc "Addressing the whole inline field preserves its C array extent for the ABI assertion.")
-						(i32.gtz (struct.get inline extent))
-						(then (set cursor (call write_native_inline_check (borrow-shared source)
-							repr name inline layout (borrow-mut output)
-							cursor writing)))
+						(:doc "C pointer members retain a distinct exact type check.")
+						(u32.gtz pointer)
+						(then (set cursor (call write_native_pointer_field_check (borrow-shared source)
+							repr name pointer (borrow-mut output) cursor writing)))
 						(else
-							(let type (call native_field_type (borrow-shared source) (borrow-shared nodes)
-								(borrow-shared records) layout field))
-							(set cursor (call c_literal_text (borrow-shared c_member_check_open) (borrow-mut output) cursor writing))
-							(set cursor (call write_native_type (borrow-shared source) repr
-								(borrow-mut output) cursor writing))
-							(set cursor (call c_literal_text (borrow-shared c_member_check_access) (borrow-mut output) cursor writing))
-							(set cursor (call c_span (borrow-shared source) (struct.get name start)
-								(struct.get name end) (borrow-mut output) cursor writing))
-							(set cursor (call c_byte (borrow-mut output) cursor 44u8 writing))
-							(set cursor (call write_value_type (borrow-shared source) (borrow-shared nodes)
-								(borrow-shared records) type (borrow-mut output) cursor name_prefix writing))
-							(set cursor (call c_literal_text (borrow-shared c_member_check_close) (borrow-mut output) cursor writing))))
+							(let inline (call read_c_inline_field (borrow-shared source) (borrow-shared nodes)
+								(array.load nodes (struct.get parts operands))))
+							(if
+								(:doc "Addressing the whole inline field preserves its C array extent for the ABI assertion.")
+								(i32.gtz (struct.get inline extent))
+								(then (set cursor (call write_native_inline_check (borrow-shared source)
+									repr name inline layout (borrow-mut output)
+									cursor writing)))
+								(else
+									(let type (call native_field_type (borrow-shared source) (borrow-shared nodes)
+										(borrow-shared records) layout field))
+									(set cursor (call c_literal_text (borrow-shared c_member_check_open) (borrow-mut output) cursor writing))
+									(set cursor (call write_native_type (borrow-shared source) repr
+										(borrow-mut output) cursor writing))
+									(set cursor (call c_literal_text (borrow-shared c_member_check_access) (borrow-mut output) cursor writing))
+									(set cursor (call c_span (borrow-shared source) (struct.get name start)
+										(struct.get name end) (borrow-mut output) cursor writing))
+									(set cursor (call c_byte (borrow-mut output) cursor 44u8 writing))
+									(set cursor (call write_value_type (borrow-shared source) (borrow-shared nodes)
+										(borrow-shared records) type (borrow-mut output) cursor name_prefix writing))
+									(set cursor (call c_literal_text (borrow-shared c_member_check_close) (borrow-mut output) cursor writing))))))
 					(set field (struct.get node next_sibling))))
 			(return cursor)))
 
