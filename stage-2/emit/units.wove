@@ -1,17 +1,19 @@
 (module emit_units
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Partition and emit an already checked, bridge-free executable graph for the native graph probe.")
+	(:doc "Partition and emit an already checked executable graph for the native graph probe.")
 
 	(use wove-file "../hashing/base32hex.wove" (only encode_base32hex32))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
-	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
 	(use wove-file "../source/graph.wove" (only includes_c_header (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "./bindings.wove" (only write_module_bindings (value declared_module_bindings) (value linked_module_bindings)))
-	(use wove-file "./c.wove" (only write_program_preamble write_program_bodies))
+	(use wove-file "./c.wove" (only has_c_arguments write_program_preamble write_program_bodies))
+	(use wove-file "../source/types.wove" (only is_builtin_scalar void_type))
+	(use wove-file "./headers.wove" (only append_includes (type CInclude) (type Includes)))
 	(use wove-file "./text.wove" (only c_literal_text))
 	(use wove-file "./workers.wove" (only is_record_worker_launch))
 
@@ -122,16 +124,64 @@
 					(set (local index) (i32.inc (local index)))))
 			(return (local width))))
 
+	(fn ordinary_bridge_signature
+		(:doc "Admit direct scalar C calls and leave native adapters on the serial path.")
+		(params (function ScalarFunction) (parameters (shared-array ScalarParameter))) (returns bool)
+		(body
+			(let result (struct.get (local function) result))
+			(if
+				(:doc "Void and built-in scalar results need no native type or ownership adapter.")
+				(bool.or (bool.or (call has_c_arguments (local function))
+					(i32.not-eqz (struct.get (local function) c_variadic)))
+					(bool.and (u32.not-eq (local result) (call void_type)) (bool.not (call is_builtin_scalar (local result)))))
+				(then (return (bool false))))
+			(let-mut index (struct.get (local function) params))
+			(let end (i32.add (local index) (struct.get (local function) arity)))
+			(while
+				(:doc "A native parameter must have a plain scalar ABI with no borrow or layout dependency.")
+				(i32.lt (local index) (local end))
+				(body
+					(if
+						(:doc "Header-specific types belong to the native ABI follow-up.")
+						(bool.not (call is_builtin_scalar (struct.get (array.load (local parameters) (local index)) type)))
+						(then (return (bool false))))
+					(set (local index) (i32.inc (local index)))))
+			(return (bool true))))
+
 	(fn can_share_program_preamble
-		(:doc "Admit graphs whose preamble is safe to include in every numbered unit.")
-		(params (bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression))) (returns bool)
+		(:doc "Keep the numbered header limited to ordinary native calls and stateless generated declarations.")
+		(params (bindings (shared-array GraphBinding)) (functions (shared-array ScalarFunction))
+			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression))) (returns bool)
 		(body
 			(let-mut index 0i32)
+			(let-mut has_bridge (bool false))
 			(while
-				(:doc "Selected bridge imports need a policy for native preprocessing across units.")
+				(:doc "Selected native values, types, and optional members have separate C contracts.")
 				(i32.lt (local index) (array.len (local bindings)))
 				(body
-					(if (call includes_c_header (array.load (local bindings) (local index))) (then (return (bool false))))
+					(let binding (array.load (local bindings) (local index)))
+					(if
+						(:doc "Only a required function binding can contribute an audited native include.")
+						(call includes_c_header (local binding))
+						(then
+							(if
+								(:doc "Other bridge namespaces and optional resolution remain separate.")
+								(bool.or (u32.gtz (struct.get (local binding) namespace)) (struct.get (local binding) optional))
+								(then (return (bool false))))
+							(set (local has_bridge) (bool true))))
+					(set (local index) (i32.inc (local index)))))
+			(let count (call checked_function_count (borrow-shared (local functions))))
+			(set (local index) 0i32)
+			(while
+				(:doc "Check native signatures before any numbered output is published.")
+				(bool.and (local has_bridge) (i32.lt (local index) (local count)))
+				(body
+					(let function (array.load (local functions) (local index)))
+					(if
+						(:doc "The numbered emitter reuses the checked direct call without generating an ABI wrapper.")
+						(bool.and (i32.ltz (struct.get (local function) body))
+							(bool.not (call ordinary_bridge_signature (local function) (borrow-shared (local parameters)))))
+						(then (return (bool false))))
 					(set (local index) (i32.inc (local index)))))
 			(set (local index) 0i32)
 			(while
@@ -180,20 +230,23 @@
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
 			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
 			(assignments (shared-array UnitIndex)) (count i32) (name_prefix i32)
+			(paths (shared-array u8)) (includes (shared-array CInclude)) (headers Includes)
 			(output (mut-array u8)) (ends (mut-array UnitIndex)) (writing bool))
 		(returns u32)
 		(body
 			(let-mut cursor (call write_program_preamble (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local statements))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-shared (local expressions))
-				(borrow-mut (local output)) 0u32 (bool false) (bool false) (bool false)
+				(borrow-mut (local output)) 0u32 (struct.get (local headers) stdint) (struct.get (local headers) runtime) (bool false)
 				(local declared_module_bindings) (local name_prefix) (local writing)))
 			(if (local writing) (then (array.store (local ends) 0i32 (struct.new UnitIndex (value (i32.from-u32 (local cursor)))))))
 			(let-mut unit 0i32)
 			(while
-				(:doc "Give every body unit the common declarations and exactly the definitions assigned to it.")
+				(:doc "Replay the audited serial include prefix at translation-unit depth before generated declarations.")
 				(i32.lt (local unit) (local count))
 				(body
+					(set (local cursor) (call append_includes (borrow-shared (local paths)) (borrow-shared (local includes))
+						(struct.get (local headers) count) (borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local cursor) (call c_literal_text (borrow-shared (local program_include))
 						(borrow-mut (local output)) (local cursor) (local writing)))
 					(if

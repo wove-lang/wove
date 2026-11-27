@@ -32,7 +32,7 @@
 	(use wove-file "./embeds.wove" (only bind_graph_embeds bind_module_embeds))
 	(use wove-file "./text.wove" (only native_name_prefix_slot))
 	(use wove-file "../source/c_formals.wove" (only find_c_fixed_formal c_fixed_formal_at))
-	(use wove-file "./headers.wove" (only include_capacity prepare_includes write_includes (type CInclude) (type Includes)))
+	(use wove-file "./headers.wove" (only include_capacity prepare_includes write_includes matches_verified_includes (type CInclude) (type Includes)))
 	(use wove-file "../source/assets.wove" (only (type EmbedAsset) (type EmbedCheck) embed_check))
 
 	(struct GraphOutput
@@ -425,15 +425,38 @@
 			(trees (shared-array ScalarTree)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
 			(parameters (shared-array ScalarParameter)) (statements (shared-array ScalarStatement))
 			(records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
-			(root i32) (plan GraphPlan) (assignments (shared-array UnitIndex)) (count i32)
+			(root i32) (plan GraphPlan) (assignments (shared-array UnitIndex)) (count i32) (verified_includes (shared-array u8))
 			(output (mut-array u8)) (unit_ends (mut-array UnitIndex))) (returns GraphOutput)
 		(body
 			(let tree (array.load (local trees) (local root)))
 			(if
-				(:doc "Bridge preprocessing and generated entry wrappers stay on the serial path.")
+				(:doc "Generated entry wrappers and nonordinary native bridges stay on the serial path.")
 				(bool.or (bool.or (u8.not-eqz (struct.get (local plan) library_os)) (i32.not-ltz (struct.get (local plan) test_count)))
-					(bool.not (call can_share_program_preamble (borrow-shared (local bindings))
-						(borrow-shared (local expressions)))))
+					(bool.not (call can_share_program_preamble (borrow-shared (local bindings)) (borrow-shared (local functions))
+						(borrow-shared (local parameters)) (borrow-shared (local expressions)))))
+				(then (return (call graph_output 0i32 -2i32 (local root)
+					(struct.get (local tree) start) (struct.get (local tree) end) 0u32))))
+			(let binding_count (array.len (local bindings)))
+			(let capacity (call include_capacity (borrow-shared (local bindings)) 0i32 (local binding_count)))
+			(if
+				(:doc "An oversized include plan is a capacity error before publishing output.")
+				(i32.ltz (struct.get (local capacity) bytes))
+				(then (return (call graph_output 0i32 -1i32 (local root)
+					(struct.get (local tree) start) (struct.get (local tree) end) 16u32))))
+			(let-mut paths (array.alloc u8 (struct.get (local capacity) bytes)))
+			(let-mut includes (array.alloc CInclude (struct.get (local capacity) rows)))
+			(let headers (call prepare_includes (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) 0i32 (local binding_count)
+				(borrow-mut (local paths)) (borrow-mut (local includes))))
+			(if
+				(:doc "An invalid include operand points at the original bridge declaration.")
+				(u32.gtz (struct.get (local headers) error))
+				(then (return (call graph_output 0i32 -1i32 (struct.get (local headers) file)
+					(struct.get (local headers) start) (struct.get (local headers) end) (struct.get (local headers) error)))))
+			(if
+				(:doc "Every split unit replays the complete audited include context, including prerequisites not named by its calls.")
+				(bool.not (call matches_verified_includes (borrow-shared (local paths)) (borrow-shared (local includes))
+					(struct.get (local headers) count) (borrow-shared (local verified_includes))))
 				(then (return (call graph_output 0i32 -2i32 (local root)
 					(struct.get (local tree) start) (struct.get (local tree) end) 0u32))))
 			(let-mut occupied (array.alloc u8 (call native_prefix_capacity (borrow-shared (local bindings)) (borrow-shared (local records)))))
@@ -444,6 +467,7 @@
 				(borrow-shared (local bindings)) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 				(borrow-shared (local assignments)) (local count) (local name_prefix)
+				(borrow-shared (local paths)) (borrow-shared (local includes)) (local headers)
 				(borrow-mut (local output)) (borrow-mut (local unit_ends)) (bool false)))
 			(if
 				(:doc "On a short buffer leave all segments unwritten and retain the serial emitter's source span.")
@@ -455,6 +479,7 @@
 				(borrow-shared (local bindings)) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 				(borrow-shared (local assignments)) (local count) (local name_prefix)
+				(borrow-shared (local paths)) (borrow-shared (local includes)) (local headers)
 				(borrow-mut (local output)) (borrow-mut (local unit_ends)) (bool true)))
 			(return (call graph_output (i32.from-u32 (local written)) -1i32 (local root)
 				(struct.get (local tree) start) (struct.get (local tree) end) 0u32))))
@@ -471,13 +496,19 @@
 		The graph probe can request a partition using one boundary row per
 		requested unit plus one for the common header. A declaration of -2
 		indicates a graph outside the supported numbered subset.
-		An empty boundary table selects the serial path.`)
+		An empty boundary table selects the serial path.
+
+		For a split with selected native headers, the caller certifies the
+		exact include prefix under the eventual C compilation context. It
+		must have checked external declarations without per-unit native state
+		or preprocessing side effects that change partitioned semantics.
+		An empty audit accepts only graphs without selected native headers.`)
 		(:expect
 			(tests "stage-2/scalar_graphs.tsv" "stage-2/test_execution.tsv" "stage-2/native_alias/cases.tsv" "stage-2/native_records/cases.tsv" "stage-2/native_values/cases.tsv")
 			(issues "gh:wove-lang/wove:71" "gh:wove-lang/wove:129" "gh:wove-lang/wove:140" "gh:wove-lang/wove:142" "gh:wove-lang/wove:144" "gh:wove-lang/wove:146" "gh:wove-lang/wove:154" "gh:wove-lang/wove:186" "gh:wove-lang/wove:194" "gh:wove-lang/wove:223" "gh:wove-lang/wove:222"))
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
 			(bindings (shared-array GraphBinding)) (resolved GraphResult) (root i32) (query_path i32) (name (shared-array u8))
-			(assets (shared-array SuppliedFile)) (private_helpers bool) (output (mut-array u8)) (callers (mut-array CallSite)) (unit_ends (mut-array UnitIndex)))
+			(assets (shared-array SuppliedFile)) (private_helpers bool) (verified_includes (shared-array u8)) (output (mut-array u8)) (callers (mut-array CallSite)) (unit_ends (mut-array UnitIndex)))
 		(returns GraphOutput)
 		(body
 			(let-mut trees (array.alloc ScalarTree (array.len (local files))))
@@ -502,7 +533,7 @@
 				(body
 					(let result (call run_scalar_graph_workspace (borrow-shared (local arena)) (borrow-shared (local files))
 						(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved) (local root)
-						(local query_path) (borrow-shared (local name)) (borrow-shared (local assets)) (local private_helpers)
+						(local query_path) (borrow-shared (local name)) (borrow-shared (local assets)) (local private_helpers) (borrow-shared (local verified_includes))
 						(borrow-shared (local trees)) (local rows) (local capacity) (borrow-mut (local output)) (borrow-mut (local callers))
 						(borrow-mut (local unit_ends))))
 					(if
@@ -522,7 +553,7 @@
 		(:doc "Check, inspect, or emit a supplied graph using one private allocation attempt.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
 			(resolved_bindings (shared-array GraphBinding)) (resolved GraphResult) (root i32) (query_path i32) (name (shared-array u8))
-			(assets (shared-array SuppliedFile)) (private_helpers bool) (trees (shared-array ScalarTree)) (rows i32)
+			(assets (shared-array SuppliedFile)) (private_helpers bool) (verified_includes (shared-array u8)) (trees (shared-array ScalarTree)) (rows i32)
 			(signatures_capacity i32) (output (mut-array u8)) (callers (mut-array CallSite)) (unit_ends (mut-array UnitIndex))) (returns GraphOutput)
 		(body
 			(let-mut bindings (array.alloc GraphBinding (array.len (local resolved_bindings))))
@@ -588,7 +619,8 @@
 							(borrow-shared (local bindings)) (borrow-shared (local trees)) (borrow-shared (local nodes))
 							(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local statements))
 							(borrow-shared (local records)) (borrow-shared (local expressions)) (local root) (local plan)
-							(borrow-shared (local assignments)) (local count) (borrow-mut (local output)) (borrow-mut (local unit_ends))))))))
+							(borrow-shared (local assignments)) (local count) (borrow-shared (local verified_includes))
+							(borrow-mut (local output)) (borrow-mut (local unit_ends))))))))
 			(let emitted (call write_graph_c (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (borrow-shared (local trees))
 				(borrow-shared (local nodes)) (borrow-shared (local functions)) (borrow-shared (local parameters))

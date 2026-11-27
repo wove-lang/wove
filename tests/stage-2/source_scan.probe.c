@@ -970,7 +970,7 @@ static bool write_graph_parts(const UnitIndex *ends, int32_t count) {
 
 // Compile or inspect a resolved graph and check that the chosen destination remains bounded.
 static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, wvrt_slice modules, wvrt_slice bindings,
-		GraphResult resolved, int32_t root, int32_t query, const char *name, int32_t capacity, bool private_helpers, int32_t unit_limit) {
+		GraphResult resolved, int32_t root, int32_t query, const char *name, int32_t capacity, bool private_helpers, int32_t unit_limit, const char *verified_includes) {
 	const bool emit = query < 0;
 	const int32_t byte_capacity = emit ? capacity : 0;
 	const int32_t site_capacity = emit ? 0 : capacity;
@@ -990,6 +990,7 @@ static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, w
 	for (int32_t index = 0; index < end_capacity; ++index) { ends[index].wv_field_0 = -1; }
 	const GraphOutput result = run_scalar_graph(arena, files, modules, bindings, resolved, root, query,
 		(wvrt_slice){name, (int32_t)strlen(name), sizeof(uint8_t)}, assets, private_helpers,
+		(wvrt_slice){verified_includes, (int32_t)strlen(verified_includes), sizeof(uint8_t)},
 		(wvrt_mut_slice){bytes + 1, byte_capacity, sizeof(uint8_t)},
 		(wvrt_mut_slice){sites, site_capacity, sizeof(CallSite)},
 		(wvrt_mut_slice){ends, end_capacity, sizeof(UnitIndex)});
@@ -1111,7 +1112,9 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 	const bool expect_name = strcmp(argv[1], "--graph-expect") == 0;
 	const bool expect_link = strcmp(argv[1], "--graph-expect-link") == 0;
 	const bool expectations = expect_name || expect_link;
-	const int first_file = (inspect || expectations) ? 7 : grouped ? 6 : (emit || tests) ? 5 : 4;
+	// A verified prefix comes from the caller's audit of the actual C include context.
+	const bool verified = grouped && argc > 7 && strcmp(argv[6], "--verified-c-prefix") == 0;
+	const int first_file = (inspect || expectations) ? 7 : grouped ? (verified ? 8 : 6) : (emit || tests) ? 5 : 4;
 	int32_t entry;
 	int32_t capacity;
 	int32_t output = 0;
@@ -1126,7 +1129,7 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 			(expect_link && strcmp(argv[4], "issue") != 0 && strcmp(argv[4], "test") != 0)) {
 		fputs("usage: source_scan --graph ENTRY SCRATCH (IDENTITY PATH FILE)...\n"
 			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
-			"       source_scan --emit-graph-units ENTRY SCRATCH CAPACITY UNITS (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
+			"       source_scan --emit-graph-units ENTRY SCRATCH CAPACITY UNITS [--verified-c-prefix PREFIX] (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --emit-private-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n"
 			"       source_scan --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n"
@@ -1185,7 +1188,7 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 		status = finish_graph(arena, supplied, (wvrt_slice){asset_storage->wvrt_items, asset_count, sizeof(SuppliedFile)},
 			(wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},
 			(wvrt_slice){bindings->wvrt_items, result.wv_field_1, sizeof(GraphBinding)}, result, files[entry].wv_field_0,
-			query, inspect ? argv[5] : "", output, private_helpers, unit_limit);
+			query, inspect ? argv[5] : "", output, private_helpers, unit_limit, verified ? argv[7] : "");
 	} else {
 		write_graph(bytes, files, count, modules->wvrt_items, bindings->wvrt_items, result);
 		status = EXIT_SUCCESS;
