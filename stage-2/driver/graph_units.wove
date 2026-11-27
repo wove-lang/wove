@@ -8,7 +8,8 @@
 	(use wove-file "./bin/units.wove" (only staged_unit_path (value program_header)))
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "../clang/native_replay.wove" (only (value lvalue_witness_prefix)
-		(value storage_type_witness_prefix) (value release_witness_prefix) (value call_witness_prefix)))
+		(value storage_type_witness_prefix) (value release_witness_prefix) (value call_witness_prefix)
+		(value record_call_witness_prefix)))
 	(use wove-file "./diagnostics.wove" (only report_argv (value publish_failure)))
 	(use wove-file "./numbered_headers.wove" (only certify_numbered_includes (value names_begin) (value names_end)
 		(value implicit_runtime) (value implicit_stdint)))
@@ -25,7 +26,8 @@
 	(use wove-file "../emit/text.wove" (only c_literal_text c_span))
 	(use wove-file "../emit/graph.wove" (only write_partitioned_graph (type GraphPlan)))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
-	(use wove-file "../emit/units.wove" (only plan_unit_assignments numbered_program_preamble numbered_storage_binding
+	(use wove-file "../emit/units.wove" (only plan_unit_assignments numbered_program_preamble
+		numbered_record_call numbered_storage_binding
 		(value numbered_preamble_replay) (type UnitIndex)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
@@ -111,6 +113,7 @@
 	(let storage_witness "typedef __typeof__((")
 	(let storage_pointer "*)0) ")
 	(let function_guard "\n#error native replay requires a direct C function\n#endif\n")
+	(struct NativeCallWitnesses (fields (width u32) (records bool)))
 
 	(fn write_function_witness
 		(:doc "Observe the direct function that the generated C call will use, including its native prototype.")
@@ -128,33 +131,42 @@
 			(return (call c_literal_text (borrow-shared witness_end_line) (borrow-mut output) width writing))))
 
 	(fn write_native_call_witnesses
-		(:doc "Certify each approved byte or snapshot call and any release against Clang's actual C declarations.")
+		(:doc "Certify each supported native call and any release against Clang's actual C declaration.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
-			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns NativeCallWitnesses)
 		(body
 			(let-mut width offset)
+			(let-mut record_calls (bool false))
 			(for
 				(:doc "The eligibility pass has already checked the exact argument and snapshot contracts.")
 				(let index) (range 0i32 (call checked_function_count (borrow-shared functions)))
 				(body
 					(let function (array.load functions index))
 					(let snapshot (struct.get function c_snapshot))
+					(if (i32.not-ltz (struct.get function body)) (then (continue)))
+					(let record (call numbered_record_call function (borrow-shared parameters) (borrow-shared records)))
+					(set record_calls (bool.or record_calls record))
 					(if
 						(:doc "Use the actual native spelling, including an explicit c-name.")
-						(bool.and (i32.ltz (struct.get function body))
-							(bool.or snapshot (i32.gtz (struct.get function c_extents))))
+						(bool.or record (bool.or snapshot (i32.gtz (struct.get function c_extents))))
 						(then
 							(let declaration (struct.get function declaration))
-							(set width (call write_function_witness (borrow-shared arena)
-								(array.load nodes (struct.get function name)) (borrow-shared call_witness_prefix)
-								declaration (borrow-mut output) width writing))
+							(let symbol (array.load nodes (struct.get function name)))
+							(if
+								(:doc "Only the record-call witness can certify SDK symbol redirects.")
+								record
+								(then (set width (call write_function_witness (borrow-shared arena) symbol
+									(borrow-shared record_call_witness_prefix) declaration (borrow-mut output) width writing)))
+								(else (set width (call write_function_witness (borrow-shared arena) symbol
+									(borrow-shared call_witness_prefix) declaration (borrow-mut output) width writing))))
 							(if
 								(:doc "The snapshot's named release is checked independently of the allocating callee.")
 								snapshot
 								(then (set width (call write_function_witness (borrow-shared arena)
 									(array.load nodes (struct.get function c_snapshot_drop)) (borrow-shared release_witness_prefix)
 									declaration (borrow-mut output) width writing))))))))
-			(return width)))
+			(return (struct.new NativeCallWitnesses (width width) (records record_calls)))))
 
 	(fn mark_storage_witnesses
 		(:doc "Select canonical owner declarations from both direct bindings and native formals.")
@@ -217,7 +229,8 @@
 	(fn write_native_value_witnesses
 		(:doc "Observe the exact expansions of the checked native operands in each include context.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
-			(storage (shared-array u8)) (functions (shared-array ScalarFunction)) (native_calls bool)
+			(storage (shared-array u8)) (functions (shared-array ScalarFunction))
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (native_calls bool)
 			(output (mut-array u8)) (writing bool))
 		(returns u32)
 		(body
@@ -281,8 +294,9 @@
 			(if
 				(:doc "Checked calls and their releases depend on consistent C declarations in both preambles.")
 				native_calls
-				(then (set width (call write_native_call_witnesses (borrow-shared arena) (borrow-shared nodes)
-					(borrow-shared functions) (borrow-mut output) width writing))))
+				(then (set width (struct.get (call write_native_call_witnesses (borrow-shared arena)
+					(borrow-shared nodes) (borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
+					(borrow-mut output) width writing) width))))
 			(if (u32.eqz width) (then (return width)))
 			(return (call c_literal_text (borrow-shared names_end) (borrow-mut output) width writing))))
 
@@ -339,9 +353,14 @@
 						(call mark_storage_witnesses (borrow-shared arena) (borrow-shared nodes)
 							(borrow-shared bindings) (borrow-shared trees) (borrow-shared parameters) (borrow-mut marked))))
 					(let storage_length (if storage (then (array.len marked)) (else 0i32)))
-					(let native_calls (bool.and (u8.lt 1u8 mode)
-						(u32.gtz (call write_native_call_witnesses (borrow-shared arena) (borrow-shared nodes)
-							(borrow-shared functions) (borrow-mut empty) 0u32 (bool false)))))
+					(let call_witnesses (if
+						(:doc "Only replayed C signatures add observations to the private probe.")
+						(u8.lt 1u8 mode)
+						(then (call write_native_call_witnesses (borrow-shared arena) (borrow-shared nodes)
+							(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
+							(borrow-mut empty) 0u32 (bool false)))
+						(else (struct.new NativeCallWitnesses (width 0u32) (records (bool false))))))
+					(let native_calls (u32.gtz (struct.get call_witnesses width)))
 					(if
 						(:doc "Measure any checked operands whose original expansions must match between units.")
 						(u8.lt 1u8 mode)
@@ -351,6 +370,7 @@
 							(set names_width (call write_native_value_witnesses (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements)
 								(borrow-shared (array.range marked 0i32 storage_length)) (borrow-shared functions)
+								(borrow-shared parameters) (borrow-shared records)
 								native_calls (borrow-mut empty) (bool false)))
 							(if
 								(:doc "Both measured fragments must fit, and a borrowed value must have a witness.")
@@ -391,6 +411,7 @@
 							(let witnesses (call write_native_value_witnesses (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements)
 								(borrow-shared (array.range marked 0i32 storage_length)) (borrow-shared functions)
+								(borrow-shared parameters) (borrow-shared records)
 								native_calls (borrow-mut names) (bool true)))
 							(if
 								(:doc "Both private probe fragments must match their measured sizes.")
@@ -404,7 +425,8 @@
 						(bool.or (i32.eqz (array.len options))
 							(bool.not (call certify_numbered_includes (borrow-shared program) (borrow-shared options)
 								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards) (borrow-shared names)
-								implicit borrowed writable (bool.or writable (bool.or storage native_calls)))))
+								implicit borrowed writable (bool.or writable (bool.or storage native_calls))
+								(struct.get call_witnesses records))))
 						(then (return 0i32)))))
 			(let-mut ends (array.alloc UnitIndex (i32.inc count)))
 			(let measured (call write_partitioned_graph (borrow-shared arena) (borrow-shared files) (borrow-shared bindings)

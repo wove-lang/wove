@@ -12,6 +12,7 @@
 	(let storage_type_witness_prefix "wove_native_storage_type_probe_")
 	(let release_witness_prefix "wove_native_release_probe_")
 	(let call_witness_prefix "wove_native_call_probe_")
+	(let record_call_witness_prefix "wove_native_record_call_probe_")
 	(let id_key "id")
 	(let name_key "name")
 	(let type_key "type")
@@ -36,6 +37,8 @@
 	(let function_prototype_kind "\"FunctionProtoType\"")
 	(let parameter_kind "\"ParmVarDecl\"")
 	(let nothrow_kind "\"NoThrowAttr\"")
+	(let nonnull_kind "\"NonNullAttr\"")
+	(let asm_label_kind "\"AsmLabelAttr\"")
 	(let const_kind "\"ConstAttr\"")
 	(let extern_storage "\"extern\"")
 	(let decay_cast "\"FunctionToPointerDecay\"")
@@ -278,20 +281,27 @@
 				(then (return getter)))
 			(return -1i32)))
 
-	(fn function_parameters_only
-		(:doc "A body-free ordinary declaration has only parameters as direct AST children.")
+	(fn function_declaration_children
+		(:doc "Check a body-free declaration and the SDK attributes admitted for witnessed record calls.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32)
-			(scratch (mut-array u8))) (returns bool)
+			(record_call bool) (scratch (mut-array u8))) (returns bool)
 		(body
 			(let-mut child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) function (borrow-mut scratch)))
 			(while
-				(:doc "An attribute or compound statement requires the ordinary serial context.")
+				(:doc "A declaration can carry parameters and only explicitly checked metadata.")
 				(i32.not-ltz child)
 				(body
+					(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) child
+						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(let attribute (bool.and record_call (bool.or
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared asm_label_kind))
+						(bool.or
+							(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared nothrow_kind))
+							(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared nonnull_kind))))))
 					(if
-						(:doc "Every child must be a formal parameter.")
-						(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) child
-							(borrow-shared parameter_kind) (borrow-mut scratch)))
+						(:doc "Reject bodies and attributes outside the audited declaration contract.")
+						(bool.not (bool.or attribute (call field_equals (borrow-shared ast)
+							(borrow-shared nodes) kind (borrow-shared parameter_kind))))
 						(then (return (bool false))))
 					(set child (struct.get (array.load nodes child) next_sibling))))
 			(return (bool true))))
@@ -299,7 +309,7 @@
 	(fn witness_direct_function
 		(:doc "Resolve a body-free external function with a fixed native prototype.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (witness i32)
-			(scratch (mut-array u8))) (returns i32)
+			(record_call bool) (scratch (mut-array u8))) (returns i32)
 		(body
 			(let address (call witness_address (borrow-shared ast) (borrow-shared nodes) witness (borrow-mut scratch)))
 			(let operand (call peel_parens (borrow-shared ast) (borrow-shared nodes)
@@ -313,9 +323,10 @@
 				(borrow-shared reference_key) (borrow-mut scratch)))
 			(let function (call referenced_function (borrow-shared ast) (borrow-shared nodes) reference (borrow-mut scratch)))
 			(if
-				(:doc "The effective context must keep an ordinary declaration without attributes or a body.")
+				(:doc "Each effective context must retain the approved body-free declaration shape.")
 				(bool.or (i32.ltz function)
-					(bool.not (call function_parameters_only (borrow-shared ast) (borrow-shared nodes) function (borrow-mut scratch))))
+					(bool.not (call function_declaration_children (borrow-shared ast) (borrow-shared nodes)
+						function record_call (borrow-mut scratch))))
 				(then (return -1i32)))
 			(let type (call single_inner (borrow-shared ast) (borrow-shared nodes) witness (borrow-mut scratch)))
 			(let expression (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) type (borrow-mut scratch)))
@@ -335,7 +346,8 @@
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (witness i32)
 			(scratch (mut-array u8))) (returns i32)
 		(body
-			(let drop (call witness_direct_function (borrow-shared ast) (borrow-shared nodes) witness (borrow-mut scratch)))
+			(let drop (call witness_direct_function (borrow-shared ast) (borrow-shared nodes)
+				witness (bool false) (borrow-mut scratch)))
 			(let parameter (call single_inner (borrow-shared ast) (borrow-shared nodes) drop (borrow-mut scratch)))
 			(if
 				(:doc "A release function with a body or attributes cannot use this proof.")
@@ -344,28 +356,38 @@
 				(then (return drop)))
 			(return -1i32)))
 
-	(fn mark_lvalue_getters
-		(:doc "Authorize only getters resolved from every generated lvalue typedef in the AST.")
-		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (getters (mut-array u8))
-			(scratch (mut-array u8))) (returns bool)
+	(fn mark_witnessed_declarations
+		(:doc "Admit extra declaration metadata only on functions resolved by selected witnesses.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (approved (mut-array u8))
+			(writable bool) (record_calls bool) (scratch (mut-array u8))) (returns bool)
 		(body
-			(let-mut found (bool false))
+			(let-mut getters (bool false))
+			(let-mut records (bool false))
 			(let-mut row (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
 			(while
 				(:doc "Each generated witness must certify its own resolved declaration.")
 				(i32.not-ltz row)
 				(body
+					(let getter (bool.and writable (i32.not-ltz (call witness_name (borrow-shared ast)
+						(borrow-shared nodes) row (borrow-shared lvalue_witness_prefix) (borrow-mut scratch)))))
+					(let record (bool.and record_calls (i32.not-ltz (call witness_name (borrow-shared ast)
+						(borrow-shared nodes) row (borrow-shared record_call_witness_prefix) (borrow-mut scratch)))))
 					(if
-						(:doc "Other typedefs and declarations do not authorize additional getters.")
-						(i32.not-ltz (call witness_name (borrow-shared ast) (borrow-shared nodes) row
-						(borrow-shared lvalue_witness_prefix) (borrow-mut scratch)))
+						(:doc "Only a proven witness may exempt its exact function declaration.")
+						(bool.or getter record)
 						(then
-							(let getter (call witness_getter (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
-							(if (i32.ltz getter) (then (return (bool false))))
-							(array.store getters getter 1u8)
-							(set found (bool true))))
+							(let function (if
+								(:doc "Getter and record-call witnesses enforce distinct native expression shapes.")
+								getter
+								(then (call witness_getter (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+								(else (call witness_direct_function (borrow-shared ast) (borrow-shared nodes)
+									row (bool true) (borrow-mut scratch)))))
+							(if (i32.ltz function) (then (return (bool false))))
+							(array.store approved function 1u8)
+							(set getters (bool.or getters getter))
+							(set records (bool.or records record))))
 					(set row (struct.get (array.load nodes row) next_sibling))))
-			(return found)))
+			(return (bool.and (bool.or (bool.not writable) getters) (bool.or (bool.not record_calls) records)))))
 
 	(fn proved_lvalue_macro
 		(:doc "Allow an object-like macro only if it names an operand already checked by a lvalue witness.")
@@ -443,11 +465,15 @@
 						(borrow-shared release_witness_prefix) (borrow-mut scratch)))
 					(let call_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
 						(borrow-shared call_witness_prefix) (borrow-mut scratch)))
+					(let record_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared record_call_witness_prefix) (borrow-mut scratch)))
 					(let getter (i32.not-ltz getter_name))
 					(let drop (i32.not-ltz drop_name))
+					(let record (i32.not-ltz record_name))
 					(let-mut name call_name)
 					(if getter (then (set name getter_name)))
 					(if drop (then (set name drop_name)))
+					(if record (then (set name record_name)))
 					(if
 						(:doc "A private witness contributes the actual resolved object-code symbol.")
 						(i32.not-ltz name)
@@ -462,7 +488,8 @@
 										(:doc "Native calls and their releases require direct external prototypes.")
 										drop
 										(then (set function (call witness_release_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch))))
-										(else (set function (call witness_direct_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))))))
+										(else (set function (call witness_direct_function (borrow-shared ast) (borrow-shared nodes)
+											row record (borrow-mut scratch)))))))
 							(if (i32.ltz function) (then (return -1i32)))
 							(let symbol (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
 								(borrow-shared mangled_key) (borrow-mut scratch)))
