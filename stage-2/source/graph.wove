@@ -24,13 +24,15 @@
 	(use wove-file "./c_headers.wove" (only (type HeaderMatch) find_c_header find_header_kind find_c_declaration))
 	(use wove-file "./c_dependencies.wove" (only connect_bridge_type))
 	(use wove-file "./c_dependency_paths.wove" (only scoped_uses count_bridge_uses (type BridgeUse)))
+	(use wove-file "./c_owners.wove" (only is_c_long_double))
+	(use wove-file "./c_records.wove" (only is_c_record))
 
 	(use wove-file "./target.wove" (only default_selection (type SelectionContext)))
 
 	(struct GraphModule
 		(fields (state u32) (path i32) (order i32) (parent i32) (next_use i32) (end_use i32) (active bool) (failed bool)))
 	(struct
-		(:doc "A published name with a file-local name node in the owner and a declaration in the defining file.")
+		(:doc "A published name with a file-local name node in the owner and a declaration in the defining file. A private intrinsic type has no C header span.")
 		GraphBinding
 		(fields (owner i32) (start i32) (end i32) (file i32) (declaration i32) (namespace u32)
 			(provider u32) (header_start i32) (header_end i32) (native_start i32) (native_end i32)
@@ -72,11 +74,17 @@
 
 	(let c_dependency_provider 10u32)
 
-	(fn includes_c_header
-		(:doc "Both public C selections and private dependencies contribute C includes.")
+	(fn references_c_header
+		(:doc "A public C selection or private dependency can require its provider's Wove declarations.")
 		(params (binding GraphBinding)) (returns bool)
 		(body (return (bool.or (u32.eq (struct.get (local binding) provider) 8u32)
 			(u32.eq (struct.get (local binding) provider) (local c_dependency_provider))))))
+
+	(fn includes_c_header
+		(:doc "A private intrinsic type keeps its provider identity without an include span.")
+		(params (binding GraphBinding)) (returns bool)
+		(body (return (bool.and (call references_c_header (local binding))
+			(i32.not-ltz (struct.get (local binding) header_start))))))
 
 	(struct CScopeTree (fields (base i32) (rows i32)))
 	(struct CScopeVisit (fields (file i32) (node i32)))
@@ -865,9 +873,9 @@
 			(return (i32.add (local next) (local rows)))))
 
 	(fn write_c_dependency
-		(:doc "Publish a private dependency row for include ordering and restoration of a type selector.")
+		(:doc "Publish a private type link and an include span when C needs its header.")
 		(params (files (shared-array SuppliedFile)) (trees (shared-array CScopeTree)) (use BridgeUse)
-			(selector i32) (definition i32) (bindings (mut-array GraphBinding)) (count i32))
+			(selector i32) (definition i32) (include bool) (bindings (mut-array GraphBinding)) (count i32))
 		(returns GraphRead)
 		(body
 			(let owner (struct.get (local use) owner))
@@ -891,6 +899,12 @@
 				(then
 					(set (local header_start) (struct.get (local use) header_start))
 					(set (local header_end) (struct.get (local use) header_end))))
+			(if
+				(:doc "An intrinsic type is spelled directly in C, without its defining header.")
+				(bool.not (local include))
+				(then
+					(set (local header_start) -1i32)
+					(set (local header_end) -1i32)))
 			(if
 				(:doc "A type selector points to its canonical definition even when the target is an overlay.")
 				(i32.not-ltz (local selector))
@@ -942,6 +956,10 @@
 			(let file (struct.get (local use) file))
 			(let node (struct.get (local use) node))
 			(if
+				(:doc "An include-only request can name a header with no Wove provider.")
+				(i32.ltz (local node))
+				(then (return (call graph_read (local offset) 0i32 0i32 0u32))))
+			(if
 				(:doc "Header prerequisites cannot require their own active consumer ahead of themselves.")
 				(call c_scope_visiting (borrow-shared (local visiting)) (local depth) (local file) (local node))
 				(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
@@ -982,21 +1000,18 @@
 					(let use (array.load (local uses) (local index)))
 					(let owner (struct.get (local use) owner))
 					(let-mut row (struct.get (local use) first))
+					(let-mut included (bool false))
 					(if
-						(:doc "Every present provider contributes its prerequisites before the first include of that header.")
-						(i32.not-ltz (struct.get (local use) node))
+						(:doc "An empty only list requests the header and its prerequisites without importing a name.")
+						(i32.ltz (local row))
 						(then
 							(let required (call bind_c_provider_prerequisites (borrow-shared (local arena)) (borrow-shared (local files))
 								(borrow-shared (local trees)) (local use) (borrow-mut (local bindings)) (local count) (local context)
 								(borrow-mut (local visiting)) (local depth)))
 							(if (u32.gtz (struct.get (local required) error)) (then (return (local required))))
-							(set (local count) (struct.get (local required) next))))
-					(if
-						(:doc "An empty only list requests the header without importing a name.")
-						(i32.ltz (local row))
-						(then
+							(set (local count) (struct.get (local required) next))
 							(let saved (call write_c_dependency (borrow-shared (local files)) (borrow-shared (local trees))
-								(local use) -1i32 -1i32 (borrow-mut (local bindings)) (local count)))
+								(local use) -1i32 -1i32 (bool true) (borrow-mut (local bindings)) (local count)))
 							(if (u32.gtz (struct.get (local saved) error)) (then (return (local saved))))
 							(set (local count) (struct.get (local saved) next))))
 					(while
@@ -1042,8 +1057,25 @@
 								(then (return (call c_scope_error (borrow-shared (local files)) (borrow-shared (local trees))
 									(local owner) (local count) (local local_start) (local local_end) 30u32))))
 							(call connect_bridge_type (borrow-mut (local nodes)) (local row) (local definition))
+							(let intrinsic (bool.and (i32.ltz (struct.get (local found) drop_start))
+								(bool.and
+									(bool.not (call is_c_record (borrow-shared (local arena)) (borrow-shared (local nodes))
+										(array.load (local nodes) (local definition))))
+									(call is_c_long_double (borrow-shared (local arena))
+										(struct.get (local found) type_start) (struct.get (local found) type_end)))))
+							(if
+								(:doc "Resolve the header's prerequisites before the first selector that needs a C include.")
+								(bool.and (bool.not (local intrinsic)) (bool.not (local included)))
+								(then
+									(let required (call bind_c_provider_prerequisites (borrow-shared (local arena)) (borrow-shared (local files))
+										(borrow-shared (local trees)) (local use) (borrow-mut (local bindings)) (local count) (local context)
+										(borrow-mut (local visiting)) (local depth)))
+									(if (u32.gtz (struct.get (local required) error)) (then (return (local required))))
+									(set (local count) (struct.get (local required) next))
+									(set (local included) (bool true))))
 							(let saved (call write_c_dependency (borrow-shared (local files)) (borrow-shared (local trees))
-								(local use) (local row) (local definition) (borrow-mut (local bindings)) (local count)))
+								(local use) (local row) (local definition) (bool.not (local intrinsic))
+								(borrow-mut (local bindings)) (local count)))
 							(if (u32.gtz (struct.get (local saved) error)) (then (return (local saved))))
 							(set (local count) (struct.get (local saved) next))
 							(set (local row) (struct.get (array.load (local nodes) (local row)) next_sibling))))

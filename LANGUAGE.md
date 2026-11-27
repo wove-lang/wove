@@ -1006,6 +1006,10 @@ header to use it outside the bridge. A bridge-local C use with an empty
 `(only)` list adds an include without importing a name. The compiler emits
 the required headers in the stated order before the bridge's own header.
 A type provider's own prerequisites precede its header as well.
+When a bridge-local use selects only intrinsic `long double` aliases, it
+shares their Wove type identities and uses the built-in C spelling. Explicit
+source imports, include-only uses, and selections with header-defined types
+retain the C include and its prerequisites.
 
 Use `(type Size (c-type "size_t"))` for a native integer alias and
 `(struct Stat (c-type "struct stat") (fields (st_size Offset)))` for a
