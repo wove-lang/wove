@@ -2111,7 +2111,7 @@ _Noreturn void wvrt_int_conversion_trap(int32_t wvrtfile, int32_t wvrtstart, int
 }
 
 // Check the exact byte view before touching any element.
-static const uint8_t *wvrt_integer_bytes(wvrt_slice wvrtview, int32_t wvrtwidth,
+const uint8_t *wvrt_integer_bytes(wvrt_slice wvrtview, int32_t wvrtwidth,
 	bool wvrtvalid, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	// The caller supplies the range admitted by the result type.
 	if (!wvrtvalid || wvrtview.wvrt_length != wvrtwidth ||
