@@ -44,6 +44,7 @@ TOKEN = re.compile(
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 TAG = re.compile(":?" + WORD.pattern)
+NUL_OR_ESCAPED_BACKSLASH = re.compile(r"\\\\|\\0")
 
 
 # Recognize metadata entries without interpreting their payloads.
@@ -177,11 +178,15 @@ def parse(source: str) -> Form:
 		elif kind == "string" and token.startswith("`"):
 			node = Atom(token[1:-1].replace("``", "`"), line, quoted=True)
 			line += token.count("\n")
-		# Double-quoted strings continue to decode JSON escapes.
+		# Double-quoted Wove strings add NUL to the JSON escape set.
 		elif kind == "string":
+			# Consume escaped backslashes together so a following zero stays literal.
+			json_token = NUL_OR_ESCAPED_BACKSLASH.sub(
+				lambda escape: r"\u0000" if escape[0] == r"\0" else escape[0], token
+			)
 			# Decode escapes before storing the string value.
 			try:
-				node = Atom(json.loads(token), line, quoted=True)
+				node = Atom(json.loads(json_token), line, quoted=True)
 			# Point malformed escapes back to their token.
 			except ValueError:
 				raise SourceError(line) from None
