@@ -24,6 +24,7 @@ def compiler_inputs():
 
 	# Preserve first encounter order across the compiler's relative imports.
 	def visit(path):
+		# A shared dependency contributes its source and assets once.
 		if path in sources:
 			return
 		sources[path] = None
@@ -31,13 +32,18 @@ def compiler_inputs():
 
 		# Only Wove imports and embed forms contribute further source paths.
 		def walk(node):
+			# Atoms and disabled forms cannot contribute active inputs.
 			if not isinstance(node, Form) or node.tag == "disabled":
 				return
+			# Follow a Wove import relative to its defining module.
 			if node.tag == "use" and node.operands[0].text == "wove-file":
 				visit(os.path.normpath(parent / node.operands[1].text))
+			# Record embedded files at the same relative path used by the emitter.
 			elif node.tag == "embed":
 				assets[os.path.normpath(parent / node.operands[0].text)] = None
+			# Imports and embeds can appear beneath other forms.
 			else:
+				# Visit operands in source order.
 				for child in node.operands:
 					walk(child)
 
@@ -46,6 +52,7 @@ def compiler_inputs():
 	visit(ENTRY)
 	# The compiler's own embeds supply its bundled Wove bridge declarations.
 	for path in tuple(assets):
+		# Only embedded Wove modules can also supply graph declarations.
 		if Path(path).suffix == ".wove":
 			visit(path)
 	assets.pop(VERSION_ASSET, None)

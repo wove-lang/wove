@@ -173,6 +173,7 @@ def c_type(kind: Type) -> str:
 	# The descriptor depends on the access mode and carries a typed element count.
 	if isinstance(kind, BufferType):
 		return C_TYPE[kind.access]
+	# Inline arrays are passed by value through their generated C type.
 	if isinstance(kind, FixedArrayType):
 		return f"wv_seed_fixed_{kind.element}_{kind.count}"
 	return kind.c_name if isinstance(kind, Record) else C_TYPE[kind]
@@ -219,9 +220,11 @@ def read_fixed_array_type(node: Node) -> FixedArrayType:
 	# Only supported scalar elements can be copied by the seed's inline array representation.
 	if element not in SCALAR_TYPES:
 		raise SourceError(element_node.line)
+	# The extent is a decimal atom in the fixed array type form.
 	if not isinstance(count_node, Atom) or count_node.quoted or not re.fullmatch(r"[0-9]+", count_node.text):
 		raise SourceError(count_node.line)
 	digits = count_node.text.lstrip("0") or "0"
+	# Keep the extent representable in the runtime's signed length field.
 	if len(digits) > 10 or (count := int(digits)) > SCALAR_LIMITS[I32][1]:
 		raise SourceError(count_node.line)
 	return FixedArrayType(element, count)
@@ -314,6 +317,7 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 		# Keep nominal record identity in the signature.
 		if copyable(kind):
 			return kind
+	# An exact inline array shape gives the parameter its own value storage.
 	if isinstance(node, Form) and node.tag == "array":
 		return read_fixed_array_type(node)
 	view = checked_form(node, arity=1)
@@ -366,6 +370,7 @@ def read_function(
 		element_node, = checked_form(result_node, OWNED, 1).operands
 		element_name = identifier(element_node)
 		element = records.get(element_name, element_name)
+		# Owned results use the element layouts already supported for native seed arrays.
 		if element != U8 and not isinstance(element, Record):
 			raise SourceError(element_node.line)
 		result = BufferType(OWNED, element)
@@ -373,6 +378,7 @@ def read_function(
 	else:
 		result_name = identifier(result_node)
 		result = records.get(result_name, result_name)
+		# Borrowed results have no seed return representation.
 		if result != VOID and not copyable(result):
 			raise SourceError(result_node.line)
 	entry = entry_module and name == "main"
@@ -483,6 +489,7 @@ class FunctionEmitter:
 		kind = value.kind
 		# Fixed array parameters are immutable values with inline storage.
 		if isinstance(kind, FixedArrayType):
+			# Only a shared view may refer to the parameter's own storage.
 			if writable:
 				raise SourceError(line)
 			view_type = BufferType(SHARED, kind.element)
@@ -823,6 +830,7 @@ class FunctionEmitter:
 			# Keep the full unsigned product before reducing it to the low word.
 			if expr.tag == "u32.mul":
 				return self.temporary(U32, f"(uint32_t)((uint64_t){first.c} * {second.c})")
+			# Multiply as unsigned bits so signed overflow has Wove wrapping semantics.
 			if expr.tag == "i32.mul":
 				product = f"(uint32_t)((uint64_t)(uint32_t){first.c} * (uint32_t){second.c})"
 				return self.temporary(I32, f"wvrt_i32_from_wrapped_bits({product})")
@@ -832,6 +840,7 @@ class FunctionEmitter:
 				return self.temporary(
 					result, f"wvrt_u32_divide({first.c}, {second.c}, {remainder}, {self.site(node.line)})"
 				)
+			# The runtime handles signed quotient and remainder edge cases.
 			if expr.tag in ("i32.div", "i32.rem"):
 				remainder = "true" if operator == "%" else "false"
 				return self.temporary(I32,
@@ -1415,6 +1424,7 @@ def compile_source(source: str, filename: str) -> str:
 	# Give every exact inline shape one ordinary C type before signatures reference it.
 	for kind in sorted(fixed_arrays, key=lambda shape: (shape.element, shape.count)):
 		lines.append(f"typedef struct {{ {c_type(kind.element)} items[{max(1, kind.count)}]; }} {c_type(kind)};")
+	# Separate any generated array types from the record declarations.
 	if fixed_arrays:
 		lines.append("")
 	# Define every native type before functions use it by value.

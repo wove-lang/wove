@@ -42,13 +42,16 @@ def emit_native(probe, destination, version, paths, providers, private_helpers=F
 		else:
 			sys.stderr.buffer.write(result.stderr or result.stdout)
 		return 1
+	# Make can publish the seed's stdout through its existing atomic build rule.
 	if destination is None:
 		sys.stdout.buffer.write(source)
+	# The fixtures write directly to their generated input path.
 	else:
 		Path(destination).write_bytes(source)
 	return 0
 
 
+# Preserve the standalone emitter interface used by the test fixtures.
 if __name__ == "__main__":
 	probe, destination, version, *inputs = sys.argv[1:]
 	private_helpers = inputs[:1] == ["--private-helpers"]
