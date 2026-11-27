@@ -46,14 +46,39 @@ record views and lowers checked record fields and call-scoped borrows.
 Further activation requires the declaration, type, selection, and lowering
 work below. [Seed bridge behavior](../LANGUAGE-SUBSET.md#imports-and-c-headers)
 
+## Bundled `<sys/wait.h>` coverage
+
+`IdType` keeps the SDK's `idtype_t` spelling. `P_ALL`, `P_PID`, and
+`P_PGID` are native values of that type. `waitid` lends a complete
+`siginfo_t` for one call and exposes the six child-status fields,
+including the glibc child member aliases. The installed fixture
+observes an exited child by PID and process group with `WNOWAIT`, reaps
+it with `P_ALL`, and checks `ECHILD` after collection.
+
+Darwin exposes `waitid` outside the `_ANSI_SOURCE` profile. glibc
+exposes it with POSIX.1-2008, extended X/Open, and the audited default
+and GNU extension profiles. The driver checks the selected function,
+complete record, and optional option macros against the header.
+Select `Id`, `IdType`, and the typed selector constants in profiles
+that supply their C declarations. Conditional scalar typedef
+selection is tracked separately. [Optional scalar typedefs #638](https://github.com/wove-lang/wove/issues/638)
+
+The audit covered both Clangs, both SDK architectures, C11, C17, and
+C23. `wait`, `waitpid`, `WNOHANG`, `WUNTRACED`, and the ordinary
+status macros remain available across the audited profiles. Older
+glibc profiles also omit the function-like macro `WIFCONTINUED`.
+`WCOREDUMP`, `WCORE_DUMPED`, `Usage`, `wait3`, and `wait4` remain
+in the source's disabled group and require their own bridge coverage.
+
 ## Active archive declarations
 
 | Header and declarations | Form or contract | Compiler behavior needed |
 | --- | --- | --- |
 | All fourteen headers and their active members | `(bridge c-header "<header>" …)`, bodyless `fn`, and `(c-name "symbol")` | Resolve a selected member from the declared header. Bind its Wove name and exact C name, discover macro or symbol availability in the selected target's header environment, check the native signature, and emit the right include, call, and link dependencies. |
 | `dirent.h` aliases for stream positions, GNU byte counts and offsets, `fcntl.h` typedefs, `math.h` floating and integer aliases, `signal.h` signal types, `spawn.h` attributes and actions, `stdio.h` file and position types, `sys/stat.h`, `sys/wait.h`, `time.h`, and `unistd.h` aliases | `(type Name (c-type "…"))` | Integer aliases keep the selected native spelling and nominal identity in parameters, results, and locals. Wider native value classes, checked casts, and aliases as buffer extents require additional lowering. |
-| `fcntl.h` `Lock`, `spawn.h` `Scheduling`, `sys/stat.h` `Timespec` and both `Stat` views, `sys/wait.h` `SignalInfo`, and `time.h` `Stamp` | `struct` with `c-type` and `fields` | Allocate, borrow, and read the header's complete native object. The Linux and macOS `Stat` fixtures cover target-specific timestamps and native field types. Specialized union and alias views such as the child status in `siginfo_t` need separate validation. |
-| `sys/wait.h` `IdType` and `time.h` `Clock` | `enum` with `c-type` and `members` | Bind the C enum or typedef and its selected header members with their native values and argument representation. |
+| `fcntl.h` `Lock`, `spawn.h` `Scheduling`, `sys/stat.h` `Timespec` and both `Stat` views, `sys/wait.h` `SignalInfo`, and `time.h` `Stamp` | `struct` with `c-type` and `fields` | Allocate, borrow, and read the header's complete native object. The Linux and macOS `Stat` fixtures cover target-specific timestamps and native field types. The installed `waitid` test checks the native child-status view in `siginfo_t` on Darwin and glibc. |
+| `sys/wait.h` `IdType` | `type` with `c-type` and typed `const` declarations | The native `idtype_t` carries the selected header values for `P_ALL`, `P_PID`, and `P_PGID`. |
+| `time.h` `Clock` | `enum` with `c-type` and `members` | Bind the C enum or typedef and its selected header members with their native values and argument representation. |
 | `errno.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdio.h`, `sys/stat.h`, `sys/wait.h`, and `unistd.h` constant declarations | `const` with an explicit type | Select guarded integer constants with their declared Wove types and check the C value and constant expression. Wider Wove widths remain needed for some `UTIME_NOW` and `UTIME_OMIT` alternatives. |
 | `errno.h` `errno`, `math.h` `signgam` and floating values, `stdio.h` standard streams, `unistd.h` `optind`, `opterr`, `optopt`, and `environ` | Typed `let` and `let-mut` | Read scalar lvalues and borrow standard streams live. Writable scalar bindings such as `errno` retain the original C lvalue. Read-only expression macros and copied snapshots have separate contracts. |
 | `math.h` native floating aliases and Darwin half-width family | `float_t`, `double_t`, `long double`, and target-selected `f16` | Preserve the native floating representation in named aliases and out pointees. The Darwin half family still needs its feature and deployment contract. |
