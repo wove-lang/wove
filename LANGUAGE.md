@@ -269,8 +269,13 @@ available at every supported integer width.
   array, and decoding requires a shared byte view of exactly that width.
   The 128-bit types use 16 bytes, and the 256-bit types use 32 bytes.
 
-The [128-bit decimal writers](stage-2/text/decimal_128.wove) preserve the
-full signed and unsigned values in a caller-supplied byte view.
+The [128-bit](stage-2/text/decimal_128.wove) and
+[256-bit decimal writers](stage-2/text/decimal_256.wove) append exact signed
+and unsigned values to a caller-supplied mutable byte view at an `i32`
+offset. They return the next offset on success. A short view keeps the
+prefix that fit and returns `-1`. An invalid initial offset returns `-1`
+with the view intact. The writers append only decimal digits and the minus
+sign for negative values. The longest 256-bit outputs use 78 bytes.
 
 ## Floating point
 
