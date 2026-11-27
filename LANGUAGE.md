@@ -987,6 +987,7 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_cstr_raw parameter ...)` | Copy all bytes, including embedded NUL, before adding a terminator. |
 | `(c_cstrs parameter ...)` | Copy shared byte rows into a null-terminated array of C-string pointers. Reject embedded NUL. |
 | `(c_void_ptr parameter ...)` | Pass the original address of a borrowed scalar place, exact-length byte view, or shared opaque owner slot. Scalar loans keep their exact pointee type. A shared opaque owner lends the original slot holding its native handle and must be present. Byte views use `(shared-array u8 N)` or `(mut-array u8 N)` and require exactly `N` bytes before the call. All ordinary loan rules apply. The native prototype must use `const void *` for a shared loan and `void *` for a mutable loan. The callee may use the address for the duration of the call. |
+| `(c_owner_out output removed sentinel)` | Lend an empty `(mut-ref Owner)` slot through an exact native `void *` formal. The native `i32` status is returned unchanged. Set the Wove-only `(mut-ref bool)` flag when the C header's nonnull pointer sentinel is written, then clear the owner slot. A different nonnull pointer belongs to the owner even on failure. |
 | `(c_bytes data count)` or `(c_bytes data size count)` | Borrow bytes after checking the requested count or product fits the view. |
 | `(c_array data count)` | Borrow an integer slice after checking its element count. Use a literal or a named integer parameter. |
 | `(c_variadic)` | Call a C variadic function with just its declared fixed arguments. |
@@ -1012,9 +1013,11 @@ A fixed C argument in `params` supplies a native operand at that position.
 Use `(const command i32 F_SETFL)` for a header constant,
 `(const property (c-type "filesec_property_t") FILESEC_MODE)` for a header
 constant at its exact native integer or enum type,
-`(const length i32 -1)` for a checked signed literal, or
-`(const tail (c-type "const char **") null)` for a null pointer with the
-exact C type. A fixed `i32` literal may also carry its `i32` suffix or
+`(const length i32 -1)` for a checked signed literal,
+`(const tail (c-type "const char **") null)` for a null pointer, or
+`(const marker (c-type "const void *") NATIVE_MARKER)` for a header
+pointer expression compatible with the explicit C type. A fixed
+`i32` literal may also carry its `i32` suffix or
 use the `(i32 ...)` form. Clang verifies the signature against the
 included header. Pass only the ordinary parameters at Wove call sites.
 
@@ -1036,6 +1039,9 @@ A pointer-backed resource uses a destructor contract.
 
 A `File` result owns the native handle. Cleanup calls the destructor once
 for each present handle. Test presence with `(owner.is-null (local file))`.
+If the native destructor accepts exactly `void *`, declare
+`(c_owned (drop destructor void-pointer))`. The owner keeps its defining
+native pointer type. The C header determines the ignored destructor result.
 An ordinary Wove function can declare `(returns File)` after importing
 the native type. Return a fresh handle call or explicitly transfer a
 local with `(return (move (local file)))`. The caller owns the result,
