@@ -215,7 +215,24 @@ void wvrt_check_c_handle_empty(const volatile void *wvrt_handle, int32_t wvrt_fi
 
 typedef struct wvrt_c_storage wvrt_c_storage;
 
+// Match the GNU trailing zero-byte array and its compatible incomplete array type.
+__extension__ typedef unsigned char wvrt_c_zero_bytes[0];
+
+// Check the actual native member types before allocating at their C layout.
+#define WVRT_C_TAIL_ALLOC(type, count, bytes, capacity, file, start, end) \
+	((void)sizeof(char[_Generic(&((type *)0)->count, uint32_t *: 1, default: -1)]), \
+	(void)sizeof(char[_Generic(&((type *)0)->bytes, wvrt_c_zero_bytes *: 1, default: -1)]), \
+	wvrt_c_storage_new_tail(sizeof(type), _Alignof(type), offsetof(type, bytes), offsetof(type, count), \
+		(capacity), (file), (start), (end)))
+
 wvrt_c_storage *wvrt_c_storage_new(size_t wvrt_size, size_t wvrt_alignment,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_c_storage *wvrt_c_storage_new_tail(size_t wvrt_size, size_t wvrt_alignment,
+	size_t wvrt_tail, size_t wvrt_count, int64_t wvrt_capacity,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+uint32_t wvrt_c_storage_tail_report(const wvrt_c_storage *wvrt_storage,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+uint8_t wvrt_c_storage_tail_at(wvrt_c_storage *wvrt_storage, int64_t wvrt_index,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

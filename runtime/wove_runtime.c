@@ -458,6 +458,9 @@ static void *wvrt_calloc(size_t wvrtcount, size_t wvrtsize, size_t wvrtalignment
 struct wvrt_c_storage {
 	void *wvrt_data;
 	_Bool wvrt_active;
+	size_t wvrt_tail_capacity;
+	size_t wvrt_tail_offset;
+	size_t wvrt_count_offset;
 };
 
 // Allocate an inactive owner and zeroed storage at the actual C type's alignment.
@@ -476,7 +479,44 @@ wvrt_c_storage *wvrt_c_storage_new(size_t wvrt_size, size_t wvrt_alignment,
 		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "could not allocate C storage");
 	}
 	wvrt_storage->wvrt_active = 0;
+	wvrt_storage->wvrt_tail_capacity = 0;
+	wvrt_storage->wvrt_tail_offset = 0;
+	wvrt_storage->wvrt_count_offset = SIZE_MAX;
 	return wvrt_storage;
+}
+
+// Allocate the full header and the requested byte tail at the native alignment.
+wvrt_c_storage *wvrt_c_storage_new_tail(size_t wvrt_size, size_t wvrt_alignment,
+	size_t wvrt_tail, size_t wvrt_count, int64_t wvrt_capacity,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	// The report must lie in the header. Its width also bounds the writable capacity.
+	if (wvrt_tail > wvrt_size || wvrt_count > wvrt_tail ||
+		sizeof(uint32_t) > wvrt_tail - wvrt_count || wvrt_capacity < 0 ||
+		(uint64_t)wvrt_capacity > UINT32_MAX || (uint64_t)wvrt_capacity > SIZE_MAX - wvrt_tail) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "invalid C byte-tail extent");
+	}
+	size_t wvrt_extent = wvrt_tail + (size_t)wvrt_capacity;
+	// A native layout may pad the fixed header beyond the first byte of its tail.
+	if (wvrt_extent < wvrt_size) { wvrt_extent = wvrt_size; }
+	wvrt_c_storage *wvrt_storage = wvrt_c_storage_new(wvrt_extent, wvrt_alignment,
+		wvrt_file, wvrt_start, wvrt_end);
+	wvrt_storage->wvrt_tail_capacity = (size_t)wvrt_capacity;
+	wvrt_storage->wvrt_tail_offset = wvrt_tail;
+	wvrt_storage->wvrt_count_offset = wvrt_count;
+	return wvrt_storage;
+}
+
+// Read the native count without treating it as a validated tail span.
+uint32_t wvrt_c_storage_tail_report(const wvrt_c_storage *wvrt_storage,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	// An initializer can report a required size even when the object is inactive.
+	if (wvrt_storage == NULL || wvrt_storage->wvrt_count_offset == SIZE_MAX) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "missing C byte-tail storage");
+	}
+	uint32_t wvrt_count;
+	memcpy(&wvrt_count, (const unsigned char *)wvrt_storage->wvrt_data +
+		wvrt_storage->wvrt_count_offset, sizeof wvrt_count);
+	return wvrt_count;
 }
 
 // Require inactive storage for initialization and an active object for other native calls.
@@ -491,6 +531,31 @@ void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing
 		const char *wvrt_problem = wvrt_initializing ? "C storage is already initialized" : "C storage is not initialized";
 		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, wvrt_problem);
 	}
+	// Only byte-tail owners carry a mutable native count.
+	if (wvrt_storage->wvrt_count_offset != SIZE_MAX) {
+		// Start each initialization with the actual capacity. Failed calls may overwrite the count.
+		if (wvrt_initializing) {
+			uint32_t wvrt_count = (uint32_t)wvrt_storage->wvrt_tail_capacity;
+			memcpy((unsigned char *)wvrt_storage->wvrt_data + wvrt_storage->wvrt_count_offset,
+				&wvrt_count, sizeof wvrt_count);
+		// A live loan may expose only a report that fits its original allocation.
+		} else if (wvrt_c_storage_tail_report(wvrt_storage, wvrt_file, wvrt_start, wvrt_end) >
+			wvrt_storage->wvrt_tail_capacity) {
+			wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "native byte-tail length exceeds capacity");
+		}
+	}
+}
+
+// Load one byte from a successfully initialized, bounded native tail.
+uint8_t wvrt_c_storage_tail_at(wvrt_c_storage *wvrt_storage, int64_t wvrt_index,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	uint32_t wvrt_count = wvrt_c_storage_tail_report(wvrt_storage, wvrt_file, wvrt_start, wvrt_end);
+	wvrt_c_storage_access(wvrt_storage, 0, wvrt_file, wvrt_start, wvrt_end);
+	// Only the valid native length, within the original capacity, admits an index.
+	if (wvrt_index < 0 || (uint64_t)wvrt_index >= wvrt_count) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C byte-tail index out of bounds");
+	}
+	return ((const unsigned char *)wvrt_storage->wvrt_data)[wvrt_storage->wvrt_tail_offset + (size_t)wvrt_index];
 }
 
 // Return the object address after a checked loan or for its active destructor.

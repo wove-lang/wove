@@ -13,9 +13,11 @@
 	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte is_c_identifier))
 
-	(struct COwnerRead (fields (native i32) (drop i32) (storage bool) (start i32) (end i32) (error u32)))
+	(struct COwnerRead (fields (native i32) (drop i32) (storage bool) (tail i32) (count i32)
+		(start i32) (end i32) (error u32)))
 
 	(let storage_flag "storage")
+	(let tail_clause "tail")
 
 	(fn is_native_name
 		(:doc `Require a bare Wove node with the portable C identifier spelling.`)
@@ -87,10 +89,11 @@
 		(params (native i32) (drop i32) (storage bool) (site SourceNode) (error u32))
 		(returns COwnerRead)
 		(body (return (struct.new COwnerRead (native (local native)) (drop (local drop)) (storage (local storage))
+			(tail -1i32) (count -1i32)
 			(start (struct.get (local site) start)) (end (struct.get (local site) end)) (error (local error))))))
 
 	(fn owner_keyword
-		(:doc `Recognize c_owned, c-type, and drop in their respective contract positions.`)
+		(:doc `Recognize the tags in native type and ownership contracts.`)
 		(params (source (shared-array u8)) (node SourceNode))
 		(returns u32)
 		(body
@@ -118,6 +121,11 @@
 					(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) 100u8 114u8 111u8)
 						(call is_head_byte (borrow-shared (local source)) (local start) 3i32 112u8)))
 				(then (return 3u32)))
+			(if
+				(:doc "A tail clause names the count and byte-array members of caller-owned storage.")
+				(call same_bytes (borrow-shared (local source)) (local start) (struct.get (local node) end)
+					(borrow-shared (local tail_clause)) 0i32 (array.len (local tail_clause)))
+				(then (return 4u32)))
 			(return 0u32)))
 
 	(fn owner_form_keyword
@@ -133,7 +141,7 @@
 			(return (call owner_keyword (borrow-shared (local source)) (local node)))))
 
 	(fn read_owner_drop
-		(:doc `Read the destructor and optional caller-owned storage flag.`)
+		(:doc `Read a native destructor contract or the caller-owned byte-tail members.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (directive SourceNode))
 		(returns COwnerRead)
 		(body
@@ -141,10 +149,35 @@
 			(let clause (struct.get (local parts) operands))
 			(if (i32.ltz (local clause)) (then (return (call owner_read -1i32 -1i32 (bool false) (local directive) 23u32))))
 			(let drop (array.load (local nodes) (local clause)))
+			(let tag (call owner_form_keyword (borrow-shared (local source)) (borrow-shared (local nodes)) (local drop)))
+			(if
+				(:doc "Runtime-owned byte storage has a count member and a trailing byte member.")
+				(u32.eq (local tag) 4u32)
+				(then
+					(let operands (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local drop)))
+					(let count (struct.get (local operands) operands))
+					(if
+						(:doc "The byte-tail clause is the entire ownership contract.")
+						(bool.or (i32.ltz (local count)) (i32.not-ltz (struct.get (local drop) next_sibling)))
+						(then (return (call owner_read -1i32 -1i32 (bool false) (local drop) 23u32))))
+					(let count_name (array.load (local nodes) (local count)))
+					(let tail (struct.get (local count_name) next_sibling))
+					(if
+						(:doc "The first operand is the exact native count field.")
+						(bool.or (i32.ltz (local tail)) (bool.not (call is_native_name (borrow-shared (local source)) (local count_name))))
+						(then (return (call owner_read -1i32 -1i32 (bool false) (local count_name) 23u32))))
+					(let tail_name (array.load (local nodes) (local tail)))
+					(if
+						(:doc "The second operand is the exact terminal byte field.")
+						(bool.or (i32.not-ltz (struct.get (local tail_name) next_sibling))
+							(bool.not (call is_native_name (borrow-shared (local source)) (local tail_name))))
+						(then (return (call owner_read -1i32 -1i32 (bool false) (local tail_name) 23u32))))
+					(return (struct.new COwnerRead (native -1i32) (drop -1i32) (storage (bool true))
+						(tail (local tail)) (count (local count))
+						(start (struct.get (local drop) start)) (end (struct.get (local drop) end)) (error 0u32)))))
 			(if
 				(:doc "The contract starts with a single destructor clause.")
-				(u32.not-eq (call owner_form_keyword (borrow-shared (local source))
-					(borrow-shared (local nodes)) (local drop)) 3u32)
+				(u32.not-eq (local tag) 3u32)
 				(then (return (call owner_read -1i32 -1i32 (bool false) (local directive) 23u32))))
 			(let flag (struct.get (local drop) next_sibling))
 			(let storage (i32.lt -1i32 (local flag)))
@@ -182,6 +215,8 @@
 			(let-mut metadata (struct.get (local parts) metadata))
 			(let-mut drop -1i32)
 			(let-mut storage (bool false))
+			(let-mut tail -1i32)
+			(let-mut count -1i32)
 			(while
 				(:doc "Only :pragma metadata can supply the ownership directive.")
 				(bool.and (i32.not-ltz (local metadata))
@@ -201,22 +236,26 @@
 								(body
 									(let directive (array.load (local nodes) (local index)))
 									(if
-										(:doc "An owner carries one destructor, so a second contract is ambiguous.")
+										(:doc "One ownership contract sets the lifetime of the native allocation.")
 										(u32.eq (call owner_form_keyword (borrow-shared (local source))
 											(borrow-shared (local nodes)) (local directive)) 1u32)
 										(then
 											(if
 												(:doc "Diagnose a repeated ownership marker at the later directive.")
-												(i32.not-ltz (local drop))
+												(bool.or (local storage) (i32.not-ltz (local drop)))
 												(then (return (call owner_read -1i32 -1i32 (bool false) (local directive) 23u32))))
 											(let checked (call read_owner_drop (borrow-shared (local source))
 												(borrow-shared (local nodes)) (local directive)))
 											(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
 											(set (local drop) (struct.get (local checked) drop))
-											(set (local storage) (struct.get (local checked) storage))))
+											(set (local storage) (struct.get (local checked) storage))
+											(set (local tail) (struct.get (local checked) tail))
+											(set (local count) (struct.get (local checked) count))))
 									(set (local index) (struct.get (local directive) next_sibling))))))
 					(set (local metadata) (struct.get (local entry) next_sibling))))
-			(return (call owner_read -1i32 (local drop) (local storage) (local site) 0u32))))
+			(return (struct.new COwnerRead (native -1i32) (drop (local drop)) (storage (local storage))
+				(tail (local tail)) (count (local count))
+				(start (struct.get (local site) start)) (end (struct.get (local site) end)) (error 0u32)))))
 
 	(fn read_c_type_form
 		(:doc `Read a c-type form and its single quoted representation.`)
@@ -237,6 +276,7 @@
 				(:doc "Selection belongs to the enclosing declaration. Keep the directive's own span.")
 				(u32.gtz (struct.get (local choice) error))
 				(then (return (struct.new COwnerRead (native -1i32) (drop -1i32) (storage (bool false))
+					(tail -1i32) (count -1i32)
 					(start (struct.get (local choice) start)) (end (struct.get (local choice) end))
 					(error (struct.get (local choice) error))))))
 			(let value (array.load (local nodes) (local literal)))
@@ -277,8 +317,10 @@
 			(if (u32.gtz (struct.get (local drop) error)) (then (return (local drop))))
 			(let native (call read_c_type_literal (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)))
 			(if (u32.gtz (struct.get (local native) error)) (then (return (local native))))
-			(return (call owner_read (struct.get (local native) native) (struct.get (local drop) drop)
-				(struct.get (local drop) storage) (local node) 0u32))))
+			(return (struct.new COwnerRead (native (struct.get (local native) native))
+				(drop (struct.get (local drop) drop)) (storage (struct.get (local drop) storage))
+				(tail (struct.get (local drop) tail)) (count (struct.get (local drop) count))
+				(start (struct.get (local node) start)) (end (struct.get (local node) end)) (error 0u32)))))
 
 	(fn is_c_storage_type
 		(:doc `Identify an owned storage declaration by its original source row.`)
@@ -300,9 +342,9 @@
 		(body
 			(let read (call read_c_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(if
-				(:doc "Every owned native representation requires an explicit destructor.")
+				(:doc "A borrowed pointer requires a destructor. Runtime-owned storage can free itself.")
 				(bool.and (u32.eqz (struct.get (local read) error))
-					(i32.ltz (struct.get (local read) drop)))
+					(bool.and (i32.ltz (struct.get (local read) drop)) (bool.not (struct.get (local read) storage))))
 				(then (return (call owner_read -1i32 -1i32 (bool false) (local node) 23u32))))
 			(return (local read))))
 
