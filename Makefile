@@ -184,7 +184,7 @@ NATIVE_CLI_CASES := \
 	cases.tsv check.tsv diagnostics.tsv literals.tsv function_values/cases.tsv \
 	callable_aliases/cases.tsv bin.tsv standard.tsv protection.tsv phases.tsv
 NATIVE_INTEROP_CASES := \
-	extents.tsv borrow_extents.tsv dirent.tsv deployment.tsv optional-macros.tsv optional-records/cases.tsv \
+	extents.tsv borrow_extents.tsv dirent.tsv deployment.tsv optional-macros.tsv optional-records/cases.tsv callbacks/cases.tsv \
 	intrinsic/cases.tsv nullable-cstr/cases.tsv static-cstr/cases.tsv record-init.tsv \
 	inline-fields/cases.tsv library/cross-target.tsv
 NATIVE_CLI_TESTS := $(addprefix test-native/,$(NATIVE_CLI_CASES))

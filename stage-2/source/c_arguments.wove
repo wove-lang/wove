@@ -18,7 +18,7 @@
 	(use wove-file "../c/arguments.wove"
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
 			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode)
-			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_string_mode) (value c_static_string_mode)))
+			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode)))
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (scalar_ref u32) (owner_mode u8) (nullable bool)))
 	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (handle_out bool) (void_pointer bool) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
@@ -30,6 +30,8 @@
 	(let void_pointer_directive "c_void_ptr")
 	(let vector_directive "c_cstrs")
 	(let static_string_directive "c_static_cstr")
+	(let callback_directive "c_callback_sync")
+	(let callback_type_name "fn-type")
 	(let null_directive "c_null")
 	(let nullable_directive "c_nullable")
 	(let init_directive "c_init")
@@ -91,6 +93,16 @@
 				(then (return (struct.get (local view) access))))
 			(return 0u32)))
 
+	(fn is_c_callback_type
+		(:doc "Recognize an inline callable shape for the later signature and native contract checks.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)) (returns bool)
+		(body
+			(let head (struct.get (call form_parts (borrow-shared (local source))
+				(borrow-shared (local nodes)) (local node)) head))
+			(return (bool.and (i32.not-ltz (local head))
+				(call matches_pragma (borrow-shared (local source)) (array.load (local nodes) (local head))
+					(borrow-shared (local callback_type_name)))))))
+
 	(fn c_argument_directive
 		(:doc `Map a recognized pragma to its native argument mode. Other directives leave the ABI unchanged.`)
 		(params (source (shared-array u8)) (head SourceNode))
@@ -106,6 +118,10 @@
 				(:doc "A retained native string uses immutable NUL-terminated literal storage.")
 				(call matches_pragma (borrow-shared (local source)) (local head) (borrow-shared (local static_string_directive)))
 				(then (return (local c_static_string_mode))))
+			(if
+				(:doc "A synchronous callback has an explicit call lifetime contract.")
+				(call matches_pragma (borrow-shared (local source)) (local head) (borrow-shared (local callback_directive)))
+				(then (return (local c_sync_callback_mode))))
 			(if
 				(:doc "An array bound counts native elements.")
 				(call matches_pragma (borrow-shared (local source)) (local head) (borrow-shared (local array_directive)))
@@ -202,6 +218,10 @@
 					(bool.or (u8.eq (struct.get (local formal) owner_mode) (local c_shared_handle_slot_mode))
 						(u32.gtz (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes))
 							(local type) (bool true))))))))
+			(if
+				(:doc "Only a written callback signature can use the synchronous callback contract.")
+				(u8.eq (local mode) (local c_sync_callback_mode))
+				(then (return (call is_c_callback_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))))
 			(let rows (call c_row_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
 			(if
 				(:doc "C string vectors borrow the rows through a shared projection.")
@@ -742,6 +762,12 @@
 									(count (struct.get (local slot) count)) (integer (struct.get (local slot) integer))
 									(scalar_ref (struct.get (local slot) scalar_ref)) (owner_mode (struct.get (local slot) owner_mode))
 									(nullable (bool true))))))
+					(if
+						(:doc "A callback formal needs an explicit synchronous contract and a fixed C prototype.")
+						(bool.and (call is_c_callback_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type))
+							(bool.or (u8.not-eq (local mode) (local c_sync_callback_mode))
+								(bool.or (struct.get (local arguments) macro) (i32.not-eqz (struct.get (local arguments) variadic)))))
+						(then (return (call c_argument_error_at (local type)))))
 					(let vector (call is_c_vector_mode (local mode)))
 					(let retained (u8.eq (local mode) (local c_static_string_mode)))
 					(if

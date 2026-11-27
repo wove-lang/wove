@@ -1147,6 +1147,7 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_variadic)` | Call a C variadic function with just its declared fixed arguments. |
 | `(c_variadic first_tail_parameter)` | Declare one typed call shape. Clang applies native promotions to the variadic arguments. |
 | `(c_variadic ...)` | Keep all declared parameters fixed and accept zero or more scalar arguments after them. |
+| `(c_callback_sync parameter)` | Lend a Wove callable to a C function for the duration of the call. The C header must match the declared function pointer. |
 | `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
 | `(c_nullable parameter)` | Accept literal `null` in place of a mutable scalar reference or a shared byte view with `c_cstr`. A present string still receives a checked, call-scoped NUL-terminated copy. An empty view supplies an empty C string. |
 
