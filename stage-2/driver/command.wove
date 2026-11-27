@@ -20,6 +20,7 @@
 	(use wove-file "./target.wove" (only effective_selection))
 	(use wove-file "./bin/library.wove" (only configured_library_entry default_library_path public_header_path public_header_state))
 	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use wove-file "../io/stdio.wove" (only write_stderr_line))
 	(use wove-file "./bin/build.wove" (only compile_binary))
 	(use wove-file "./bin/links.wove" (only check_link_inputs))
 	(use wove-file "./files.wove" (only file_stamp file_is_absent read_source_file path_identity same_path_identity))
@@ -30,6 +31,7 @@
 	(use wove-file "../config/schema.wove" (only project_compiler_rule))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 
+	(let host_arguments_failed "runtime error: could not capture host arguments")
 	(let no_project_source "")
 	(let explicit_bin_target "bin requires one explicit source and an explicit output target")
 	(let invalid_library_target "shared libraries require a Linux or macOS target")
@@ -332,14 +334,50 @@
 				(borrow-shared (local nodes)) (borrow-shared (local settings)) (local human)))))
 
 	(fn run_native_command
-		(:doc `Handle version directly and send compilation arguments to the native build driver.`)
-		(params (bytes (shared-array u8)) (argv (shared-array ArgSpan)))
+		(:doc "Preserve the native parser's user-only argument spans by packing its private byte arena.")
+		(params (argv (shared-array (shared-array u8))))
 		(returns i32)
 		(body
+			(let count (array.len (local argv)))
+			(let-mut first 0i32)
+			(if (i32.gtz (local count)) (then (set (local first) 1i32)))
 			(if
-				(:doc "With exactly one user argument the host byte arena is its entire spelling.")
-				(bool.and (i32.eq (array.len (local argv)) 1i32)
-					(call is_version_argument (borrow-shared (local bytes))))
-				(then (return (call print_version))))
-			(return (call run_native_build (borrow-shared (local bytes)) (borrow-shared (local argv))))))
+				(:doc "Version handling can inspect its sole user argument directly.")
+				(i32.eq (local count) 2i32)
+				(then
+					(let argument (array.load (local argv) 1i32))
+					(if
+						(:doc "The version command needs neither a byte arena nor a project file.")
+						(call is_version_argument (borrow-shared (local argument)))
+						(then (return (call print_version))))))
+			(let-mut index (local first))
+			(let-mut length 0i32)
+			(while
+				(:doc "Measure only user arguments before reserving the parser's storage.")
+				(i32.lt (local index) (local count))
+				(body
+					(let width (array.len (array.load (local argv) (local index))))
+					(if
+						(:doc "The private parser uses signed byte offsets into the combined arena.")
+						(i32.lt (i32.sub 2147483647i32 (local length)) (local width))
+						(then
+							(let written (call write_stderr_line (borrow-shared (local host_arguments_failed))))
+							(return 1i32)))
+					(set (local length) (i32.add (local length) (local width)))
+					(set (local index) (i32.inc (local index)))))
+			(let-mut bytes (array.alloc u8 (local length)))
+			(let-mut spans (array.alloc ArgSpan (i32.sub (local count) (local first))))
+			(let-mut offset 0i32)
+			(set (local index) (local first))
+			(while
+				(:doc "Each original user argument gets one parser span, including empty strings.")
+				(i32.lt (local index) (local count))
+				(body
+					(let argument (array.load (local argv) (local index)))
+					(let end (call append_bytes (borrow-shared (local argument)) (borrow-mut (local bytes)) (local offset)))
+					(array.store (local spans) (i32.sub (local index) (local first))
+						(struct.new ArgSpan (start (local offset)) (end (local end))))
+					(set (local offset) (local end))
+					(set (local index) (i32.inc (local index)))))
+			(return (call run_native_build (borrow-shared (local bytes)) (borrow-shared (local spans))))))
 )

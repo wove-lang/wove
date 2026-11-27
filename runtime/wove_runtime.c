@@ -391,54 +391,31 @@ static int wvrt_host_arguments_error(void) {
 	return EXIT_FAILURE;
 }
 
-// Pack the user's original argument bytes and lend them and their spans to Wove.
-int wvrt_run_host_entry(int argc, char **argv, size_t span_size,
-	void (*write_span)(void *, int32_t, int32_t, int32_t), int32_t (*entry)(wvrt_slice, wvrt_slice)) {
-	// Both lengths must fit in the runtime's signed slice domain.
-	if (argc < 0 || (argc > 0 && (uintmax_t)(argc - 1) > INT32_MAX) || span_size == 0) {
+// Lend descriptors backed by the original host strings for the duration of the entry.
+int wvrt_run_host_entry(int argc, char **argv, int32_t (*entry)(wvrt_slice)) {
+	// The number of rows must fit a signed Wove slice and the C allocation.
+	if (argc < 0 || (uintmax_t)argc > INT32_MAX || (uintmax_t)argc > SIZE_MAX / sizeof(wvrt_slice)) {
 		return wvrt_host_arguments_error();
 	}
-	const int32_t count = argc == 0 ? 0 : (int32_t)(argc - 1);
-	// The host supplies only the executable name in the usual empty case.
-	if (count == 0) {
-		return entry((wvrt_slice){NULL, 0, sizeof(uint8_t)}, (wvrt_slice){NULL, 0, span_size});
-	}
-	// Check the span extent before allocating its record storage.
-	if (argv == NULL || (uintmax_t)count > SIZE_MAX / span_size) {
-		return wvrt_host_arguments_error();
-	}
-	size_t length = 0;
-	// Measure the byte arena without counting the executable name or C terminators.
-	for (int32_t index = 0; index < count; ++index) {
-		if (argv[index + 1] == NULL) { return wvrt_host_arguments_error(); }
-		const size_t width = strlen(argv[index + 1]);
-		// Keep every half-open end representable as a Wove i32 and a host allocation offset.
-		if ((uintmax_t)width > INT32_MAX - (uintmax_t)length || width > SIZE_MAX - length) {
+	if (argc == 0) { return entry((wvrt_slice){NULL, 0, sizeof(wvrt_slice)}); }
+	if (argv == NULL) { return wvrt_host_arguments_error(); }
+	// Invocations with just the executable name need only one stack descriptor.
+	wvrt_slice single_row;
+	wvrt_slice *rows = argc == 1 ? &single_row : malloc((size_t)argc * sizeof(*rows));
+	if (rows == NULL) { return wvrt_host_arguments_error(); }
+	// Each row excludes its C terminator and retains the host's byte spelling.
+	for (int index = 0; index < argc; ++index) {
+		const char *argument = argv[index];
+		const size_t length = argument == NULL ? 0 : strlen(argument);
+		// A missing string or an unrepresentable row cannot be exposed as a Wove view.
+		if (argument == NULL || (uintmax_t)length > INT32_MAX) {
+			if (rows != &single_row) { free(rows); }
 			return wvrt_host_arguments_error();
 		}
-		length += width;
+		rows[index] = (wvrt_slice){argument, (int32_t)length, sizeof(uint8_t)};
 	}
-	uint8_t *bytes = length == 0 ? NULL : malloc(length);
-	void *spans = malloc((size_t)count * span_size);
-	// Release whichever allocation succeeded when the other fails.
-	if ((length > 0 && bytes == NULL) || spans == NULL) {
-		free(spans);
-		free(bytes);
-		return wvrt_host_arguments_error();
-	}
-	size_t offset = 0;
-	// Equal endpoints preserve an empty argument as a distinct row.
-	for (int32_t index = 0; index < count; ++index) {
-		const char *argument = argv[index + 1];
-		const size_t width = strlen(argument);
-		if (width > 0) { memcpy(bytes + offset, argument, width); }
-		write_span(spans, index, (int32_t)offset, (int32_t)(offset + width));
-		offset += width;
-	}
-	const int32_t status = entry((wvrt_slice){bytes, (int32_t)length, sizeof(uint8_t)},
-		(wvrt_slice){spans, count, span_size});
-	free(spans);
-	free(bytes);
+	const int32_t status = entry((wvrt_slice){rows, (int32_t)argc, sizeof(*rows)});
+	if (rows != &single_row) { free(rows); }
 	return status;
 }
 

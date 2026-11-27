@@ -3,6 +3,8 @@
 
 """Lower the first Wove ownership forms to C11."""
 
+from __future__ import annotations
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -98,7 +100,7 @@ class Record:
 @dataclass(frozen=True)
 class BufferType:
 	access: str
-	element: str | Record
+	element: str | Record | BufferType
 
 
 Type = str | Record | BufferType
@@ -106,6 +108,7 @@ Type = str | Record | BufferType
 
 _BYTE_VIEW = BufferType(SHARED, U8)
 _BYTE_OUTPUT = BufferType(MUT, U8)
+_HOST_ARGV = BufferType(SHARED, _BYTE_VIEW)
 # Only the private bootstrap host ABI bypasses ordinary Wove name lookup.
 BOOTSTRAP_CALLS: dict[str, tuple[tuple[Type, ...], Type]] = {
 	"bootstrap_canonical_path": ((_BYTE_VIEW, _BYTE_OUTPUT), I32),
@@ -142,12 +145,7 @@ class Function:
 	params: tuple[tuple[str, Type], ...]
 	result: str | Record
 	body: Form
-	host_span: Record | None = None
-
-	# The host adapter owns the application entry.
-	@property
-	def is_entry(self) -> bool:
-		return self.host_span is not None
+	is_entry: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,29 +298,19 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 	# Slice parameters specify a read or write loan.
 	if view.tag not in (SHARED, MUT):
 		raise SourceError(node.line)
-	element = identifier(view.operands[0])
+	element_node, = view.operands
+	# Permit exactly one layer of shared byte rows through the host entry and its helpers.
+	if view.tag == SHARED and isinstance(element_node, Form) and element_node.tag == SHARED:
+		row, = checked_form(element_node, SHARED, 1).operands
+		# Keep the nested form limited to shared byte descriptors.
+		if identifier(row) == U8:
+			return _HOST_ARGV
+		raise SourceError(element_node.line)
+	element = identifier(element_node)
 	# Keep the declared element type as part of the slice type.
 	if element != U8 and element not in records:
 		raise SourceError(node.line)
 	return BufferType(view.tag, records.get(element, element))
-
-
-# Require the same concrete argument-span layout as the native runtime adapter.
-def read_host_span(params: dict[str, Type], line: int) -> Record:
-	# The host supplies a shared byte arena followed by its shared span table.
-	if len(params) != 2:
-		raise SourceError(line)
-	bytes_kind, spans_kind = params.values()
-	# Validate the two view kinds before inspecting the span element record.
-	if bytes_kind != BufferType(SHARED, U8) or not isinstance(spans_kind, BufferType):
-		raise SourceError(line)
-	record = spans_kind.element
-	# Generated callbacks write the defining record directly, in declaration order.
-	if spans_kind.access != SHARED or not isinstance(record, Record) or tuple(
-		(name, field.kind) for name, field in record.fields.items()
-	) != (("start", I32), ("end", I32)):
-		raise SourceError(line)
-	return record
 
 
 # Read the signature before lowering calls, including forward calls.
@@ -358,12 +346,11 @@ def read_function(
 		raise SourceError(result_node.line)
 	entry = entry_module and name == "main"
 	# The application entry implements the shared host argument ABI.
-	if entry and result != I32:
+	if entry and (result != I32 or tuple(params.values()) != (_HOST_ARGV,)):
 		raise SourceError(node.line)
-	host_span = read_host_span(params, node.line) if entry else None
 
 	c_name = f"wv_seed_fn_{index}"
-	return Function(c_name, tuple(params.items()), result, checked_form(body_node, "body"), host_span)
+	return Function(c_name, tuple(params.items()), result, checked_form(body_node, "body"), entry)
 
 
 # Encode a source filename as a C literal, including arbitrary path bytes.
@@ -456,6 +443,10 @@ class FunctionEmitter:
 
 	# Resolve the binding and descriptor for a permitted array access.
 	def array_access(self, node: Node, line: int, writable: bool = False) -> tuple[Binding, BufferType, str]:
+		# A selected byte row can serve directly as a read-only array receiver.
+		if isinstance(node, Form) and node.tag == "array.load" and not writable:
+			value = self.typed(node, _BYTE_VIEW)
+			return Binding(value), _BYTE_VIEW, value.c + "."
 		binding = self.local(node, line)
 		value = binding.value
 		kind = value.kind
@@ -469,9 +460,9 @@ class FunctionEmitter:
 		self.check_access(binding, writable, line)
 		return binding, kind, value.c + ("->" if owned else ".")
 
-	# Index a native record only after the runtime verifies the signed element index.
-	def record_element(
-		self, fields: str, element: str | Record, index: Value, line: int, *, writable: bool = False
+	# Index a typed C element only after the runtime verifies the signed index.
+	def typed_element(
+		self, fields: str, element: Type, index: Value, line: int, *, writable: bool = False
 	) -> str:
 		native = c_type(element)
 		pointer = native if writable else f"const {native}"
@@ -488,6 +479,9 @@ class FunctionEmitter:
 		tag = "borrow-mut" if exclusive else "borrow-shared"
 		target_node, = checked_form(node, tag, 1).operands
 		target = checked_form(target_node)
+		# A row selected from a shared outer view already has the shared descriptor ABI.
+		if kind == _BYTE_VIEW and target.tag == "array.load":
+			return self.typed(target, _BYTE_VIEW)
 		source = target
 		range_bounds = None
 		# A range projects the named source for a byte-array call argument.
@@ -748,9 +742,9 @@ class FunctionEmitter:
 			_, kind, fields = self.array_access(target, node.line)
 			element = kind.element
 			index = self.typed(subscript, I32)
-			# A typed record access copies the entire element.
+			# A typed access copies a record value or a shared row descriptor.
 			if element != U8:
-				return self.temporary(element, self.record_element(fields, element, index, node.line))
+				return self.temporary(element, self.typed_element(fields, element, index, node.line))
 			return self.temporary(
 				U8, f"wvrt_slice_load_u8({fields}wvrt_items, {fields}wvrt_length, "
 				f"{index.c}, {self.site(node.line)})"
@@ -959,7 +953,7 @@ class FunctionEmitter:
 				)
 			# The checked element index selects one writable record slot.
 			else:
-				slot = self.record_element(fields, element, index, node.line, writable=True)
+				slot = self.typed_element(fields, element, index, node.line, writable=True)
 				self.emit_line(f"{slot} = {value.c};")
 			return True
 
@@ -1395,7 +1389,7 @@ def compile_source(source: str, filename: str) -> str:
 			for function in module.functions.values():
 				references = retained if function.is_entry else ()
 				lines.extend(FunctionEmitter(function, module, path).emit(references))
-				# Reuse the runtime's bounded host argv adapter for the two-view entry.
-				if function.host_span is not None:
-					lines.extend([f"WVRT_HOST_ENTRY({function.c_name}, {function.host_span.c_name})", ""])
+				# Reuse the same borrowed host argument vector as the native compiler.
+				if function.is_entry:
+					lines.extend([f"WVRT_HOST_ENTRY({function.c_name})", ""])
 	return "\n".join(lines)

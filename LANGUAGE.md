@@ -19,13 +19,11 @@ as `let-mut` and `u32.add-checked`.
 ```lisp
 (module example
     (:doc `Show how a program calls a helper and returns an exit status.`)
-    (struct ArgSpan (fields (start i32) (end i32)))
-
     (fn twice (params (value i32)) (returns i32)
         (:doc "Double the input with wrapping i32 addition.")
         (body (return (i32.add (local value) (local value)))))
 
-    (fn main (params (bytes (shared-array u8)) (args (shared-array ArgSpan))) (returns i32)
+    (fn main (params (argv (shared-array (shared-array u8)))) (returns i32)
         (:doc "Double 21 and return the result as the process exit status.")
         (body (return (call twice 21i32)))))
 ```
@@ -42,12 +40,13 @@ The program exits with status 42. From a compiler checkout, use
 
 ### Program entry
 
-The entry module's `main` takes a `(shared-array u8)` and a
-`(shared-array ArgSpan)` and returns `i32`. The span record can have any
-name and must contain `(start i32)` followed by `(end i32)`. The byte view
-concatenates the user arguments without terminators. Each span is
-half-open and indexes that view. The executable name is omitted. Empty
-arguments have equal endpoints, and no user arguments give two empty views.
+The entry module's `main` takes one `(shared-array (shared-array u8))`
+and returns `i32`. `array.len` counts the arguments, including the
+host's `argv[0]` when present. `array.load` selects one shared byte view
+by its checked `i32` index. Row zero is the executable spelling supplied by
+the host. User arguments follow in order. Each row contains the original
+bytes without the C terminator, and an empty argument has its own empty row.
+The views borrow the host strings for the duration of `main`.
 
 ### Shared libraries
 
