@@ -7,6 +7,8 @@
 	(use wove-file "../clang/trace.wove" (only include_line trace_length))
 	(use wove-file "../clang/replay.wove" (only replay_directives_safe replay_declarations_safe))
 	(use wove-file "../clang/native_replay.wove" (only write_native_identities))
+	(use wove-file "../clang/macro_directives.wove" (only safe_macro_definitions))
+	(use wove-file "../clang/macro_replay.wove" (only append_macro_identities))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 	(use wove-file "../emit/units.wove" (only write_unit_name))
 	(use wove-file "../io/write.wove" (only write_new_file))
@@ -105,7 +107,8 @@
 		(:doc "Check the serial prefix's preprocessing and declarations together before comparing numbered paths.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
 			(baseline (shared-array u8)) (preprocessed (mut-array u8)) (trace (mut-array u8))
-			(identities (mut-array FileStamp)) (borrowed bool) (writable bool) (record_calls bool)) (returns i32)
+			(identities (mut-array FileStamp)) (macros (shared-array u8))
+			(borrowed bool) (writable bool) (record_calls bool)) (returns i32)
 		(body
 			(let pp (call run_clang_replay (borrow-shared program) (borrow-shared options)
 				(borrow-shared path) (bool true) (borrow-mut preprocessed) (borrow-mut trace)))
@@ -126,7 +129,7 @@
 					(if
 						(:doc "An ordinary plan certifies only the original inert directive grammar.")
 						(bool.not (call replay_directives_safe (borrow-shared text) base
-							(borrow-shared baseline) (borrow-shared no_ast) (bool false) (bool false)))
+							(borrow-shared baseline) (borrow-shared no_ast) (bool false) (bool false) (borrow-shared macros)))
 						(then (return -1i32)))))
 			(if
 				(:doc "The trace must identify every header before the JSON AST pass.")
@@ -153,7 +156,7 @@
 			(if
 				(:doc "A borrowed object's new macro may only name an externally declared live slot.")
 				(bool.and (bool.or borrowed writable) (bool.not (call replay_directives_safe (borrow-shared text) base
-					(borrow-shared declarations_bytes) (borrow-shared statements) borrowed writable)))
+					(borrow-shared declarations_bytes) (borrow-shared statements) borrowed writable (borrow-shared macros))))
 				(then (return -1i32)))
 			(return length)))
 
@@ -224,7 +227,7 @@
 		(:doc "Resolve the native link identities in the same include context already witnessed by preprocessing.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
 			(serial_trace (shared-array u8)) (identities (mut-array FileStamp)) (boundary i32)
-			(shared (shared-array u8)) (output (mut-array u8))) (returns i32)
+			(shared (shared-array u8)) (macro_count i32) (output (mut-array u8))) (returns i32)
 		(body
 			(let-mut ast (array.alloc u8 native_ast_capacity))
 			(let-mut trace (array.alloc u8 trace_capacity))
@@ -237,14 +240,16 @@
 						(borrow-mut identities) boundary (borrow-shared shared))))
 				(then (return -1i32)))
 			(let-mut statements (array.alloc JsonNode native_node_capacity))
-			(return (call write_native_identities (borrow-shared (array.range ast 0i32 (struct.get result length)))
-				(borrow-mut statements) (borrow-mut output)))))
+			(let bytes (borrow-shared (array.range ast 0i32 (struct.get result length))))
+			(let width (call write_native_identities (borrow-shared bytes) (borrow-mut statements) (borrow-mut output)))
+			(return (call append_macro_identities (borrow-shared bytes) (borrow-shared statements)
+				(borrow-mut output) width macro_count))))
 
 	(fn matching_numbered_sources
 		(:doc "Require identical effective preprocessing and selected headers at every numbered filename.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8)) (count i32)
 			(serial (shared-array u8)) (serial_trace (shared-array u8)) (identities (mut-array FileStamp))
-			(boundary i32) (shared (shared-array u8)) (native_identities (shared-array u8))) (returns bool)
+			(boundary i32) (shared (shared-array u8)) (native_identities (shared-array u8)) (macro_count i32)) (returns bool)
 		(body
 			(let-mut output (array.alloc u8 capture_capacity))
 			(let-mut trace (array.alloc u8 trace_capacity))
@@ -271,7 +276,7 @@
 						(then
 							(let length (call read_native_identities (borrow-shared program) (borrow-shared options)
 								(borrow-shared path) (borrow-shared serial_trace) (borrow-mut identities)
-								boundary (borrow-shared shared) (borrow-mut native)))
+								boundary (borrow-shared shared) macro_count (borrow-mut native)))
 							(if
 								(:doc "Compare only the stable resolved fields from each Clang AST.")
 								(bool.or (i32.ltz length)
@@ -285,7 +290,8 @@
 		(:doc "Stage all numbered names together and remove only the files this audit created.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8)) (count i32)
 			(probe (shared-array u8)) (header (shared-array u8)) (serial (shared-array u8))
-			(trace (shared-array u8)) (identities (mut-array FileStamp)) (boundary i32) (native_identities (shared-array u8)))
+			(trace (shared-array u8)) (identities (mut-array FileStamp)) (boundary i32) (native_identities (shared-array u8))
+			(macro_count i32))
 		(returns bool)
 		(body
 			(let shared (call join_file_path (borrow-shared serial_path) (borrow-shared common_name)))
@@ -302,7 +308,7 @@
 			(let matched (bool.and complete
 				(call matching_numbered_sources (borrow-shared program) (borrow-shared options)
 					(borrow-shared serial_path) count (borrow-shared serial) (borrow-shared trace) (borrow-mut identities)
-					boundary (borrow-shared shared) (borrow-shared native_identities))))
+					boundary (borrow-shared shared) (borrow-shared native_identities) macro_count)))
 			(let-mut cleaned (i32.eqz (call unlink (borrow-shared shared))))
 			(while
 				(:doc "Release every staged filename on either result even if an earlier removal failed.")
@@ -354,10 +360,11 @@
 
 	(fn implicit_replay_source
 		(:doc "Place any checked native operands on either side of the implicit include, followed by the counter.")
-		(params (prefix (shared-array u8)) (names (shared-array u8)) (directive (shared-array u8)))
+		(params (prefix (shared-array u8)) (names (shared-array u8)) (directive (shared-array u8))
+			(macros (shared-array u8)))
 		(returns (owned-array u8))
 		(body
-			(let length (u64.add (u64.from-i32 (array.len prefix))
+			(let length (u64.add (u64.add (u64.from-i32 (array.len prefix)) (u64.from-i32 (array.len macros)))
 				(u64.add (u64.mul 2u64 (u64.from-i32 (array.len names)))
 					(u64.from-i32 (i32.add (array.len directive) (array.len counter_probe))))))
 			(if (u64.gt length 2147483647u64) (then (return (array.alloc u8 0i32))))
@@ -366,19 +373,20 @@
 			(let before (call append_bytes (borrow-shared names) (borrow-mut output) first))
 			(let after (call append_bytes (borrow-shared directive) (borrow-mut output) before))
 			(let last (call append_bytes (borrow-shared names) (borrow-mut output) after))
-			(let end (call append_bytes (borrow-shared counter_probe) (borrow-mut output) last))
+			(let typed (call append_bytes (borrow-shared macros) (borrow-mut output) last))
+			(let end (call append_bytes (borrow-shared counter_probe) (borrow-mut output) typed))
 			(return (move output))))
 
 	(fn certify_implicit_context
 		(:doc "Replay the actual implicit header at serial and numbered include depth.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8)) (count i32)
 			(prefix (shared-array u8)) (names (shared-array u8)) (explicit_trace (shared-array u8))
-			(directive (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8))
+			(directive (shared-array u8)) (macros (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8))
 			(identities (mut-array FileStamp)) (resolve_native bool))
 		(returns bool)
 		(body
 			(let serial (call implicit_replay_source (borrow-shared prefix) (borrow-shared names)
-				(borrow-shared directive)))
+				(borrow-shared directive) (borrow-shared macros)))
 			(if
 				(:doc "Never overwrite an existing serial source or run with an exhausted probe.")
 				(bool.or (i32.eqz (array.len serial))
@@ -388,20 +396,27 @@
 				(borrow-shared serial_path) (bool true) (borrow-mut output) (borrow-mut trace)))
 			(let identified (bool.and (u32.eqz (struct.get result error))
 				(call include_identities (borrow-shared trace) (borrow-mut identities) (bool false))))
-			(let-mut native (array.alloc u8 (if resolve_native (then capture_capacity) (else 0i32))))
+			(let macro_count (if
+				(:doc "The effective serial prefix must still contain only substitutable macro definitions.")
+				identified
+				(then (call safe_macro_definitions (borrow-shared (array.range output 0i32 (struct.get result length)))
+					(borrow-shared macros)))
+				(else -1i32)))
+			(let native_query (bool.or resolve_native (i32.gtz macro_count)))
+			(let-mut native (array.alloc u8 (if native_query (then capture_capacity) (else 0i32))))
 			(let width (if
 				(:doc "The actual serial preamble establishes the external identities to compare.")
-				(bool.and identified resolve_native)
+				(bool.and (i32.not-ltz macro_count) native_query)
 				(then (call read_native_identities (borrow-shared program) (borrow-shared options)
 					(borrow-shared serial_path) (borrow-shared trace) (borrow-mut identities)
-					-1i32 (borrow-shared serial_path) (borrow-mut native)))
+					-1i32 (borrow-shared serial_path) macro_count (borrow-mut native)))
 				(else 0i32)))
 			(let removed (call unlink (borrow-shared serial_path)))
 			(let boundary (call trace_length (borrow-shared explicit_trace)))
 			(if
 				(:doc "The implicit header must extend the already certified explicit include trace.")
-				(bool.or (bool.or (i32.not-eqz removed) (bool.and resolve_native (i32.not-gtz width)))
-					(bool.or (bool.not identified)
+				(bool.or (bool.or (i32.not-eqz removed) (bool.and native_query (i32.not-gtz width)))
+					(bool.or (i32.ltz macro_count)
 					(bool.or (i32.ge boundary (call trace_length (borrow-shared trace)))
 						(bool.not (call same_bytes (borrow-shared explicit_trace) 0i32 boundary
 							(borrow-shared trace) 0i32 boundary)))))
@@ -412,12 +427,12 @@
 				(bool.and (i32.gtz (array.len names)) (bool.not (call native_names_preserved (borrow-shared text))))
 				(then (return (bool false))))
 			(let numbered (call implicit_replay_source (borrow-shared prefix) (borrow-shared names)
-				(borrow-shared common_directive)))
+				(borrow-shared common_directive) (borrow-shared macros)))
 			(if (i32.eqz (array.len numbered)) (then (return (bool false))))
 			(return (call replay_numbered_context (borrow-shared program) (borrow-shared options)
 				(borrow-shared serial_path) count (borrow-shared numbered) (borrow-shared directive)
 				(borrow-shared text) (borrow-shared trace) (borrow-mut identities) boundary
-				(borrow-shared (array.range native 0i32 width))))))
+				(borrow-shared (array.range native 0i32 width)) macro_count))))
 
 	(fn certify_numbered_includes
 		(:doc `Certify the selected bytes from write_includes for the final staged frontend context.
@@ -431,6 +446,7 @@
 		An uncertain audit leaves the serial path and its diagnostics available.`)
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8))
 			(count i32) (prefix (shared-array u8)) (guards (shared-array u8)) (names (shared-array u8))
+			(macros (shared-array u8))
 			(implicit u8) (borrowed bool) (writable bool) (resolve_native bool) (record_calls bool)) (returns bool)
 		(body
 			(if
@@ -441,7 +457,8 @@
 				(:doc "A caller must have planned multiple units in a private directory.")
 				(bool.or (i32.not-lt 1i32 count) (i32.eqz (array.len serial_path)))
 				(then (return (bool false))))
-			(let size (u64.add (u64.from-i32 (array.len guards))
+			(let flat_macros (if (u8.eqz implicit) (then (array.len macros)) (else 0i32)))
+			(let size (u64.add (u64.add (u64.from-i32 (array.len guards)) (u64.from-i32 flat_macros))
 				(u64.add (u64.from-i32 (array.len prefix))
 					(u64.add (u64.from-i32 (array.len names)) (u64.from-i32 (array.len counter_probe))))))
 			(if (u64.gt size 2147483647u64) (then (return (bool false))))
@@ -449,7 +466,8 @@
 			(let start (call append_bytes (borrow-shared guards) (borrow-mut probe) 0i32))
 			(let next (call append_bytes (borrow-shared prefix) (borrow-mut probe) start))
 			(let witnessed (call append_bytes (borrow-shared names) (borrow-mut probe) next))
-			(let end (call append_bytes (borrow-shared counter_probe) (borrow-mut probe) witnessed))
+			(let typed (call append_bytes (borrow-shared (array.range macros 0i32 flat_macros)) (borrow-mut probe) witnessed))
+			(let end (call append_bytes (borrow-shared counter_probe) (borrow-mut probe) typed))
 			(let-mut baseline (array.alloc u8 capture_capacity))
 			(let-mut trace (array.alloc u8 trace_capacity))
 			(let base (call staged_empty_baseline (borrow-shared program) (borrow-shared options)
@@ -463,20 +481,25 @@
 			(let-mut identities (array.alloc FileStamp include_limit))
 			(let width (call serial_snapshot (borrow-shared program) (borrow-shared options) (borrow-shared serial_path)
 				(borrow-shared (array.range baseline 0i32 base)) (borrow-mut source) (borrow-mut trace)
-				(borrow-mut identities) borrowed writable record_calls))
-			(let direct (bool.and resolve_native (u8.eqz implicit)))
+				(borrow-mut identities) (borrow-shared macros) borrowed writable record_calls))
+			(let macro_count (if
+				(:doc "Check definitions in the exact translation unit when its preamble is already complete.")
+				(bool.and (i32.not-ltz width) (u8.eqz implicit))
+				(then (call safe_macro_definitions (borrow-shared (array.range source 0i32 width)) (borrow-shared macros)))
+				(else 0i32)))
+			(let direct (bool.and (u8.eqz implicit) (bool.or resolve_native (i32.gtz macro_count))))
 			(let-mut native (array.alloc u8 (if direct (then capture_capacity) (else 0i32))))
 			(let native_width (if
 				(:doc "Without an implicit include, the audited serial prefix is the actual identity context.")
-				(bool.and direct (i32.not-ltz width))
+				(bool.and direct (bool.and (i32.not-ltz width) (i32.not-ltz macro_count)))
 				(then (call read_native_identities (borrow-shared program) (borrow-shared options)
 					(borrow-shared serial_path) (borrow-shared trace) (borrow-mut identities)
-					-1i32 (borrow-shared serial_path) (borrow-mut native)))
+					-1i32 (borrow-shared serial_path) macro_count (borrow-mut native)))
 				(else 0i32)))
 			(let removed (call unlink (borrow-shared serial_path)))
 			(if
 				(:doc "A failed audit or missing required identity leaves the original serial path available.")
-				(bool.or (bool.or (i32.ltz width) (i32.not-eqz removed))
+				(bool.or (bool.or (bool.or (i32.ltz width) (i32.ltz macro_count)) (i32.not-eqz removed))
 					(bool.and direct (i32.not-gtz native_width)))
 				(then (return (bool false))))
 			(if
@@ -490,13 +513,13 @@
 						(then (return (call certify_implicit_context (borrow-shared program) (borrow-shared options)
 							(borrow-shared serial_path) count (borrow-shared (array.range probe 0i32 next))
 							(borrow-shared names) (borrow-shared trace) (borrow-shared stdint_directive)
-							(borrow-mut source) (borrow-mut implicit_trace) (borrow-mut identities) resolve_native))))
+							(borrow-shared macros) (borrow-mut source) (borrow-mut implicit_trace) (borrow-mut identities) resolve_native))))
 					(return (call certify_implicit_context (borrow-shared program) (borrow-shared options)
 						(borrow-shared serial_path) count (borrow-shared (array.range probe 0i32 next))
 						(borrow-shared names) (borrow-shared trace) (borrow-shared runtime_directive)
-						(borrow-mut source) (borrow-mut implicit_trace) (borrow-mut identities) resolve_native))))
+						(borrow-shared macros) (borrow-mut source) (borrow-mut implicit_trace) (borrow-mut identities) resolve_native))))
 			(return (call replay_numbered_context (borrow-shared program) (borrow-shared options)
 				(borrow-shared serial_path) count (borrow-shared probe) (borrow-shared common_probe)
 				(borrow-shared (array.range source 0i32 width)) (borrow-shared trace) (borrow-mut identities) -1i32
-				(borrow-shared (array.range native 0i32 native_width))))))
+				(borrow-shared (array.range native 0i32 native_width)) macro_count))))
 )
