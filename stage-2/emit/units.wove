@@ -4,23 +4,25 @@
 	(:doc "Partition and emit an already checked graph as numbered C units.")
 
 	(use wove-file "../hashing/base32hex.wove" (only encode_base32hex32))
-	(use wove-file "../c/arguments.wove" (only is_c_value_mode))
+	(use wove-file "../c/arguments.wove" (only (value c_storage_init_always_mode) is_c_storage_mode is_c_value_mode))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
-	(use wove-file "../scalar/native_owner_types.wove" (only is_native_owner))
+	(use wove-file "../scalar/native_owner_types.wove" (only is_native_owner native_owner_type))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
-	(use wove-file "../scalar/records.wove" (only find_native_definition is_native_integer is_native_record (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only find_native_definition is_native_integer
+		is_native_record (type ScalarRecord)))
 	(use wove-file "../scalar/trees.wove" (only (type ScalarTree)))
 	(use wove-file "../source/graph.wove" (only includes_c_header (type GraphBinding)))
 	(use wove-file "../scalar/tests.wove" (only (type DiscoveredTest)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
 	(use wove-file "./bindings.wove" (only write_module_bindings (value declared_module_bindings) (value linked_module_bindings)))
-	(use wove-file "./c.wove" (only has_c_arguments write_program_preamble write_program_bodies))
+	(use wove-file "./c.wove" (only has_c_nonstorage_arguments write_program_preamble write_program_bodies))
 	(use wove-file "./c_values.wove" (only is_c_integer_constant is_c_vector_snapshot is_writable_c_integer))
 	(use wove-file "../source/types.wove" (only is_builtin_scalar void_type))
 	(use wove-file "./headers.wove" (only append_includes (type CInclude) (type Includes)))
 	(use wove-file "./library.wove" (only write_library_abi))
+	(use wove-file "./owners.wove" (only is_numbered_storage_owner))
 	(use wove-file "./text.wove" (only c_literal_text))
 	(use wove-file "./workers.wove" (only write_worker_adapters (value declared_worker_adapters) (value linked_worker_adapters)))
 	(use wove-file "./tests.wove" (only write_test_entry))
@@ -134,9 +136,29 @@
 		(params (type u32)) (returns bool)
 		(body (return (bool.or (call is_builtin_scalar type) (call is_native_integer type)))))
 
+	(fn numbered_storage_binding
+		(:doc "Recover the exact owner declaration from a selected type and its defining file.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(binding GraphBinding) (trees (shared-array ScalarTree))) (returns i32)
+		(body
+			(if
+				(:doc "Only a selected type with a named destructor can select fixed storage here.")
+				(bool.or (u32.not-eq (struct.get binding namespace) 1u32)
+					(bool.or (i32.not-gtz (struct.get binding native_type)) (i32.ltz (struct.get binding drop_start))))
+				(then (return -1i32)))
+			(let tree (array.load trees (struct.get binding native_file)))
+			(let declaration (i32.add (struct.get tree base) (struct.get binding native_type)))
+			(if
+				(:doc "Local-only owners keep their defining form without an ordinary value layout row.")
+				(call is_numbered_storage_owner (borrow-shared source) (borrow-shared nodes)
+					(call native_owner_type declaration))
+				(then (return declaration)))
+			(return -1i32)))
+
 	(fn numbered_bridge_binding
 		(:doc "Classify the selected declaration before certifying its include context.")
-		(params (binding GraphBinding) (records (shared-array ScalarRecord))
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(binding GraphBinding) (records (shared-array ScalarRecord))
 			(trees (shared-array ScalarTree)) (statements (shared-array ScalarStatement))) (returns u8)
 		(body
 			(if (struct.get binding optional) (then (return 0u8)))
@@ -162,6 +184,11 @@
 						(then (return 2u8)))
 					(return 0u8)))
 			(if (u32.not-eq namespace 1u32) (then (return 0u8)))
+			(if
+				(:doc "Fixed storage is interpreted from the same native type and destructor in every unit.")
+				(i32.not-ltz (call numbered_storage_binding (borrow-shared source) (borrow-shared nodes)
+					binding (borrow-shared trees)))
+				(then (return numbered_preamble_replay)))
 			(let row (call find_native_definition (borrow-shared records)
 				(struct.get binding native_file) (struct.get binding native_type)))
 			(if (i32.ltz row) (then (return 0u8)))
@@ -177,13 +204,14 @@
 			(return 0u8)))
 
 	(fn ordinary_bridge_signature
-		(:doc "Admit direct scalar calls and shared pointer parameters when verifying live native values.")
-		(params (function ScalarFunction) (parameters (shared-array ScalarParameter)) (borrows bool)) (returns bool)
+		(:doc "Admit direct scalar, pointer loan, and fixed storage contracts.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(function ScalarFunction) (parameters (shared-array ScalarParameter)) (borrows bool)) (returns bool)
 		(body
 			(let result (struct.get function result))
 			(if
 				(:doc "Void and direct scalar results need no ownership adapter.")
-				(bool.or (bool.or (call has_c_arguments function)
+				(bool.or (bool.or (call has_c_nonstorage_arguments function)
 					(i32.not-eqz (struct.get function c_variadic)))
 					(bool.and (u32.not-eq result (call void_type)) (bool.not (call direct_scalar_abi result))))
 				(then (return (bool false))))
@@ -195,18 +223,23 @@
 				(body
 					(let parameter (array.load parameters index))
 					(let type (struct.get parameter type))
+					(let mode (struct.get parameter c_mode))
 					(let borrowed (bool.and borrows (bool.and (call is_native_owner type)
-						(call is_c_value_mode (struct.get parameter c_mode)))))
+						(call is_c_value_mode mode))))
+					(let storage (bool.and (bool.and (call is_c_storage_mode mode)
+							(u8.not-eq mode c_storage_init_always_mode))
+						(call is_numbered_storage_owner (borrow-shared source) (borrow-shared nodes) type)))
 					(if
-						(:doc "Only scalars and direct shared pointer handles can cross the unadapted native call.")
-						(bool.not (bool.or borrowed (call direct_scalar_abi type)))
+						(:doc "Every argument must use the checked scalar, borrowed pointer, or fixed storage ABI.")
+						(bool.not (bool.or (bool.or borrowed storage) (call direct_scalar_abi type)))
 						(then (return (bool false))))
 					(set index (i32.inc index))))
 			(return (bool true))))
 
 	(fn numbered_program_preamble
 		(:doc "Select serial output or the include proof needed by the checked native declarations.")
-		(params (bindings (shared-array GraphBinding)) (functions (shared-array ScalarFunction))
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(bindings (shared-array GraphBinding)) (functions (shared-array ScalarFunction))
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
 			(trees (shared-array ScalarTree)) (statements (shared-array ScalarStatement))) (returns u8)
 		(body
@@ -222,7 +255,8 @@
 						(:doc "Each selected native binding must share the same audited include context.")
 						(call includes_c_header binding)
 						(then
-							(let admitted (call numbered_bridge_binding binding (borrow-shared records)
+							(let admitted (call numbered_bridge_binding (borrow-shared source) (borrow-shared nodes)
+								binding (borrow-shared records)
 								(borrow-shared trees) (borrow-shared statements)))
 							(if (u8.eqz admitted) (then (return 0u8)))
 							(if
@@ -239,10 +273,18 @@
 				(body
 					(let function (array.load functions index))
 					(if
-						(:doc "The numbered emitter reuses the checked direct call without generating an ABI wrapper.")
-						(bool.and (i32.ltz (struct.get function body))
-							(bool.not (call ordinary_bridge_signature function (borrow-shared parameters) (u8.eq mode 2u8))))
-						(then (return 0u8)))
+						(:doc "Only verified native argument and result contracts may use the numbered emitter.")
+						(i32.ltz (struct.get function body))
+						(then
+							(if
+								(:doc "A signature outside the supported ABI keeps the graph serial.")
+								(bool.not (call ordinary_bridge_signature (borrow-shared source) (borrow-shared nodes)
+									function (borrow-shared parameters) (u8.eq mode 2u8)))
+								(then (return 0u8)))
+							(if
+								(:doc "A native signature can select storage without a direct import of its type.")
+								(bool.and (u8.eq mode 1u8) (struct.get function c_storage))
+								(then (set mode numbered_preamble_replay)))))
 					(set index (i32.inc index))))
 			(return mode)))
 
