@@ -147,10 +147,26 @@ An empty `(only)` visits the provider without binding a name. Aliases
 retain the original declaration's identity and storage.
 
 A metadata entry uses a colon-prefixed tag such as `(:doc "text")`.
-Module and module-level `let` metadata follows the name as a contiguous
-prefix. Function metadata can appear anywhere after the name among its
-tagged fields. On other ordinary forms, use a contiguous prefix directly
-after the tag. A C bridge's prefix follows its header.
+Write each declared name immediately after its tag. This includes modules,
+functions, named types, local and module bindings, C bridge members, and
+generic parameters. An indexed `for` binder puts both names before its
+metadata. Named declarations can attach metadata anywhere after the names,
+including between payload operands or after the last one. Metadata does
+not change the order of ordinary operands.
+
+Fields, parameters, and enum variants use the name as the form head.
+On forms without a fixed name slot, put the metadata prefix directly
+after the head. A C bridge's prefix follows its provider and quoted header.
+
+```lisp
+(struct Block
+    (generic (type T (:doc "Element type.")) (const N i32 (:doc "Width.")))
+    (:doc "Store exactly N elements.")
+    (fields (items (array T N))))
+(let-mut cursor (:doc "Current position.") 0i32)
+(for (let index item (:doc "Relative position and value."))
+    (borrow-shared data) (body ...))
+```
 
 ```lisp
 (:expect (tests "examples/scan.wove") (issues "gh:owner/repo:42"))
@@ -1095,14 +1111,14 @@ the native signature. A project bridge adds to a bundled header and can
 override an individual name. `(:pragma (bridge_replace))` selects only
 the project declarations. `(:pragma (c_optional))` checks that a selected
 function, object-like macro, or native record is available with the target
-header and build settings. Use `(const (:pragma (c_optional)) FEATURE_FLAG i32)` for an
-integer constant, or `(let (:pragma (c_optional) (c_macro)) LIMIT f32)`
+header and build settings. Use `(const FEATURE_FLAG (:pragma (c_optional)) i32)` for an
+integer constant, or `(let LIMIT (:pragma (c_optional) (c_macro)) f32)`
 for a read-only scalar expression. The selected value keeps its declared
 Wove type and reads the expression from the live C header. Optional macro
 probes use the selected header, its declared native header prerequisites,
 and the effective build flags. An optional native record uses the same
 marker on the bridge `struct` form, for example
-`(struct (:pragma (c_optional)) Ftw (c-type "struct FTW") (fields (base i32) (level i32)))`.
+`(struct Ftw (:pragma (c_optional)) (c-type "struct FTW") (fields (base i32) (level i32)))`.
 The probe requires a complete definition in the selected header or its
 include subtree. It recognizes file-scope `struct` and `union` tags,
 including tags defined inside a record, and follows record typedefs across
@@ -1241,7 +1257,7 @@ checks that its capacity fits the mutable output view before entering C.
 A pointer-backed resource uses a destructor contract.
 
 ```lisp
-(type (:pragma (c_owned (drop fclose))) File (c-type "FILE *"))
+(type File (:pragma (c_owned (drop fclose))) (c-type "FILE *"))
 ```
 
 A `File` result owns the native handle. Cleanup calls the destructor once

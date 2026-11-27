@@ -15,6 +15,13 @@ Use one named `module` per file. Give each Wove function a name, `params`,
 `returns`, and `body`, including explicit `(params)` for a zero-argument
 helper. A `void` helper can use `(return)` or fall through.
 
+Put the name immediately after `module`, `fn`, `struct`, `let`, or
+`let-mut`. Named forms attach metadata anywhere after the name, including
+between operands and after the last operand. For example,
+`(let index (:doc "Initial index.") 42i32)` and
+`(let index 42i32 (:doc "Initial index."))` declare the same value.
+Fields and function parameters still use their name as the head.
+
 The seed enables `bootstrap` during selection and excludes `(test)` forms.
 It evaluates selection on modules, declarations, and `decls` groups before
 opening providers or binding names. All `cfg` predicates on a form must pass.

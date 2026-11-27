@@ -63,7 +63,7 @@ HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
 HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,fnv1a base32hex base16)
 BASE32HEX_SOURCE := stage-2/hashing/base32hex.wove
-BASE16_SOURCES = stage-2/emit/text.wove stage-2/hashing/base16.wove $(C_IDENTIFIER_MODULE) $(SOURCE_TYPE_MODULE) $(BASE32HEX_SOURCE) $(BOOTSTRAP_WOVE_SOURCES)
+BASE16_SOURCES = $(BYTE_TEXT_MODULE) stage-2/emit/text.wove stage-2/hashing/base16.wove $(C_IDENTIFIER_MODULE) $(SOURCE_TYPE_MODULE) $(BASE32HEX_SOURCE) $(BOOTSTRAP_WOVE_SOURCES)
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
 BLAKE2B_SOURCE := stage-2/hashing/blake2b.wove
@@ -150,7 +150,7 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 
 # Schedule independent manifests as Make prerequisites.
 GRAPH_LANGUAGE_CASES := \
-	identity_collisions/cases.tsv ascii_names/cases.tsv source_graphs.tsv scalar_graphs.tsv \
+	identity_collisions/cases.tsv ascii_names/cases.tsv declaration_slots/cases.tsv source_graphs.tsv scalar_graphs.tsv \
 	expectations/cases.tsv fixed_record_arrays/cases.tsv scalar_refs/cases.tsv \
 	value_if/cases.tsv embed/cases.tsv test_discovery.tsv numeric_arrays/cases.tsv \
 	owner_assignment/cases.tsv optional_owners/cases.tsv recoverable_growth/cases.tsv \

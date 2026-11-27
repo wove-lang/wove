@@ -10,18 +10,18 @@
 
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "./scan.wove"
-		(only is_wove_name is_metadata_form is_disabled_form declaration_head named_form_error read_c_bridge_opening (type SourceNode) (type FormCheck)))
+		(only is_wove_name is_metadata_form is_disabled_form form_name_mode second_form_name first_ordinary_child read_c_bridge_opening (type SourceNode) (type FormCheck)))
 
 	(use wove-file "./target.wove" (only default_selection cfg_target_name cfg_deployment_limit (type SelectionContext)))
 
-	(struct FormParts (fields (head i32) (metadata i32) (operands i32) (name i32) (header i32)))
+	(struct FormParts (fields (head i32) (metadata i32) (operands i32) (name i32) (second_name i32) (header i32)))
 	(struct SelectedDeclaration (fields (node i32) (test bool)))
 	(struct ModuleRead
 		(fields (name i32) (count i32) (active bool) (start i32) (end i32) (error u32) (mode u32)))
 	(struct Selection (fields (active bool) (start i32) (end i32) (error u32) (test bool)))
 
 	(fn find_metadata
-		(:doc "Find the next metadata sibling, skipping ordinary fields only on a function declaration.")
+		(:doc "Find the next metadata sibling, skipping ordinary operands of named forms.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32) (interleaved bool))
 		(returns i32)
 		(body
@@ -47,18 +47,22 @@
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (parts FormParts) (entry SourceNode))
 		(returns i32)
 		(body
-			(let interleaved (bool.and (i32.lt -1i32 (struct.get parts name))
-				(u32.eq (call declaration_head (borrow-shared source)
-					(array.load nodes (struct.get parts head))) 2u32)))
+			(let interleaved (i32.not-ltz (struct.get parts name)))
 			(return (call find_metadata (borrow-shared source) (borrow-shared nodes)
 				(struct.get entry next_sibling) interleaved))))
+
+	(fn next_form_operand
+		(:doc "Continue through a named form's payload without consuming attached metadata.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (operand SourceNode))
+		(returns i32)
+		(body (return (call first_ordinary_child (borrow-shared source) (borrow-shared nodes) operand))))
 
 	(fn form_parts
 		(:doc `Expose a checked form's name, first metadata entry, and first ordinary operand.
 
-		Each field is an original row index or -1. Modules, functions, and
-		module bindings have a name slot. C bridges have a header slot.
-		Named functions can have metadata after their first ordinary field.`)
+		Each field is an original row index or -1. A named form separates its
+		names from its payload. Indexed iteration can introduce a second name.
+		C bridges have a header slot. Named forms permit interleaved metadata.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
 		(returns FormParts)
 		(body
@@ -66,19 +70,23 @@
 				(:doc "Nodes without a form head have no name, metadata, or operand view.")
 				(u32.not-eq (struct.get node kind) 40u32)
 				(then (return (struct.new FormParts (head -1i32) (metadata -1i32)
-					(operands -1i32) (name -1i32) (header -1i32)))))
+					(operands -1i32) (name -1i32) (second_name -1i32) (header -1i32)))))
 			(let head (struct.get node first_child))
 			(let tag (array.load nodes head))
-			(let named (u32.gtz (call named_form_error (borrow-shared source)
-				(borrow-shared nodes) node tag)))
+			(let mode (call form_name_mode (borrow-shared source) (borrow-shared nodes) node tag))
 			(let-mut cursor (struct.get tag next_sibling))
 			(let-mut name -1i32)
 			(if
 				(:doc "A declared name occupies the first slot before metadata.")
-				(bool.and named (i32.not-ltz cursor))
+				(bool.and (u32.gtz mode) (i32.not-ltz cursor))
 				(then
 					(set name cursor)
 					(set cursor (struct.get (array.load nodes name) next_sibling))))
+			(let second_name (call second_form_name (borrow-shared source) (borrow-shared nodes) mode cursor))
+			(if
+				(:doc "The optional indexed name is part of the opening rather than the payload.")
+				(i32.not-ltz second_name)
+				(then (set cursor (struct.get (array.load nodes second_name) next_sibling))))
 			(let opening (call read_c_bridge_opening (borrow-shared source) (borrow-shared nodes) node tag))
 			(let header (struct.get opening header))
 			(if
@@ -96,13 +104,13 @@
 					(set metadata first)
 					(set cursor (struct.get (array.load nodes cursor) next_sibling))))
 			(if
-				(:doc "If no metadata precedes a function's fields, look among its remaining siblings.")
+				(:doc "If no metadata precedes the payload, look among the other siblings of a named form.")
 				(bool.and (i32.ltz metadata)
-					(bool.and named (u32.eq (call declaration_head (borrow-shared source) tag) 2u32)))
+					(u32.gtz mode))
 				(then (set metadata (call find_metadata (borrow-shared source) (borrow-shared nodes)
 					cursor (bool true)))))
 			(return (struct.new FormParts (head head) (metadata metadata)
-				(operands cursor) (name name) (header header)))))
+				(operands cursor) (name name) (second_name second_name) (header header)))))
 
 	(fn source_keyword
 		(:doc `Match the exact atom spellings used by module selection.
@@ -455,17 +463,17 @@
 
 	(fn next_declaration
 		(:doc `Find the next declaration after a leaf or a group that will not be descended.`)
-		(params (nodes (shared-array SourceNode)) (node SourceNode) (module i32))
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (module i32))
 		(returns i32)
 		(body
-			(let-mut next (struct.get node next_sibling))
+			(let-mut next (call next_form_operand (borrow-shared source) (borrow-shared nodes) node))
 			(let-mut parent (struct.get node parent))
 			(while
 				(:doc "At a group end, climb until a sibling is available or the module is complete.")
 				(bool.and (i32.ltz next) (i32.not-eq parent module))
 				(body
 					(let group (array.load nodes parent))
-					(set next (struct.get group next_sibling))
+					(set next (call next_form_operand (borrow-shared source) (borrow-shared nodes) group))
 					(set parent (struct.get group parent))))
 			(return next)))
 
@@ -594,6 +602,6 @@
 					(if
 						(:doc "Only a nonempty selected group takes the walk directly to its first operand.")
 						(i32.ltz next)
-						(then (set next (call next_declaration (borrow-shared nodes) item module))))
+						(then (set next (call next_declaration (borrow-shared source) (borrow-shared nodes) item module))))
 					(set index next)))
 			(return (call module_result mode name count (bool true) start end 0u32)))))

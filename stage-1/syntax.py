@@ -31,6 +31,8 @@ class Form:
 	operands: tuple[Node, ...]
 	line: int
 	metadata: tuple[Form, ...] = ()
+	names: tuple[Atom, ...] = ()
+	tag_line: int = 0
 
 
 Node = Atom | Form
@@ -64,33 +66,90 @@ def c_header_provider_index(children: list[Node], index: int = 0) -> int | None:
 	return index if isinstance(provider, Atom) and not provider.quoted and provider.text == "c-header" else None
 
 
-# Follow only declaration containers when deciding whether a form owns a name.
-def declaration_context(parents: list[tuple[int, list[Node]]], tag: str) -> bool:
-	is_function = tag == "fn"
+# Read a bare enclosing head without treating data forms as declarations.
+def open_head(children: list[Node]) -> str | None:
+	head = children[0] if children else None
+	return head.text if isinstance(head, Atom) and not head.quoted else None
+
+
+# Follow only declaration containers back to the source root.
+def declaration_context(parents: list[tuple[int, list[Node]]], tag: str) -> str | None:
 	in_bridge = False
-	# The synthetic accumulator has no tag and can host a standalone source form.
+	# The synthetic accumulator has no tag.
 	for depth in range(len(parents) - 1, 0, -1):
 		children = parents[depth][1]
-		head = children[0] if children else None
-		# A malformed or opaque enclosing form cannot establish declaration context.
-		if not isinstance(head, Atom) or head.quoted:
-			return False
-		# A module contributes declarations after its name at the source root.
-		if head.text == "module":
+		head = open_head(children)
+		# Only the root module can introduce declaration ancestry.
+		if head == "module":
 			name = children[1] if len(children) > 1 else None
-			return depth == 1 and isinstance(name, Atom) and not name.quoted and bool(IDENTIFIER.fullmatch(name.text))
-		# Declaration groups are transparent within a declaration ancestry.
-		if head.text == "decls":
+			# The module's own check reports a malformed name.
+			if depth == 1 and isinstance(name, Atom) and not name.quoted and IDENTIFIER.fullmatch(name.text):
+				return "c" if in_bridge else "wove"
+			return None
+		# Groups and disabled declarations preserve the enclosing namespace.
+		if head in ("decls", "disabled"):
 			continue
-		# A supported C bridge contributes members after its provider and header.
-		if not is_function or head.text != "bridge" or in_bridge:
-			return False
-		# The provider identifies member declarations while the enclosing form checks its opening.
-		if c_header_provider_index(children, 1) is None:
-			return False
+		# Only C header bridges give their members this declaration grammar.
+		if head != "bridge" or in_bridge or tag not in ("fn", "struct", "type", "const", "let", "let-mut"):
+			return None
+		index = c_header_provider_index(children, 1)
+		# Recognize the provider before its closing form checks the header slots.
+		if index is None:
+			return None
 		in_bridge = True
-	# Standalone functions and C bridges also have fixed opening slots.
-	return is_function or tag == "bridge"
+	# Standalone named types, functions and bridges can be inspected as source forms.
+	if in_bridge or tag in ("fn", "struct", "enum", "type", "bridge"):
+		return "c" if in_bridge else "wove"
+	return None
+
+
+# Locate a body of an actual Wove function without looking through metadata.
+def in_function_body(parents: list[tuple[int, list[Node]]]) -> bool:
+	# A nested body can contain expression forms as well as statement blocks.
+	for depth in range(len(parents) - 1, 1, -1):
+		head = open_head(parents[depth][1])
+		# Metadata entries own opaque payload forms.
+		if head is None or head.startswith(":"):
+			return False
+		# The body field belongs to a function only in a Wove declaration context.
+		if head == "body" and open_head(parents[depth - 1][1]) == "fn":
+			return declaration_context(parents[:depth - 1], "fn") == "wove"
+	return False
+
+
+# Return the number of opening names owned by this occurrence of a tag.
+def name_slots(tag: str, children: list[Node], parents: list[tuple[int, list[Node]]]) -> int:
+	# Only the source root declares a module.
+	if tag == "module":
+		return int(len(parents) == 1)
+	# Ordinary declarations and C bridge members have explicit name slots.
+	if tag in ("fn", "struct", "enum", "type", "const", "let", "let-mut"):
+		context = declaration_context(parents, tag)
+		# Constant and mutable storage declarations only use this slot at C bridge scope.
+		if context == "c" or (context == "wove" and tag not in ("const", "let-mut")):
+			return 1
+	# Unrelated tags cannot introduce a local or generic parameter here.
+	if len(parents) < 2:
+		return 0
+	parent = parents[-1][1]
+	head = open_head(parent)
+	# Only the first ordinary field of a Wove function or struct supplies its generic parameters.
+	if head == "generic" and tag in ("type", "const", "fn") and len(parents) >= 3:
+		owner = parents[-2][1]
+		owner_head = open_head(owner)
+		# At this point the enclosing generic form has not been appended to its owner.
+		if (owner_head in ("fn", "struct") and len(owner) >= 2
+				and all(is_metadata(item) for item in owner[2:])
+				and declaration_context(parents[:-2], owner_head) == "wove"):
+			return 1
+	# Binding-shaped payloads outside a function body keep ordinary form grammar.
+	if tag not in ("let", "let-mut") or not in_function_body(parents):
+		return 0
+	# The first child of a for header binds one or two names before any metadata.
+	if head == "for" and tag == "let" and all(is_metadata(item) for item in parent[1:]):
+		return 2 if len(children) >= 2 and not is_metadata(children[1]) else 1
+	# These blocks declare ordinary local bindings and match payload binders.
+	return int(head in ("body", "then", "else", "case"))
 
 
 # Separate metadata from the logical operands of a completed form.
@@ -103,19 +162,26 @@ def read_form(children: list[Node], line: int, parents: list[tuple[int, list[Nod
 	# The old attachment forms are reserved so they fail at their old spelling.
 	if tag in ("with-meta", "meta"):
 		raise SourceError(head.line)
-	named = (tag == "module" and len(parents) == 1) or (
-		tag in ("fn", "let") and declaration_context(parents, tag)
-	)
+	slots = name_slots(tag, children, parents)
+	names = []
 	metadata = []
 	operands = []
 	# A declaration's fixed name slot precedes any metadata entries.
-	if named:
+	for index in range(slots):
 		# With no operand, the missing name points to the declaration opener.
-		if not children:
+		if index >= len(children):
 			raise SourceError(line)
-		identifier(children[0])
-		operands.append(children[0])
-		children = children[1:]
+		name = children[index]
+		# Point misplaced metadata at the original colon-prefixed tag.
+		if is_metadata(name):
+			raise SourceError(name.tag_line)
+		identifier(name)
+		names.append(name)
+	children = children[slots:]
+	# A binder's optional second name must precede its metadata.
+	if (tag == "let" and slots == 1 and open_head(parents[-1][1]) == "for"
+			and children and is_metadata(children[0]) and any(not is_metadata(child) for child in children)):
+		raise SourceError(children[0].tag_line)
 	# C bridge documentation and pragmas follow the provider and quoted header.
 	if tag == "bridge" and declaration_context(parents, tag):
 		index = c_header_provider_index(children)
@@ -123,30 +189,30 @@ def read_form(children: list[Node], line: int, parents: list[tuple[int, list[Nod
 		if index is not None:
 			# A leading entry occupies the fixed provider slot.
 			if index != 0:
-				raise SourceError(children[0].line)
+				raise SourceError(children[0].tag_line)
 			# A header with no operand points to the bridge opener.
 			if len(children) < 2:
 				raise SourceError(line)
 			header = children[1]
 			# Point a non-string header or interleaved entry to its original operand.
 			if not isinstance(header, Atom) or not header.quoted:
-				raise SourceError(header.line)
+				raise SourceError(header.tag_line if is_metadata(header) else header.line)
 			operands.extend(children[:2])
 			children = children[2:]
 	prefix_open = True
-	interleaved = named and tag == "fn"
-	# Function metadata can appear between ordinary fields or after the last one.
+	interleaved = bool(slots)
+	# Named forms can attach metadata between ordinary fields or after the last one.
 	for child in children:
 		# Metadata is attached to the declaration independently of its name and fields.
 		if is_metadata(child):
 			# Other forms attach metadata only in a contiguous prefix.
 			if not (prefix_open or interleaved):
-				raise SourceError(child.line)
+				raise SourceError(child.tag_line)
 			metadata.append(child)
 		else:
 			prefix_open = False
 			operands.append(child)
-	return Form(tag, tuple(operands), line, tuple(metadata))
+	return Form(tag, tuple(operands), line, tuple(metadata), tuple(names), head.line)
 
 
 # Read one IR tree and record each form's opening line.

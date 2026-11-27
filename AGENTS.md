@@ -24,10 +24,11 @@ Split reusable logic into focused modules. Organize related modules in
 directories named for their purpose, with short module filenames inside
 each group. For example, keep the Stage 2 scanner in `stage-2/source/scan.wove`.
 
-Write the bare name immediately after `module` and `fn`, including C bridge
-functions. Module metadata forms a contiguous prefix after the name. Function
-metadata and tagged fields can appear in any order after the name. Place the
-function's purpose note immediately after the name in new implementation code.
+Write declared names immediately after their tag, including declarations inside
+C bridges and the names in generic and binding patterns. Both names of an indexed
+iteration pattern precede its metadata. Named forms may interleave metadata with
+ordinary operands after their names. In new implementation code, keep purpose
+notes immediately after the opening names.
 
 Start a C bridge with `(bridge c-header "<header.h>"`. Place its metadata
 prefix after the quoted header and before its members.
