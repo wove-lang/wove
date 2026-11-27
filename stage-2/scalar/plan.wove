@@ -49,12 +49,12 @@
 	(use wove-file "../source/generics.wove" (only has_specialization_head generic_i32_value is_checked_non_type_operand
 		(value normalized_i32_literal) (value checked_i32_operand) (value checked_function_operand) (value checked_operation_operand) (value checked_bool_operand) (value checked_enum_operand)))
 	(use wove-file "./records.wove"
-		(only scope_at checked_enum_value is_generic_template is_callable_type callable_index callable_layout_shape (value callable_alias_kind) declaration_kind register_module_records register_module_record_arrays register_owned_rows order_record_layouts validate_record_array_fields value_type copyable_type owned_array_leaf_type is_owning_array_element has_inline_owner_slots is_owning_record is_scoped_record read_parameter_type read_view_parameter_extent find_record pointer_owner_definition record_type record_index is_record_type
+		(only scope_at checked_enum_value is_generic_template is_callable_type callable_index callable_layout_shape (value callable_alias_kind) declaration_kind register_module_records register_module_record_arrays register_owned_rows order_record_layouts validate_record_array_fields value_type copyable_type owned_array_leaf_type is_owning_array_element has_inline_owner_slots is_owning_record is_scoped_record read_parameter_type read_optional_native_parameter optional_record_borrow_type read_view_parameter_extent find_record pointer_owner_definition record_type record_index is_record_type
 			find_member member_value_type native_field_type read_member_operand register_static_array find_fixed_array_type is_fixed_array is_enum_layout is_payload_enum is_typed_slice is_fixed_scalar_slice typed_slice_type typed_slice_element_code encode_place_type slice_element_code slice_element_type is_readable_slice is_writable_slice shared_byte_rows_type
 			is_array_owner array_owner_type owning_array_type array_owner_element array_slot_code owner_view_type read_owned_array_type byte_rows_owner_type is_native_integer native_row_type find_native_node (type ScalarRecord)
 			is_native_record is_native_long_double is_optional_record_borrow is_place_reference is_mutable_place_reference place_reference_type place_reference_target mutable_scalar_target record_receiver_type place_borrow_kind))
 	(use wove-file "./callable_types.wove" (only callable_parameter_type))
-	(use wove-file "./function_rows.wove" (only checked_function_count resolve_call_target find_function_instance
+	(use wove-file "./function_rows.wove" (only checked_function_count resolve_call_target find_function_instance find_parameter find_function_parameter
 		(type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./function_refs.wove" (only register_function_references plan_function_reference))
 	(use wove-file "./value_types.wove" (only value_matches_type (value static_number)))
@@ -191,26 +191,6 @@
 			(return (call complete_signature (borrow-shared (local source)) (borrow-shared (local nodes))
 				(local node) (local head) (local result)))))
 
-	(fn find_parameter
-		(:doc `Look up a parameter within the owning function's contiguous parameter interval.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (name SourceNode)
-			(parameters (shared-array ScalarParameter)) (start i32) (end i32))
-		(returns i32)
-		(body
-			(let-mut cursor (local start))
-			(while
-				(:doc "Only parameters of this function participate in its local namespace.")
-				(i32.lt (local cursor) (local end))
-				(body
-					(let item (array.load (local parameters) (local cursor)))
-					(let node (array.load (local nodes) (struct.get (local item) name)))
-					(if
-						(:doc "Match the raw spelling before any C suffix transformation.")
-						(call same_name (borrow-shared (local source)) (local node) (local name))
-						(then (return (local cursor))))
-					(set (local cursor) (i32.inc (local cursor)))))
-			(return -1i32)))
-
 	(fn storage_argument_mode
 		(:doc `Classify a validated native storage formal by its written access mode.`)
 		(params (reference u32))
@@ -270,16 +250,30 @@
 						(borrow-shared (local records)) (borrow-shared (local bindings))
 						(struct.get (local scope) file) (struct.get (local scope) source_base) (local operand) (i32.ltz (local bridge))))
 					(let type_node (array.load (local nodes) (local operand)))
-					(let-mut owned 0u32)
+					(let-mut declared_type 0u32)
+					(if
+						(:doc "Keep an incoming record loan in the full-width parameter type field.")
+						(bool.not (local native))
+						(then
+							(let record (call read_optional_native_parameter (borrow-shared (local source))
+								(borrow-shared (local nodes)) (local type_node) (borrow-shared (local records))
+								(borrow-shared (local bindings)) (struct.get (local scope) file) (struct.get (local scope) source_base)))
+							(if (u32.gtz (struct.get (local record) error)) (then (return (local record))))
+							(if
+								(:doc "Only a checked native record receives the nullable reference code.")
+								(i32.not-ltz (struct.get (local record) operand))
+								(then (set (local declared_type) (call optional_record_borrow_type
+									(u32.from-i32 (struct.get (local record) operand))))))))
 					(if
 						(:doc "Wove formals can take the same exact owned array types as Wove results.")
-						(bool.and (bool.not (local native)) (u32.gtz (struct.get (local checked) error)))
-						(then (set (local owned) (call owned_result_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(bool.and (bool.not (local native)) (bool.and (u32.eqz (local declared_type))
+							(u32.gtz (struct.get (local checked) error))))
+						(then (set (local declared_type) (call owned_result_type (borrow-shared (local source)) (borrow-shared (local nodes))
 							(local type_node) (borrow-shared (local records)) (borrow-shared (local bindings)) (local scope)))))
 					(if
 						(:doc "An owning Wove struct or fixed array transfers through its exact checked layout.")
 						(bool.and (bool.not (local native))
-							(bool.and (u32.eqz (local owned)) (u32.gtz (struct.get (local checked) error))))
+							(bool.and (u32.eqz (local declared_type)) (u32.gtz (struct.get (local checked) error))))
 						(then
 							(let aggregate (call value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 								(borrow-shared (local records)) (borrow-shared (local bindings))
@@ -287,7 +281,7 @@
 							(if
 								(:doc "Use the same ownership classification for the signature, call, and callee cleanup.")
 								(call is_owned_parameter (borrow-shared (local records)) (local aggregate))
-								(then (set (local owned) (local aggregate))))))
+								(then (set (local declared_type) (local aggregate))))))
 					(let view (call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type_node) (bool false)))
 					(let view_element (struct.get (local view) element))
 					(let native_view (bool.and (i32.lt -1i32 (local bridge))
@@ -297,16 +291,16 @@
 					(let native_alias (bool.and (i32.lt -1i32 (local bridge))
 						(bool.and (u32.eq (struct.get (local type_node) kind) 1u32)
 							(u32.eqz (call scalar_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local operand))))))
-					(let-mut type (local owned))
+					(let-mut type (local declared_type))
 					(let-mut mode (call c_value_mode))
 					(if
 						(:doc "Native aliases in scalar and slice positions resolve in the defining bridge.")
-						(bool.and (bool.or (u32.gtz (local owned)) (u32.eqz (struct.get (local checked) error)))
+						(bool.and (bool.or (u32.gtz (local declared_type)) (u32.eqz (struct.get (local checked) error)))
 							(bool.not (bool.or (local native_alias) (local native_view))))
 						(then
 							(if
 								(:doc "Only ordinary parameters take their type from the view or scalar reader.")
-								(u32.eqz (local owned))
+								(u32.eqz (local declared_type))
 								(then (set (local type) (u32.from-i32 (struct.get (local checked) operand))))))
 						(else
 							(if
@@ -1092,16 +1086,6 @@
 					(set (local cursor) (i32.inc (local cursor)))))
 			(array.store (local statements) (local base) (call block_statement (local first) -1i32 -1i32 (bool false)))
 			(return (call entry_at (array.load (local nodes) (local base)) (local next) 0u32))))
-
-	(fn find_function_parameter
-		(:doc `Find a parameter in the current function's signature.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
-			(parameters (shared-array ScalarParameter)) (name SourceNode))
-		(returns i32)
-		(body
-			(let start (struct.get (local caller) params))
-			(return (call find_parameter (borrow-shared (local source)) (borrow-shared (local nodes)) (local name)
-				(borrow-shared (local parameters)) (local start) (i32.add (local start) (struct.get (local caller) arity))))))
 
 	(fn plan_local
 		(:doc `Resolve a read to a checked binding and retain its defining name or parameter row.`)
@@ -3021,7 +3005,7 @@
 				(u32.eq (local tag) (call optional_unwrap_kind))
 				(then (return (call plan_view_option (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local reference) (local index) (local expected) (local tag) (local caller) (local statement) (local view_start)
-					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
+					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A resource formal can lend a projected owner slot or a named handle.")
 				(call is_native_owner (local expected))
@@ -3091,7 +3075,7 @@
 				(bool.and (u32.eq (local tag) (call optional_unwrap_kind)) (u32.eq (local keyword) 35u32))
 				(then (return (call plan_view_option (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local reference) (local index) (local infer_shared_array) (local tag) (local caller) (local statement) (local view_start)
-					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
+					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(let-mut inferred (local infer_shared_array))
 			(if (u32.eq (local keyword) 39u32) (then (set (local inferred) (local infer_mut_array))))
 			(if
@@ -4268,7 +4252,7 @@
 				(bool.or (u32.eq (local tag) (local optional_view_absent)) (u32.eq (local tag) (call optional_unwrap_kind)))
 				(then (return (call plan_view_option (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (local expected) (local tag) (local caller) (local statement) (local view_start)
-					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
+					(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "A function reference yields the checked defining function's address.")
 				(u32.eq (local tag) (local fn_ref_kind))
