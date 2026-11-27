@@ -986,10 +986,11 @@ signature and evaluated once from left to right. The C header verifies
 the native signature. A project bridge adds to a bundled header and can
 override an individual name. `(:pragma (bridge_replace))` selects only
 the project declarations. `(:pragma (c_optional))` checks that a selected
-function or integer macro is available with the target header and build
+function or object-like macro is available with the target header and build
 settings. Use `(const (:pragma (c_optional)) FEATURE_FLAG i32)` for an
-object-like macro. The constant keeps its declared Wove type and uses the value
-provided by the live C header.
+integer constant, or `(let (:pragma (c_optional) (c_macro)) LIMIT f32)`
+for a read-only scalar expression. The selected value keeps its declared
+Wove type and reads the expression from the live C header.
 
 A bridge can use a type from a different C header in its private signatures.
 Write `(use c-header "<locale.h>" (only (type Locale)))` inside the
