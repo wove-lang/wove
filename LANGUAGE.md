@@ -194,8 +194,9 @@ C23 `_BitInt(256)`. These types support exact decimal, hexadecimal, and
 binary literals, including full-width extrema, and use the corresponding
 signed or unsigned C representation. When a checked graph uses either
 type, Wove requires the selected Clang toolchain to compile and link the
-wide-integer capability probe. The 256-bit types use exactly 32 bytes
-for both endian conversions.
+wide-integer capability probe. For `bin`, the probe link includes the
+selected `ldflags` and named `ldlibs`. The 256-bit types use exactly
+32 bytes for both endian conversions.
 
 Typed numeric operators use `type.operation`. In `(i32.add left right)`,
 `i32` specifies the exact operands and result. The operators below are
