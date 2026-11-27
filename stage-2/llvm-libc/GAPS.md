@@ -333,6 +333,29 @@ paths. It exposes `clockid_t`, `time_t`, `long`, `struct timespec`, the
 checks that the call replaces the sentinel fields with a valid native
 timestamp. The Darwin timed fcntl functions use this same `Stamp` identity.
 
+## Bundled floating-point environment coverage
+
+Both drivers bundle `fenv.h.wove`. Clang exposed the shared C environment
+functions and constants on macOS SDK 27.2 and Debian glibc 2.41 on arm64 and
+x86-64. The audited C11, C17, and C23 profiles use native snapshots for
+`fenv_t` and `fexcept_t` so their sizes, alignment, and original pointer types
+follow the selected header. [LLVM libc fenv checklist](https://libc.llvm.org/headers/fenv.html)
+
+| Members | Coverage or outstanding contract |
+| --- | --- |
+| `FE_ALL_EXCEPT`, `FE_DIVBYZERO`, `FE_DOWNWARD`, `FE_INEXACT`, `FE_INVALID`, `FE_OVERFLOW`, `FE_TONEAREST`, `FE_TOWARDZERO`, `FE_UNDERFLOW`, `FE_UPWARD` | The fixture compares every constant to C. It uses all four rounding modes for positive and negative halfway values and exercises each exception mask separately. |
+| `feclearexcept`, `fegetexceptflag`, `feraiseexcept`, `fesetexceptflag`, `fetestexcept` | Clear, raise, save, test, and restore flags through the native object. Restoring a selected flag subset preserves an unselected flag. |
+| `fegetround`, `fesetround`, `fegetenv`, `feholdexcept`, `fesetenv`, `feupdateenv` | Check the actual rounding effect through `nearbyint`. The fixture also saves, holds, and restores environments, tests flag propagation through `feupdateenv`, and restores its incoming environment. Linux links these calls through the driver's existing `-lm` input. |
+| `FE_DFL_ENV` | The fixed-operand setters use the exact `const fenv_t *` from the header. The fixture verifies clearing flags through `fesetenv` and propagating flags through `feupdateenv`. |
+| Darwin `FE_FLUSHTOZERO`, `FE_DENORMALOPERAND`, and alternate default environment macros | Visible on different Darwin architectures. The shared slice keeps these separate for guarded follow-up. |
+| glibc `fesetexcept`, `fetestexceptflag`, `femode_t`, `fegetmode`, `fesetmode`, `FE_DFL_MODE`, `FE_NOMASK_ENV`, `feenableexcept`, `fedisableexcept`, `fegetexcept`, `FE_EXCEPT_SHIFT` | The Wove driver's GNU feature set exposes the extra callables and presets in all three C modes. `FE_EXCEPT_SHIFT` is AArch64-only. These members have a guarded follow-up. |
+| Decimal round control, `FE_TONEARESTFROMZERO`, `__STDC_VERSION_FENV_H__`, `FE_SNANS_ALWAYS_SIGNAL` | Absent in the tested headers and Clang feature profiles. |
+
+In C11, C17, and C23, the shared runtime fixtures ran under ASan and UBSan
+on Darwin arm64 and linked on Darwin x86-64. The Debian glibc 2.41 fixtures
+linked on arm64 and x86-64 with a `libm.so.6` dependency. The Linux checks
+stop at link validation. [Debian glibc packages](https://deb.debian.org/debian/pool/main/g/glibc/)
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
