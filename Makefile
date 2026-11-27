@@ -147,9 +147,54 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
 
+# Schedule independent manifests as Make prerequisites.
+GRAPH_LANGUAGE_CASES := \
+	identity_collisions/cases.tsv ascii_names/cases.tsv source_graphs.tsv scalar_graphs.tsv \
+	expectations/cases.tsv fixed_record_arrays/cases.tsv scalar_refs/cases.tsv \
+	value_if/cases.tsv embed/cases.tsv test_discovery.tsv numeric_arrays/cases.tsv \
+	owner_assignment/cases.tsv optional_owners/cases.tsv recoverable_growth/cases.tsv \
+	integer_compare/cases.tsv cli/native/int128/test-mode.tsv \
+	cli/native/function_values/test-mode.tsv graph/targets/cases.tsv module_arrays/cases.tsv \
+	computed_constants/cases.tsv array_copy/cases.tsv integer_conversions/cases.tsv \
+	integer_checks/cases.tsv integer_arithmetic/cases.tsv integer_division/cases.tsv \
+	integer_bits/cases.tsv generics/cases.tsv generic_functions/cases.tsv \
+	generic_operations/cases.tsv generic_booleans/cases.tsv generic_enums/cases.tsv \
+	enums/cases.tsv matches/cases.tsv floats/cases.tsv while/exits.tsv scoped_arrays/cases.tsv \
+	borrowed_results/cases.tsv shared_byte_rows/cases.tsv fallible_views/cases.tsv \
+	for/cases.tsv array_growth/cases.tsv owned_record_arrays/traps.tsv
+GRAPH_INTEROP_CASES := \
+	native_header_types/cases.tsv native_alias/cases.tsv native_records/cases.tsv \
+	native_values/cases.tsv native_macros/cases.tsv native_variadic/cases.tsv \
+	native_fixed/cases.tsv native_pointer_typedefs/cases.tsv native_arrays/cases.tsv \
+	native_dirent/cases.tsv native_handle_out/cases.tsv native_owner_returns/cases.tsv \
+	native_owner_fields/cases.tsv native_scalar_refs/cases.tsv native_storage/cases.tsv \
+	native_rows/cases.tsv native_vectors/cases.tsv native_streams/cases.tsv \
+	native_paths/cases.tsv native_borrowed_records/cases.tsv
+GRAPH_TRACKED_CASES := \
+	owned_records/cases.tsv owned_record_arrays/cases.tsv owning_enums/cases.tsv \
+	array_growth/tracked.tsv for/consuming/tracked.tsv scoped_records/cases.tsv \
+	borrowed_results/tracked.tsv owner_assignment/tracked.tsv optional_owners/tracked.tsv \
+	recoverable_growth/tracked.tsv native_storage/tail/tracked.tsv
+GRAPH_LANGUAGE_TESTS := $(addprefix test-graph/,$(GRAPH_LANGUAGE_CASES))
+GRAPH_INTEROP_TESTS := $(addprefix test-graph/,$(GRAPH_INTEROP_CASES))
+GRAPH_TRACKED_TESTS := $(addprefix test-graph/,$(GRAPH_TRACKED_CASES))
+GRAPH_TESTS := $(GRAPH_LANGUAGE_TESTS) $(GRAPH_INTEROP_TESTS) $(GRAPH_TRACKED_TESTS)
+
+NATIVE_CLI_CASES := \
+	cases.tsv check.tsv diagnostics.tsv literals.tsv function_values/cases.tsv \
+	callable_aliases/cases.tsv bin.tsv standard.tsv protection.tsv phases.tsv
+NATIVE_INTEROP_CASES := \
+	extents.tsv borrow_extents.tsv dirent.tsv deployment.tsv optional-macros.tsv \
+	intrinsic/cases.tsv nullable-cstr/cases.tsv static-cstr/cases.tsv record-init.tsv \
+	inline-fields/cases.tsv library/cross-target.tsv
+NATIVE_CLI_TESTS := $(addprefix test-native/,$(NATIVE_CLI_CASES))
+NATIVE_INTEROP_TESTS := $(addprefix test-native/,$(NATIVE_INTEROP_CASES))
+
 .PHONY: all stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
 .PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-workers test-stage-2-process test-stage-2-version force-build-info
-.PHONY: test-stage-2-inventory vscode
+.PHONY: test-stage-2-inventory vscode test-stage-1 test-stage-2-source test-stage-2-language test-stage-2-utilities
+.PHONY: test-stage-2-interop test-stage-2-runtime test-stage-2-self-host test-stage-2-array-copy
+.PHONY: test-stage-2-native-cli test-stage-2-native-interop $(GRAPH_TESTS)
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -183,14 +228,24 @@ self-host: $(FINAL_COMPILER) $(STAGE2)/wovec.c $(SELF_HOST_SOURCE)/.ready
 	CLANG="$(abspath $(BUILD_CLANG))" "$(FINAL_COMPILER)" bin "$(NATIVE_CLI_FIXTURES)/input.wove" -o "$(SELF_HOST_SMOKE)"
 	@status=0; "$(SELF_HOST_SMOKE)" || status=$$?; test "$$status" -eq 42
 
+# Keep the complete local suite and expose independent groups for CI.
+test: test-stage-1 test-stage-2
+test-stage-2: stage-2 test-stage-2-language test-stage-2-utilities test-stage-2-native-cli \
+	test-stage-2-interop test-stage-2-runtime test-stage-2-version
+test-stage-2-language: test-stage-2-source $(GRAPH_LANGUAGE_TESTS) $(GRAPH_TRACKED_TESTS)
+test-stage-2-utilities: test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config \
+	test-stage-2-diagnostics test-stage-2-blake2b
+test-stage-2-interop: $(GRAPH_INTEROP_TESTS) test-stage-2-clang test-stage-2-native-interop test-stage-2-f80
+test-stage-2-runtime: test-stage-2-array-copy test-stage-2-process test-stage-2-workers test-stage-2-inventory
+test-stage-2-self-host: self-host test-stage-2-version
+
 # Preserve quoting in compiler settings until the runner splits them into arguments.
-test-stage-2: export WOVE_TEST_CLANG = $(CLANG)
-test-stage-2: export WOVE_TEST_CFLAGS = $(CFLAGS)
-test-stage-2: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
-test-stage-2: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
-test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o $(STAGE2)/array-copy-runtime test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics test-stage-2-blake2b test-stage-2-native test-stage-2-process test-stage-2-version test-stage-2-inventory
+test-stage-2-source: export WOVE_TEST_CLANG = $(CLANG)
+test-stage-2-source: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2-source: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
+test-stage-2-source: export WOVE_TEST_TRACKED_RUNTIME = $(STAGE1)/runtime.tracked.o
+test-stage-2-source: $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o
 	"$(SOURCE_SCAN)"
-	"$(STAGE2)/array-copy-runtime"
 	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/cases.jsonc
 	$(PYTHON) tests/stage-2/check_streams.py "$(SOURCE_SCAN)" \
 		tests/stage-2/lexer_layouts.tsv tests/stage-2/lexer_errors.tsv tests/stage-2/source_forms.tsv \
@@ -201,15 +256,17 @@ test-stage-2: stage-2 $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o $(STAGE2)/array
 		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(BOOLEAN_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) stage-2/text/decimal_wide.wove stage-2/text/decimal_128.wove stage-2/text/decimal_256.wove $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
 		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) $(PROCESS_MODULES) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
-	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/native_header_types/cases.tsv tests/stage-2/identity_collisions/cases.tsv tests/stage-2/ascii_names/cases.tsv
-	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" \
-		tests/stage-2/source_graphs.tsv tests/stage-2/scalar_graphs.tsv tests/stage-2/expectations/cases.tsv tests/stage-2/fixed_record_arrays/cases.tsv tests/stage-2/scalar_refs/cases.tsv tests/stage-2/value_if/cases.tsv tests/stage-2/embed/cases.tsv tests/stage-2/test_discovery.tsv \
-		tests/stage-2/native_alias/cases.tsv tests/stage-2/native_records/cases.tsv tests/stage-2/native_values/cases.tsv \
-		tests/stage-2/native_macros/cases.tsv tests/stage-2/native_variadic/cases.tsv tests/stage-2/native_fixed/cases.tsv tests/stage-2/native_pointer_typedefs/cases.tsv tests/stage-2/native_arrays/cases.tsv tests/stage-2/numeric_arrays/cases.tsv tests/stage-2/native_dirent/cases.tsv tests/stage-2/native_handle_out/cases.tsv tests/stage-2/native_owner_returns/cases.tsv tests/stage-2/native_owner_fields/cases.tsv tests/stage-2/owner_assignment/cases.tsv tests/stage-2/optional_owners/cases.tsv tests/stage-2/recoverable_growth/cases.tsv \
-		tests/stage-2/native_scalar_refs/cases.tsv tests/stage-2/native_storage/cases.tsv tests/stage-2/native_rows/cases.tsv tests/stage-2/native_vectors/cases.tsv tests/stage-2/native_streams/cases.tsv tests/stage-2/native_paths/cases.tsv \
-		tests/stage-2/integer_compare/cases.tsv tests/stage-2/cli/native/int128/test-mode.tsv tests/stage-2/cli/native/function_values/test-mode.tsv \
-		tests/stage-2/graph/targets/cases.tsv tests/stage-2/module_arrays/cases.tsv tests/stage-2/computed_constants/cases.tsv tests/stage-2/array_copy/cases.tsv tests/stage-2/integer_conversions/cases.tsv tests/stage-2/integer_checks/cases.tsv tests/stage-2/integer_arithmetic/cases.tsv tests/stage-2/integer_division/cases.tsv tests/stage-2/integer_bits/cases.tsv tests/stage-2/generics/cases.tsv tests/stage-2/generic_functions/cases.tsv tests/stage-2/generic_operations/cases.tsv tests/stage-2/generic_booleans/cases.tsv tests/stage-2/generic_enums/cases.tsv tests/stage-2/enums/cases.tsv tests/stage-2/matches/cases.tsv tests/stage-2/floats/cases.tsv tests/stage-2/while/exits.tsv tests/stage-2/scoped_arrays/cases.tsv tests/stage-2/borrowed_results/cases.tsv tests/stage-2/shared_byte_rows/cases.tsv tests/stage-2/fallible_views/cases.tsv tests/stage-2/native_borrowed_records/cases.tsv tests/stage-2/for/cases.tsv tests/stage-2/array_growth/cases.tsv tests/stage-2/owned_record_arrays/traps.tsv
-	WOVE_TEST_RUNTIME="$(STAGE1)/runtime.tracked.o" $(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/owned_records/cases.tsv tests/stage-2/owned_record_arrays/cases.tsv tests/stage-2/owning_enums/cases.tsv tests/stage-2/array_growth/tracked.tsv tests/stage-2/for/consuming/tracked.tsv tests/stage-2/scoped_records/cases.tsv tests/stage-2/borrowed_results/tracked.tsv tests/stage-2/owner_assignment/tracked.tsv tests/stage-2/optional_owners/tracked.tsv tests/stage-2/recoverable_growth/tracked.tsv tests/stage-2/native_storage/tail/tracked.tsv
+
+# Give each isolated graph manifest a Make target so checks can run side by side.
+$(GRAPH_TESTS): export WOVE_TEST_CLANG = $(CLANG)
+$(GRAPH_TESTS): export WOVE_TEST_CFLAGS = $(CFLAGS)
+$(GRAPH_TESTS): test-graph/%: tests/stage-2/% $(SOURCE_SCAN)
+	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" "$<"
+
+$(GRAPH_LANGUAGE_TESTS) $(GRAPH_INTEROP_TESTS): export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
+$(GRAPH_LANGUAGE_TESTS) $(GRAPH_INTEROP_TESTS): $(STAGE1)/runtime.o
+$(GRAPH_TRACKED_TESTS): export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.tracked.o
+$(GRAPH_TRACKED_TESTS): $(STAGE1)/runtime.tracked.o
 
 # Exercise the same byte and ID encoders in both stages and the native word digest.
 test-stage-2-hashing: $(HASHING_PROGRAMS) $(HASHING_NATIVE_PROGRAMS)
@@ -230,51 +287,59 @@ test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/cli" "$(CLI_CASES)"
 	$(PYTHON) "$(COMMAND_FIXTURES)/check.py" "$(COMMAND_PROGRAM)" "$(COMMAND_FIXTURES)/cases.tsv"
 
-# Run native CLI cases in isolated work directories with the configured C toolchain.
-test-stage-2-native: export WOVE_TEST_CLANG = $(CLANG)
-test-stage-2-native: export WOVE_TEST_CFLAGS = $(CFLAGS)
-test-stage-2-native: export WOVE_BUILD_CLANG = $(CLANG)
-test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80 test-stage-2-workers
+# Keep the aggregate entry point for installed-compiler and worker checks.
+test-stage-2-native: test-stage-2-native-cli test-stage-2-native-interop test-stage-2-f80 test-stage-2-workers
+
+test-stage-2-native-cli: $(NATIVE_CLI_TESTS) test-native-discovery test-native-debug
+test-stage-2-native-interop: $(NATIVE_INTEROP_TESTS) test-native-numeric test-native-library test-native-emission test-native-macro-modes
+
+NATIVE_TESTS := $(NATIVE_CLI_TESTS) $(NATIVE_INTEROP_TESTS) \
+	test-native-discovery test-native-debug test-native-numeric test-native-library test-native-emission test-native-macro-modes
+.PHONY: $(NATIVE_TESTS)
+
+$(NATIVE_TESTS): export WOVE_TEST_CLANG = $(CLANG)
+$(NATIVE_TESTS): export WOVE_TEST_CFLAGS = $(CFLAGS)
+$(NATIVE_TESTS): export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
+$(NATIVE_TESTS): export WOVE_BUILD_CLANG = $(CLANG)
+$(NATIVE_TESTS): $(NATIVE_COMPILER) $(STAGE1)/runtime.o
+
+# Each manifest stages the compiler and its inputs in its own temporary directory.
+$(NATIVE_CLI_TESTS) $(NATIVE_INTEROP_TESTS): test-native/%: $(NATIVE_CLI_FIXTURES)/%
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/$*"
+
+test-native-discovery:
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/discovery/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib" "$(NATIVE_CLI_FIXTURES)/emission/cases.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/cases.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/check.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/diagnostics.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/literals.tsv"
+
+test-native-debug:
+	sh "$(NATIVE_CLI_FIXTURES)/debug/check.sh" "$(PYTHON)" "$(abspath $(NATIVE_COMPILER))" "$(NATIVE_CLI_FIXTURES)/debug/cases.tsv"
+
+test-native-numeric:
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/half/check.py" "$(NATIVE_COMPILER)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/quad/check.py" "$(NATIVE_COMPILER)"
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/int128/check.py" "$(NATIVE_COMPILER)"
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/int256/check.py" "$(NATIVE_COMPILER)" runtime/probes/wide_integer.c
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/function_values/cases.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/callable_aliases/cases.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/extents.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/borrow_extents.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/dirent.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/deployment.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/optional-macros.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/intrinsic/cases.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/nullable-cstr/cases.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/static-cstr/cases.tsv"
-	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/check_macro_modes.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/macro-modes.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/record-init.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/inline-fields/cases.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
+
+test-native-library:
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/library/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/library/cases.jsonc"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/library/cross-target.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/standard.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/protection.tsv"
-	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/phases.tsv"
-	sh "$(NATIVE_CLI_FIXTURES)/debug/check.sh" "$(PYTHON)" "$(abspath $(NATIVE_COMPILER))" "$(NATIVE_CLI_FIXTURES)/debug/cases.tsv"
+
+test-native-emission:
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/emission/check.py" "$(BOOTSTRAP_COMPILER)" "$(NATIVE_COMPILER)" "$(dir $(COMPILER_ROOT))c-stdlib" "$(NATIVE_CLI_FIXTURES)/emission/cases.tsv"
+
+test-native-macro-modes:
+	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/check_macro_modes.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/macro-modes.tsv"
 
 # Check f80 admission and run the native cases when the selected tool supports extended precision.
 test-stage-2-f80: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-f80: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2-f80: export WOVE_BUILD_CLANG = $(CLANG)
 test-stage-2-f80: $(NATIVE_COMPILER)
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/extended/check.py" "$(NATIVE_COMPILER)"
 
 # Run the Wove transfer fixtures and the host probe for thread API failures.
 test-stage-2-workers: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-workers: export WOVE_TEST_CFLAGS = $(CFLAGS)
+test-stage-2-workers: export WOVE_BUILD_CLANG = $(CLANG)
+test-stage-2-workers: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2-workers: $(NATIVE_COMPILER) $(SOURCE_SCAN) $(WORKER_PROBE) $(WORKER_QUEUE_PROBE) $(WORKER_POOL_PROBE)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/worker_records/cases.tsv
 	WOVE_TEST_RUNTIME="$(WORKER_RUNTIME)" $(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/worker_records/ledger.tsv
@@ -326,6 +391,10 @@ $(STAGE2)/test/wove_test.o: stage-2/test/wove_test.c stage-2/test/wove_test.h
 $(TEST_RUNTIME): $(STAGE2)/test/wove_test.o $(TEST_RUNNER).o $(STAGE1)/runtime.o
 	$(AR) rcs "$@" $^
 
+# Check runtime array copy directly with a C fixture.
+test-stage-2-array-copy: $(STAGE2)/array-copy-runtime
+	"$(STAGE2)/array-copy-runtime"
+
 # Run the Wove launcher and interleave unrelated launches during descriptor creation.
 test-stage-2-process: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-process: export WOVE_TEST_CFLAGS = $(CFLAGS)
@@ -350,7 +419,8 @@ $(AST_LIVE): $(AST_LIVE).c $(STAGE1)/runtime.o
 test-stage-2-blake2b: $(BLAKE2B_PROBE)
 	sh "$(BLAKE2B_FIXTURES)/check.sh" "$(BLAKE2B_PROBE)" "$(BLAKE2B_FIXTURES)/cases.tsv"
 
-test: stage-1 test-stage-2 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
+# Exercise the seed's programs, diagnostics, and emitted headers independently.
+test-stage-1: stage-1 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TEST_PROGRAMS))
 	"$(STAGE1)/runtime.cstr_cleanup"
 	sh "$(OWNERSHIP_TESTS)/check.sh" "$(PYTHON)" "$(STAGE1)" "$(OWNERSHIP_CASES)"
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
