@@ -12,6 +12,7 @@
 	(use wove-file "./c_owners.wove" (only is_native_name read_c_type_form check_c_type_spelling))
 	(use wove-file "../text/match.wove" (only is_three_bytes))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
 
 	(struct CRecordRead (fields (name i32) (native i32) (first i32) (count i32) (start i32) (end i32) (error u32)))
 
@@ -43,6 +44,58 @@
 				(bool.and (call is_three_bytes (borrow-shared (local source)) (local start) 102u8 105u8 101u8)
 					(call is_three_bytes (borrow-shared (local source)) (i32.add (local start) 3i32)
 						108u8 100u8 115u8))))))
+
+	(let inline_array_word "array")
+	(let inline_char_word "char")
+
+	(struct CInlineField (fields (extent i32) (start i32) (end i32) (error u32)))
+
+	(fn c_inline_field_at
+		(:doc "Keep the complete native array operand or its first rejected subform.")
+		(params (node SourceNode) (extent i32) (error u32)) (returns CInlineField)
+		(body
+			(return (struct.new CInlineField (extent (local extent)) (start (struct.get (local node) start))
+				(end (struct.get (local node) end)) (error (local error))))))
+
+	(fn read_c_inline_field
+		(:doc "Recognize a native plain-char array type and retain the source span for its exact extent.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
+		(returns CInlineField)
+		(body
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let head (struct.get (local parts) head))
+			(if (i32.ltz (local head)) (then (return (call c_inline_field_at (local node) 0i32 0u32))))
+			(let tag (array.load (local nodes) (local head)))
+			(if
+				(:doc "Bare scalar and native alias operands continue through ordinary field resolution.")
+				(bool.not (call same_bytes (borrow-shared (local source)) (struct.get (local tag) start) (struct.get (local tag) end)
+					(borrow-shared (local inline_array_word)) 0i32 5i32))
+				(then (return (call c_inline_field_at (local node) 0i32 0u32))))
+			(let element (struct.get (local parts) operands))
+			(if
+				(:doc "Report an incomplete array type at the whole field operand.")
+				(i32.ltz (local element))
+				(then (return (call c_inline_field_at (local node) 0i32 23u32))))
+			(let name (array.load (local nodes) (local element)))
+			(if
+				(:doc "Plain C char has its own native type and exposes an unsigned byte representation in Wove.")
+				(bool.not (call same_bytes (borrow-shared (local source)) (struct.get (local name) start) (struct.get (local name) end)
+					(borrow-shared (local inline_char_word)) 0i32 4i32))
+				(then (return (call c_inline_field_at (local name) 0i32 23u32))))
+			(let count (struct.get (local name) next_sibling))
+			(if
+				(:doc "Only a single positive decimal extent can describe the exact native declaration.")
+				(bool.or (i32.ltz (local count))
+					(i32.not-ltz (struct.get (array.load (local nodes) (local count)) next_sibling)))
+				(then (return (call c_inline_field_at (local node) 0i32 23u32))))
+			(let literal (array.load (local nodes) (local count)))
+			(let parsed (call read_decimal_digits (borrow-shared (local source)) (struct.get (local literal) start)
+				(struct.get (local literal) end) 214748364u32 7u32))
+			(if
+				(:doc "C arrays require a positive extent that fits the signed Wove index.")
+				(bool.or (i32.not-gtz (struct.get (local parsed) digits)) (u32.eqz (struct.get (local parsed) magnitude)))
+				(then (return (call c_inline_field_at (local literal) 0i32 23u32))))
+			(return (call c_inline_field_at (local node) (i32.from-u32 (struct.get (local parsed) magnitude)) 0u32))))
 
 	(fn read_c_fields
 		(:doc `Check the native member spelling, single type operand, and uniqueness of each field in source order.`)
@@ -76,10 +129,18 @@
 					(let spelling (struct.get (local member) head))
 					(let type (struct.get (local member) operands))
 					(if
-						(:doc "Fields need one bare type, preserving the view's original span on shape errors.")
+						(:doc "Fields need one type operand, preserving the view's original span on shape errors.")
 						(bool.or (bool.or (i32.ltz (local spelling)) (i32.ltz (local type)))
 							(i32.lt -1i32 (struct.get (array.load (local nodes) (local type)) next_sibling)))
 						(then (return (call c_record_at (local node) -1i32 -1i32 -1i32 0i32 23u32))))
+					(let inline (call read_c_inline_field (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local nodes) (local type))))
+					(if
+						(:doc "Keep a malformed native array type on the offending operand.")
+						(u32.gtz (struct.get (local inline) error))
+						(then (return (struct.new CRecordRead (name -1i32) (native -1i32) (first -1i32) (count 0i32)
+							(start (struct.get (local inline) start)) (end (struct.get (local inline) end))
+							(error (struct.get (local inline) error))))))
 					(let field_name (array.load (local nodes) (local spelling)))
 					(if
 						(:doc "C member access uses the written name verbatim.")

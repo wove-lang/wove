@@ -58,7 +58,7 @@
 	(use wove-file "./c_formals.wove" (only fixed_c_needs_prototype native_owner_needs_prototype write_fixed_c_checks))
 	(use wove-file "../scalar/flow.wove" (only after_block is_loop is_loop_exit (value break_statement) (value for_statement) (value for_source_owner) (value for_element_assignment) (type ScalarStatement) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment) (value owner_assignment) (value owner_field_assignment)))
-	(use wove-file "../scalar/loans.wove" (only is_local_slice_view indexed_growth_receiver (value indirect_local_place) (value inline_owner_argument_guard) (value local_slice_projection) (value scoped_field_loan) (value indexed_record_loan) (type ScalarExpression)))
+	(use wove-file "../scalar/loans.wove" (only is_local_slice_view indexed_growth_receiver is_c_inline_projection (value indirect_local_place) (value inline_owner_argument_guard) (value local_slice_projection) (value scoped_field_loan) (value indexed_record_loan) (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only read_module_declarations plan_bodies (type CallSite)))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/syntax.wove" (only is_direct_call (value array_try_copy_kind) (value borrowed_record_unwrap_kind) (value fn_ref_kind) (value indirect_call_kind) is_worker_launch is_worker_collect is_worker_pool_operation is_worker_queue_access
@@ -959,6 +959,10 @@
 	(let tail_report_call "WVRT_C_TAIL_REPORT(")
 	(let tail_load_call "WVRT_C_TAIL_AT(")
 
+	(let native_inline_shared "(wvrt_slice){")
+	(let native_inline_mut "(wvrt_mut_slice){")
+	(let native_inline_end ",1}")
+
 	(fn write_value
 		(:doc `Write a checked value using the temporaries already evaluated for its operands.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (value_index i32) (tree_base i32)
@@ -1102,9 +1106,10 @@
 				(:doc "Read the selected member from the checked record value.")
 				(u32.eq (local kind) 52u32)
 				(then
+					(let inline (call is_c_inline_projection (local expression)))
 					(if
 						(:doc "Read a projected binding directly, without copying its enclosing records.")
-						(i32.lt -1i32 (struct.get (local expression) projection))
+						(bool.and (bool.not (local inline)) (i32.not-ltz (struct.get (local expression) projection)))
 						(then (return (call write_field_place (borrow-shared (local source)) (borrow-shared (local nodes))
 							(borrow-shared (local expressions)) (borrow-shared (local parameters))
 							(local value_index) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
@@ -1112,13 +1117,24 @@
 					(let receiver (array.load (local expressions) (local reference)))
 					(let-mut value (local offset))
 					(if
+						(:doc "Lend the native member's original address through the checked byte-view ABI.")
+						(local inline)
+						(then
+							(if
+								(:doc "Use a mutable descriptor only for an exclusive checked byte store.")
+								(call is_writable_slice (struct.get (local expression) type))
+								(then (set (local value) (call c_literal_text (borrow-shared (local native_inline_mut))
+									(borrow-mut (local output)) (local value) (local writing))))
+								(else (set (local value) (call c_literal_text (borrow-shared (local native_inline_shared))
+									(borrow-mut (local output)) (local value) (local writing)))))))
+					(if
 						(:doc "A compound receiver has already been evaluated. Use its temporary once.")
 						(call requires_value_temporary (struct.get (local receiver) kind))
 						(then (set (local value) (call write_temporary_name (borrow-shared (local source))
-							(local reference) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing))))
+							(local reference) (local tree_base) (borrow-mut (local output)) (local value) (local name_prefix) (local writing))))
 						(else (set (local value) (call write_scalar (borrow-shared (local source)) (borrow-shared (local nodes))
 							(local receiver) (local tree_base) (borrow-shared (local parameters)) (borrow-shared (local expressions))
-							(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+							(borrow-mut (local output)) (local value) (local name_prefix) (local writing)))))
 					(let type (struct.get (local receiver) type))
 					(let dot (call write_member_separator (borrow-mut (local output)) (local value)
 						(call is_place_reference (local type)) (local writing)))
@@ -1128,8 +1144,17 @@
 						(call is_native_record (local layout))
 						(then
 							(let name (array.load (local nodes) (struct.get (local expression) target)))
-							(return (call c_span (borrow-shared (local source)) (struct.get (local name) start)
-								(struct.get (local name) end) (borrow-mut (local output)) (local dot) (local writing)))))
+							(let member (call c_span (borrow-shared (local source)) (struct.get (local name) start)
+								(struct.get (local name) end) (borrow-mut (local output)) (local dot) (local writing)))
+							(if
+								(:doc "The descriptor records the exact header-checked extent and a one-byte stride.")
+								(local inline)
+								(then
+									(let limit (call write_site_number (borrow-mut (local output)) (local member)
+										(struct.get (local expression) asset_end) (local writing)))
+									(return (call c_literal_text (borrow-shared (local native_inline_end))
+										(borrow-mut (local output)) (local limit) (local writing)))))
+							(return (local member))))
 					(return (call write_member_name (borrow-shared (local source)) (struct.get (local expression) target)
 						(borrow-mut (local output)) (local dot) (local name_prefix) (local writing)))))
 			(if

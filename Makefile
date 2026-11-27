@@ -228,6 +228,7 @@ test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80 test-stage-2-workers
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/deployment.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/optional-macros.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/record-init.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/inline-fields/check.py" "$(NATIVE_COMPILER)"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/library/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/library/cases.jsonc"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/library/cross-target.tsv"

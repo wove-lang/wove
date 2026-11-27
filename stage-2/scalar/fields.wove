@@ -5,8 +5,10 @@
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
-	(use wove-file "./syntax.wove" (only entry_at entry_form is_scalar_name (type EntryRead)))
-	(use wove-file "./loans.wove" (only expression_row (type ScalarExpression)))
+	(use wove-file "../source/c_records.wove" (only read_c_inline_field))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "./syntax.wove" (only entry_at entry_form entry_keyword is_scalar_name (type EntryRead)))
+	(use wove-file "./loans.wove" (only expression_row writable_place (type ScalarExpression)))
 	(use wove-file "./flow.wove" (only (type ScalarStatement)))
 	(use wove-file "./control.wove" (only prior_owner_take))
 	(use wove-file "./conditional.wove" (only is_pending_value (value pending_field_read)))
@@ -53,6 +55,46 @@
 						(i32.lt -1i32 (local moved))
 						(then (return (struct.new EntryRead (operand -1i32) (start (struct.get (local node) start))
 							(end (struct.get (local node) end)) (error 39u32) (related (local moved))))))))
+			(return (call entry_at (local node) (local index) 0u32))))
+
+	(fn plan_c_inline_field
+		(:doc "Lend caller-stored native bytes only to the immediately enclosing checked array access.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+			(index i32) (receiver i32) (binding ScalarExpression) (field i32) (extent i32) (expected u32)
+			(expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let parent (array.load (local nodes) (struct.get (local node) parent)))
+			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local parent)))
+			(let kind (call entry_keyword (borrow-shared (local source)) (borrow-shared (local nodes))
+				(struct.get (local parts) head)))
+			(let write (u32.eq (local kind) 40u32))
+			(let access (bool.or (local write) (bool.or (u32.eq (local kind) 36u32) (u32.eq (local kind) 37u32))))
+			(if
+				(:doc "The descriptor never escapes as a standalone value or an implicit loan.")
+				(bool.not (bool.and (local access) (i32.eq (struct.get (local parts) operands) (local index))))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let origin (struct.get (local binding) kind))
+			(let declared (bool.or (u32.eq (local origin) 6u32) (u32.eq (local origin) 2u32)))
+			(if
+				(:doc "A native member must remain in the caller's named record or its existing reference.")
+				(bool.not (local declared))
+				(then (return (call entry_at (array.load (local nodes) (local receiver)) -1i32 24u32))))
+			(if
+				(:doc "Updating an inline member needs mutable record storage or an exclusive record reference.")
+				(bool.and (local write) (bool.not (call writable_place (local binding))))
+				(then (return (call entry_at (array.load (local nodes) (local receiver)) -1i32 37u32))))
+			(let-mut type 34u32)
+			(if (local write) (then (set (local type) 38u32)))
+			(if
+				(:doc "Require the access planner's readable or writable descriptor expectation.")
+				(bool.not (call value_matches_type (local expected) (local type)))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(array.store (local expressions) (local index)
+				(struct.new ScalarExpression (kind 52u32) (type (local type)) (target (local field))
+					(first (local receiver)) (start 0i32) (end 0i32) (negative (bool false))
+					(borrowed_owner (bool false)) (mutable_place (bool false)) (projection (local receiver))
+					(asset_start 0i32) (asset_end (local extent)) (extent_check -1i32)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_field_read
@@ -110,7 +152,18 @@
 				(:doc "Native fields use the real C name and the defining bridge's checked type.")
 				(call is_native_record (local layout))
 				(then
-					(set (local target) (struct.get (array.load (local nodes) (local row)) first_child))
+					(let field_node (array.load (local nodes) (local row)))
+					(set (local target) (struct.get (local field_node) first_child))
+					(let field_parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local field_node)))
+					(let inline (call read_c_inline_field (borrow-shared (local source)) (borrow-shared (local nodes))
+						(array.load (local nodes) (struct.get (local field_parts) operands))))
+					(let extent (struct.get (local inline) extent))
+					(if
+						(:doc "Keep an inline byte array in its native record and supply a checked access to its original storage.")
+						(i32.gtz (local extent))
+						(then (return (call plan_c_inline_field (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local node) (local index) (local receiver) (local value) (local target) (local extent) (local expected)
+							(borrow-mut (local expressions))))))
 					(set (local result) (call native_field_type (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local records)) (local layout) (local row))))
 				(else
