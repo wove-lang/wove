@@ -63,6 +63,18 @@ wvrt_i128 wvrt_i128_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wv
 #define WVRT_HAS_INT256 1
 typedef signed _BitInt(256) wvrt_i256;
 typedef unsigned _BitInt(256) wvrt_u256;
+
+int32_t wvrt_clz256(wvrt_u256 wvrt_value);
+int32_t wvrt_ctz256(wvrt_u256 wvrt_value);
+int32_t wvrt_popcnt256(wvrt_u256 wvrt_value);
+wvrt_i256 wvrt_i256_shift_at_span(wvrt_i256 wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_u256 wvrt_u256_shift_at_span(wvrt_u256 wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_i256 wvrt_i256_rotate_at_span(wvrt_i256 wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_u256 wvrt_u256_rotate_at_span(wvrt_u256 wvrt_value, int32_t wvrt_count, bool wvrt_right,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 #endif
 
 // Exact native floating representations and checked numerical conversions.
