@@ -1,0 +1,118 @@
+(module extended_native_record_snapshot
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+
+	(use c-header "./extended.h"
+		(only (type Reader) fixture_extent_open fixture_extent_close next_snapshot next_entry copy_entry
+			errno EAGAIN ENOENT))
+
+	(bridge c-header "./extended.h"
+		(let-mut errno i32)
+		(const EAGAIN i32)
+		(const ENOENT i32)
+		(type Reader (:pragma (c_owned (drop fixture_extent_close))) (c-type "struct fixture_extent_reader *"))
+		(fn fixture_extent_open (params (mode i32)) (returns Reader))
+		(fn fixture_extent_close (params (reader Reader)) (returns void))
+		(struct Entry (c-type "struct fixture_extent_record") (fields (marker u32)))
+		(fn next_snapshot
+			(:pragma (c_snapshot cstr (field text) (extent extent)))
+			(params (reader (mut-ref Reader)))
+			(returns (optional (owned-array u8)))
+			(c-name "fixture_extent_next"))
+		(fn next_entry
+			(params (reader (mut-ref Reader)))
+			(returns (optional (shared-ref Entry)) (from reader))
+			(c-name "fixture_extent_next"))
+		(fn copy_entry
+			(:pragma (c_snapshot cstr (field text) (extent extent) (from entry)))
+			(params (entry (shared-ref Entry)))
+			(returns (optional (owned-array u8)))))
+
+	(let expected "extended payload")
+	(let reused "reused")
+
+	(fn matches (params (data (shared-array u8)) (value (shared-array u8))) (returns bool)
+		(body
+			(if (i32.not-eq (array.len data) (array.len value)) (then (return (bool false))))
+			(for (let i) (range 0i32 (array.len value))
+				(body
+					(if (u8.not-eq (array.load data i) (array.load value i))
+						(then (return (bool false))))))
+			(return (bool true))))
+
+	(fn check_returned (params) (returns i32)
+		(body
+			(let-mut reader (call fixture_extent_open 0i32))
+			(let first (call next_snapshot (borrow-mut reader)))
+			(if (bool.or (owner.is-null first) (i32.not-eq errno EAGAIN)) (then (return 1i32)))
+			(let second (call next_snapshot (borrow-mut reader)))
+			(if (owner.is-null second) (then (return 2i32)))
+			(call fixture_extent_close (move reader))
+			(let before (move (optional.unwrap first)))
+			(let after (move (optional.unwrap second)))
+			(if (bool.not (call matches (borrow-shared before) (borrow-shared expected))) (then (return 3i32)))
+			(if (bool.not (call matches (borrow-shared after) (borrow-shared reused))) (then (return 4i32)))
+			(return 0i32)))
+
+	(fn check_optional (params) (returns i32)
+		(body
+			(let-mut empty_reader (call fixture_extent_open 4i32))
+			(let empty (call next_snapshot (borrow-mut empty_reader)))
+			(call fixture_extent_close (move empty_reader))
+			(if (owner.is-null empty) (then (return 5i32)))
+			(let data (move (optional.unwrap empty)))
+			(if (i32.not-eqz (array.len data)) (then (return 6i32)))
+			(let-mut absent_reader (call fixture_extent_open 1i32))
+			(let absent (call next_snapshot (borrow-mut absent_reader)))
+			(let saved errno)
+			(call fixture_extent_close (move absent_reader))
+			(if (bool.or (bool.not (owner.is-null absent)) (i32.not-eq saved ENOENT)) (then (return 7i32)))
+			(return 0i32)))
+
+	(fn check_loan (params) (returns i32)
+		(body
+			(let-mut reader (call fixture_extent_open 0i32))
+			(let-mut copy (array.alloc u8 0i32))
+			(if (bool true)
+				(then
+					(let raw (call next_entry (borrow-mut reader)))
+					(if (optional.is-none raw) (then (return 10i32)))
+					(let entry (optional.unwrap raw))
+					(let snapshot (call copy_entry (borrow-shared entry)))
+					(if (bool.or (owner.is-null snapshot) (i32.not-eq errno EAGAIN)) (then (return 11i32)))
+					(set copy (move (optional.unwrap snapshot)))))
+			(let next (call next_snapshot (borrow-mut reader)))
+			(if (owner.is-null next) (then (return 12i32)))
+			(call fixture_extent_close (move reader))
+			(if (bool.not (call matches (borrow-shared copy) (borrow-shared expected))) (then (return 13i32)))
+			(return 0i32)))
+
+	(fn malformed_loan (params (mode i32)) (returns i32)
+		(body
+			(let-mut reader (call fixture_extent_open mode))
+			(let raw (call next_entry (borrow-mut reader)))
+			(if (optional.is-none raw) (then (return 14i32)))
+			(let entry (optional.unwrap raw))
+			(let snapshot (call copy_entry (borrow-shared entry)))
+			(if (owner.is-null snapshot) (then (return 15i32)))
+			(return 16i32)))
+
+	(fn main (:expect (issues "gh:wove-lang/wove:688"))
+		(params (args (shared-array (shared-array u8)))) (returns i32)
+		(body
+			(let mode (array.len args))
+			(if (i32.gt mode 3i32) (then (return (call malformed_loan (i32.sub mode 2i32)))))
+			(if (i32.gt mode 1i32)
+				(then
+					(let-mut reader (call fixture_extent_open mode))
+					(let result (call next_snapshot (borrow-mut reader)))
+					(call fixture_extent_close (move reader))
+					(if (owner.is-null result) (then (return 8i32)))
+					(return 9i32)))
+			(let direct (call check_returned))
+			(if (i32.not-eqz direct) (then (return direct)))
+			(let presence (call check_optional))
+			(if (i32.not-eqz presence) (then (return presence)))
+			(let borrowed (call check_loan))
+			(if (i32.not-eqz borrowed) (then (return borrowed)))
+			(return 42i32))))
