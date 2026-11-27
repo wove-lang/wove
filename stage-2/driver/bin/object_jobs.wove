@@ -1,0 +1,174 @@
+(module native_object_jobs
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Run prepared object compiler commands within an existing job budget.")
+
+	(use wove-file "../../io/process_file.wove" (only start_process_files (type FileChild)))
+	(use wove-file "../../io/capture/child.wove" (only poll_capture_child reap_capture_child))
+	(use wove-file "../../llvm-libc/time.wove" (only))
+	(use c-header "<time.h>" (only nanosleep (type Stamp) (type Time) (type Long)))
+
+	(struct ObjectJob
+		(fields (arguments (owned-array u8)) (stdout_path (owned-array u8))
+			(stderr_path (owned-array u8)) (environment (owned-array (owned-array u8)))))
+
+	(struct
+		(:doc "Only the attempted prefix has statuses. The first failing index is in job order.")
+		ObjectJobsResult
+		(fields (attempted i32) (failed_job i32) (status i32) (statuses (owned-array i32))))
+
+	(struct RunningObject (fields (job i32) (pid i32)))
+	(struct ObjectPoll (fields (pending i32) (failed bool)))
+
+	(fn pause_for_compiler
+		(:doc "Pause a millisecond when none of the owned children have finished. An interruption resumes polling.")
+		(params) (returns void)
+		(body
+			(let delay (struct.new Stamp (tv_sec (int.convert Time 0i32)) (tv_nsec (int.convert Long 1000000i32))))
+			(let-mut remaining (struct.new Stamp (tv_sec (int.convert Time 0i32)) (tv_nsec (int.convert Long 0i32))))
+			(let status (call nanosleep (borrow-shared delay) (borrow-mut remaining)))))
+
+	(fn collect_objects
+		(:doc "Collect completed children and compact the remaining slots in input order.")
+		(params (running (mut-array RunningObject)) (length i32) (statuses (mut-array i32))) (returns ObjectPoll)
+		(body
+			(let-mut pending 0i32)
+			(let-mut index 0i32)
+			(let-mut failed (bool false))
+			(while
+				(:doc "Check all launched jobs before refilling, so a visible failure takes precedence over available slots.")
+				(i32.lt index length)
+				(body
+					(let entry (array.load running index))
+					(let child (call poll_capture_child (struct.get entry pid)))
+					(if
+						(:doc "A pending child retains its PID; a completed child supplies one status.")
+						(struct.get child ready)
+						(then
+							(let-mut status (struct.get child status))
+							(if
+								(:doc "If polling fails, make a final blocking collection attempt for that PID.")
+								(i32.ltz status)
+								(then
+									(let reaped (call reap_capture_child (struct.get entry pid)))
+									(set status -2i32)))
+							(array.store statuses (struct.get entry job) status)
+							(set failed (bool.or failed (i32.not-eqz status))))
+						(else
+							(array.store running pending entry)
+							(set pending (i32.inc pending))))
+					(set index (i32.inc index))))
+			(return (struct.new ObjectPoll (pending pending) (failed failed)))))
+
+	(fn reap_objects
+		(:doc "Finish collecting the remaining owned children after a failure has stopped admission.")
+		(params (running (shared-array RunningObject)) (length i32) (statuses (mut-array i32))) (returns void)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Each remaining slot still owns one positive PID.")
+				(i32.lt index length)
+				(body
+					(let entry (array.load running index))
+					(let-mut status (call reap_capture_child (struct.get entry pid)))
+					(if (i32.ltz status) (then (set status -2i32)))
+					(let job (struct.get entry job))
+					(if
+						(:doc "A launch failure remains attributed even if it left a successfully started child.")
+						(i32.eqz (array.load statuses job))
+						(then (array.store statuses job status)))
+					(set index (i32.inc index))))))
+
+	(fn start_object
+		(:doc "Use the prepared packed argv and environment, with separate staged output and diagnostic files.")
+		(params (program (shared-array u8)) (job (shared-ref ObjectJob))) (returns FileChild)
+		(body
+			(return (call start_process_files (borrow-shared program)
+				(borrow-shared (struct.get job arguments))
+				(borrow-shared (struct.get job stdout_path))
+				(borrow-shared (struct.get job stderr_path))
+				(borrow-shared (struct.get job environment))))))
+
+	(fn run_object_jobs
+		(:doc `Start up to the supplied budget of prepared jobs. Refill on any owned child's completion.
+
+		Stop admission on the first observed failure and collect every started
+		child before returning. Report the first failure in input order.
+		A status of -1 means launch or invalid budget and -2 means wait failure.
+		The caller supplies distinct private paths for stdout and diagnostics
+		and can read the attempted logs afterward. Resolve the budget with
+		compiler_job_budget.`)
+		(:expect (tests "stage-2/cli/native/object_jobs/cases.tsv") (issues "gh:wove-lang/wove:218"))
+		(params (program (shared-array u8)) (jobs (shared-array ObjectJob)) (budget u32)) (returns ObjectJobsResult)
+		(body
+			(let total (array.len jobs))
+			(if
+				(:doc "An empty queue needs no children. Zero is invalid for a nonempty resolved queue.")
+				(bool.or (i32.eqz total) (u32.eqz budget))
+				(then
+					(let-mut status -1i32)
+					(if (i32.eqz total) (then (set status 0i32)))
+					(return (struct.new ObjectJobsResult (attempted 0i32) (failed_job -1i32) (status status)
+						(statuses (array.alloc i32 0i32))))))
+			(let-mut capacity total)
+			(if
+				(:doc "Clamp before narrowing the full unsigned budget to a signed array extent.")
+				(u32.lt budget (u32.from-i32 total))
+				(then (set capacity (i32.from-u32 budget))))
+			(let-mut running (array.alloc RunningObject capacity))
+			(let-mut statuses (array.alloc i32 total))
+			(let-mut attempted 0i32)
+			(let-mut active 0i32)
+			(let-mut stopped (bool false))
+			(while
+				(:doc "Collect each running child before the runner returns, even if admission stopped.")
+				(bool.or (i32.gtz active) (bool.and (bool.not stopped) (i32.lt attempted total)))
+				(body
+					(while
+						(:doc "Fill free slots before waiting without exceeding the resolved budget.")
+						(bool.and (bool.not stopped) (bool.and (i32.lt attempted total) (i32.lt active capacity)))
+						(body
+							(let child (call start_object (borrow-shared program) (borrow-shared (array.load jobs attempted))))
+							(let pid (struct.get child pid))
+							(if
+								(:doc "Retain every started process even when closing a parent descriptor failed.")
+								(i32.gtz pid)
+								(then
+									(array.store running active (struct.new RunningObject (job attempted) (pid pid)))
+									(set active (i32.inc active))))
+							(if
+								(:doc "An invalid command or unavailable writer ends admission at this job.")
+								(bool.not (struct.get child ok))
+								(then
+									(array.store statuses attempted -1i32)
+									(set stopped (bool true))))
+							(set attempted (i32.inc attempted))))
+					(if
+						(:doc "With admission stopped, blocking waits can drain all remaining file-backed jobs.")
+						stopped
+						(then
+							(call reap_objects (borrow-shared running) active (borrow-mut statuses))
+							(break)))
+					(let collected (call collect_objects (borrow-mut running) active (borrow-mut statuses)))
+					(let pending (struct.get collected pending))
+					(set stopped (struct.get collected failed))
+					(if
+						(:doc "Avoid spinning while all slots are still occupied.")
+						(bool.and (bool.not stopped) (i32.eq pending active))
+						(then (call pause_for_compiler)))
+					(set active pending)))
+			(let-mut index 0i32)
+			(while
+				(:doc "Attribute failure in input order, including a failure collected during the drain.")
+				(i32.lt index attempted)
+				(body
+					(let status (array.load statuses index))
+					(if
+						(:doc "Keep the original tool status and job identity.")
+						(i32.not-eqz status)
+						(then (return (struct.new ObjectJobsResult (attempted attempted)
+							(failed_job index) (status status) (statuses (move statuses))))))
+					(set index (i32.inc index))))
+			(return (struct.new ObjectJobsResult (attempted attempted)
+				(failed_job -1i32) (status 0i32) (statuses (move statuses))))))
+)

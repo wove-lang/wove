@@ -107,6 +107,9 @@ WORKER_QUEUE_PROBE := $(STAGE2)/workers/queue-failure
 WORKER_POOL_PROBE := $(STAGE2)/workers/pool
 PROCESS_MODULES := stage-2/io/process.wove stage-2/io/temporary.wove stage-2/io/capture/descriptors.wove stage-2/io/capture/child.wove
 PROCESS_FIXTURES := tests/stage-2/process
+OBJECT_JOB_FIXTURES := tests/stage-2/cli/native/object_jobs
+OBJECT_JOB_SOURCES := $(NATIVE_DRIVER)/bin/object_jobs.wove $(JOB_BUDGET_MODULE) stage-2/llvm-libc/time.wove \
+	stage-2/io/process_file.wove $(PROCESS_MODULES) stage-2/text/copy.wove
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
 PROCESS_DESCRIPTOR_CASES := $(PROCESS_FIXTURES)/descriptors.tsv
 PROCESS_INHERITANCE_CASES := $(PROCESS_FIXTURES)/inheritance.tsv
@@ -236,7 +239,7 @@ test-stage-2-language: test-stage-2-source $(GRAPH_LANGUAGE_TESTS) $(GRAPH_TRACK
 test-stage-2-utilities: test-stage-2-hashing test-stage-2-json test-stage-2-cli test-stage-2-config \
 	test-stage-2-diagnostics test-stage-2-blake2b
 test-stage-2-interop: $(GRAPH_INTEROP_TESTS) test-stage-2-clang test-stage-2-native-interop test-stage-2-f80
-test-stage-2-runtime: test-stage-2-array-copy test-stage-2-process test-stage-2-workers test-stage-2-inventory
+test-stage-2-runtime: test-stage-2-array-copy test-stage-2-process test-stage-2-workers test-stage-2-inventory test-stage-2-object-jobs
 test-stage-2-self-host: self-host test-stage-2-version
 
 # Preserve quoting in compiler settings until the runner splits them into arguments.
@@ -404,6 +407,15 @@ test-stage-2-process: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-process: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
 test-stage-2-process: $(SOURCE_SCAN)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" "$(PROCESS_CASES)" "$(PROCESS_DESCRIPTOR_CASES)" "$(PROCESS_INHERITANCE_CASES)"
+
+# Exercise prepared native jobs without connecting the runner to compiler CLI scheduling.
+.PHONY: test-stage-2-object-jobs
+test-stage-2-object-jobs: $(STAGE2)/object-jobs
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$<" "$(OBJECT_JOB_FIXTURES)/cases.tsv"
+
+$(STAGE2)/object-jobs: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
+$(STAGE2)/object-jobs: $(OBJECT_JOB_FIXTURES)/main.wove $(OBJECT_JOB_FIXTURES)/tool.py $(OBJECT_JOB_SOURCES) $(NATIVE_COMPILER)
+	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
 
 # Check generated C, archived JSON, and live tool invocation.
 test-stage-2-clang: $(AST_PROBE) $(AST_LIVE) $(CLANG_TEMPLATE)
