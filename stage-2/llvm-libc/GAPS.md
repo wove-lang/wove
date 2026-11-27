@@ -621,6 +621,25 @@ declaration through ordinary bridge imports.
 | `timeradd`, `timersub`, `timerclear`, `timerisset`, `timercmp`, `timevalcmp`, `TIMEVAL_TO_TIMESPEC`, and `TIMESPEC_TO_TIMEVAL` | These extension macros need per-operation fixtures and exact pointer contracts. Comparison macros take an operator token. The conversion macros are GNU-only on glibc and appear in Darwin extension profiles. Darwin also exposes `timevalcmp`. |
 | Darwin `struct timeval64`, `struct clockinfo`, and `DST_*` | These are extension-profile members for separate coverage. The portable wall-time binding uses the native `struct timeval` and a typed null timezone. |
 
+## Bundled `<sys/statvfs.h>` filesystem capacity
+
+Both Clang frontends expose `statvfs`, `fstatvfs`, the eleven portable
+fields, and the two standard flags on the macOS 27.2 SDK and Debian glibc
+2.41 across C11, C17, and C23 on arm64 and x86-64. The public count
+typedefs `fsblkcnt_t` and `fsfilcnt_t` are unsigned 32-bit types on
+Darwin and unsigned 64-bit types on glibc LP64. The remaining portable
+fields are native `unsigned long`. The C record occupies 64 bytes on
+Darwin and 112 bytes on glibc LP64 including its reserved tail.
+[LLVM libc statvfs checklist](https://libc.llvm.org/headers/sys/statvfs.html)
+
+| Native members | Coverage or outstanding contract |
+| --- | --- |
+| `statvfs`, `fstatvfs`, `struct statvfs`, `fsblkcnt_t`, `fsfilcnt_t` | Both functions lend a complete mutable native record and return C's status. The path uses a call-scoped C string. Paired bundled and project fixtures compare real directory path and descriptor results to direct C calls, check missing-path and invalid-descriptor status, and verify every portable count and field against the initialized native record. |
+| `ST_RDONLY`, `ST_NOSUID` | Both headers expose these native integer constants in every audited profile. |
+| `ST_NODEV`, `ST_NOEXEC`, `ST_SYNCHRONOUS`, `ST_MANDLOCK`, `ST_WRITE`, `ST_APPEND`, `ST_IMMUTABLE`, `ST_NOATIME`, `ST_NODIRATIME`, `ST_RELATIME`, `ST_NOSYMFOLLOW` | The selected glibc GNU profile exposes these as C `int` constants. Each follows ordinary optional constant selection. |
+| `statvfs64`, `fstatvfs64`, `struct statvfs64` | Glibc exposes the distinct record and calls with GNU or explicit large-file features. The view uses `__fsblkcnt64_t` and `__fsfilcnt64_t` as declared in the record. Ordinary calls continue to use the header's file-offset redirection. |
+| glibc `f_type` | The current glibc headers declare an `unsigned int` field. The glibc 2.36 record uses that slot as reserved storage. Both Wove views preserve the entire native allocation. Exposing the field needs an availability guard on the projection. [glibc 2.36 declaration](https://github.com/bminor/glibc/blob/glibc-2.36/sysdeps/unix/sysv/linux/bits/statvfs.h) · [Compiler prerequisite #691](https://github.com/wove-lang/wove/issues/691) |
+
 ## Bundled message formatting
 
 The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public

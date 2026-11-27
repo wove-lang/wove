@@ -78,12 +78,17 @@ def main():
 			project = stage / f"{origin}-{standard}-{profile}"
 			check_case(installed, clang, runtime, fixtures, project, header, standard, flags, execute=execute)
 			# Test optional declarations according to the configured compiler's header.
-			for case_origin, native, macro, source, diagnostic in optional_cases:
+			for case_origin, native, macro, source, diagnostic, *mode in optional_cases:
 				if case_origin != origin:
 					continue
 				present = macro.encode() in macro_inventory(clang, standard, native, tuple(flags))
+				# A positive-only fixture runs when its native profile marker is present.
+				if not present and diagnostic == "-":
+					continue
+				run_fixture = mode == ["run"]
 				check_case(installed, clang, runtime, fixtures, project.with_name(f"{project.name}-{macro}"),
-					header, standard, flags, source=source, unavailable=None if present else diagnostic, macro=macro)
+					header, standard, flags, source=source, unavailable=None if present else diagnostic,
+					execute=run_fixture, macro=None if run_fixture else macro)
 	print(f"{fixtures.name}.h: bundled and project values checked in {3 * len(profiles)} host profiles")
 
 
