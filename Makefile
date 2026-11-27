@@ -97,48 +97,23 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 STAGE1_FIXTURE_C := $(addprefix $(STAGE1)/,$(addsuffix .c,$(sort $(filter-out %.tracked,$(TEST_PROGRAMS)))))
 SEED_GRAPH_C := $(SOURCE_PROBE_C) $(SEED_UTILITY_C) $(NATIVE_FIXTURE_C) $(AST_PROBE).c $(STAGE1_FIXTURE_C)
 
-# Schedule independent manifests as Make prerequisites.
-GRAPH_LANGUAGE_CASES := \
-	identity_collisions/cases.tsv ascii_names/cases.tsv declaration_slots/cases.tsv source_graphs.tsv scalar_graphs.tsv \
-	expectations/cases.tsv fixed_record_arrays/cases.tsv scalar_refs/cases.tsv \
-	value_if/cases.tsv embed/cases.tsv test_discovery.tsv numeric_arrays/cases.tsv \
-	owner_assignment/cases.tsv optional_owners/cases.tsv recoverable_growth/cases.tsv \
-	integer_compare/cases.tsv cli/native/int128/test-mode.tsv \
-	cli/native/function_values/test-mode.tsv graph/targets/cases.tsv module_arrays/cases.tsv \
-	computed_constants/cases.tsv array_copy/cases.tsv integer_conversions/cases.tsv \
-	integer_checks/cases.tsv integer_arithmetic/cases.tsv integer_division/cases.tsv \
-	integer_bits/cases.tsv generics/cases.tsv generic_functions/cases.tsv \
-	generic_operations/cases.tsv generic_booleans/cases.tsv generic_enums/cases.tsv \
-	enums/cases.tsv matches/cases.tsv floats/cases.tsv while/exits.tsv scoped_arrays/cases.tsv \
-	borrowed_results/cases.tsv shared_byte_rows/cases.tsv fallible_views/cases.tsv \
-	for/cases.tsv array_growth/cases.tsv owned_record_arrays/traps.tsv
-GRAPH_INTEROP_CASES := \
-	native_header_types/cases.tsv native_alias/cases.tsv native_records/cases.tsv \
-	native_values/cases.tsv native_macros/cases.tsv native_variadic/cases.tsv native_record_snapshots/cases.tsv \
-	native_fixed/cases.tsv native_pointer_typedefs/cases.tsv native_arrays/cases.tsv \
-	native_dirent/cases.tsv native_handle_out/cases.tsv native_owner_returns/cases.tsv \
-	native_owner_fields/cases.tsv native_scalar_refs/cases.tsv native_storage/cases.tsv \
-	native_rows/cases.tsv native_vectors/cases.tsv native_streams/cases.tsv \
-	native_paths/cases.tsv native_borrowed_records/cases.tsv
-GRAPH_TRACKED_CASES := \
-	owned_records/cases.tsv owned_record_arrays/cases.tsv owning_enums/cases.tsv \
-	array_growth/tracked.tsv for/consuming/tracked.tsv scoped_records/cases.tsv \
-	borrowed_results/tracked.tsv owner_assignment/tracked.tsv optional_owners/tracked.tsv \
-	recoverable_growth/tracked.tsv native_storage/tail/tracked.tsv
-GRAPH_LANGUAGE_TESTS := $(addprefix test-graph/,$(GRAPH_LANGUAGE_CASES))
-GRAPH_INTEROP_TESTS := $(addprefix test-graph/,$(GRAPH_INTEROP_CASES))
-GRAPH_TRACKED_TESTS := $(addprefix test-graph/,$(GRAPH_TRACKED_CASES))
-GRAPH_TESTS := $(GRAPH_LANGUAGE_TESTS) $(GRAPH_INTEROP_TESTS) $(GRAPH_TRACKED_TESTS)
+# Add a "# suite: <group>" comment to schedule a TSV fixture in one of these groups.
+# Read the comments only for goals that schedule graph or native manifests.
+ifneq ($(filter test test-stage-2 test-stage-2-language test-stage-2-interop test-stage-2-native \
+	test-stage-2-native-cli test-stage-2-native-interop test-graph/% test-native/%,$(MAKECMDGOALS)),)
+SUITE_TAG := \# suite:
+SUITE_CASES := $(sort $(shell find tests/stage-2 -type f -name '*.tsv' \
+	-exec awk 'index($$0, "$(SUITE_TAG) ") == 1 { print $$3 ":" FILENAME }' {} +))
+endif
 
-NATIVE_CLI_CASES := \
-	cases.tsv check.tsv diagnostics.tsv literals.tsv function_values/cases.tsv \
-	callable_aliases/cases.tsv bin.tsv standard.tsv protection.tsv phases.tsv
-NATIVE_INTEROP_CASES := \
-	extents.tsv borrow_extents.tsv dirent.tsv deployment.tsv optional-macros.tsv string-macros/cases.tsv optional-records/cases.tsv optional-typedefs/cases.tsv callbacks/cases.tsv native-vectors/cases.tsv \
-	intrinsic/cases.tsv nullable-cstr/cases.tsv static-cstr/cases.tsv writable-cstr/cases.tsv record-init.tsv \
-	inline-fields/cases.tsv record-snapshots/cases.tsv record-loans/cases.tsv record-inputs/cases.tsv library/cross-target.tsv
-NATIVE_CLI_TESTS := $(addprefix test-native/,$(NATIVE_CLI_CASES))
-NATIVE_INTEROP_TESTS := $(addprefix test-native/,$(NATIVE_INTEROP_CASES))
+# Map each marked manifest to its existing public target within the fixture tree.
+suite_targets = $(patsubst $(1):$(2)/%,$(3)/%,$(filter $(1):$(2)/%,$(SUITE_CASES)))
+GRAPH_LANGUAGE_TESTS := $(call suite_targets,graph-language,tests/stage-2,test-graph)
+GRAPH_INTEROP_TESTS := $(call suite_targets,graph-interop,tests/stage-2,test-graph)
+GRAPH_TRACKED_TESTS := $(call suite_targets,graph-tracked,tests/stage-2,test-graph)
+GRAPH_TESTS := $(GRAPH_LANGUAGE_TESTS) $(GRAPH_INTEROP_TESTS) $(GRAPH_TRACKED_TESTS)
+NATIVE_CLI_TESTS := $(call suite_targets,native-cli,$(NATIVE_CLI_FIXTURES),test-native)
+NATIVE_INTEROP_TESTS := $(call suite_targets,native-interop,$(NATIVE_CLI_FIXTURES),test-native)
 
 .PHONY: all stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
 .PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-workers test-stage-2-process test-stage-2-version force-build-info
