@@ -109,7 +109,7 @@ PROCESS_MODULES := stage-2/io/process.wove stage-2/io/temporary.wove stage-2/io/
 PROCESS_FIXTURES := tests/stage-2/process
 OBJECT_JOB_FIXTURES := tests/stage-2/cli/native/object_jobs
 OBJECT_JOB_SOURCES := $(NATIVE_DRIVER)/bin/object_jobs.wove $(JOB_BUDGET_MODULE) stage-2/llvm-libc/time.wove \
-	stage-2/io/process_file.wove $(PROCESS_MODULES) stage-2/text/copy.wove
+	stage-2/io/process_file.wove $(PROCESS_MODULES) stage-2/text/copy.wove stage-2/cli/values.wove stage-2/text/decimal.wove
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
 PROCESS_DESCRIPTOR_CASES := $(PROCESS_FIXTURES)/descriptors.tsv
 PROCESS_INHERITANCE_CASES := $(PROCESS_FIXTURES)/inheritance.tsv
@@ -414,7 +414,7 @@ test-stage-2-object-jobs: $(STAGE2)/object-jobs
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$<" "$(OBJECT_JOB_FIXTURES)/cases.tsv"
 
 $(STAGE2)/object-jobs: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
-$(STAGE2)/object-jobs: $(OBJECT_JOB_FIXTURES)/main.wove $(OBJECT_JOB_FIXTURES)/tool.py $(OBJECT_JOB_SOURCES) $(NATIVE_COMPILER)
+$(STAGE2)/object-jobs: $(addprefix $(OBJECT_JOB_FIXTURES)/,main.wove tool.py scenarios.jsonc) $(OBJECT_JOB_SOURCES) $(NATIVE_COMPILER)
 	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
 
 # Check generated C, archived JSON, and live tool invocation.
