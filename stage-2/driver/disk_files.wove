@@ -8,7 +8,8 @@
 
 	(use wove-file "./protection.wove" (only protected_input report_input_collision (type BuildProtection)))
 	(use wove-file "./paths.wove" (only join_file_path directory_width))
-	(use wove-file "./files.wove" (only canonical_path empty_path file_stamp read_source_file same_file_stamp (type FileStamp)))
+	(use wove-file "./files.wove" (only canonical_path empty_path file_stamp invalid_file_stamp read_source_file same_file_stamp (type FileStamp)))
+	(use wove-file "../source/c_provider_paths.wove" (only provider_path_width write_provider_path find_bundled_path))
 	(use wove-file "../source/paths.wove" (only append_component (type SuppliedFile)))
 	(use wove-file "../source/scan.wove" (only (type Token)))
 	(use wove-file "../source/strings.wove" (only decode_string (type DecodeResult)))
@@ -119,11 +120,87 @@
 				(struct.new Token (kind 2u32) (start start) (end end) (error 0u32))
 				(borrow-mut output)))))
 
+	(fn store_disk_source
+		(:doc "Append an already available source snapshot after checking byte and file capacity.")
+		(params (path (shared-array u8)) (source (shared-array u8)) (stamp FileStamp) (bundled bool)
+			(used DiskSpace) (arena (mut-array u8)) (files (mut-array DiskFile))) (returns DiskRead)
+		(body
+			(let start (struct.get used bytes))
+			(let index (struct.get used files))
+			(let width (array.len path))
+			(let size (array.len source))
+			(if
+				(:doc "A complete path and source must fit within signed graph offsets.")
+				(bool.or (i32.eq index 2147483647i32)
+					(bool.or (i32.lt (i32.sub 2147483647i32 start) width)
+						(i32.lt (i32.sub 2147483647i32 (i32.add start width)) size)))
+				(then (return (call disk_read used 0i32 0i32 16u32 (bool false)))))
+			(let end (i32.add (i32.add start width) size))
+			(let required (call disk_space end (i32.inc index) (struct.get used edges)))
+			(if
+				(:doc "Leave the resolved snapshot unpublished while the storage grows.")
+				(bool.or (i32.lt (array.len arena) end) (i32.not-lt index (array.len files)))
+				(then (return (call disk_read required 0i32 0i32 0u32 (bool true)))))
+			(let path_end (call append_bytes (borrow-shared path) (borrow-mut arena) start))
+			(let copied (call append_bytes (borrow-shared source) (borrow-mut arena) path_end))
+			(array.store files index (struct.new DiskFile (source (struct.new SuppliedFile (identity index)
+				(path_start start) (path_end path_end) (source_start path_end) (source_end copied) (bundled bundled)))
+				(stamp stamp)))
+			(return (call disk_read required 0i32 0i32 0u32 (bool false)))))
+
+	(fn load_disk_provider
+		(:doc "Supply the selected embedded provider under the same virtual identity used by bootstrap.")
+		(params (used DiskSpace) (request GraphResult) (catalog (shared-array u8)) (inventory (shared-array SuppliedFile))
+			(arena (mut-array u8)) (files (mut-array DiskFile))) (returns DiskRead)
+		(body
+			(let importer (struct.get (array.load files (struct.get request file)) source))
+			(let start (struct.get request path_start))
+			(let end (struct.get request path_end))
+			(let-mut decoded (array.alloc u8 (i32.sub end start)))
+			(let value (call decode_use_path (borrow-shared arena) importer start end (borrow-mut decoded)))
+			(if
+				(:doc "Keep the original diagnostic if the literal cannot be decoded.")
+				(u32.gtz (struct.get value error))
+				(then (return (call disk_read used (struct.get value start) (struct.get value end)
+					(struct.get value error) (bool false)))))
+			(let width (call provider_path_width (borrow-shared (array.range decoded 0i32 (struct.get value written)))))
+			(let-mut logical (array.alloc u8 width))
+			(let finish (call write_provider_path (borrow-shared (array.range decoded 0i32 (struct.get value written)))
+				0i32 (borrow-mut logical)))
+			(let-mut candidate (array.alloc u8 width))
+			(let-mut style 0i32)
+			(while
+				(:doc "Use the same spelling precedence for the native catalog and on-disk bootstrap bundle.")
+				(i32.lt style 3i32)
+				(body
+					(let written (call write_provider_path (borrow-shared (array.range decoded 0i32 (struct.get value written)))
+						style (borrow-mut candidate)))
+					(let row (call find_bundled_path (borrow-shared catalog) (borrow-shared inventory)
+						(borrow-shared (array.range candidate 0i32 written))))
+					(if
+						(:doc "Copy only the requested provider into the resolved source graph.")
+						(i32.not-ltz row)
+						(then
+							(let file (array.load inventory row))
+							(return (call store_disk_source (borrow-shared (array.range logical 0i32 finish))
+								(borrow-shared (array.range catalog (struct.get file source_start) (struct.get file source_end)))
+								(call invalid_file_stamp) (bool true) used (borrow-mut arena) (borrow-mut files)))))
+					(set style (i32.inc style))))
+			(return (call store_disk_source (borrow-shared (array.range logical 0i32 finish))
+				(borrow-shared (array.range catalog 0i32 0i32)) (call invalid_file_stamp) (bool true)
+				used (borrow-mut arena) (borrow-mut files)))))
+
 	(fn load_disk_edge
 		(:doc `Decode the selected use, canonicalize it, and load a new identity only when needed.`)
 		(params (used DiskSpace) (request GraphResult) (protection BuildProtection) (arena (mut-array u8)) (files (mut-array DiskFile))
-			(edges (mut-array DiskEdge)) (human bool)) (returns DiskRead)
+			(edges (mut-array DiskEdge)) (human bool)
+			(catalog (shared-array u8)) (inventory (shared-array SuppliedFile))) (returns DiskRead)
 		(body
+			(if
+				(:doc "Header lookup uses the compiler’s embedded catalog.")
+				(struct.get request header)
+				(then (return (call load_disk_provider used request (borrow-shared catalog) (borrow-shared inventory)
+					(borrow-mut arena) (borrow-mut files)))))
 			(let edge (struct.get used edges))
 			(let count (struct.get used files))
 			(if
