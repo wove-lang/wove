@@ -1,0 +1,213 @@
+(module clang_macro_replay
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Certify the effective scalar expression computed by each checked native C macro.")
+
+	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_kind_key)
+		(value clang_name_key) (value clang_value_key) (value clang_inner_key)))
+	(use wove-file "./native_replay.wove" (only append_field has_kind single_inner type_spelling witness_name))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(let macro_guard_prefix "#ifndef ")
+	(let macro_witness_prefix "wove_native_macro_probe_")
+	(let macro_capture_prefix "wove_native_macro_arg_")
+	(let prototype_kind "\"FunctionProtoType\"")
+	(let pointer_kind "\"PointerType\"")
+	(let typeof_kind "\"TypeOfExprType\"")
+	(let binary_kind "\"BinaryOperator\"")
+	(let unary_kind "\"UnaryOperator\"")
+	(let reference_kind "\"DeclRefExpr\"")
+	(let parameter_kind "\"ParmVarDecl\"")
+	(let opcode_key "opcode")
+	(let cast_key "castKind")
+	(let reference_key "referencedDecl")
+	(let binary_ops "\"+\"\u0000\"-\"\u0000\"*\"\u0000\"/\"\u0000\"%\"\u0000\"<<\"\u0000\">>\"\u0000\"&\"\u0000\"|\"\u0000\"^\"\u0000\"==\"\u0000\"!=\"\u0000\"<\"\u0000\">\"\u0000\"<=\"\u0000\">=\"\u0000\"&&\"\u0000\"||\"\u0000")
+	(let unary_ops "\"+\"\u0000\"-\"\u0000\"!\"\u0000\"~\"\u0000")
+	(let casts "\"NoOp\"\u0000\"LValueToRValue\"\u0000\"IntegralCast\"\u0000\"IntegralToBoolean\"\u0000\"IntegralToFloating\"\u0000\"FloatingToIntegral\"\u0000\"FloatingCast\"\u0000\"FloatingToBoolean\"\u0000")
+	(let cast_nodes "\"ImplicitCastExpr\"\u0000\"CStyleCastExpr\"\u0000")
+	(let literals "\"IntegerLiteral\"\u0000\"FloatingLiteral\"\u0000")
+	(let pure_nodes "\"ParenExpr\"\u0000\"ConditionalOperator\"\u0000")
+
+	(fn field_in
+		(:doc "Match a JSON string field against exact NUL-delimited spellings.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (field i32) (words (shared-array u8)))
+		(returns bool)
+		(body
+			(if (i32.ltz field) (then (return (bool false))))
+			(let token (array.load nodes field))
+			(let-mut start 0i32)
+			(for
+				(:doc "Only whole words name approved operations or type conversions.")
+				(let end) (range 0i32 (array.len words))
+				(body
+					(if
+						(:doc "Each delimiter ends one exact AST spelling.")
+						(u8.eqz (array.load words end))
+						(then
+							(if
+								(:doc "Compare the quoted JSON spelling without decoding arbitrary escapes.")
+								(call same_bytes (borrow-shared ast) (struct.get token start) (struct.get token end)
+									(borrow-shared words) start end)
+								(then (return (bool true))))
+							(set start (i32.inc end))))))
+			(return (bool false))))
+
+	(fn macro_expression
+		(:doc "Read the typeof expression in the probe's final prototype parameter.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(let prototype (call single_inner (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(if
+				(:doc "A checked observation is a function typedef with typed formal captures.")
+				(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) prototype
+					(borrow-shared prototype_kind) (borrow-mut scratch)))
+				(then (return -1i32)))
+			(let parameters (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) prototype (borrow-shared clang_inner_key) (borrow-mut scratch)))
+			(if (i32.ltz parameters) (then (return -1i32)))
+			(let last (struct.get (array.load nodes parameters) last_child))
+			(let type (call single_inner (borrow-shared ast) (borrow-shared nodes) last (borrow-mut scratch)))
+			(if
+				(:doc "Only the final typeof pointer parameter can contain the witnessed invocation.")
+				(bool.not (bool.and
+					(call has_kind (borrow-shared ast) (borrow-shared nodes) last (borrow-shared pointer_kind) (borrow-mut scratch))
+					(call has_kind (borrow-shared ast) (borrow-shared nodes) type (borrow-shared typeof_kind) (borrow-mut scratch))))
+				(then (return -1i32)))
+			(return (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) type (borrow-mut scratch)))))
+
+	(fn capture_field
+		(:doc "Resolve only a scalar parameter captured in this exact witness's prototype.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (expression i32) (witness i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let reference (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) expression
+				(borrow-shared reference_key) (borrow-mut scratch)))
+			(if
+				(:doc "External objects, literals named by enums, and function references are not captured operands.")
+				(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) reference
+					(borrow-shared parameter_kind) (borrow-mut scratch)))
+				(then (return -1i32)))
+			(let field (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) reference
+				(borrow-shared clang_name_key) (borrow-mut scratch)))
+			(if (i32.ltz field) (then (return -1i32)))
+			(let ref (array.load nodes field))
+			(let name (array.load nodes witness))
+			(let start (i32.inc (struct.get ref start)))
+			(let prefix_end (i32.add start (array.len macro_capture_prefix)))
+			(let index_start (i32.add (i32.inc (struct.get name start)) (array.len macro_witness_prefix)))
+			(let index_end (i32.dec (struct.get name end)))
+			(let separator (i32.add prefix_end (i32.sub index_end index_start)))
+			(if
+				(:doc "The name must carry this witness's row index followed by a formal ordinal.")
+				(bool.and (i32.lt (i32.inc separator) (i32.dec (struct.get ref end)))
+					(bool.and (u8.eq (array.load ast separator) 95u8)
+						(bool.and (call same_bytes (borrow-shared ast) start prefix_end
+							(borrow-shared macro_capture_prefix) 0i32 (array.len macro_capture_prefix))
+							(call same_bytes (borrow-shared ast) prefix_end separator (borrow-shared ast) index_start index_end))))
+				(then (return field)))
+			(return -1i32)))
+
+	(fn expression_attribute
+		(:doc "Validate an expression kind and return its stable attribute, or -2 for a plain node.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (expression i32) (kind i32)
+			(witness i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(if
+				(:doc "A declared reference must be one of the probe's own scalar captures.")
+				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared reference_kind))
+				(then (return (call capture_field (borrow-shared ast) (borrow-shared nodes)
+					expression witness (borrow-mut scratch)))))
+			(if
+				(:doc "Canonicalize numeric literals using the value selected by Clang.")
+				(call field_in (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared literals))
+				(then (return (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) expression
+					(borrow-shared clang_value_key) (borrow-mut scratch)))))
+			(if
+				(:doc "Parentheses and conditional expressions carry no extra attribute.")
+				(call field_in (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared pure_nodes))
+				(then (return -2i32)))
+			(if
+				(:doc "Retain the exact scalar conversion and reject pointer and non-scalar casts.")
+				(call field_in (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared cast_nodes))
+				(then
+					(let cast (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) expression
+						(borrow-shared cast_key) (borrow-mut scratch)))
+					(if (call field_in (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared casts))
+						(then (return cast)))
+					(return -1i32)))
+			(let op (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) expression
+				(borrow-shared opcode_key) (borrow-mut scratch)))
+			(if
+				(:doc "Only ordinary scalar operators may consume captures. Calls and writes stay serial.")
+				(bool.or (bool.and (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared binary_kind))
+						(call field_in (borrow-shared ast) (borrow-shared nodes) op (borrow-shared binary_ops)))
+					(bool.and (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared unary_kind))
+						(call field_in (borrow-shared ast) (borrow-shared nodes) op (borrow-shared unary_ops))))
+				(then (return op)))
+			(return -1i32)))
+
+	(fn append_expression
+		(:doc "Compare only scalar operations, conversions, literals, and captured lvalues from the expanded AST.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (expression i32) (witness i32)
+			(output (mut-array u8)) (offset i32) (depth i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(if
+				(:doc "Keep malformed or excessively nested input on the ordinary diagnostic path.")
+				(bool.or (i32.ltz expression) (bool.or (i32.ltz offset) (i32.gt depth 64i32)))
+				(then (return -1i32)))
+			(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) expression
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(let attribute (call expression_attribute (borrow-shared ast) (borrow-shared nodes) expression kind
+				witness (borrow-mut scratch)))
+			(if (i32.eq attribute -1i32) (then (return -1i32)))
+			(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) expression (bool true) (borrow-mut scratch)))
+			(let start (call append_field (borrow-shared ast) (borrow-shared nodes) kind (borrow-mut output) offset))
+			(let-mut length (call append_field (borrow-shared ast) (borrow-shared nodes) type (borrow-mut output) start))
+			(if
+				(:doc "Record a literal, operator, conversion, or parameter name when the kind carries one.")
+				(i32.not-ltz attribute)
+				(then (set length (call append_field (borrow-shared ast) (borrow-shared nodes)
+					attribute (borrow-mut output) length))))
+			(let-mut child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) expression (borrow-mut scratch)))
+			(while
+				(:doc "Preserve operand order and explicitly delimit complete subtrees in the comparison.")
+				(bool.and (i32.not-ltz length) (i32.not-ltz child))
+				(body
+					(set length (call append_expression (borrow-shared ast) (borrow-shared nodes) child witness
+						(borrow-mut output) length (i32.inc depth) (borrow-mut scratch)))
+					(set child (struct.get (array.load nodes child) next_sibling))))
+			(if (bool.or (i32.ltz length) (i32.ge length (array.len output))) (then (return -1i32)))
+			(array.store output length 255u8)
+			(return (i32.inc length))))
+
+	(fn append_macro_identities
+		(:doc "Append the stable expansion of every typed macro probe from the effective Clang AST.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (output (mut-array u8))
+			(offset i32) (expected i32)) (returns i32)
+		(body
+			(if (i32.eqz expected) (then (return offset)))
+			(let-mut scratch (array.alloc u8 24i32))
+			(let-mut length offset)
+			(let-mut count 0i32)
+			(let-mut row (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(while
+				(:doc "Retain probe order and validate every requested signature.")
+				(bool.and (i32.not-ltz row) (i32.not-ltz length))
+				(body
+					(let name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared macro_witness_prefix) (borrow-mut scratch)))
+					(if
+						(:doc "Other header typedefs do not certify any expression.")
+						(i32.not-ltz name)
+						(then
+							(let expression (call macro_expression (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+							(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool true) (borrow-mut scratch)))
+							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) name (borrow-mut output) length))
+							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) type (borrow-mut output) length))
+							(set length (call append_expression (borrow-shared ast) (borrow-shared nodes) expression name
+								(borrow-mut output) length 0i32 (borrow-mut scratch)))
+							(set count (i32.inc count))))
+					(set row (struct.get (array.load nodes row) next_sibling))))
+			(if (i32.not-eq count expected) (then (return -1i32)))
+			(return length)))
+)

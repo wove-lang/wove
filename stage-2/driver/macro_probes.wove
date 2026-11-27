@@ -1,0 +1,88 @@
+(module driver_macro_probes
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Describe checked C macro calls using live scalar lvalues in a private Clang probe.")
+
+	(use wove-file "../clang/macro_replay.wove" (only (value macro_capture_prefix) (value macro_witness_prefix)
+		(value macro_guard_prefix)))
+	(use wove-file "../emit/c_arguments.wove" (only c_symbol_text))
+	(use wove-file "../emit/records.wove" (only write_value_type))
+	(use wove-file "../emit/runtime.wove" (only write_c_number))
+	(use wove-file "../emit/text.wove" (only c_literal_text c_byte))
+	(use wove-file "../emit/units.wove" (only numbered_macro_call))
+	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+
+	(let guard_end "\n#error numbered replay requires a C expression macro\n#endif\n")
+	(let prototype "typedef void ")
+	(let expansion "__typeof__((")
+	(let probe_end "))) *);\n")
+
+	(fn write_capture_name
+		(:doc "Identify the captured formal and the specific invocation that introduced it.")
+		(params (index i32) (formal i32) (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let prefix (call c_literal_text (borrow-shared macro_capture_prefix) (borrow-mut output) offset writing))
+			(let number (call write_c_number (borrow-mut output) prefix index writing))
+			(let delimiter (call c_byte (borrow-mut output) number 95u8 writing))
+			(return (call write_c_number (borrow-mut output) delimiter formal writing))))
+
+	(fn write_macro_probe
+		(:doc "Put the unevaluated expansion after parameters with the same types and value category as the real captures.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction) (index i32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let name (array.load nodes (struct.get function name)))
+			(let-mut width (call c_literal_text (borrow-shared macro_guard_prefix) (borrow-mut output) offset writing))
+			(set width (call c_symbol_text (borrow-shared arena) name (borrow-mut output) width writing))
+			(set width (call c_literal_text (borrow-shared guard_end) (borrow-mut output) width writing))
+			(set width (call c_literal_text (borrow-shared prototype) (borrow-mut output) width writing))
+			(set width (call c_literal_text (borrow-shared macro_witness_prefix) (borrow-mut output) width writing))
+			(set width (call write_c_number (borrow-mut output) width index writing))
+			(set width (call c_byte (borrow-mut output) width 40u8 writing))
+			(let first (struct.get function params))
+			(let arity (struct.get function arity))
+			(for
+				(:doc "Declare each real scalar storage type while the original native typedefs are in scope.")
+				(let formal) (range 0i32 arity)
+				(body
+					(let parameter (array.load parameters (i32.add first formal)))
+					(set width (call write_value_type (borrow-shared arena) (borrow-shared nodes) (borrow-shared records)
+						(struct.get parameter type) (borrow-mut output) width 0i32 writing))
+					(set width (call c_byte (borrow-mut output) width 32u8 writing))
+					(set width (call write_capture_name index formal (borrow-mut output) width writing))
+					(set width (call c_byte (borrow-mut output) width 44u8 writing))))
+			(set width (call c_literal_text (borrow-shared expansion) (borrow-mut output) width writing))
+			(set width (call c_symbol_text (borrow-shared arena) name (borrow-mut output) width writing))
+			(set width (call c_byte (borrow-mut output) width 40u8 writing))
+			(for
+				(:doc "Invoke the macro with the same unparenthesized captured lvalues as the compiler.")
+				(let formal) (range 0i32 arity)
+				(body
+					(if (i32.gtz formal) (then (set width (call c_byte (borrow-mut output) width 44u8 writing))))
+					(set width (call write_capture_name index formal (borrow-mut output) width writing))))
+			(return (call c_literal_text (borrow-shared probe_end) (borrow-mut output) width writing))))
+
+	(fn write_macro_probes
+		(:doc "Emit one typed observation for each selected fixed C macro signature.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(output (mut-array u8)) (writing bool)) (returns u32)
+		(body
+			(let-mut width 0u32)
+			(for
+				(:doc "Use a unique table index even when different bridges select the same C spelling.")
+				(let index) (range 0i32 (call checked_function_count (borrow-shared functions)))
+				(body
+					(let function (array.load functions index))
+					(if
+						(:doc "Only external calls that passed the fixed scalar eligibility gate have a witness.")
+						(bool.and (i32.ltz (struct.get function body))
+							(call numbered_macro_call function (borrow-shared parameters)))
+						(then (set width (call write_macro_probe (borrow-shared arena) (borrow-shared nodes)
+							function index (borrow-shared parameters) (borrow-shared records)
+							(borrow-mut output) width writing))))))
+			(return width)))
+)
