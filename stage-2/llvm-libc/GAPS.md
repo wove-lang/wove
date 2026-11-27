@@ -125,13 +125,14 @@ local allocation and initialization rules.
 
 ## Borrowed native record snapshots
 
-A project bridge for Darwin `<grp.h>` exercises `getgrnam`, `getgrgid`,
-`getgruuid` and `getgrent` with a shared record mapping. Wove copies the
+The bundled Darwin `<grp.h>` bridge uses one record mapping for
+`getgrnam`, `getgrgid`, `getgruuid`, and `getgrent`. Wove copies the
 thread-local return into an owning result before another lookup or
-enumeration reset can affect the values. The mapping covers `gid_t`,
-the name, the nullable password, and every member string. The libc
-provider inventory is tracked in #514. glibc caller-buffer group lookup
-is tracked in #637.
+enumeration reset can affect it. The mapping covers the native GID, name,
+nullable password, and every member string. A relocated compiler exercises
+all four functions through C-header selectors, including missing results,
+enumeration resets, and independent worker lookups. The source graph
+resolves the ordinary layout privately through the fix in #663.
 
 ## Fixed native operands
 
@@ -475,7 +476,8 @@ give `struct group` size 32 and alignment 8. Its native `char *` fields
 | `setgrent`, `endgrent` | Both take no arguments and return `void`. Darwin exposes them in all audited profiles. glibc requires X/Open or miscellaneous extensions. |
 | `setgroupent`, `group_from_gid` | Darwin selects each declaration from the live header. `setgroupent` preserves the native result, including the cold and populated cache cases. `group_from_gid` snapshots the name or decimal fallback before another lookup can replace it, and preserves the null result when fallback is disabled. [Darwin lookup implementation](https://github.com/apple-oss-distributions/Libinfo/blob/main/lookup.subproj/libinfo.c) |
 | `NSS_BUFLEN_GROUP`, `initgroups`, `setgroups` | glibc miscellaneous/GNU profiles expose the integer macro and the native operations. `initgroups` receives a checked C string and native `gid_t`. `setgroups` receives the native `size_t` and a checked array of native `gid_t` elements. |
-| `getgrgid`, `getgrnam`, `getgrent`, Darwin `getgruuid`, glibc `fgetgrent` | A nullable native result refers to library-managed storage that later lookups can replace. The record contains the name, password, and null-terminated member table. [Static record contract #636](https://github.com/wove-lang/wove/issues/636) |
+| Darwin `getgrgid`, `getgrnam`, `getgrent`, `getgruuid` | Wove preserves lookup failure and copies all fields of a present thread-local record. The UUID argument is a writable view of exactly 16 bytes. The installed fixture keeps results alive across further lookups, enumeration resets, and worker calls. |
+| glibc `getgrgid`, `getgrnam`, `getgrent`, `fgetgrent` | A nullable native result refers to library-managed storage that later lookups can replace. glibc static and stream bindings still need the complete checked snapshot contract. [Static record contract #636](https://github.com/wove-lang/wove/issues/636) |
 | `getgrgid_r`, `getgrnam_r`, Darwin `getgruuid_r`, glibc `getgrent_r`, `fgetgrent_r`, and `putgrent` | The reentrant calls write a nullable result that aliases the caller's record, with strings and the member table in the caller's bytes. The Darwin probe found a valid table at an unaligned address. `putgrent` consumes a complete borrowed native record. [Caller storage and vector contract #637](https://github.com/wove-lang/wove/issues/637) |
 | `gid_t` | Optional `Gid` selects the exact typedef from `<grp.h>`. Darwin exposes it across the audited profiles. glibc exposes it in POSIX.1-2001 and later, X/Open, or extension profiles. ISO and POSIX.1-1992 glibc report the original unavailable selector. The fixture checks conversion of a value above signed 32-bit range. [Optional scalar typedefs](https://github.com/wove-lang/wove/pull/652) |
 | Darwin `_PATH_GROUP` | The optional immutable byte view reads `"/etc/group"` from the SDK string literal in extension profiles. Strict POSIX selection reports the original unavailable selector. The installed fixture checks the exact length and every byte. [Native string macros](https://github.com/wove-lang/wove/pull/655) |
