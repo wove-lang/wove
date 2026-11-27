@@ -340,9 +340,11 @@ test-stage-2-workers: export WOVE_TEST_CLANG = $(CLANG)
 test-stage-2-workers: export WOVE_TEST_CFLAGS = $(CFLAGS)
 test-stage-2-workers: export WOVE_BUILD_CLANG = $(CLANG)
 test-stage-2-workers: export WOVE_TEST_RUNTIME = $(STAGE1)/runtime.o
+test-stage-2-workers: export WOVE_TEST_WORKER_RUNTIME = $(WORKER_RUNTIME)
 test-stage-2-workers: $(NATIVE_COMPILER) $(SOURCE_SCAN) $(WORKER_PROBE) $(WORKER_QUEUE_PROBE) $(WORKER_POOL_PROBE)
 	$(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/worker_records/cases.tsv
 	WOVE_TEST_RUNTIME="$(WORKER_RUNTIME)" $(PYTHON) tests/stage-2/check_graphs.py "$(SOURCE_SCAN)" tests/stage-2/worker_records/ledger.tsv
+	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/workers.jsonc
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(WORKER_FIXTURES)/cases.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_PROBE)" "$(WORKER_FIXTURES)/failure.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$(WORKER_QUEUE_PROBE)" "$(WORKER_FIXTURES)/queue-failure.tsv"
