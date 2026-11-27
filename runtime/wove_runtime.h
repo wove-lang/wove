@@ -587,12 +587,16 @@ static inline wvrt_u256 wvrt_u256_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_
 }
 
 // Interpret all 256 bits using only representable signed casts, including the minimum.
+static inline wvrt_i256 wvrt_i256_from_wrapped_bits(wvrt_u256 wvrt_bits) {
+	if (wvrt_bits <= ((wvrt_u256)-1 >> 1)) { return (wvrt_i256)wvrt_bits; }
+	return -1 - (wvrt_i256)(~wvrt_bits);
+}
+
+// Decode a signed value using the same bit interpretation as wrapping arithmetic.
 static inline wvrt_i256 wvrt_i256_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
-	wvrt_u256 wvrt_bits = wvrt_u256_from_bytes(wvrt_view, wvrt_width, wvrt_big_endian, wvrt_file, wvrt_start, wvrt_end);
-	const wvrt_u256 wvrt_maximum = ~(wvrt_u256)0;
-	if (wvrt_bits <= (wvrt_maximum >> 1)) { return (wvrt_i256)wvrt_bits; }
-	return -1 - (wvrt_i256)(wvrt_maximum - wvrt_bits);
+	return wvrt_i256_from_wrapped_bits(
+		wvrt_u256_from_bytes(wvrt_view, wvrt_width, wvrt_big_endian, wvrt_file, wvrt_start, wvrt_end));
 }
 #endif
 
@@ -648,6 +652,51 @@ _Noreturn void wvrt_int_arithmetic_trap(int32_t wvrt_file, int32_t wvrt_start, i
 		wvrt_ok; \
 	})
 
+#ifdef WVRT_HAS_INT256
+// Multiply modulo 2^256 before interpreting the signed result.
+static inline wvrt_i256 wvrt_i256_wrapping_mul(wvrt_i256 wvrt_left, wvrt_i256 wvrt_right) {
+	return wvrt_i256_from_wrapped_bits((wvrt_u256)wvrt_left * (wvrt_u256)wvrt_right);
+}
+
+// Unsigned C multiplication already returns the modulo product.
+static inline wvrt_u256 wvrt_u256_wrapping_mul(wvrt_u256 wvrt_left, wvrt_u256 wvrt_right) {
+	return wvrt_left * wvrt_right;
+}
+
+// Select the exact result type of the captured operands.
+#define wvrt_int256_wrapping_mul(type, left, right) \
+	_Generic((type)0, wvrt_i256: wvrt_i256_wrapping_mul, wvrt_u256: wvrt_u256_wrapping_mul)((left), (right))
+
+// Clang does not provide signed mul-overflow at this width. Check magnitudes first.
+static inline bool wvrt_i256_mul_overflow(wvrt_i256 wvrt_left, wvrt_i256 wvrt_right, wvrt_i256 *wvrt_result) {
+	const bool wvrt_negative = (wvrt_left < 0) != (wvrt_right < 0);
+	const wvrt_u256 wvrt_a = wvrt_left < 0 ? (wvrt_u256)0 - (wvrt_u256)wvrt_left : (wvrt_u256)wvrt_left;
+	const wvrt_u256 wvrt_b = wvrt_right < 0 ? (wvrt_u256)0 - (wvrt_u256)wvrt_right : (wvrt_u256)wvrt_right;
+	const wvrt_u256 wvrt_sign = (wvrt_u256)1 << 255;
+	const wvrt_u256 wvrt_limit = wvrt_negative ? wvrt_sign : wvrt_sign - 1;
+	// Divide only by a nonzero magnitude and keep the output unchanged on overflow.
+	if (wvrt_b != 0 && wvrt_a > wvrt_limit / wvrt_b) { return true; }
+	const wvrt_u256 wvrt_product = wvrt_a * wvrt_b;
+	*wvrt_result = wvrt_i256_from_wrapped_bits(wvrt_negative ? (wvrt_u256)0 - wvrt_product : wvrt_product);
+	return false;
+}
+
+// Check the unsigned limit before storing a fitting product.
+static inline bool wvrt_u256_mul_overflow(wvrt_u256 wvrt_left, wvrt_u256 wvrt_right, wvrt_u256 *wvrt_result) {
+	if (wvrt_right != 0 && wvrt_left > (wvrt_u256)-1 / wvrt_right) { return true; }
+	*wvrt_result = wvrt_left * wvrt_right;
+	return false;
+}
+
+// Match the shared overflow helper contract, using the exact output pointee type.
+#define wvrt_int256_mul_overflow(left, right, output) \
+	_Generic((output), wvrt_i256 *: wvrt_i256_mul_overflow, wvrt_u256 *: wvrt_u256_mul_overflow)((left), (right), (output))
+
+#define WVRT_INT256_SIGNED_MIN wvrt_i256: (-1 - (wvrt_i256)((wvrt_u256)-1 >> 1)),
+#else
+#define WVRT_INT256_SIGNED_MIN
+#endif
+
 // Include the signed 128-bit minimum only when the target defines the native type.
 #ifdef WVRT_HAS_INT128
 #define WVRT_WIDE_SIGNED_MIN wvrt_i128: WVRT_I128_NEG_C(UINT64_C(0x8000000000000000), 0),
@@ -658,7 +707,7 @@ _Noreturn void wvrt_int_arithmetic_trap(int32_t wvrt_file, int32_t wvrt_start, i
 // Return the selected signed minimum, or zero for an unsigned integer.
 #define wvrt_int_signed_min(value) \
 	_Generic((value), int8_t: INT8_MIN, int16_t: INT16_MIN, \
-		int32_t: INT32_MIN, int64_t: INT64_MIN, WVRT_WIDE_SIGNED_MIN default: 0)
+		int32_t: INT32_MIN, int64_t: INT64_MIN, WVRT_WIDE_SIGNED_MIN WVRT_INT256_SIGNED_MIN default: 0)
 
 // Avoid undefined signed arithmetic and leave the destination alone on failure.
 #define wvrt_int_try_divide(left, right, output, remainder) \
