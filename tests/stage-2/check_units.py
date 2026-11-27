@@ -4,7 +4,6 @@
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import subprocess
 import sys
@@ -15,8 +14,9 @@ from tempfile import TemporaryDirectory
 def native_command(case, root):
 	compiler = shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang"))
 	flags = shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))
-	search = ["-I", str(root)] if "headers" in case else []
-	return [*compiler, "-std=c11", *flags, "-I", "runtime", *search, *case.get("cflags", [])]
+	search = ["-I", str(root)] if "headers" in case and case.get("search_stage", True) else []
+	configured = [flag.replace("{root}", str(root)) for flag in case.get("cflags", [])]
+	return [*compiler, "-std=c11", *flags, "-I", "runtime", *search, *configured]
 
 
 # Materialize the project headers beside the emitted C with their original spellings.
@@ -27,45 +27,26 @@ def stage_headers(case, root):
 		path.write_bytes(Path(fixture).read_bytes())
 
 
-# Certify the fixture's C prefix only when every output filename sees declaration-only C.
-def audit_headers(probe, case, prefix):
+# Use the same source directory and frontend options for certification and compilation.
+def certify_context(certifier, case, root, prefix, count):
+	compiler, *options = native_command(case, root)
+	if case.get("certify_without_clang"):
+		compiler = str(root / "absent-clang")
+	paths = set(root.rglob("*"))
+	result = subprocess.run([certifier, compiler, root / "main.c", str(count), prefix.decode(), *options],
+		capture_output=True, timeout=30)
+	assert (result.returncode, result.stdout, result.stderr) in {(0, b"", b""), (1, b"", b"")}, (case["name"], result)
+	assert set(root.rglob("*")) == paths, (case["name"], paths)
+	return result.returncode == 0
+
+
+# Observe eligibility even for cases that will use only the serial layout.
+def audit_headers(certifier, probe, case, prefix):
 	with TemporaryDirectory(prefix="unit-headers-", dir=Path(probe).parent) as temporary:
-		root = Path(temporary)
+		root = Path(temporary).resolve()
 		stage_headers(case, root)
-		command = native_command(case, root)
-		empty = subprocess.run([*command, "-E", "-dM", "-x", "c", "-"], input=b"",
-			capture_output=True, check=True, timeout=30).stdout.splitlines()
-		parts = {name for layout in case["layouts"] for name in layout["files"]}
-		assert not parts.intersection(name for name, _ in case["headers"]), case["name"]
-		snapshots = set()
-		for name in sorted(parts.difference({"program.h"}) | {"serial.c"}):
-			path = root / name
-			path.write_bytes(prefix)
-			macros = subprocess.run([*command, "-E", "-dM", str(path)],
-				capture_output=True, check=True, timeout=30).stdout.splitlines()
-			# Include guards and numeric context flags cannot inject per-call code or state.
-			if any(not re.fullmatch(rb"#define [A-Za-z_][A-Za-z_0-9]*(?: +[0-9]+)? *", line)
-				for line in set(macros).difference(empty)):
-				return False
-			preprocessed = subprocess.run([*command, "-E", "-P", str(path)],
-				capture_output=True, check=True, timeout=30).stdout
-			# A remaining preprocessing directive can modify a unit or emit linker metadata.
-			if any(line.lstrip().startswith(b"#") for line in preprocessed.splitlines()):
-				return False
-			snapshots.add((frozenset(macros), preprocessed))
-		if len(snapshots) != 1:
-			return False
-		ast = subprocess.run([*command, "-fsyntax-only", "-Xclang", "-ast-dump=json", str(path)],
-			capture_output=True, check=True, timeout=30).stdout
-	# Reject header objects, definitions, internal-linkage declarations, and native adapters.
-	for declaration in json.loads(ast)["inner"]:
-		kind = declaration["kind"]
-		if kind in {"TypedefDecl", "RecordDecl", "EnumDecl"}:
-			continue
-		if (kind != "FunctionDecl" or declaration.get("storageClass", "extern") != "extern"
-			or declaration.get("inline") or any(child["kind"] != "ParmVarDecl" for child in declaration.get("inner", []))):
-			return False
-	return True
+		count = max([2, *(len(layout["files"]) - 1 for layout in case["layouts"])])
+		return certify_context(certifier, case, root, prefix, count)
 
 
 # Run the same supplied graph with or without the probe's private partition flag.
@@ -125,7 +106,7 @@ def symbols(path):
 
 
 # Independently compile each part, verify its symbols, then link and run all objects together.
-def check_native(probe, case, layout, parts):
+def check_native(certifier, probe, case, layout, parts, prefix):
 	compiler = shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang"))
 	flags = shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))
 	runtime = os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")
@@ -135,17 +116,20 @@ def check_native(probe, case, layout, parts):
 	elif case.get("worker_ledger"):
 		runtime = os.environ["WOVE_TEST_WORKER_RUNTIME"]
 	with TemporaryDirectory(prefix="units-", dir=Path(probe).parent) as temporary:
-		root = Path(temporary)
+		root = Path(temporary).resolve()
 		stage_headers(case, root)
+		if prefix and len(parts) > 1:
+			assert certify_context(certifier, case, root, prefix, len(parts) - 1), (case["name"], layout["requested"])
 		# Materialize all emitted files before compiling the individual translation units.
 		for name, data in parts.items():
-			(root / name).write_bytes(data)
+			(root / ("main.c" if len(parts) == 1 else name)).write_bytes(data)
 		objects = []
 		# Every expected C symbol is defined in its owning object and may be undefined elsewhere.
 		for unit, names in layout["symbols"].items():
 			object_file = (root / unit).with_suffix(".o")
+			source = root / ("main.c" if len(parts) == 1 else unit)
 			subprocess.run([*native_command(case, root), "-c",
-				str(root / unit), "-o", str(object_file)], check=True, timeout=30)
+				str(source), "-o", str(object_file)], check=True, timeout=30)
 			table = symbols(object_file)
 			if "entry_unit" in layout:
 				assert (table.get("main") == "T") == (unit == layout["entry_unit"]), (unit, table)
@@ -173,7 +157,7 @@ def check_native(probe, case, layout, parts):
 
 
 # Verify determinism, one-unit compatibility, real linkage, and atomic output on rejection.
-def check_case(probe, case):
+def check_case(certifier, probe, case):
 	baseline = None
 	prefix = b""
 	# Rejected graphs exercise the private gate and canary checks without compiling units.
@@ -182,11 +166,16 @@ def check_case(probe, case):
 		assert baseline.returncode == 0 and not baseline.stderr, (case["name"], baseline)
 	if "headers" in case:
 		declared = b"".join(f"#include {operand}\n".encode() for operand in case["includes"])
-		assert baseline.stdout.split(b"\n", 1)[1].startswith(declared), case["name"]
-		verified = audit_headers(probe, case, declared)
+		candidate = baseline.stdout.split(b"\n", 1)[1][:len(declared)]
+		assert candidate == declared, case["name"]
+		verified = audit_headers(certifier, probe, case, candidate)
 		assert verified == case.get("replicable_headers", True), case["name"]
 		if verified:
-			prefix = declared
+			prefix = candidate
+		for flags, eligible in case.get("audit_variants", []):
+			assert audit_headers(certifier, probe, dict(case, cflags=flags), candidate) == eligible, (case["name"], flags)
+	if case.get("certify_without_clang"):
+		assert audit_headers(certifier, probe, case, b""), case["name"]
 	for layout in case.get("layouts", []):
 		first = emit(probe, case, layout["requested"], layout.get("capacity"), prefix)
 		second = emit(probe, case, layout["requested"], layout.get("capacity"), prefix)
@@ -201,7 +190,7 @@ def check_case(probe, case):
 			for name, body in parts.items():
 				if name.endswith(".c"):
 					assert body.startswith(prefix + b'#include "program.h"\n'), (case["name"], name)
-		check_native(probe, case, layout, parts)
+		check_native(certifier, probe, case, layout, parts, prefix)
 	for rejected in case.get("rejected", []):
 		verified_prefix = prefix if rejected.get("verified") else b""
 		if rejected.get("reverse_prefix"):
@@ -212,12 +201,12 @@ def check_case(probe, case):
 
 # Run the partition and native-link recipes supplied by the manifest.
 def main():
-	probe, manifest = sys.argv[1:]
+	probe, manifest, certifier = sys.argv[1:]
 	contents = Path(manifest).read_text(encoding="utf-8").splitlines()
 	settings = json.loads("\n".join(line for line in contents if not line.startswith("//")))
 	# Each graph supplies its own file rows, output partition and native expectations.
 	for case in settings["cases"]:
-		check_case(probe, case)
+		check_case(certifier, probe, case)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,175 @@
+(module clang_include_replay
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Admit only declaration and macro forms that are safe to replay across C units.")
+
+	(use wove-file "./fields.wove" (only clang_field clang_inner (value clang_kind_key)))
+	(use wove-file "../json/reader.wove" (only json_parse (type JsonNode)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(let define_word "define ")
+	(let unit_kind "\"TranslationUnitDecl\"")
+	(let typedef_kind "\"TypedefDecl\"")
+	(let record_kind "\"RecordDecl\"")
+	(let enum_kind "\"EnumDecl\"")
+	(let function_kind "\"FunctionDecl\"")
+	(let parameter_kind "\"ParmVarDecl\"")
+	(let extern_value "\"extern\"")
+	(let storage_key "storageClass")
+	(let inline_key "inline")
+
+	(fn horizontal_space
+		(:doc "Recognize whitespace that cannot end a preprocessor line.")
+		(params (byte u8)) (returns bool)
+		(body (return (bool.or (u8.eq byte 32u8) (u8.eq byte 9u8)))))
+
+	(fn digit
+		(:doc "Recognize a decimal digit in an inert macro replacement.")
+		(params (byte u8)) (returns bool)
+		(body (return (bool.and (u8.not-lt byte 48u8) (u8.lt byte 58u8)))))
+
+	(fn identifier_head
+		(:doc "Limit admitted macro names to ordinary C identifier characters.")
+		(params (byte u8)) (returns bool)
+		(body (return (bool.or (u8.eq byte 95u8)
+			(bool.or (bool.and (u8.not-lt byte 65u8) (u8.lt byte 91u8))
+				(bool.and (u8.not-lt byte 97u8) (u8.lt byte 123u8)))))))
+
+	(fn skip_horizontal
+		(:doc "Advance to the next nonspace byte inside one line.")
+		(params (source (shared-array u8)) (start i32) (end i32)) (returns i32)
+		(body
+			(let-mut index start)
+			(while
+				(:doc "Leave the end exclusive even on whitespace-only lines.")
+				(bool.and (i32.lt index end) (call horizontal_space (array.load source index)))
+				(body (set index (i32.inc index))))
+			(return index)))
+
+	(fn harmless_define
+		(:doc "Permit include guards and decimal object macros, rejecting pragmas, undefines, and other replacements.")
+		(params (source (shared-array u8)) (start i32) (end i32)) (returns bool)
+		(body
+			(let word (call skip_horizontal (borrow-shared source) (i32.inc start) end))
+			(let width (array.len define_word))
+			(if (i32.lt (i32.sub end word) width) (then (return (bool false))))
+			(let name (i32.add word width))
+			(if
+				(:doc "Require a real object-like definition instead of accepting an unrelated directive.")
+				(bool.not (call same_bytes (borrow-shared source) word name (borrow-shared define_word) 0i32 width))
+				(then (return (bool false))))
+			(let first (call skip_horizontal (borrow-shared source) name end))
+			(if
+				(:doc "A macro needs at least one valid identifier byte.")
+				(bool.or (i32.eq first end) (bool.not (call identifier_head (array.load source first))))
+				(then (return (bool false))))
+			(let-mut index (i32.inc first))
+			(while
+				(:doc "Scan the name without accepting a function-like parameter list.")
+				(bool.and (i32.lt index end) (bool.or (call identifier_head (array.load source index))
+					(call digit (array.load source index))))
+				(body (set index (i32.inc index))))
+			(let value (call skip_horizontal (borrow-shared source) index end))
+			(if (i32.eq value end) (then (return (bool true))))
+			(if (i32.eq value index) (then (return (bool false))))
+			(set index value)
+			(while
+				(:doc "Only an unadorned sequence of decimal digits can follow the name.")
+				(bool.and (i32.lt index end) (call digit (array.load source index)))
+				(body (set index (i32.inc index))))
+			(return (bool.and (i32.lt value index)
+				(i32.eq (call skip_horizontal (borrow-shared source) index end) end)))))
+
+	(fn replay_directives_safe
+		(:doc "Check all directives contributed by the selected includes after the compiler's baseline definitions.")
+		(params (source (shared-array u8)) (start i32)) (returns bool)
+		(body
+			(let length (array.len source))
+			(let-mut index start)
+			(while
+				(:doc "Check each complete directive even when it follows ordinary declarations.")
+				(i32.lt index length)
+				(body
+					(let-mut end index)
+					(while
+						(:doc "Clang emits physical output lines with LF separators.")
+						(bool.and (i32.lt end length) (u8.not-eq (array.load source end) 10u8))
+						(body (set end (i32.inc end))))
+					(let first (call skip_horizontal (borrow-shared source) index end))
+					(if
+						(:doc "Preprocessing directives left visible by Clang can change later generated C.")
+						(bool.and (i32.lt first end) (u8.eq (array.load source first) 35u8))
+						(then
+							(if (bool.not (call harmless_define (borrow-shared source) first end))
+								(then (return (bool false))))))
+					(set index end)
+					(if (i32.lt index length) (then (set index (i32.inc index))))))
+			(return (bool true))))
+
+	(fn field_equals
+		(:doc "Compare Clang's simple ASCII JSON enum strings including their delimiters.")
+		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (value (shared-array u8)))
+		(returns bool)
+		(body
+			(if (i32.ltz row) (then (return (bool false))))
+			(let item (array.load nodes row))
+			(return (call same_bytes (borrow-shared source) (struct.get item start) (struct.get item end)
+				(borrow-shared value) 0i32 (array.len value)))))
+
+	(fn declaration_only
+		(:doc "Admit C type declarations and ordinary external function prototypes without attributes or bodies.")
+		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)))
+		(returns bool)
+		(body
+			(let kind (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if
+				(:doc "Type declarations allocate no storage or body in a translation unit.")
+				(bool.or (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared typedef_kind))
+					(bool.or (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared record_kind))
+						(call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared enum_kind))))
+				(then (return (bool true))))
+			(if (bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared function_kind)))
+				(then (return (bool false))))
+			(let storage (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
+				(borrow-shared storage_key) (borrow-mut scratch)))
+			(let inline (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
+				(borrow-shared inline_key) (borrow-mut scratch)))
+			(if
+				(:doc "Inline and static functions can carry per-unit definitions or local linkage.")
+				(bool.or (i32.not-ltz inline) (bool.and (i32.not-ltz storage)
+					(bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) storage (borrow-shared extern_value)))))
+				(then (return (bool false))))
+			(let-mut child (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) row (borrow-mut scratch)))
+			(while
+				(:doc "A declaration's only direct children can be formal parameters.")
+				(i32.not-ltz child)
+				(body
+					(let child_kind (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) child
+						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(if (bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) child_kind (borrow-shared parameter_kind)))
+						(then (return (bool false))))
+					(set child (struct.get (array.load nodes child) next_sibling))))
+			(return (bool true))))
+
+	(fn replay_declarations_safe
+		(:doc "Validate the complete AST and check only the direct declarations of its translation unit.")
+		(params (source (shared-array u8)) (nodes (mut-array JsonNode))) (returns bool)
+		(body
+			(let result (call json_parse (borrow-shared source) (borrow-mut nodes)))
+			(if (u32.not-eqz (struct.get result error)) (then (return (bool false))))
+			(let-mut scratch (array.alloc u8 12i32))
+			(let kind (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) 0i32
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if (bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared unit_kind)))
+				(then (return (bool false))))
+			(let-mut row (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(while
+				(:doc "Reject any global object, assembly, function definition, or unrecognized side effect.")
+				(i32.not-ltz row)
+				(body
+					(if (bool.not (call declaration_only (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch)))
+						(then (return (bool false))))
+					(set row (struct.get (array.load nodes row) next_sibling))))
+			(return (bool true))))
+)
