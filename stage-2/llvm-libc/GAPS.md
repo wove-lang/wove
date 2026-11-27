@@ -224,6 +224,11 @@ The borrowed-entry fixture reads the native fields and copies the name
 while the stream is borrowed. It compares native and large-file records
 on glibc and checks Darwin's seek offset and name length.
 
+The current name snapshots use directory-specific runtime macros. Moving
+returned and borrowed record snapshots onto the public bridge contract
+requires a bounded copy of the terminated field using the native record
+extent. [Compiler prerequisite #688](https://github.com/wove-lang/wove/issues/688)
+
 Clang exposed the same selected members in C11, C17, and C23 on arm64 and
 x86-64 with the macOS 27.2 SDK and Debian glibc 2.41. The audit used the
 driver's Darwin and GNU feature definitions. The supported members and
