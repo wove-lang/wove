@@ -90,7 +90,7 @@ def declaration_context(parents: list[tuple[int, list[Node]]], tag: str) -> str 
 		if head in ("decls", "disabled"):
 			continue
 		# Only C header bridges give their members this declaration grammar.
-		if head != "bridge" or in_bridge or tag not in ("fn", "struct", "type", "const", "let", "let-mut"):
+		if head != "bridge" or in_bridge or tag not in ("fn", "struct", "type", "const", "let", "let-mut", "snapshot"):
 			return None
 		index = c_header_provider_index(children, 1)
 		# Recognize the provider before its closing form checks the header slots.
@@ -123,10 +123,10 @@ def name_slots(tag: str, children: list[Node], parents: list[tuple[int, list[Nod
 	if tag == "module":
 		return int(len(parents) == 1)
 	# Ordinary declarations and C bridge members have explicit name slots.
-	if tag in ("fn", "struct", "enum", "type", "const", "let", "let-mut"):
+	if tag in ("fn", "struct", "enum", "type", "const", "let", "let-mut", "snapshot"):
 		context = declaration_context(parents, tag)
-		# Constant and mutable storage declarations only use this slot at C bridge scope.
-		if context == "c" or (context == "wove" and tag not in ("const", "let-mut")):
+		# Constants, mutable bridge bindings and snapshots use this slot only in C bridges.
+		if context == "c" or (context == "wove" and tag not in ("const", "let-mut", "snapshot")):
 			return 1
 	# Unrelated tags cannot introduce a local or generic parameter here.
 	if len(parents) < 2:
