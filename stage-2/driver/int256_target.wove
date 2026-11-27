@@ -1,0 +1,140 @@
+(module driver_int256_target
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Compile and link the archived C23 capability probe with the selected toolchain.")
+
+	(use wove-file "./clang.wove" (only clang_program))
+	(use wove-file "../c/probe.wove" (only probe_options_complete))
+	(use wove-file "../io/process.wove" (only run_process_capture_merged))
+	(use wove-file "../io/temporary.wove" (only create_temporary_directory))
+	(use wove-file "../io/write.wove" (only write_new_file))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use c-header "<unistd.h>" (only access X_OK unlink rmdir))
+	(use c-header "<sys/stat.h>" (only lstat S_ISREG (type Stat)))
+
+	(let int256_unavailable 89u32)
+	(let int256_probe_failed 90u32)
+	(let dialect_prefix "-std=")
+	(let c23_option "-std=c23")
+	(let directory_suffix "/wove-int256.XXXXXX")
+	(let source_suffix "/wide_integer.c")
+	(let control_suffix "/control.c")
+	(let image_suffix "/linked")
+	(let control_source "int main(void) { return 0; }\n")
+	(let output_flag "-o\u0000")
+	(let probe_sinks "-MJ\u0000/dev/null\u0000-Xclang\u0000-dependency-file\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-MT\u0000-Xclang\u0000wove-int256\u0000-Xclang\u0000-dependency-dot\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-header-include-file\u0000-Xclang\u0000/dev/null\u0000")
+
+	(fn selected_c23
+		(:doc "Read the last standard argument from the packed options shared with the real compiler.")
+		(params (options (shared-array u8))) (returns bool)
+		(body
+			(let-mut end (i32.dec (array.len (local options))))
+			(let width (array.len (local dialect_prefix)))
+			(while
+				(:doc "Both the resolved driver and frontend standard follow caller overrides.")
+				(i32.not-ltz (local end))
+				(body
+					(let-mut start (local end))
+					(while
+						(:doc "Stop at the terminator of the preceding option.")
+						(bool.and (i32.gtz (local start)) (u8.not-eqz (array.load (local options) (i32.dec (local start)))))
+						(body (set (local start) (i32.dec (local start)))))
+					(if
+						(:doc "An exact standard argument determines whether the build can use C23 syntax.")
+						(bool.and (i32.not-lt (i32.sub (local end) (local start)) (local width))
+							(call same_bytes (borrow-shared (local options)) (local start) (i32.add (local start) (local width))
+								(borrow-shared (local dialect_prefix)) 0i32 (local width)))
+						(then (return (call same_bytes (borrow-shared (local options)) (local start) (local end)
+							(borrow-shared (local c23_option)) 0i32 (array.len (local c23_option))))))
+					(set (local end) (i32.dec (local start)))))
+			(return (bool false))))
+
+	(fn probe_path
+		(:doc "Give each compiler operand an exact filename inside the reserved directory.")
+		(params (directory (shared-array u8)) (suffix (shared-array u8))) (returns (owned-array u8))
+		(body
+			(let-mut path (array.alloc u8 (i32.add (array.len (local directory)) (array.len (local suffix)))))
+			(let start (call append_bytes (borrow-shared (local directory)) (borrow-mut (local path)) 0i32))
+			(let end (call append_bytes (borrow-shared (local suffix)) (borrow-mut (local path)) (local start)))
+			(return (move (local path)))))
+
+	(fn link_probe
+		(:doc "Use the effective Clang options and require a real executable output before accepting the link.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8)) (image (shared-array u8)))
+		(returns i32)
+		(body
+			(let files (u64.add (u64.from-i32 (array.len (local path))) (u64.from-i32 (array.len (local image)))))
+			(let flags (i32.add (array.len (local output_flag)) (array.len (local probe_sinks))))
+			(let width (u64.add (u64.add (local files) (u64.from-i32 (array.len (local options))))
+				(u64.from-i32 (i32.add (local flags) 2i32))))
+			(if (u64.lt 2147483647u64 (local width)) (then (return -1i32)))
+			(let-mut arguments (array.alloc u8 (i32.from-u64 (local width))))
+			(let input (call append_bytes (borrow-shared (local path)) (borrow-mut (local arguments)) 0i32))
+			(let settings (call append_bytes (borrow-shared (local options)) (borrow-mut (local arguments)) (i32.inc (local input))))
+			(let sinks (call append_bytes (borrow-shared (local probe_sinks)) (borrow-mut (local arguments)) (local settings)))
+			(let output (call append_bytes (borrow-shared (local output_flag)) (borrow-mut (local arguments)) (local sinks)))
+			(let end (call append_bytes (borrow-shared (local image)) (borrow-mut (local arguments)) (local output)))
+			(let-mut capture (array.alloc u8 16384i32))
+			(let result (call run_process_capture_merged (borrow-shared (local program))
+				(borrow-shared (local arguments)) (borrow-mut (local capture))))
+			(let status (struct.get (local result) status))
+			(if
+				(:doc "A child failure returns its exit status for the control link.")
+				(i32.not-eqz (local status))
+				(then (return (local status))))
+			(let-mut info (struct.new Stat))
+			(if
+				(:doc "A frontend-only invocation or missing image cannot establish link capability.")
+				(bool.and (i32.eqz (call lstat (borrow-shared (local image)) (borrow-mut (local info))))
+					(bool.and (call S_ISREG (struct.get (local info) st_mode))
+						(i32.eqz (call access (borrow-shared (local image)) (local X_OK)))))
+				(then (return 0i32)))
+			(return -1i32)))
+
+	(fn classify_link
+		(:doc "Separate unsupported wide operations from an unusable compiler or linker invocation.")
+		(params (options (shared-array u8)) (source (shared-array u8)) (control (shared-array u8))
+			(image (shared-array u8))) (returns u32)
+		(body
+			(let program (call clang_program))
+			(let status (call link_probe (borrow-shared (local program)) (borrow-shared (local options))
+				(borrow-shared (local source)) (borrow-shared (local image))))
+			(if (i32.eqz (local status)) (then (return 0u32)))
+			(if
+				(:doc "A normal Clang rejection can indicate a missing capability only if the same tool can link ordinary C.")
+				(bool.and (i32.eq (local status) 1i32)
+					(call write_new_file (borrow-shared (local control)) (borrow-shared (local control_source))))
+				(then
+					(let removed (call unlink (borrow-shared (local image))))
+					(let fallback (call link_probe (borrow-shared (local program)) (borrow-shared (local options))
+						(borrow-shared (local control)) (borrow-shared (local image))))
+					(if (i32.eqz (local fallback)) (then (return (local int256_unavailable))))))
+			(return (local int256_probe_failed))))
+
+	(fn probe_int256
+		(:doc "Probe only C23 and keep the control, probe source and linked image in a private directory.")
+		(params (options (shared-array u8))) (returns u32)
+		(body
+			(if (bool.not (call probe_options_complete (borrow-shared (local options))))
+				(then (return (local int256_probe_failed))))
+			(if (bool.not (call selected_c23 (borrow-shared (local options))))
+				(then (return (local int256_unavailable))))
+			(let directory (call create_temporary_directory (borrow-shared (local directory_suffix))))
+			(if (i32.eqz (array.len (local directory))) (then (return (local int256_probe_failed))))
+			(let source (call probe_path (borrow-shared (local directory)) (borrow-shared (local source_suffix))))
+			(let control (call probe_path (borrow-shared (local directory)) (borrow-shared (local control_suffix))))
+			(let image (call probe_path (borrow-shared (local directory)) (borrow-shared (local image_suffix))))
+			(let archive_probe (embed "../../runtime/probes/wide_integer.c"))
+			(let-mut result (local int256_probe_failed))
+			(if
+				(:doc "Only invoke Clang after the complete archived source has been staged.")
+				(call write_new_file (borrow-shared (local source)) (borrow-shared (local archive_probe)))
+				(then (set (local result) (call classify_link (borrow-shared (local options)) (borrow-shared (local source))
+					(borrow-shared (local control)) (borrow-shared (local image))))))
+			(let removed_image (call unlink (borrow-shared (local image))))
+			(let removed_control (call unlink (borrow-shared (local control))))
+			(let removed_source (call unlink (borrow-shared (local source))))
+			(let removed_directory (call rmdir (borrow-shared (local directory))))
+			(return (local result))))
+)

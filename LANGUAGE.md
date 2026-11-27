@@ -186,6 +186,14 @@ The 128-bit types use the native `__int128` and `unsigned __int128` ABI.
 Wove checks `__SIZEOF_INT128__` for the selected Clang target and reports
 an unavailable width at the Wove source location.
 
+Stage 2 also supports the optional `i256` and `u256` value types with
+C23 `_BitInt(256)`. These types support exact decimal, hexadecimal, and
+binary literals, including full-width extrema, and use the corresponding
+signed or unsigned C representation. When a checked graph uses either
+type, Wove requires the selected Clang toolchain to compile and link the
+wide-integer capability probe. The integer operator table below covers
+the widths through 128 bits.
+
 Typed numeric operators use `type.operation`. In `(i32.add left right)`,
 `i32` specifies the exact operands and result. The same integer operators
 are available at every listed width.

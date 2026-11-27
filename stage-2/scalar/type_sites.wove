@@ -5,8 +5,9 @@
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../source/functions.wove" (only function_field_tag))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
-	(use wove-file "../source/types.wove" (only is_128bit_integer (value i128_type)))
+	(use wove-file "../source/types.wove" (only is_128bit_integer is_256bit_integer (value i128_type) (value i256_type)))
 	(use wove-file "../source/integer_checks.wove" (only (value integer_fits)))
 	(use wove-file "./loans.wove" (only (type ScalarExpression)))
 	(use wove-file "./flow.wove" (only (type ScalarStatement)))
@@ -23,7 +24,8 @@
 			(if (u32.eq (local type) (local wanted)) (then (return (bool true))))
 			(if
 				(:doc "Both signednesses of the wide integer require the same target capability.")
-				(bool.and (u32.eq (local wanted) (local i128_type)) (call is_128bit_integer (local type)))
+				(bool.or (bool.and (u32.eq (local wanted) (local i128_type)) (call is_128bit_integer (local type)))
+					(bool.and (u32.eq (local wanted) (local i256_type)) (call is_256bit_integer (local type))))
 				(then (return (bool true))))
 			(if
 				(:doc "An owning array carries the type of each aligned element.")
@@ -126,6 +128,25 @@
 					(set (local index) (i32.inc (local index)))))
 			(return -1i32)))
 
+	(fn target_result_site
+		(:doc "Recover the written result type even when the checked declaration has generic fields.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction))
+		(returns i32)
+		(body
+			(let-mut index (struct.get (array.load (local nodes) (struct.get (local function) name)) next_sibling))
+			(while
+				(:doc "A returns field can follow metadata or precede parameters.")
+				(i32.not-ltz (local index))
+				(body
+					(let field (array.load (local nodes) (local index)))
+					(if
+						(:doc "Use the original type operand as the location of the target requirement.")
+						(u32.eq (call function_field_tag (borrow-shared (local source)) (borrow-shared (local nodes)) (local field)) 2u32)
+						(then (return (struct.get (call form_parts (borrow-shared (local source))
+							(borrow-shared (local nodes)) (local field)) operands))))
+					(set (local index) (struct.get (local field) next_sibling))))
+			(return (struct.get (local function) declaration))))
+
 	(fn target_numeric_site
 		(:doc "Locate the required format in a checked expression, storage declaration, signature, or field.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
@@ -135,6 +156,8 @@
 		(body
 			(let-mut index 0i32)
 			(let-mut storage -1i32)
+			(let-mut derived -1i32)
+			(let bit_integer (u32.eq (local wanted) (local i256_type)))
 			(while
 				(:doc "Expression and statement rows share their original source node index.")
 				(i32.lt (local index) (array.len (local expressions)))
@@ -147,14 +170,22 @@
 							(bool.and (u32.eq (local wanted) (local i128_type))
 								(bool.and (u32.eq (struct.get (local expr) kind) (local integer_fits))
 									(call is_128bit_integer (u32.from-i32 (struct.get (local expr) target))))))
-						(then (return (local index))))
+						(then
+							(if
+								(:doc "An explicit 256-bit literal is a better site than a call or read that inherits the type.")
+								(bool.or (bool.not (local bit_integer)) (u32.eq (struct.get (local expr) kind) 1u32))
+								(then (return (local index))))
+							(if (i32.ltz (local derived)) (then (set (local derived) (local index))))))
 					(if
 						(:doc "A storage declaration can require the format even with no initializer expression.")
 						(bool.and (i32.ltz (local storage))
 							(call target_numeric_type (borrow-shared (local records)) (struct.get (local statement) type) (local wanted)))
 						(then (set (local storage) (local index))))
 					(set (local index) (i32.inc (local index)))))
-			(if (i32.lt -1i32 (local storage)) (then (return (local storage))))
+			(if
+				(:doc "For 256-bit types, prefer the defining signature or layout over downstream uses.")
+				(bool.and (bool.not (local bit_integer)) (i32.not-ltz (local storage)))
+				(then (return (local storage))))
 			(set (local index) 0i32)
 			(while
 				(:doc "An unused function parameter can still require the target ABI.")
@@ -181,8 +212,17 @@
 					(if
 						(:doc "Report the original declaration if its result requires the target ABI.")
 						(call target_numeric_type (borrow-shared (local records)) (struct.get (local fn_row) result) (local wanted))
-						(then (return (struct.get (local fn_row) declaration))))
+						(then
+							(if
+								(:doc "Keep the result type's own span for the optional C23 ABI.")
+								(local bit_integer)
+								(then (return (call target_result_site (borrow-shared (local source))
+									(borrow-shared (local nodes)) (local fn_row)))))
+							(return (struct.get (local fn_row) declaration))))
 					(set (local index) (i32.inc (local index)))))
-			(return (call target_numeric_field (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local bindings)) (borrow-shared (local records)) (local wanted)))))
+			(let field (call target_numeric_field (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (borrow-shared (local records)) (local wanted)))
+			(if (i32.not-ltz (local field)) (then (return (local field))))
+			(if (i32.not-ltz (local storage)) (then (return (local storage))))
+			(return (local derived))))
 )
