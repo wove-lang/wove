@@ -260,10 +260,14 @@ checks those relations and Darwin's distinct `ENOTSUP` and
 `__errno_location` are reserved implementation spellings called by the
 header's `errno` macro.
 
-The GNU `program_invocation_name` and `program_invocation_short_name`
-globals are writable `char *` lvalues. They remain documented in the
-provider pending a contract for reassigning native string pointers with
-explicit lifetimes. [Compiler prerequisite #532](https://github.com/wove-lang/wove/issues/532) · [glibc program names](https://sourceware.org/glibc/manual/latest/html_node/Error-Messages.html)
+glibc exposes the writable `char *` lvalues `program_invocation_name`
+and `program_invocation_short_name` in the GNU feature profile. Reads
+copy the native value into an optional owner. Assignments through either
+Wove spelling retain writable literal storage for the life of the
+executable. The installed fixture checks native edits, repeated use of
+an assignment site, null reads, and restoration of both original
+pointers. Clang reports the missing declarations under strict POSIX
+flags. [Writable string lvalues](https://github.com/wove-lang/wove/pull/668)
 
 ## Bundled dlfcn coverage
 
