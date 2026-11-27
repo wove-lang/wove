@@ -8,10 +8,10 @@
 #include <string.h>
 
 typedef struct {
-	uint32_t wgm0000000;
-	int32_t wgm0000001;
-	_Bool wgm0000002;
-	uint8_t wgm0000003;
+	uint32_t wgm08h454tkind;
+	int32_t wgm2l3oejpstart;
+	_Bool wgm0p53of8ready;
+	uint8_t wgm0s9i5chflag;
 } wgr1fpbp46Token;
 
 #undef main
@@ -20,8 +20,8 @@ wgr1fpbp46Token wgf0o0aumnreplace_token(wvrt_mut_slice view, int32_t index, wgr1
 
 // Print every field of a copy or backing record without truncating its scalar values.
 static void print_token(wgr1fpbp46Token value) {
-	printf(" %" PRIu32 " %" PRId32 " %d %u", value.wgm0000000, value.wgm0000001,
-		value.wgm0000002, (unsigned)value.wgm0000003);
+	printf(" %" PRIu32 " %" PRId32 " %d %u", value.wgm08h454tkind, value.wgm2l3oejpstart,
+		value.wgm0p53of8ready, (unsigned)value.wgm0s9i5chflag);
 }
 
 // Give the emitted program the caller's original two-record buffer.

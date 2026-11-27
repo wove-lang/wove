@@ -18,7 +18,8 @@
 	(use wove-file "../source/module.wove" (only skip_disabled_siblings (type ModuleRead) (type SelectedDeclaration)))
 	(use wove-file "../scalar/records.wove" (only count_declarations record_index is_record_type is_native_record is_optional_record_borrow is_buffered_record buffered_record_layout place_reference_type is_payload_enum is_place_reference is_mutable_place_reference record_receiver_type place_borrow_kind is_native_integer is_typed_slice slice_element_type is_readable_slice is_writable_slice is_array_owner is_owning_record is_owning_array_element array_owner_element (type ScalarRecord)))
 	(use wove-file "../scalar/type_sites.wove" (only target_numeric_site))
-	(use wove-file "./records.wove" (only write_value_type write_member_name write_member_separator write_parameter_name write_parameter_place write_field_place write_place_borrow captures_value_argument write_record_layouts write_array_layout_argument))
+	(use wove-file "./members.wove" (only named_member projected_member write_member))
+	(use wove-file "./records.wove" (only write_value_type write_member_separator write_parameter_name write_parameter_place write_field_place write_place_borrow captures_value_argument write_record_layouts write_array_layout_argument))
 	(use wove-file "../source/slice_options.wove" (only (value try_slice_kind) (value optional_view_absent) (value buffered_record_absent) (value optional_view_unwrap)))
 	(use wove-file "./slice_options.wove" (only write_slice_option))
 	(use wove-file "../source/numeric_ops.wove" (only is_integer_byte_conversion is_integer_byte_encoder))
@@ -101,7 +102,7 @@
 	(fn write_scalar
 		(:doc `Write one checked leaf as a literal, binding reference, or slice reborrow.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row ScalarExpression) (tree_base i32)
-			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression))
+			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression)) (records (shared-array ScalarRecord))
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -121,7 +122,7 @@
 				(:doc "A place loan points to its original local or parameter storage.")
 				(u32.eq kind (call place_borrow_kind))
 				(then (return (call write_place_borrow (borrow-shared source) (borrow-shared nodes)
-					row (borrow-shared parameters) (borrow-shared expressions) tree_base
+					row (borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) tree_base
 					(borrow-mut output) offset name_prefix writing))))
 			(if
 				(:doc "A range or indexed loan passes the value already evaluated by its child projection.")
@@ -133,7 +134,7 @@
 				(:doc "A fixed array provides inline storage and its compile-time length.")
 				(bool.or (u32.eq kind fixed_shared_loan) (u32.eq kind fixed_mut_loan))
 				(then (return (call write_fixed_slice (borrow-shared source) (borrow-shared nodes)
-					row tree_base (borrow-shared parameters) (borrow-shared expressions)
+					row tree_base (borrow-shared parameters) (borrow-shared expressions) (borrow-shared records)
 					(borrow-mut output) offset name_prefix writing))))
 			(if
 				(:doc "Read a named view's existing descriptor, projecting its backing pointer if needed.")
@@ -156,13 +157,13 @@
 				(:doc "A scoped field lends its captured descriptor at the original record place.")
 				(u32.eq kind scoped_field_loan)
 				(then (return (call write_field_place (borrow-shared source) (borrow-shared nodes)
-					(borrow-shared expressions) (borrow-shared parameters) (struct.get row projection) tree_base
+					(borrow-shared expressions) (borrow-shared parameters) (borrow-shared records) (struct.get row projection) tree_base
 					(borrow-mut output) offset name_prefix writing))))
 			(if
 				(:doc "An owned record field borrows the original pointer stored in its slot.")
 				(u32.eq kind (call owned_field_loan_kind))
 				(then (return (call write_owned_field_loan (borrow-shared source) (borrow-shared nodes) row
-					(borrow-shared parameters) (borrow-shared expressions) tree_base
+					(borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) tree_base
 					(borrow-mut output) offset name_prefix writing))))
 			(if
 				(:doc "An array loan projects the owner's pointer without allocating.")
@@ -775,7 +776,9 @@
 							(set cursor (call c_span (borrow-shared source) (struct.get name start)
 								(struct.get name end) (borrow-mut output) cursor writing)))
 						(else
-							(set cursor (call write_member_name (borrow-shared source) (struct.get row target)
+							(let name (array.load nodes (struct.get initializer first_child)))
+							(let member (call named_member (borrow-shared source) layout name))
+							(set cursor (call write_member (borrow-shared source) member
 								(borrow-mut output) cursor name_prefix writing))))
 					(set cursor (call c_byte (borrow-mut output) cursor 61u8 writing))
 					(set cursor (call write_temporary_name (borrow-shared source) (struct.get row first)
@@ -1179,7 +1182,7 @@
 						(:doc "Read a projected binding directly, without copying its enclosing records.")
 						(bool.and (bool.not inline) (i32.not-ltz (struct.get expression projection)))
 						(then (return (call write_field_place (borrow-shared source) (borrow-shared nodes)
-							(borrow-shared expressions) (borrow-shared parameters)
+							(borrow-shared expressions) (borrow-shared parameters) (borrow-shared records)
 							value_index tree_base (borrow-mut output) offset name_prefix writing))))
 					(let reference (struct.get expression first))
 					(let receiver (array.load expressions reference))
@@ -1219,7 +1222,7 @@
 						(then (set value (call write_temporary_name (borrow-shared source)
 							reference tree_base (borrow-mut output) value name_prefix writing)))
 						(else (set value (call write_scalar (borrow-shared source) (borrow-shared nodes)
-							receiver tree_base (borrow-shared parameters) (borrow-shared expressions)
+							receiver tree_base (borrow-shared parameters) (borrow-shared expressions) (borrow-shared records)
 							(borrow-mut output) value name_prefix writing))))
 					(if
 						(:doc "A buffered record keeps its native pointer separate from the checked byte range.")
@@ -1251,7 +1254,9 @@
 									(return (call c_literal_text (borrow-shared native_inline_end)
 										(borrow-mut output) limit writing))))
 							(return member)))
-					(return (call write_member_name (borrow-shared source) (struct.get expression target)
+					(let member (call projected_member (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) (borrow-shared expressions) expression))
+					(return (call write_member (borrow-shared source) member
 						(borrow-mut output) dot name_prefix writing))))
 			(if
 				(:doc "Test whether the owner is missing without invoking the native handle check.")
@@ -1263,7 +1268,7 @@
 						(:doc "Read a projected handle directly without invoking the nonnull guard.")
 						(i32.not-ltz place)
 						(then (return (call write_native_handle_slot (borrow-shared source) (borrow-shared nodes)
-							(borrow-shared parameters) (borrow-shared expressions) place tree_base
+							(borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) place tree_base
 							(borrow-mut output) test name_prefix writing))))
 					(return (call write_local_name (borrow-shared source) (borrow-shared nodes)
 						(struct.get expression target) tree_base
@@ -1273,7 +1278,7 @@
 				(u32.eq kind (call native_handle_consume_kind))
 				(then
 					(return (call write_owner_transfer (borrow-shared source) (borrow-shared nodes)
-						expression (borrow-shared parameters) (borrow-shared expressions) tree_base
+						expression (borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) tree_base
 						(borrow-mut output) offset name_prefix writing))))
 			(if
 				(:doc "An empty receipt queue has no evaluated inputs.")
@@ -1332,17 +1337,17 @@
 						(:doc "Use the original C pointer type when moving a native owner.")
 						(call is_native_owner (struct.get expression type))
 						(then (return (call write_native_slot_take (borrow-shared source) (borrow-shared nodes) expression
-							(borrow-shared parameters) (borrow-shared expressions) tree_base
+							(borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) tree_base
 							(borrow-mut output) offset name_prefix writing))))
 					(return (call write_array_take (borrow-shared source) (borrow-shared nodes) expression
-					(borrow-shared parameters) (borrow-shared expressions) tree_base
+					(borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) tree_base
 					(borrow-mut output) offset name_prefix writing))))
 			(if
 				(:doc "An evaluating aggregate move empties the original owner before publishing the transient value.")
 				(u32.eq kind (call owned_aggregate_take_kind))
 				(then (return (call write_aggregate_take (borrow-shared source) (borrow-shared nodes)
 					(array.load records (call record_index (struct.get expression type))) expression
-					(borrow-shared parameters) (borrow-shared expressions) tree_base
+					(borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) tree_base
 					(borrow-mut output) offset name_prefix writing))))
 			(let borrowed_unwrap (u32.eq kind borrowed_record_unwrap_kind))
 			(if
@@ -1454,7 +1459,7 @@
 				(:doc "Only direct and indirect calls need a C argument list.")
 				(bool.not (bool.or indirect (call is_direct_call kind)))
 				(then (return (call write_scalar (borrow-shared source) (borrow-shared nodes)
-					expression tree_base (borrow-shared parameters) (borrow-shared expressions) (borrow-mut output)
+					expression tree_base (borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) (borrow-mut output)
 					offset name_prefix writing))))
 			(let worker (call is_worker_launch kind))
 			(let adapted (call is_record_worker_launch expression))
@@ -1574,7 +1579,7 @@
 									(borrow-mut output) cursor name_prefix writing)))
 								(else (set cursor (call write_scalar
 									(borrow-shared source) (borrow-shared nodes) row tree_base
-									(borrow-shared parameters) (borrow-shared expressions) (borrow-mut output) cursor name_prefix writing))))))
+									(borrow-shared parameters) (borrow-shared expressions) (borrow-shared records) (borrow-mut output) cursor name_prefix writing))))))
 					(if
 						(:doc "A failed box allocation or launch drops a transferred job at its source site.")
 						boxed_job
@@ -1708,7 +1713,7 @@
 		leaves a result temporary available to the statement writer.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (root i32) (caller ScalarFunction)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression)) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression)) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let tree_base (struct.get caller name_base))
@@ -1765,7 +1770,7 @@
 								(then
 									(let callee (array.load functions (struct.get expression target)))
 									(set cursor (call write_c_argument_call (borrow-shared source)
-										(borrow-shared nodes) (borrow-shared parameters) (borrow-shared records)
+										(borrow-shared nodes) (borrow-shared parameters) (borrow-shared records) (borrow-shared bindings)
 										(borrow-shared expressions) expression caller callee index
 										(borrow-mut output) cursor name_prefix writing))))
 							(if
@@ -1837,7 +1842,7 @@
 										(then
 											(set cursor (call write_native_handle_slot_capture
 												(borrow-shared source) (borrow-shared nodes) expression
-												index tree_base (borrow-shared parameters) (borrow-shared expressions)
+												index tree_base (borrow-shared parameters) (borrow-shared expressions) (borrow-shared records)
 												(borrow-mut output) cursor name_prefix writing)))
 										(else
 											(set cursor (call write_temporary_declaration (borrow-shared source) (borrow-shared nodes)
@@ -2007,14 +2012,14 @@
 		(:doc `Evaluate one header value and save it before evaluating any following value.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (root i32) (slot i32) (caller ScalarFunction)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression))
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let tree_base (struct.get caller name_base))
 			(let prepared (call write_nested_values (borrow-shared source) (borrow-shared nodes)
 				root caller (borrow-shared functions) (borrow-shared parameters)
-				(borrow-shared statements) (borrow-shared records) (borrow-shared expressions) (borrow-mut output) offset name_prefix writing))
+				(borrow-shared statements) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions) (borrow-mut output) offset name_prefix writing))
 			(let initialized (call write_temporary_declaration (borrow-shared source) (borrow-shared nodes)
 				(borrow-shared records) slot tree_base (struct.get (array.load expressions root) type)
 				(borrow-mut output) prepared name_prefix writing))
@@ -2027,7 +2032,7 @@
 		(:doc `Capture a view, moved array, or both range bounds before opening the loop body.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (caller ScalarFunction)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression))
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -2048,7 +2053,7 @@
 				(then
 					(set cursor (call write_value_capture (borrow-shared source) (borrow-shared nodes)
 						root index caller (borrow-shared functions) (borrow-shared parameters)
-						(borrow-shared statements) (borrow-shared records) (borrow-shared expressions) (borrow-mut output)
+						(borrow-shared statements) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions) (borrow-mut output)
 						cursor name_prefix writing))
 					(set last (struct.get (array.load nodes root) next_sibling))))
 			(let-mut slot block)
@@ -2060,7 +2065,7 @@
 					(set slot owner)))
 			(set cursor (call write_value_capture (borrow-shared source) (borrow-shared nodes)
 				last slot caller (borrow-shared functions) (borrow-shared parameters)
-				(borrow-shared statements) (borrow-shared records) (borrow-shared expressions)
+				(borrow-shared statements) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 				(borrow-mut output) cursor name_prefix writing))
 			(if
 				(:doc "The loop owns the captured array while its count and backing address remain stable.")
@@ -2081,7 +2086,7 @@
 		(:doc `Write one checked statement after evaluating its nested values.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (caller ScalarFunction)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression)) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression)) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let tree_base (struct.get caller name_base))
@@ -2119,7 +2124,7 @@
 				(u32.eq kind for_statement)
 				(then (return (call write_for_statement (borrow-shared source) (borrow-shared nodes)
 					index caller (borrow-shared functions) (borrow-shared parameters)
-					(borrow-shared statements) (borrow-shared records) (borrow-shared expressions)
+					(borrow-shared statements) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 					(borrow-mut output) offset name_prefix writing))))
 			(if
 				(:doc "A value-less return releases active owners without evaluating an expression.")
@@ -2136,7 +2141,7 @@
 				(then
 					(let captured (call write_value_capture (borrow-shared source) (borrow-shared nodes)
 						root index caller (borrow-shared functions) (borrow-shared parameters)
-						(borrow-shared statements) (borrow-shared records) (borrow-shared expressions)
+						(borrow-shared statements) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 						(borrow-mut output) offset name_prefix writing))
 					(return (call write_owner_assignment (borrow-shared source) (borrow-shared nodes) statement
 						(borrow-shared parameters) (borrow-shared records) (borrow-shared expressions)
@@ -2166,7 +2171,7 @@
 					(set condition_prefix 9u32)))
 			(set cursor (call write_nested_values (borrow-shared source) (borrow-shared nodes)
 				root caller (borrow-shared functions) (borrow-shared parameters)
-				(borrow-shared statements) (borrow-shared records) (borrow-shared expressions)
+				(borrow-shared statements) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 				(borrow-mut output) cursor name_prefix writing))
 			(if
 				(:doc "Evaluate the match subject once and switch on the integer value or variant ordinal.")
@@ -2300,7 +2305,7 @@
 								(:doc "Use the checked field path for projected destinations.")
 								(u32.eq kind field_assignment)
 								(then (set cursor (call write_field_place (borrow-shared source) (borrow-shared nodes)
-									(borrow-shared expressions) (borrow-shared parameters) target tree_base
+									(borrow-shared expressions) (borrow-shared parameters) (borrow-shared records) target tree_base
 									(borrow-mut output) cursor name_prefix writing)))
 								(else
 									(if
@@ -2411,7 +2416,7 @@
 		(:doc `Write nested statements and open and close each block at its checked source-tree boundaries.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression))
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -2495,7 +2500,7 @@
 							(set cursor (call write_statement (borrow-shared source) (borrow-shared nodes)
 								index function
 								(borrow-shared functions) (borrow-shared parameters)
-								(borrow-shared statements) (borrow-shared records) (borrow-shared expressions)
+								(borrow-shared statements) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 								(borrow-mut output) cursor name_prefix writing))
 							(let first (struct.get statement first))
 							(if
@@ -2532,7 +2537,7 @@
 		(:doc `Write a checked function definition and its statements in source order.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction)
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression)) (output (mut-array u8)) (offset u32) (private_helpers bool) (name_prefix i32) (writing bool))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression)) (output (mut-array u8)) (offset u32) (private_helpers bool) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let-mut cursor (call write_signature (borrow-shared source) (borrow-shared nodes)
@@ -2554,7 +2559,7 @@
 					(set index (i32.inc index))))
 			(set cursor (call write_body (borrow-shared source) (borrow-shared nodes)
 				function (borrow-shared functions) (borrow-shared parameters)
-				(borrow-shared statements) (borrow-shared records) (borrow-shared expressions)
+				(borrow-shared statements) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 				(borrow-mut output) cursor name_prefix writing))
 			(set cursor (call c_byte (borrow-mut output) cursor 125u8 writing))
 			(set cursor (call c_byte (borrow-mut output) cursor 10u8 writing))
@@ -2742,7 +2747,7 @@ _Static_assert(sizeof(wvrt_i256) == 32 && sizeof(wvrt_u256) == 32, "Wove require
 		(:doc "Write a range of definitions in checked row order.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
 			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
-			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
+			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (expressions (shared-array ScalarExpression))
 			(first i32) (stop i32) (output (mut-array u8)) (offset u32)
 			(private_helpers bool) (name_prefix i32) (writing bool))
 		(returns u32)
@@ -2761,7 +2766,7 @@ _Static_assert(sizeof(wvrt_i256) == 32 && sizeof(wvrt_u256) == 32, "Wove require
 							(set cursor (call write_definition (borrow-shared source) (borrow-shared nodes)
 								function (borrow-shared functions)
 								(borrow-shared parameters) (borrow-shared statements)
-								(borrow-shared records) (borrow-shared expressions)
+								(borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 								(borrow-mut output) cursor private_helpers name_prefix writing))))
 					(set index (i32.inc index))))
 			(return cursor)))
@@ -2781,7 +2786,7 @@ _Static_assert(sizeof(wvrt_i256) == 32 && sizeof(wvrt_u256) == 32, "Wove require
 				static_worker_adapters name_prefix writing))
 			(return (call write_program_bodies (borrow-shared source) (borrow-shared nodes)
 				(borrow-shared functions) (borrow-shared parameters) (borrow-shared statements)
-				(borrow-shared records) (borrow-shared expressions) 0i32 (call checked_function_count (borrow-shared functions))
+				(borrow-shared records) (borrow-shared bindings) (borrow-shared expressions) 0i32 (call checked_function_count (borrow-shared functions))
 				(borrow-mut output) preamble private_helpers name_prefix writing))))
 
 	(fn emit_result

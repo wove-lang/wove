@@ -20,8 +20,9 @@
 	(use wove-file "../scalar/function_rows.wove" (only (type ScalarParameter)))
 	(use wove-file "./callable_types.wove" (only write_callable_name write_callable_layout))
 	(use wove-file "./owners.wove" (only write_bridge_result_type write_native_type write_c_pointer_owner_checks))
+	(use wove-file "./members.wove" (only write_member ordinal_member named_member projected_member (type CMember)))
 	(use wove-file "./runtime.wove" (only open_array_layout_query write_c_number write_site_number))
-	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_type_text get_name (type CNameParent) (type CNameSpelling) record_name_role parameter_name_role member_name_role fixed_array_name_role write_local_place write_local_name))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_type_text get_name (type CNameParent) (type CNameSpelling) record_name_role parameter_name_role fixed_array_name_role write_local_place write_local_name))
 
 	(let c_worker_receipt "wvrt_worker_receipt*")
 	(let c_worker_pool "WvrtWorkerPool*")
@@ -176,16 +177,6 @@
 				(borrow-shared records) type (borrow-mut output) query name_prefix writing))
 			(return (call c_byte (borrow-mut output) name 41u8 writing))))
 
-	(fn write_member_name
-		(:doc `Write a C member name from its zero-based position in the layout.`)
-		(params (source (shared-array u8)) (ordinal i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
-		(body
-			(return (call get_name
-				(struct.new CNameParent (identity (u32.from-i32 ordinal)) (slot 0i32))
-				(call member_name_role) (struct.new CNameSpelling (start 0i32) (end 0i32) (trailing 0u8))
-				(borrow-shared source) (borrow-mut output) offset name_prefix writing))))
-
 	(fn write_parameter_name
 		(:doc `Write the parameter's checked name in the concrete function's C scope.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (param ScalarParameter)
@@ -250,7 +241,7 @@
 	(fn write_field_place
 		(:doc `Write a checked Wove field path against its original binding.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
-			(parameters (shared-array ScalarParameter))
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
 			(place i32) (tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -278,8 +269,9 @@
 					(set cursor (call write_member_separator (borrow-mut output) cursor
 						reference writing))
 					(set reference (bool false))
-					(set cursor (call write_member_name (borrow-shared source)
-						(struct.get (array.load expressions root) target)
+					(let member (call projected_member (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) (borrow-shared expressions) (array.load expressions root)))
+					(set cursor (call write_member (borrow-shared source) member
 						(borrow-mut output) cursor name_prefix writing))))
 			(return cursor)))
 
@@ -287,6 +279,7 @@
 		(:doc `Write the address of a checked place or forward its existing pointer.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row ScalarExpression)
 			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression))
+			(records (shared-array ScalarRecord))
 			(tree_base i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -297,7 +290,7 @@
 				(then
 					(let open (call c_byte (borrow-mut output) offset 38u8 writing))
 					(return (call write_field_place (borrow-shared source) (borrow-shared nodes)
-						(borrow-shared expressions) (borrow-shared parameters)
+						(borrow-shared expressions) (borrow-shared parameters) (borrow-shared records)
 						place tree_base (borrow-mut output) open name_prefix writing))))
 			(if
 				(:doc "A local can lend its address or forward the pointer to an iteration element.")
@@ -323,13 +316,13 @@
 	(fn write_member_declaration
 		(:doc `Write one scalar, fixed-array, or nested record member declaration in a Wove layout.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
-			(type u32) (ordinal i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(type u32) (member CMember) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let type_end (call write_value_type (borrow-shared source) (borrow-shared nodes)
 				(borrow-shared records) type (borrow-mut output) offset name_prefix writing))
 			(let space (call c_byte (borrow-mut output) type_end 32u8 writing))
-			(let name_end (call write_member_name (borrow-shared source) ordinal
+			(let name_end (call write_member (borrow-shared source) member
 				(borrow-mut output) space name_prefix writing))
 			(return (call c_byte (borrow-mut output) name_end 59u8 writing))))
 
@@ -363,9 +356,9 @@
 				(i32.eqz count)
 				(then (set cursor (call write_member_declaration (borrow-shared source)
 					(borrow-shared nodes) (borrow-shared records)
-					10u32 0i32 (borrow-mut output) cursor name_prefix writing))))
+					10u32 (call ordinal_member 0i32) (borrow-mut output) cursor name_prefix writing))))
 			(while
-				(:doc "Assign each declared member the same ordinal used at its accesses.")
+				(:doc "Emit each field's checked spelling in its original storage order.")
 				(i32.lt ordinal count)
 				(body
 					(let node (array.load nodes field))
@@ -373,7 +366,8 @@
 						(borrow-shared records) (borrow-shared bindings) record node))
 					(set cursor (call write_member_declaration (borrow-shared source)
 						(borrow-shared nodes) (borrow-shared records)
-						type ordinal (borrow-mut output) cursor name_prefix writing))
+						type (call named_member (borrow-shared source) record (array.load nodes (struct.get node first_child)))
+						(borrow-mut output) cursor name_prefix writing))
 					(set field (struct.get node next_sibling))
 					(set ordinal (i32.inc ordinal))))
 			(set cursor (call c_byte (borrow-mut output) cursor 125u8 writing))
@@ -646,7 +640,7 @@
 						(:doc "The payload's defining layout precedes this enum in the emitted unit.")
 						(u32.gtz type)
 						(then (set cursor (call write_member_declaration (borrow-shared source)
-							(borrow-shared nodes) (borrow-shared records) type ordinal
+							(borrow-shared nodes) (borrow-shared records) type (call ordinal_member ordinal)
 							(borrow-mut output) cursor name_prefix writing))))
 					(set variant (struct.get member next_sibling))
 					(set ordinal (i32.inc ordinal))))

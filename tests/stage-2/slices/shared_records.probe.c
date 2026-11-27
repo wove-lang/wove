@@ -8,10 +8,10 @@
 #include <string.h>
 
 typedef struct {
-	uint32_t wgm0000000;
-	int32_t wgm0000001;
-	_Bool wgm0000002;
-	uint8_t wgm0000003;
+	uint32_t wgm3s76gu2kind;
+	int32_t wgm1ngbacostart;
+	_Bool wgm2b0v479ready;
+	uint8_t wgm1te2g8qflag;
 } wgr2sr0cs1Token;
 
 #undef main
@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
 	const wgr2sr0cs1Token updated = wgf1kgk0p7forward_token(full, 0);
 	printf("%d %" PRId32 " %" PRId32 " %" PRIu32 " %" PRId32 " %d %u %" PRIu32 " %" PRId32 " %d %u %" PRIu32 "\n",
 		wove_emitted_main(argc, argv), wgf1phblattoken_count(full), wgf1phblattoken_count(empty),
-		first.wgm0000000, first.wgm0000001, first.wgm0000002, (unsigned)first.wgm0000003,
-		second.wgm0000000, second.wgm0000001, second.wgm0000002, (unsigned)second.wgm0000003, updated.wgm0000000);
+		first.wgm3s76gu2kind, first.wgm1ngbacostart, first.wgm2b0v479ready, (unsigned)first.wgm1te2g8qflag,
+		second.wgm3s76gu2kind, second.wgm1ngbacostart, second.wgm2b0v479ready, (unsigned)second.wgm1te2g8qflag, updated.wgm3s76gu2kind);
 	return 0;
 }
