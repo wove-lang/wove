@@ -753,14 +753,6 @@ void wvrt_array_store_owned_at_span(wvrt_mut_slice view, int32_t index, void *sl
 	memcpy(destination, slot, view.wvrt_element_size);
 }
 
-// Copy compiled bytes into a fresh owner on each evaluation.
-wvrt_array *wvrt_array_copy_u8_at_span(const void *wvrtbytes, int32_t wvrtlength,
-	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
-	wvrt_array *wvrt_result = wvrt_array_new_u8_at_span(wvrtlength, wvrtfile, wvrtstart, wvrtend);
-	if (wvrtlength > 0) { memcpy(wvrt_result->wvrt_items, wvrtbytes, (size_t)wvrtlength); }
-	return wvrt_result;
-}
-
 // Copy a measured native string into an independent owner, including an empty string.
 static wvrt_array *wvrt_try_copy_cstr_bytes(const char *wvrttext, size_t wvrtlength) {
 	if (wvrtlength > INT32_MAX) { return NULL; }

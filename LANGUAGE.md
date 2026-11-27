@@ -313,9 +313,10 @@ represent all signed and unsigned integers of up to 64 bits exactly.
 | `(move (local buffer))` | Transfer ownership of a local buffer or hand a present native owner to a consuming C call. |
 | `(owner.is-null (local file))` | Test whether a native owner holds a missing handle. |
 
-A module-level `let` can hold an immutable scalar, a string, or an inline
-table. A quoted string gives a `(shared-array u8)` view whose length counts
-the decoded bytes. Declare an inline table with `array.new` or `array.repeat`.
+A module-level `let` can hold an immutable scalar, a string, an embedded
+file, or an inline table. A quoted string gives a `(shared-array u8)` view
+whose length counts the decoded bytes. Declare an inline table with
+`array.new` or `array.repeat`.
 Its elements are exact scalar constants or constant constructors of a
 named Wove record. `array.load` can read the table directly.
 
@@ -523,9 +524,13 @@ A struct drops its remaining owning fields in reverse field order,
 including owners inside nested structs and arrays. A return evaluates
 its result before cleanup.
 
-An `(embed "./payload.bin")` initializer resolves relative to its defining
-module and gives a fresh owner with the file's original bytes on each
-evaluation. The compiled program carries the payload.
+An `(embed "./payload.bin")` initializer can bind an immutable local or
+module value. Like a string, it has type `(shared-array u8)` and borrows
+static read-only storage. The compiler reads the path relative to the
+defining module and keeps every byte, including zero bytes and trailing
+newlines. Evaluating the binding does not allocate or copy the payload.
+To obtain writable or owned bytes, allocate a buffer and copy the view
+into it with `array.try-copy-from`.
 
 ## Control flow
 

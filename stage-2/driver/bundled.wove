@@ -13,142 +13,106 @@
 		(value stdlib_path) (value stdio_path) (value unistd_path) (value spawn_path)
 		(value fcntl_path) (value errno_path) (value sys_stat_path) (value sys_wait_path) (value dirent_path) (value math_path) (value sys_file_path)))
 
-	(fn copy_provider_path
-		(:doc `Keep each virtual provider path in the same inventory as its source bytes.`)
-		(params (path (shared-array u8))) (returns (owned-array u8))
+	(let stdlib_source (embed "../c-stdlib/stdlib.wove"))
+	(let stdio_source (embed "../c-stdlib/stdio.wove"))
+	(let unistd_source (embed "../c-stdlib/unistd.wove"))
+	(let spawn_source (embed "../c-stdlib/spawn.wove"))
+	(let fcntl_source (embed "../c-stdlib/fcntl.wove"))
+	(let errno_source (embed "../c-stdlib/errno.wove"))
+	(let sys_stat_source (embed "../c-stdlib/sys_stat.wove"))
+	(let sys_wait_source (embed "../c-stdlib/sys_wait.wove"))
+	(let dirent_source (embed "../c-stdlib/dirent.wove"))
+	(let math_source (embed "../c-stdlib/math.wove"))
+	(let sys_file_source (embed "../c-stdlib/sys_file.wove"))
+
+	(struct
+		(:doc "The next file identity and byte offset. A negative width indicates overflow.")
+		BundleCursor
+		(fields (count i32) (width i32)))
+
+	(fn append_bundled_source
+		(:doc "Account for one path and payload and write them when the file table is present.")
+		(params (path (shared-array u8)) (source (shared-array u8)) (arena (mut-array u8))
+			(files (mut-array SuppliedFile)) (cursor BundleCursor))
+		(returns BundleCursor)
 		(body
-			(let-mut bytes (array.alloc u8 (array.len (local path))))
-			(let end (call append_bytes (borrow-shared (local path)) (borrow-mut (local bytes)) 0i32))
-			(return (move (local bytes)))))
-
-	(fn load_bundled_providers
-		(:doc `Load path and source pairs in identity order. Append new providers to preserve existing identities.`)
-		(:expect (tests "stage-2/cli/native/cases.tsv") (issues "gh:wove-lang/wove:316" "gh:wove-lang/wove:488"))
-		(params) (returns (owned-array (owned-array u8)))
-		(body
-			(let-mut rows (array.alloc (owned-array u8) 22i32))
-			(array.store (local rows) 0i32 (call copy_provider_path (borrow-shared (local stdlib_path))))
-			(let stdlib (embed "../c-stdlib/stdlib.wove"))
-			(array.store (local rows) 1i32 (move (local stdlib)))
-
-			(array.store (local rows) 2i32 (call copy_provider_path (borrow-shared (local stdio_path))))
-			(let stdio (embed "../c-stdlib/stdio.wove"))
-			(array.store (local rows) 3i32 (move (local stdio)))
-
-			(array.store (local rows) 4i32 (call copy_provider_path (borrow-shared (local unistd_path))))
-			(let unistd (embed "../c-stdlib/unistd.wove"))
-			(array.store (local rows) 5i32 (move (local unistd)))
-
-			(array.store (local rows) 6i32 (call copy_provider_path (borrow-shared (local spawn_path))))
-			(let spawn (embed "../c-stdlib/spawn.wove"))
-			(array.store (local rows) 7i32 (move (local spawn)))
-
-			(array.store (local rows) 8i32 (call copy_provider_path (borrow-shared (local fcntl_path))))
-			(let fcntl (embed "../c-stdlib/fcntl.wove"))
-			(array.store (local rows) 9i32 (move (local fcntl)))
-
-			(array.store (local rows) 10i32 (call copy_provider_path (borrow-shared (local errno_path))))
-			(let errno (embed "../c-stdlib/errno.wove"))
-			(array.store (local rows) 11i32 (move (local errno)))
-
-			(array.store (local rows) 12i32 (call copy_provider_path (borrow-shared (local sys_stat_path))))
-			(let sys_stat (embed "../c-stdlib/sys_stat.wove"))
-			(array.store (local rows) 13i32 (move (local sys_stat)))
-
-			(array.store (local rows) 14i32 (call copy_provider_path (borrow-shared (local sys_wait_path))))
-			(let sys_wait (embed "../c-stdlib/sys_wait.wove"))
-			(array.store (local rows) 15i32 (move (local sys_wait)))
-
-			(array.store (local rows) 16i32 (call copy_provider_path (borrow-shared (local dirent_path))))
-			(let dirent (embed "../c-stdlib/dirent.wove"))
-			(array.store (local rows) 17i32 (move (local dirent)))
-
-			(array.store (local rows) 18i32 (call copy_provider_path (borrow-shared (local math_path))))
-			(let math (embed "../c-stdlib/math.wove"))
-			(array.store (local rows) 19i32 (move (local math)))
-
-			(array.store (local rows) 20i32 (call copy_provider_path (borrow-shared (local sys_file_path))))
-			(let sys_file (embed "../c-stdlib/sys_file.wove"))
-			(array.store (local rows) 21i32 (move (local sys_file)))
-
-			(return (move (local rows)))))
-
-	(fn bundled_file_count
-		(:doc `Count the entry plus one file row per provider pair.`)
-		(params (providers (shared-array (owned-array u8)))) (returns i32)
-		(body (return (i32.inc (i32.div (array.len (local providers)) 2i32)))))
-
-	(fn provider_row_width
-		(:doc `Measure one provider path or source through its stored byte owner.`)
-		(params (bytes (shared-array u8))) (returns i32)
-		(body (return (array.len (local bytes)))))
-
-	(fn bundled_input_width
-		(:doc `Measure the complete arena or return -1 if the signed source offsets cannot represent it.`)
-		(params (path (shared-array u8)) (source (shared-array u8))
-			(providers (shared-array (owned-array u8)))) (returns i32)
-		(body
+			(let start (struct.get (local cursor) width))
+			(if (i32.ltz (local start)) (then (return (local cursor))))
 			(let path_width (array.len (local path)))
 			(let source_width (array.len (local source)))
 			(if
-				(:doc `Check the entry range before adding the ordered provider rows.`)
-				(i32.lt (i32.sub 2147483647i32 (local path_width)) (local source_width))
-				(then (return -1i32)))
-			(let-mut total (i32.add (local path_width) (local source_width)))
-			(let-mut index 0i32)
-			(while
-				(:doc `Each path and source range must fit before it can be published.`)
-				(i32.lt (local index) (array.len (local providers)))
-				(body
-					(let width (call provider_row_width (borrow-shared (array.load (local providers) (local index)))))
-					(if (i32.lt (i32.sub 2147483647i32 (local total)) (local width)) (then (return -1i32)))
-					(set (local total) (i32.add (local total) (local width)))
-					(set (local index) (i32.inc (local index)))))
-			(return (local total))))
+				(:doc "Each path must fit the signed source-offset range.")
+				(i32.lt (i32.sub 2147483647i32 (local start)) (local path_width))
+				(then (return (struct.new BundleCursor (count 0i32) (width -1i32)))))
+			(let path_end (i32.add (local start) (local path_width)))
+			(if
+				(:doc "The full provider payload must fit after the path.")
+				(i32.lt (i32.sub 2147483647i32 (local path_end)) (local source_width))
+				(then (return (struct.new BundleCursor (count 0i32) (width -1i32)))))
+			(let source_end (i32.add (local path_end) (local source_width)))
+			(let identity (struct.get (local cursor) count))
+			(if
+				(:doc "A sized file table enables one direct copy from each view into the graph arena.")
+				(i32.gtz (array.len (local files)))
+				(then
+					(let copied_path (call append_bytes (borrow-shared (local path)) (borrow-mut (local arena)) (local start)))
+					(let copied_source (call append_bytes (borrow-shared (local source)) (borrow-mut (local arena)) (local copied_path)))
+					(array.store (local files) (local identity) (struct.new SuppliedFile (identity (local identity))
+						(path_start (local start)) (path_end (local path_end)) (source_start (local path_end))
+						(source_end (local copied_source)) (bundled (i32.gtz (local identity)))))))
+			(return (struct.new BundleCursor (count (i32.inc (local identity))) (width (local source_end))))))
 
-	(fn write_supplied_entry
-		(:doc "Reserve row zero for the entry and keep all of its source offsets relative to its own view.")
-		(params (path (shared-array u8)) (source (shared-array u8)) (arena (mut-array u8))
-			(files (mut-array SuppliedFile)))
-		(returns i32)
+	(fn pack_bundled_sources
+		(:doc "Visit the entry and each bundled provider in identity order for both sizing and writing.")
+		(:expect (tests "stage-2/cli/native/cases.tsv")
+			(issues "gh:wove-lang/wove:316" "gh:wove-lang/wove:438" "gh:wove-lang/wove:488"))
+		(params (path (shared-array u8)) (source (shared-array u8))
+			(arena (mut-array u8)) (files (mut-array SuppliedFile)))
+		(returns BundleCursor)
 		(body
-			(let path_end (call append_bytes (borrow-shared (local path)) (borrow-mut (local arena)) 0i32))
-			(let source_end (call append_bytes (borrow-shared (local source)) (borrow-mut (local arena)) (local path_end)))
-			(array.store (local files) 0i32 (struct.new SuppliedFile (identity 0i32)
-				(path_start 0i32) (path_end (local path_end)) (source_start (local path_end)) (source_end (local source_end)) (bundled (bool false))))
-			(return (local source_end))))
+			(let-mut cursor (call append_bundled_source (borrow-shared (local path)) (borrow-shared (local source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (struct.new BundleCursor (count 0i32) (width 0i32))))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local stdlib_path)) (borrow-shared (local stdlib_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local stdio_path)) (borrow-shared (local stdio_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local unistd_path)) (borrow-shared (local unistd_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local spawn_path)) (borrow-shared (local spawn_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local fcntl_path)) (borrow-shared (local fcntl_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local errno_path)) (borrow-shared (local errno_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local sys_stat_path)) (borrow-shared (local sys_stat_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local sys_wait_path)) (borrow-shared (local sys_wait_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local dirent_path)) (borrow-shared (local dirent_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local math_path)) (borrow-shared (local math_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(set (local cursor) (call append_bundled_source (borrow-shared (local sys_file_path)) (borrow-shared (local sys_file_source))
+				(borrow-mut (local arena)) (borrow-mut (local files)) (local cursor)))
+			(return (local cursor))))
 
-	(fn write_supplied_provider
-		(:doc "Assign one defining row and one byte range to the complete bundled provider.")
-		(params (path (shared-array u8)) (source (shared-array u8)) (arena (mut-array u8))
-			(files (mut-array SuppliedFile)) (start i32) (identity i32))
-		(returns i32)
+	(fn measure_bundled_sources
+		(:doc "Measure using an empty table, before allocating the graph arena.")
+		(params (path (shared-array u8)) (source (shared-array u8)))
+		(returns BundleCursor)
 		(body
-			(let path_end (call append_bytes (borrow-shared (local path)) (borrow-mut (local arena)) (local start)))
-			(let source_end (call append_bytes (borrow-shared (local source)) (borrow-mut (local arena)) (local path_end)))
-			(array.store (local files) (local identity) (struct.new SuppliedFile (identity (local identity))
-				(path_start (local start)) (path_end (local path_end)) (source_start (local path_end)) (source_end (local source_end)) (bundled (bool true))))
-			(return (local source_end))))
+			(let-mut arena (array.new (array u8 0)))
+			(let-mut files (array.alloc SuppliedFile 0i32))
+			(return (call pack_bundled_sources (borrow-shared (local path)) (borrow-shared (local source))
+				(borrow-mut (local arena)) (borrow-mut (local files))))))
 
 	(fn write_bundled_sources
-		(:doc `Register the entry and all provider pairs through the same file table publication path.`)
-		(params (path (shared-array u8)) (source (shared-array u8)) (providers (shared-array (owned-array u8)))
-			(arena (mut-array u8)) (files (mut-array SuppliedFile))) (returns i32)
+		(:doc "Populate the measured arena and file table and return the written length.")
+		(params (path (shared-array u8)) (source (shared-array u8))
+			(arena (mut-array u8)) (files (mut-array SuppliedFile)))
+		(returns i32)
 		(body
-			(let-mut end (call write_supplied_entry (borrow-shared (local path)) (borrow-shared (local source))
+			(let written (call pack_bundled_sources (borrow-shared (local path)) (borrow-shared (local source))
 				(borrow-mut (local arena)) (borrow-mut (local files))))
-			(let-mut index 0i32)
-			(let-mut identity 1i32)
-			(while
-				(:doc `The inventory keeps the virtual path immediately before its source bytes.`)
-				(i32.lt (local index) (array.len (local providers)))
-				(body
-					(let source_index (i32.inc (local index)))
-					(set (local end) (call write_supplied_provider
-						(borrow-shared (array.load (local providers) (local index)))
-						(borrow-shared (array.load (local providers) (local source_index)))
-						(borrow-mut (local arena)) (borrow-mut (local files)) (local end) (local identity)))
-					(set (local index) (i32.add (local index) 2i32))
-					(set (local identity) (i32.inc (local identity)))))
-			(return (local end))))
+			(return (struct.get (local written) width))))
 )
