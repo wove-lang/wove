@@ -39,7 +39,11 @@ def check_failure(bootstrap, native, root, expected):
 def check_case(bootstrap, native, bundled, fixtures, label, case):
 	with TemporaryDirectory(prefix="wove-emission-") as directory:
 		root = Path(directory).resolve()
-		shutil.copytree(bundled, root / "llvm-libc")
+		# A restricted bundle exercises resolution without its unrelated providers.
+		if "bundle" in case:
+			copy_inputs(root / "llvm-libc", bundled, case["bundle"])
+		else:
+			shutil.copytree(bundled, root / "llvm-libc")
 		copy_inputs(root, fixtures, case["files"])
 		# Repeated byte cycles exercise asset size and content without storing a large binary.
 		for target, cycle in case.get("byte_cycles", {}).items():
@@ -49,12 +53,18 @@ def check_case(bootstrap, native, bundled, fixtures, label, case):
 
 		entry = root / case["entry"]
 		bootstrap_command = [bootstrap, entry]
-		native_command = [native, "cc", entry, "-o", case["output"]]
 		private = subprocess.run(bootstrap_command, cwd=root, capture_output=True, check=True, timeout=30)
-		subprocess.run(native_command, cwd=root, check=True, timeout=30)
-		retained = root / case["retained"]
-		complete = retained.read_bytes()
-		assert private.stdout == complete, label
+		complete = private.stdout
+		# Graph cases check byte parity against the retained native translation unit.
+		retained = None
+		if "retained" in case:
+			native_command = [native, "cc", entry, "-o", case["output"]]
+			subprocess.run(native_command, cwd=root, check=True, timeout=30)
+			retained = root / case["retained"]
+			assert complete == retained.read_bytes(), label
+		if "includes" in case:
+			includes = [line.decode() for line in complete.splitlines() if line.startswith(b"#include ")]
+			assert includes == case["includes"], (label, includes)
 		for expected in case.get("contains", []):
 			assert expected.encode() in complete, (label, expected)
 
@@ -64,6 +74,8 @@ def check_case(bootstrap, native, bundled, fixtures, label, case):
 
 		# A failed re-emission leaves the successful unit intact.
 		for failure in case.get("failures", []):
+			assert retained is not None, label
+			# Remove inputs listed by this failure before applying its replacements.
 			for target in failure.get("remove", []):
 				(root / target).unlink()
 			copy_inputs(root, fixtures, failure.get("files", {}))

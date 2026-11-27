@@ -8,15 +8,13 @@
 	(use wove-file "./numeric_target.wove" (only (value f16_unavailable) (value f16_probe_failed)
 		(value f80_unavailable) (value f80_probe_failed) (value f128_unavailable) (value f128_probe_failed) (value int128_unavailable) (value int128_probe_failed)))
 	(use wove-file "./graph_emit.wove" (only emit_entry_graph (type EntryEmission)))
-	(use wove-file "./bundled.wove" (only measure_bundled_sources write_bundled_sources))
 	(use wove-file "./diagnostics.wove" (only report_source report_file report_path_location
 		(value invalid_source) (value unreadable_asset)))
 	(use wove-file "./protection.wove" (only (type BuildProtection)))
 	(use wove-file "./files.wove" (only canonical_path))
 	(use wove-file "../source/target.wove" (only (type SelectionContext)))
-	(use wove-file "../source/paths.wove" (only (type SuppliedFile) normalize_path))
-	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding)
-		(type GraphUse) (type GraphSelector) (type GraphResult) resolve_graph_for_target copy_graph_bindings))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../source/graph.wove" (only (type GraphModule) (type GraphBinding) (type GraphResult) copy_graph_bindings))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/module.wove" (only (type SelectedDeclaration) form_parts))
 	(use wove-file "../source/imports.wove" (only import_keyword))
@@ -33,9 +31,9 @@
 	(let bit_integer_probe_failed "could not compile and link the C23 _BitInt(256) capability probe")
 
 	(fn needs_provider_graph
-		(:doc "Find an active use of this provider kind or a C bridge that needs validation.")
+		(:doc "Find an active Wove import, C header use, or project bridge that needs graph resolution.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
-			(declarations (shared-array SelectedDeclaration)) (count i32) (kind u32))
+			(declarations (shared-array SelectedDeclaration)) (count i32))
 		(returns bool)
 		(body
 			(let-mut index 0i32)
@@ -48,17 +46,20 @@
 						(array.load nodes row)))
 					(if
 						(:doc "A project bridge needs duplicate-key checking even without a header import.")
-						(bool.and (u32.eq kind 8u32) (i32.lt -1i32 (struct.get parts header)))
+						(i32.lt -1i32 (struct.get parts header))
 						(then (return (bool true))))
 					(let head (array.load nodes (struct.get parts head)))
 					(let provider (struct.get parts operands))
 					(if
 						(:doc "The graph resolver will check the full use and its selectors.")
 						(bool.and (u32.eq (call import_keyword (borrow-shared source) head) 2u32)
-							(bool.and (i32.lt -1i32 provider)
-								(u32.eq (call import_keyword (borrow-shared source)
-									(array.load nodes provider)) kind)))
-						(then (return (bool true))))
+							(i32.not-ltz provider))
+						(then
+							(let kind (call import_keyword (borrow-shared source) (array.load nodes provider)))
+							(if
+								(:doc "Wove and C selections both require graph bindings.")
+								(bool.or (u32.eq kind 3u32) (u32.eq kind 8u32))
+								(then (return (bool true))))))
 					(set index (i32.inc index))))
 			(return (bool false))))
 
@@ -287,83 +288,4 @@
 						(borrow-shared files) file error start end human))))
 			(return (struct.get result status))))
 
-	(fn resolve_c_input
-		(:doc "Bind the entry's selections against the three registered sources.")
-		(params (path (shared-array u8)) (canonical (shared-array u8))
-			(destination (shared-array u8)) (staged (shared-array u8)) (probe_options (shared-array u8)) (probe_libraries (shared-array u8))
-			(context SelectionContext) (protection BuildProtection) (target_index i32) (check_only bool)
-			(arena (shared-array u8)) (files (shared-array SuppliedFile)) (rows i32) (human bool))
-		(returns i32)
-		(body
-			(let-mut modules (array.alloc GraphModule (array.len files)))
-			(let-mut scratch (array.alloc GraphBinding rows))
-			(let-mut uses (array.alloc GraphUse rows))
-			(let-mut selectors (array.alloc GraphSelector rows))
-			(let resolved (call resolve_graph_for_target (borrow-shared arena) (borrow-shared files) 0i32 context
-				(borrow-mut modules) (borrow-mut scratch) (borrow-mut uses) (borrow-mut selectors)))
-			(if
-				(:doc "Failed selections retain their original file identity and byte span.")
-				(u32.gtz (struct.get resolved error))
-				(then (return (call report_graph_source (borrow-shared path) (borrow-shared arena)
-					(borrow-shared files) (struct.get resolved file) (struct.get resolved error)
-					(struct.get resolved start) (struct.get resolved end) human))))
-			(return (call compile_resolved_graph (borrow-shared path) (borrow-shared canonical)
-				(borrow-shared destination) (borrow-shared staged) (borrow-shared probe_options)
-				(borrow-shared probe_libraries)
-				protection target_index check_only 0i32 (borrow-shared arena)
-				(borrow-shared files) (borrow-shared modules) (borrow-shared scratch)
-				resolved (array.len arena) human))))
-
-	(fn prepare_bundled_input
-		(:doc "Allocate the source and path arena before registering the embedded modules.")
-		(params (path (shared-array u8)) (canonical (shared-array u8))
-			(destination (shared-array u8)) (staged (shared-array u8)) (probe_options (shared-array u8)) (probe_libraries (shared-array u8))
-			(context SelectionContext) (protection BuildProtection) (target_index i32) (check_only bool)
-			(source (shared-array u8)) (rows i32) (virtual (shared-array u8)) (human bool))
-		(returns i32)
-		(body
-			(let size (call measure_bundled_sources (borrow-shared virtual) (borrow-shared source)))
-			(let total (struct.get size width))
-			(if
-				(:doc "Reject an arena whose offsets exceed the source ABI.")
-				(i32.ltz total)
-				(then (return (call report_source (borrow-shared path) 16u32 0i32 0i32 (borrow-shared invalid_source)
-					(borrow-shared source) human))))
-			(let-mut arena (array.alloc u8 total))
-			(let-mut files (array.alloc SuppliedFile (struct.get size count)))
-			(let written (call write_bundled_sources (borrow-shared virtual) (borrow-shared source)
-				(borrow-mut arena) (borrow-mut files)))
-			(return (call resolve_c_input (borrow-shared path) (borrow-shared canonical)
-				(borrow-shared destination) (borrow-shared staged) (borrow-shared probe_options)
-				(borrow-shared probe_libraries)
-				context protection target_index check_only
-				(borrow-shared (array.range arena 0i32 written)) (borrow-shared files) rows human))))
-
-	(fn compile_bundled_input
-		(:doc "Open the source graph with the checked-in C provider bytes embedded in this compiler.")
-		(:expect (tests "stage-2/cli/native/cases.tsv") (issues "gh:wove-lang/wove:221"))
-		(params (path (shared-array u8)) (canonical (shared-array u8))
-			(destination (shared-array u8)) (staged (shared-array u8)) (probe_options (shared-array u8)) (probe_libraries (shared-array u8))
-			(context SelectionContext) (protection BuildProtection) (target_index i32) (check_only bool)
-			(source (shared-array u8)) (rows i32) (human bool))
-		(returns i32)
-		(body
-			(let width (array.len path))
-			(if
-				(:doc "The virtual path buffer reserves room for a leading slash.")
-				(i32.eq width 2147483647i32)
-				(then (return (call report_source (borrow-shared path) 16u32 0i32 0i32 (borrow-shared invalid_source)
-					(borrow-shared source) human))))
-			(let-mut virtual (array.alloc u8 (i32.inc width)))
-			(let end (call normalize_path (borrow-shared path) (borrow-mut virtual) 0i32))
-			(if
-				(:doc "An entry must have a nonempty normalized source path.")
-				(i32.lt end 1i32)
-				(then (return (call report_source (borrow-shared path) 27u32 0i32 0i32 (borrow-shared invalid_source)
-					(borrow-shared source) human))))
-			(return (call prepare_bundled_input (borrow-shared path) (borrow-shared canonical)
-				(borrow-shared destination) (borrow-shared staged) (borrow-shared probe_options)
-				(borrow-shared probe_libraries)
-				context protection target_index check_only (borrow-shared source)
-				rows (borrow-shared (array.range virtual 0i32 end)) human))))
 )
