@@ -1124,6 +1124,16 @@ include subtree. It recognizes file-scope `struct` and `union` tags,
 including tags defined inside a record, and follows record typedefs across
 redeclarations. An unavailable definition is reported at the type selector.
 
+An object-like C string macro can supply an immutable byte view. Declare
+`(const _PATH_GROUP (:pragma (c_optional)) (shared-array u8))` in the
+`<grp.h>` bridge and select it with `(value _PATH_GROUP)` or a renamed
+selector. Clang initializes static backing bytes from the narrow string
+literal. The view ends at the first zero byte, so an empty C string gives
+an empty view. Aliases share the same backing storage, and reading or
+borrowing the view requires no runtime copy or allocation. If the target
+header or feature profile hides an optional macro, the diagnostic points
+to the original name in the selector.
+
 A bridge can use a type from a different C header in its private signatures.
 Write `(use c-header "<locale.h>" (only (type Locale)))` inside the
 bridge, then use `(shared-ref Locale)` for a borrow. The name keeps the
