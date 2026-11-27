@@ -13,12 +13,12 @@
 	(use wove-file "./paths.wove" (only join_file_path))
 	(use wove-file "./publication.wove" (only stage_file))
 	(use wove-file "../emit/c.wove" (only uses_runtime program_runtime))
-	(use wove-file "../emit/c_values.wove" (only is_borrowed_c_value))
+	(use wove-file "../emit/c_values.wove" (only is_borrowed_c_value is_c_integer_constant))
 	(use wove-file "../emit/text.wove" (only c_literal_text c_span))
 	(use wove-file "../emit/graph.wove" (only write_partitioned_graph (type GraphPlan)))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
 	(use wove-file "../emit/units.wove" (only plan_unit_assignments numbered_program_preamble
-		(value numbered_record_replay) (type UnitIndex)))
+		(value numbered_preamble_replay) (type UnitIndex)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
@@ -57,8 +57,8 @@
 	(let guard_open "#ifdef ")
 	(let guard_close "\n#error native name is already a macro before the audited includes\n#endif\n")
 
-	(fn write_borrowed_macro_guards
-		(:doc "Guard original C names against command-line macros that would bypass the header-object proof.")
+	(fn write_native_value_guards
+		(:doc "Keep preexisting macros from bypassing the proof of the selected header values.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
 			(output (mut-array u8)) (writing bool))
 		(returns u32)
@@ -69,8 +69,8 @@
 				(let row) (borrow-shared statements)
 				(body
 					(if
-						(:doc "Reject an existing macro of a borrowed name before any selected header can define it.")
-						(call is_borrowed_c_value row)
+						(:doc "Reject a preexisting macro before a selected header can establish its constant or object.")
+						(bool.or (call is_borrowed_c_value row) (call is_c_integer_constant row))
 						(then
 							(let name (array.load nodes (struct.get row target)))
 							(set width (call c_literal_text (borrow-shared guard_open) (borrow-mut output) width writing))
@@ -82,30 +82,46 @@
 	(let witness_type "extern __typeof__(")
 	(let witness_name ") (")
 	(let witness_end ");\n")
+	(let constant_witness "typedef char wove_native_constant_probe[1+0*(")
+	(let constant_witness_end ")];\n")
 
-	(fn write_borrowed_witnesses
-		(:doc "Redeclare each used operand as the same external object before the implicit runtime header.")
+	(fn write_native_value_witnesses
+		(:doc "Observe the exact expansions of borrowed objects and integer constants in each include context.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
 			(output (mut-array u8)) (writing bool))
 		(returns u32)
 		(body
-			(let-mut width (call c_literal_text (borrow-shared names_begin) (borrow-mut output) 0u32 writing))
+			(let-mut width 0u32)
 			(for
-				(:doc "Require a real declaration even if the source spelling aliases another C name.")
+				(:doc "Use defining rows so each selected alias observes its original C spelling.")
 				(let row) (borrow-shared statements)
 				(body
+					(let borrowed (call is_borrowed_c_value row))
 					(if
-						(:doc "Use the same checked native name as the emitted value expression.")
-						(call is_borrowed_c_value row)
+						(:doc "Only replayed native operands need a witness in the Clang input.")
+						(bool.or borrowed (call is_c_integer_constant row))
 						(then
+							(if
+								(:doc "Omit the witness section entirely when the plan has only native types.")
+								(u32.eqz width)
+								(then (set width (call c_literal_text (borrow-shared names_begin) (borrow-mut output) width writing))))
 							(let name (array.load nodes (struct.get row target)))
 							(let start (struct.get name start))
 							(let end (struct.get name end))
-							(set width (call c_literal_text (borrow-shared witness_type) (borrow-mut output) width writing))
-							(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
-							(set width (call c_literal_text (borrow-shared witness_name) (borrow-mut output) width writing))
-							(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
-							(set width (call c_literal_text (borrow-shared witness_end) (borrow-mut output) width writing))))))
+							(if
+								(:doc "Redeclare the original external object or require a constant integer array bound.")
+								borrowed
+								(then
+									(set width (call c_literal_text (borrow-shared witness_type) (borrow-mut output) width writing))
+									(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
+									(set width (call c_literal_text (borrow-shared witness_name) (borrow-mut output) width writing))
+									(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
+									(set width (call c_literal_text (borrow-shared witness_end) (borrow-mut output) width writing)))
+								(else
+									(set width (call c_literal_text (borrow-shared constant_witness) (borrow-mut output) width writing))
+									(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
+									(set width (call c_literal_text (borrow-shared constant_witness_end) (borrow-mut output) width writing))))))))
+			(if (u32.eqz width) (then (return width)))
 			(return (call c_literal_text (borrow-shared names_end) (borrow-mut output) width writing))))
 
 	(fn stage_checked_units
@@ -125,7 +141,7 @@
 				(bool.or (i32.le count 1i32) (i32.eq count 2147483647i32))
 				(then (return 0i32)))
 			(let mode (call numbered_program_preamble (borrow-shared bindings) (borrow-shared functions)
-				(borrow-shared parameters) (borrow-shared records)))
+				(borrow-shared parameters) (borrow-shared records) (borrow-shared trees) (borrow-shared statements)))
 			(if
 				(:doc "Broader native ABIs keep using serial C without starting an include audit.")
 				(u8.eqz mode)
@@ -153,29 +169,34 @@
 					(let-mut guard_width 0u32)
 					(let-mut names_width 0u32)
 					(let-mut implicit 0u8)
+					(let borrowed (u8.eq mode 2u8))
 					(if
-						(:doc "Borrowed replay needs a checked original-name guard for each live C pointer.")
-						(u8.eq mode 2u8)
+						(:doc "Measure any checked operands whose original expansions must match between units.")
+						(u8.lt 1u8 mode)
 						(then
-							(set guard_width (call write_borrowed_macro_guards (borrow-shared arena)
+							(set guard_width (call write_native_value_guards (borrow-shared arena)
+								(borrow-shared nodes) (borrow-shared statements) (borrow-mut empty) (bool false)))
+							(set names_width (call write_native_value_witnesses (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements) (borrow-mut empty) (bool false)))
 							(if
-								(:doc "An empty or oversized guard cannot certify a borrowed value.")
-								(bool.or (u32.eqz guard_width) (u32.gt guard_width 2147483647u32))
-								(then (return 0i32)))
+								(:doc "Both measured fragments must fit, and a borrowed value must have a witness.")
+								(bool.or (u32.gt names_width 2147483647u32)
+									(bool.or (u32.gt guard_width 2147483647u32) (bool.and borrowed (u32.eqz names_width))))
+								(then (return 0i32)))))
+					(if
+						(:doc "A borrowed proof places the compiler's implicit runtime header at both actual depths.")
+						borrowed
+						(then
 							(if
-								(:doc "This borrowed proof places the compiler's implicit runtime header at both actual depths.")
+								(:doc "The borrowed proof requires an implicit runtime header.")
 								(bool.or (struct.get header_plan runtime)
 									(bool.not (call uses_runtime (borrow-shared expressions)
 										(borrow-shared parameters) (borrow-shared records))))
 								(then (return 0i32)))
-							(set names_width (call write_borrowed_witnesses (borrow-shared arena)
-								(borrow-shared nodes) (borrow-shared statements) (borrow-mut empty) (bool false)))
-							(if (u32.gt names_width 2147483647u32) (then (return 0i32)))
 							(set implicit implicit_runtime)))
 					(if
-						(:doc "Check the same implicit header that supplies the native view and Wove signatures in the preamble.")
-						(u8.eq mode numbered_record_replay)
+						(:doc "Check the preamble header that supplies the native views and Wove signatures.")
+						(u8.eq mode numbered_preamble_replay)
 						(then
 							(let runtime (call program_runtime (borrow-shared arena) (borrow-shared nodes)
 								(borrow-shared functions) (borrow-shared parameters) (borrow-shared statements)
@@ -191,9 +212,9 @@
 						(:doc "Materialize the measured prelude without changing the emitted include prefix.")
 						(u32.gtz guard_width)
 						(then
-							(let size (call write_borrowed_macro_guards (borrow-shared arena)
+							(let size (call write_native_value_guards (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements) (borrow-mut guards) (bool true)))
-							(let witnesses (call write_borrowed_witnesses (borrow-shared arena)
+							(let witnesses (call write_native_value_witnesses (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements) (borrow-mut names) (bool true)))
 							(if
 								(:doc "Both private probe fragments must match their measured sizes.")
@@ -206,7 +227,8 @@
 						(:doc "Keep the ordinary build and its diagnostics when the native context cannot be certified.")
 						(bool.or (i32.eqz (array.len options))
 							(bool.not (call certify_numbered_includes (borrow-shared program) (borrow-shared options)
-								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards) (borrow-shared names) implicit)))
+								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards) (borrow-shared names)
+								implicit borrowed)))
 						(then (return 0i32)))))
 			(let-mut ends (array.alloc UnitIndex (i32.inc count)))
 			(let measured (call write_partitioned_graph (borrow-shared arena) (borrow-shared files) (borrow-shared bindings)
