@@ -18,3 +18,6 @@ make stage-1
 The generated C includes `wove_runtime.h` and links with
 `runtime/wove_runtime.c`. `make test` runs the seed cases in the
 [case manifest](../tests/stage-1/cases.tsv).
+
+The [bootstrap guard inventory](../stage-2/driver/bootstrap/README.md) records
+which Stage 2 operations are shared and which depend on the selected driver.
