@@ -7,7 +7,7 @@
 	original or converted pointers in formal order. Snapshot the native result
 	while the scratch is live, copy back mutable views, then release the scratch.`)
 
-	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_array_mode is_c_extent_mode is_c_vector_mode c_null_argument_kind is_c_storage_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_owner_marker_flag_mode) (value c_static_string_mode) (value c_adapted_callback_argument)))
+	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_array_mode is_c_extent_mode is_c_vector_mode c_null_argument_kind is_c_storage_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_owner_marker_flag_mode) (value c_static_string_mode) (value c_adapted_callback_argument) (value c_nullable_native_reference_mode)))
 	(use wove-file "../source/types.wove" (only void_type))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
@@ -23,7 +23,7 @@
 	(use wove-file "./text.wove" (only c_span c_byte c_literal_text c_text_fragment write_callback_adapter_name get_name storage_name_role write_temporary_name write_static_bytes (type CNameParent) (type CNameSpelling)))
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./runtime.wove" (only write_runtime_site write_c_number write_site_number write_slice_items))
-	(use wove-file "./c_formals.wove" (only fixed_c_needs_prototype native_owner_needs_prototype native_long_double_needs_prototype native_static_strings native_sync_callbacks write_fixed_c_argument))
+	(use wove-file "./c_formals.wove" (only native_uses_argument_mode fixed_c_needs_prototype native_owner_needs_prototype native_long_double_needs_prototype native_static_strings native_sync_callbacks write_fixed_c_argument))
 	(use wove-file "./c_record_out.wove" (only open_record_out close_record_out))
 	(use wove-file "./c_record_in.wove" (only open_record_input close_record_input))
 	(use wove-file "./c_snapshots.wove" (only open_c_snapshot close_c_snapshot))
@@ -344,6 +344,30 @@
 			(return (call c_literal_text (borrow-shared close_variadic_target)
 				(borrow-mut output) target writing))))
 
+	(fn write_c_null_argument
+		(:doc "Use the declared C pointer for an absent typed loan or C string.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(parameter ScalarParameter) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let mode (struct.get parameter c_mode))
+			(if
+				(:doc "A typed loan preserves its exact pointee and const qualification even when absent.")
+				(u8.eq mode c_nullable_native_reference_mode)
+				(then
+					(let open (call c_byte (borrow-mut output) offset 40u8 writing))
+					(let type (call write_value_type (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) (struct.get parameter type)
+						(borrow-mut output) open name_prefix writing))
+					(let close (call c_byte (borrow-mut output) type 41u8 writing))
+					(return (call c_byte (borrow-mut output) close 48u8 writing))))
+			(if
+				(:doc "C-string contracts keep their existing shared char pointer.")
+				(call is_c_string_mode mode)
+				(then (return (call c_literal_text (borrow-shared null_string_pointer)
+					(borrow-mut output) offset writing))))
+			(return (call c_literal_text (borrow-shared null_pointer) (borrow-mut output) offset writing))))
+
 	(let record_out_address "&wvrt_record_out")
 	(let discarded_macro_operand "(void)(")
 
@@ -369,7 +393,9 @@
 			(let open (i32.eq tail c_open_variadic_tail))
 			(let record_out (i32.not-ltz (struct.get callee return_scratch)))
 			(let record_input (call is_record_input callee))
-			(let checked (bool.or (bool.or (bool.or (bool.or record_out record_input) (struct.get callee c_void_pointer))
+			(let typed_nullable (call native_uses_argument_mode (borrow-shared parameters) callee c_nullable_native_reference_mode))
+			(let checked (bool.or (bool.or (bool.or (bool.or record_out record_input)
+						(bool.or typed_nullable (struct.get callee c_void_pointer)))
 					(bool.or (bool.or (struct.get callee c_handle_out) (i32.gtz tail))
 						(bool.or (call native_static_strings (borrow-shared parameters) callee)
 							(call native_sync_callbacks (borrow-shared parameters) callee))))
@@ -536,14 +562,8 @@
 													(if
 														(:doc "A checked null contributes a pointer constant and has no evaluated temporary.")
 												(u32.eq (struct.get actual kind) (call c_null_argument_kind))
-												(then
-													(if
-														(:doc "Use the exact shared C-string pointer type for a nullable string.")
-														(call is_c_string_mode mode)
-														(then (set cursor (call c_literal_text (borrow-shared null_string_pointer)
-															(borrow-mut output) cursor writing)))
-														(else (set cursor (call c_literal_text (borrow-shared null_pointer)
-															(borrow-mut output) cursor writing)))))
+												(then (set cursor (call write_c_null_argument (borrow-shared source) (borrow-shared nodes)
+													(borrow-shared records) param (borrow-mut output) cursor name_prefix writing)))
 														(else
 															(if
 																(:doc "Storage owners lend the original native object behind the captured wrapper.")

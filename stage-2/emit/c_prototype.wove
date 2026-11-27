@@ -18,16 +18,16 @@
 	(use wove-file "./c_formals.wove" (only write_fixed_c_type native_long_double_needs_prototype))
 	(use wove-file "../c/arguments.wove" (only (value c_static_string_mode) is_c_string_mode is_c_bytes_mode is_c_null_mode is_c_array_mode is_c_vector_mode
 			is_c_storage_mode c_storage_shared_mode is_c_handle_init_mode (value c_void_pointer_mode) (value c_shared_handle_slot_mode)
-			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode)))
+			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_native_reference_mode)))
 	(use wove-file "../scalar/function_rows.wove" (only is_record_out_status is_record_input_hidden (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./c_record_snapshots.wove" (only write_record_snapshot_native_type))
-	(use wove-file "../scalar/records.wove" (only is_optional_record_borrow optional_record_borrow_reference is_mutable_place_reference (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only is_optional_record_borrow optional_record_borrow_reference is_mutable_place_reference place_reference_target (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./c_extents.wove" (only write_c_array_pointer_type))
 	(use wove-file "./c_vectors.wove" (only (value vector_type)))
 	(use wove-file "./c_storage.wove" (only write_storage_pointer_type))
 	(use wove-file "./c_arguments.wove" (only c_symbol_text))
-	(use wove-file "./c_formals.wove" (only native_static_strings native_sync_callbacks))
+	(use wove-file "./c_formals.wove" (only native_uses_argument_mode native_static_strings native_sync_callbacks))
 	(use wove-file "./text.wove" (only c_byte c_literal_text))
 
 	(let check_open "_Static_assert(_Generic(&(")
@@ -45,6 +45,7 @@
 	(let void_pointer_check_open "):1,default:0),\"Wove C void pointer prototype does not match its declared signature at file ")
 	(let callback_check_open "):1,default:0),\"Wove C synchronous callback prototype does not match its declared signature at file ")
 	(let static_string_check_open "):1,default:0),\"Wove C retained-string prototype does not match its declared signature at file ")
+	(let nullable_reference_check_open "):1,default:0),\"Wove C nullable-reference prototype does not match its declared signature at file ")
 	(let handle_check_bytes " bytes [")
 	(let handle_check_close ")\");\n")
 	(let string_pointer "const char*")
@@ -148,17 +149,23 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 
 	(fn close_c_fixed_prototype
 		(:doc "Report a header signature mismatch with the defining Wove declaration's file and byte range.")
-		(params (site SourceNode) (function ScalarFunction) (long_double bool) (retained_strings bool) (callback bool)
+		(params (site SourceNode) (function ScalarFunction) (long_double bool) (retained_strings bool) (callback bool) (nullable_reference bool)
 			(output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
 			(let base (struct.get function source_base))
 			(let-mut open offset)
 			(if
-				(:doc "The selected header must use the declared callback pointer type.")
-				callback
-				(then (set open (call c_literal_text (borrow-shared callback_check_open)
-					(borrow-mut output) offset writing)))
+				(:doc "Typed nullable references and callbacks require exact pointer qualification and type.")
+				(bool.or nullable_reference callback)
+				(then
+					(if
+						(:doc "Report the nullable loan contract when it opts this declaration into checking.")
+						nullable_reference
+						(then (set open (call c_literal_text (borrow-shared nullable_reference_check_open)
+							(borrow-mut output) offset writing)))
+						(else (set open (call c_literal_text (borrow-shared callback_check_open)
+							(borrow-mut output) offset writing)))))
 				(else
 					(if
 						(:doc "Identify a void pointer qualifier mismatch with its own bridge contract.")
@@ -324,6 +331,38 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 				(then (set cursor (call c_byte (borrow-mut output) cursor 44u8 writing))))
 			(return cursor)))
 
+	(let nullable_pointee_open "_Static_assert(sizeof(")
+	(let nullable_pointee_close ") > 0,\"Wove C nullable reference requires a complete pointee\");\n")
+
+	(fn write_nullable_pointee_checks
+		(:doc "Require actual complete native pointees, including records with no projected fields.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(parameters (shared-array ScalarParameter)) (function ScalarFunction) (output (mut-array u8))
+			(offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut index (struct.get function params))
+			(let end (i32.add index (struct.get function arity)))
+			(let-mut cursor offset)
+			(while
+				(:doc "Check the actual pointee for each typed nullable formal even when all calls pass null.")
+				(i32.lt index end)
+				(body
+					(let parameter (array.load parameters index))
+					(if
+						(:doc "Clang diagnoses an incomplete C type when applied to sizeof.")
+						(u8.eq (struct.get parameter c_mode) c_nullable_native_reference_mode)
+						(then
+							(let open (call c_literal_text (borrow-shared nullable_pointee_open)
+								(borrow-mut output) cursor writing))
+							(let pointee (call place_reference_target (borrow-shared records) (struct.get parameter type)))
+							(let type (call write_value_type (borrow-shared source) (borrow-shared nodes)
+								(borrow-shared records) pointee (borrow-mut output) open name_prefix writing))
+							(set cursor (call c_literal_text (borrow-shared nullable_pointee_close)
+								(borrow-mut output) type writing))))
+					(set index (i32.inc index))))
+			(return cursor)))
+
 	(fn write_c_prototype_check
 		(:doc `Require the header to match the complete fixed signature or the variadic prefix and ellipsis.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
@@ -332,7 +371,15 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 		(returns u32)
 		(body
 			(let name (array.load nodes (struct.get function name)))
-			(let-mut cursor (call c_literal_text (borrow-shared check_open) (borrow-mut output) offset writing))
+			(let typed_nullable (call native_uses_argument_mode (borrow-shared parameters) function c_nullable_native_reference_mode))
+			(let-mut cursor offset)
+			(if
+				(:doc "Only typed nullable references require these completeness checks.")
+				typed_nullable
+				(then (set cursor (call write_nullable_pointee_checks (borrow-shared source) (borrow-shared nodes)
+					(borrow-shared records) (borrow-shared parameters) function
+					(borrow-mut output) cursor name_prefix writing))))
+			(set cursor (call c_literal_text (borrow-shared check_open) (borrow-mut output) cursor writing))
 			(set cursor (call c_symbol_text (borrow-shared source) name
 				(borrow-mut output) cursor writing))
 			(set cursor (call c_literal_text (borrow-shared after_name) (borrow-mut output) cursor writing))
@@ -389,6 +436,6 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 					function (call native_long_double_needs_prototype (borrow-shared records)
 						(borrow-shared parameters) function)
 					(call native_static_strings (borrow-shared parameters) function)
-					(call native_sync_callbacks (borrow-shared parameters) function)
+					(call native_sync_callbacks (borrow-shared parameters) function) typed_nullable
 					(borrow-mut output) cursor writing))))
 			(return (call c_literal_text (borrow-shared variadic_check_close) (borrow-mut output) cursor writing)))))
