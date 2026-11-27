@@ -1007,7 +1007,9 @@ function or object-like macro is available with the target header and build
 settings. Use `(const (:pragma (c_optional)) FEATURE_FLAG i32)` for an
 integer constant, or `(let (:pragma (c_optional) (c_macro)) LIMIT f32)`
 for a read-only scalar expression. The selected value keeps its declared
-Wove type and reads the expression from the live C header.
+Wove type and reads the expression from the live C header. Optional macro
+probes use the selected header, its declared native header prerequisites,
+and the effective build flags.
 
 A bridge can use a type from a different C header in its private signatures.
 Write `(use c-header "<locale.h>" (only (type Locale)))` inside the
