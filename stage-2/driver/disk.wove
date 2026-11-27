@@ -9,9 +9,8 @@
 
 	(use wove-file "./bundled.wove" (only measure_bundled_sources write_bundled_sources))
 	(use wove-file "./diagnostics.wove" (only report_source (value invalid_source) (value unreadable_file)))
-	(use wove-file "./disk_files.wove" (only load_disk_edge store_disk_source duplicate_disk_failure disk_space
-		(type DiskFile) (type DiskSpace)))
-	(use wove-file "./files.wove" (only (type FileStamp)))
+	(use wove-file "./disk_files.wove" (only load_disk_edge duplicate_disk_failure disk_space (type DiskFile) (type DiskSpace)))
+	(use wove-file "./files.wove" (only invalid_file_stamp (type FileStamp)))
 	(use wove-file "./protection.wove" (only (type BuildProtection)))
 	(use wove-file "./check_reports.wove" (only report_capacity copy_graph_reports remember_graph_report))
 	(use wove-file "./graph_storage.wove" (only copy_disk_edges copy_graph_modules copy_graph_imports))
@@ -70,8 +69,7 @@
 			(protection BuildProtection) (target_index i32) (check_only bool) (partition i32) (arena (shared-array u8)) (staged (shared-array DiskFile)) (edges (shared-array DiskEdge))
 			(used DiskSpace) (needed DiskSpace) (progress (mut-array GraphProgress)) (modules (shared-array GraphModule))
 			(bindings (mut-array GraphBinding)) (uses (mut-array GraphUse)) (selectors (mut-array GraphSelector))
-			(reported (shared-array GraphResult)) (report_count i32) (human bool)
-			(catalog (shared-array u8)) (inventory (shared-array SuppliedFile))) (returns i32)
+			(reported (shared-array GraphResult)) (report_count i32) (human bool)) (returns i32)
 		(body
 			(let-mut bytes (array.alloc u8 (call grow_capacity (array.len arena) (struct.get needed bytes))))
 			(let-mut files (array.alloc DiskFile (call grow_capacity (array.len staged) (struct.get needed files))))
@@ -94,7 +92,7 @@
 				(call disk_space copied (struct.get used files) (struct.get used edges))
 				(borrow-mut progress)
 				(borrow-mut next_modules) (borrow-mut bindings) (borrow-mut uses)
-				(borrow-mut selectors) (borrow-mut next_reports) report_count human (borrow-shared catalog) (borrow-shared inventory)))))
+				(borrow-mut selectors) (borrow-mut next_reports) report_count human))))
 
 	(fn grow_tables
 		(:doc "Double the import tables while retaining the pending graph operation and disk snapshots.")
@@ -104,8 +102,7 @@
 			(arena (mut-array u8)) (staged (mut-array DiskFile)) (edges (mut-array DiskEdge)) (used DiskSpace)
 			(progress (mut-array GraphProgress)) (modules (mut-array GraphModule))
 			(bindings (shared-array GraphBinding)) (uses (shared-array GraphUse)) (selectors (shared-array GraphSelector))
-			(reported (shared-array GraphResult)) (report_count i32) (human bool)
-			(catalog (shared-array u8)) (inventory (shared-array SuppliedFile))) (returns i32)
+			(reported (shared-array GraphResult)) (report_count i32) (human bool)) (returns i32)
 		(body
 			(let capacity (array.len bindings))
 			(let next (i32.add capacity capacity))
@@ -125,7 +122,7 @@
 				(borrow-mut arena) (borrow-mut staged)
 				(borrow-mut edges) used (borrow-mut progress) (borrow-mut modules)
 				(borrow-mut next_bindings) (borrow-mut next_uses) (borrow-mut next_selectors)
-				(borrow-mut next_reports) report_count human (borrow-shared catalog) (borrow-shared inventory)))))
+				(borrow-mut next_reports) report_count human))))
 
 	(fn resolve_loaded_edges
 		(:doc `Reborrow the arena as shared before exposing its initialized byte prefix to the resolver.`)
@@ -200,8 +197,7 @@
 			(arena (mut-array u8)) (staged (mut-array DiskFile)) (edges (mut-array DiskEdge)) (initial DiskSpace)
 			(progress (mut-array GraphProgress)) (modules (mut-array GraphModule))
 			(bindings (mut-array GraphBinding)) (uses (mut-array GraphUse)) (selectors (mut-array GraphSelector))
-			(reported (mut-array GraphResult)) (initial_reports i32) (human bool)
-			(catalog (shared-array u8)) (inventory (shared-array SuppliedFile)))
+			(reported (mut-array GraphResult)) (initial_reports i32) (human bool))
 		(returns i32)
 		(body
 			(let-mut length (struct.get initial bytes))
@@ -257,12 +253,12 @@
 											(set report_count next)))))
 							(continue)))
 					(if
-						(:doc "Supply the next Wove edge or bundled C provider requested by the resolver.")
+						(:doc "Only the first unresolved active Wove edge may touch disk.")
 						(i32.lt -1i32 (struct.get resolved path_start))
 						(then
 							(let used (call disk_space length file_count edge_count))
 							(let read (call load_disk_edge used resolved protection (borrow-mut arena)
-								(borrow-mut staged) (borrow-mut edges) human (borrow-shared catalog) (borrow-shared inventory)))
+								(borrow-mut staged) (borrow-mut edges) human))
 							(let status (struct.get read exit_status))
 							(if (i32.gtz status) (then (return status)))
 							(let next (struct.get read space))
@@ -295,7 +291,7 @@
 									(borrow-shared staged) (borrow-shared edges) used next
 									(borrow-mut progress) (borrow-shared modules) (borrow-mut bindings)
 									(borrow-mut uses) (borrow-mut selectors)
-									(borrow-shared reported) report_count human (borrow-shared catalog) (borrow-shared inventory)))))
+									(borrow-shared reported) report_count human))))
 							(set length (struct.get next bytes))
 							(set file_count (struct.get next files))
 							(set edge_count (struct.get next edges)))
@@ -311,10 +307,26 @@
 									(borrow-mut edges) (call disk_space length file_count edge_count)
 									(borrow-mut progress) (borrow-mut modules) (borrow-shared bindings)
 									(borrow-shared uses) (borrow-shared selectors)
-									(borrow-shared reported) report_count human (borrow-shared catalog) (borrow-shared inventory))))
+									(borrow-shared reported) report_count human)))
 								(else (return (call report_graph_source (borrow-shared path)
 									(borrow-shared arena) (borrow-shared files) file error
 									(struct.get resolved start) (struct.get resolved end) human))))))))))
+
+	(fn seed_disk_rows
+		(:doc `Store the entry's real identity and mark bundled rows as independent of the filesystem.`)
+		(params (bundled (shared-array SuppliedFile)) (entry FileStamp) (staged (mut-array DiskFile))) (returns void)
+		(body
+			(array.store staged 0i32
+				(struct.new DiskFile (source (array.load bundled 0i32)) (stamp entry)))
+			(let-mut index 1i32)
+			(while
+				(:doc "Bundle sources are already present in the same arena.")
+				(i32.lt index (array.len bundled))
+				(body
+					(array.store staged index
+						(struct.new DiskFile (source (array.load bundled index))
+							(stamp (call invalid_file_stamp))))
+					(set index (i32.inc index))))))
 
 	(fn compile_disk_graph
 		(:doc `Supply one explicit native entry, then open only its selected transitive Wove imports.`)
@@ -323,24 +335,19 @@
 			(context SelectionContext) (protection BuildProtection) (target_index i32) (check_only bool) (partition i32)
 			(canonical (shared-array u8)) (source (shared-array u8)) (stamp FileStamp) (human bool)) (returns i32)
 		(body
-			(let entry_width (array.len canonical))
-			(let entry_size (array.len source))
-			(let empty (array.alloc u8 0i32))
-			(let size (call measure_bundled_sources (borrow-shared empty) (borrow-shared empty)))
+			(let size (call measure_bundled_sources (borrow-shared canonical) (borrow-shared source)))
 			(let total (struct.get size width))
 			(if
-				(:doc "Keep both the source arena and the embedded catalog within signed offsets.")
-				(bool.or (i32.ltz total) (i32.lt (i32.sub 2147483647i32 entry_width) entry_size))
-				(then (return (call report_source (borrow-shared path) 16u32 0i32 0i32
-					(borrow-shared invalid_source) (borrow-shared source) human))))
-			(let-mut catalog (array.alloc u8 total))
-			(let-mut inventory (array.alloc SuppliedFile (struct.get size count)))
-			(let packed (call write_bundled_sources (borrow-shared empty) (borrow-shared empty)
-				(borrow-mut catalog) (borrow-mut inventory)))
-			(let-mut arena (array.alloc u8 (call grow_capacity 4096i32 (i32.add entry_width entry_size))))
-			(let-mut staged (array.alloc DiskFile 8i32))
-			(let root (call store_disk_source (borrow-shared canonical) (borrow-shared source) stamp
-				(bool false) (call disk_space 0i32 0i32 0i32) (borrow-mut arena) (borrow-mut staged)))
+				(:doc "Reject an arena whose offsets exceed the source ABI.")
+				(i32.ltz total)
+				(then (return (call report_source (borrow-shared path) 16u32 0i32 0i32 (borrow-shared invalid_source) (borrow-shared source) human))))
+			(let count (struct.get size count))
+			(let-mut arena (array.alloc u8 (call grow_capacity 4096i32 total)))
+			(let-mut bundled (array.alloc SuppliedFile count))
+			(let written (call write_bundled_sources (borrow-shared canonical) (borrow-shared source)
+				(borrow-mut arena) (borrow-mut bundled)))
+			(let-mut staged (array.alloc DiskFile (call grow_capacity 8i32 count)))
+			(call seed_disk_rows (borrow-shared bundled) stamp (borrow-mut staged))
 			(let-mut edges (array.alloc DiskEdge 8i32))
 			(let-mut progress (array.alloc GraphProgress 1i32))
 			(let-mut modules (array.alloc GraphModule (array.len staged)))
@@ -354,8 +361,8 @@
 				(borrow-shared probe_libraries)
 				context protection target_index check_only partition
 				(borrow-mut arena) (borrow-mut staged) (borrow-mut edges)
-				(struct.get root space)
+				(call disk_space written count 0i32)
 				(borrow-mut progress) (borrow-mut modules) (borrow-mut bindings)
 				(borrow-mut uses) (borrow-mut selectors)
-				(borrow-mut reported) 0i32 human (borrow-shared (array.range catalog 0i32 packed)) (borrow-shared inventory)))))
+				(borrow-mut reported) 0i32 human))))
 )
