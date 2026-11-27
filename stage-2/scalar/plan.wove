@@ -66,7 +66,7 @@
 	(use wove-file "./optional.wove" (only read_optional_result plan_optional_constructor finish_optional_some))
 	(use wove-file "./owners.wove" (only is_local_owner is_lexical_owner is_owned_parameter is_replaceable_owner is_worker_owner is_nullable_worker_owner owned_array_take_kind owned_field_loan_kind owned_aggregate_take_kind native_handle_borrow_kind owner_is_null_kind native_handle_consume_kind (value native_handle_slot_borrow_kind) (value checked_foreign_handle_kind)
 			native_storage_init_borrow_kind native_storage_mut_borrow_kind native_handle_init_borrow_kind
-			is_optional_owner optional_owner_type optional_owner_payload optional_unwrap_kind (value worker_receipt_move_kind) (value worker_permit_move_kind)))
+			is_optional_owner optional_byte_owner_type optional_owner_type optional_owner_payload optional_unwrap_kind (value worker_receipt_move_kind) (value worker_permit_move_kind)))
 	(use wove-file "./native_owner_types.wove" (only is_native_owner native_owner_type native_owner_declaration))
 	(use wove-file "./fields.wove" (only read_field_projection plan_field_read check_owned_record_path))
 	(use wove-file "./loans.wove" (only (value inline_owner_argument_guard) is_c_inline_projection is_buffered_field_projection buffered_field_projection has_conflicting_loan has_scoped_array_loan indexed_owner_base expression_row borrowed_call_row
@@ -77,7 +77,7 @@
 	(use wove-file "./constants.wove" (only constant_operation register_standalone_constants fold_i32 constant_check))
 	(use wove-file "./fixed.wove" (only plan_fixed_slice_loan plan_fixed_initializer seed_fixed_initializer finish_heap_fixed_access finish_owned_fixed_access finish_fixed_access))
 	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding is_iteration_binding is_writable_local (type ScalarStatement)
-			(value c_writable_binding) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
+			(value c_writable_binding) (value c_value_expression) (value c_value_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment) (value owner_assignment) (value owner_field_assignment) (value case_payload_binding)
 			(value next_path) (value break_path) (value continue_path) (value break_statement) (value for_statement) (value for_source_owner) (value for_mut_binding) (value for_element_assignment)))
 	(use wove-file "./conditional.wove" (only plan_conditional finish_conditional_value conditional_transfer_reaches is_pending_value
@@ -1297,8 +1297,9 @@
 						(bool.and (u32.not-eq actual 34u32) (call is_c_value_binding (struct.get declaration kind)))
 						(then
 							(if
-								(:doc "Read the current global vector into a fresh local owner before using its rows.")
-								(u32.eq actual (call byte_rows_owner_type))
+								(:doc "Read the current native string or vector into a fresh local owner.")
+								(bool.or (u32.eq actual (call byte_rows_owner_type))
+									(u32.eq actual (call optional_byte_owner_type)))
 								(then
 									(if
 										(:doc "A borrowed C global can only produce an owning initializer.")
@@ -1306,7 +1307,7 @@
 										(then (return (call entry_at node -1i32 24u32))))
 									(let base (struct.get caller source_base))
 									(array.store expressions index
-										(struct.new ScalarExpression (kind c_vector_snapshot_expression) (type actual)
+										(struct.new ScalarExpression (kind c_value_snapshot_expression) (type actual)
 											(target (struct.get caller file)) (first -1i32)
 											(start (i32.sub (struct.get node start) base))
 											(end (i32.sub (struct.get node end) base))
@@ -1934,7 +1935,7 @@
 			(return (call entry_at node index 0u32))))
 
 	(fn plan_static_c_string
-		(:doc "Check a retained argument as a direct string literal and record its original file and span.")
+		(:doc "Check a retained C literal and record its original file and span.")
 		(params (source (shared-array u8)) (argument SourceNode) (index i32) (caller ScalarFunction)
 			(expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
@@ -1956,7 +1957,7 @@
 					(end (struct.get decoded end)) (error (struct.get decoded error)) (related -1i32)))))
 			(let-mut byte_index 0i32)
 			(while
-				(:doc "An embedded NUL would truncate the registered text.")
+				(:doc "An embedded NUL would truncate the retained text.")
 				(i32.lt byte_index (struct.get decoded written))
 				(body
 					(if
@@ -5777,8 +5778,9 @@
 								(then (set emitted_kind for_element_assignment)))
 							(set expected (struct.get declaration type))
 							(if
-								(:doc "A local owner stays in its original cleanup chain across assignments.")
-								(call is_replaceable_owner (borrow-shared records) expected)
+								(:doc "A local owner stays in its cleanup chain. A C lvalue stores a native value.")
+								(bool.and (u32.not-eq emitted_kind c_value_assignment)
+									(call is_replaceable_owner (borrow-shared records) expected))
 								(then (set emitted_kind owner_assignment)))
 							(set target (struct.get declaration target))))))
 			(if
@@ -5822,6 +5824,22 @@
 				(:doc "Resultless stores and receipt appends have their own statement roots.")
 				(bool.or (u32.eq kind 40u32) (u32.eq kind worker_push_kind))
 				(then (set expected 40u32)))
+			(if
+				(:doc "A writable C string lvalue can retain only checked literal storage from the executable.")
+				(bool.and (u32.eq emitted_kind c_value_assignment)
+					(u32.eq expected (call optional_byte_owner_type)))
+				(then
+					(let checked (call plan_static_c_string (borrow-shared source) (array.load nodes value)
+						value caller (borrow-mut expressions)))
+					(if
+						(:doc "Keep an invalid replacement at the literal or ephemeral operand.")
+						(u32.gtz (struct.get checked error))
+						(then (return (call expression_error caller (borrow-shared nodes) checked))))
+					(array.store statements index
+						(struct.new ScalarStatement (kind emitted_kind) (target target) (value value)
+							(type 34u32) (first first) (previous_owner previous_owner)
+							(falls_through (bool true)) (move_site -1i32) (paths next_path) (previous_loan previous_loan)))
+					(return (call body_success site_count))))
 			(let checked (call plan_value (borrow-shared source) (borrow-shared nodes)
 				caller value expected index (borrow-shared functions)
 				(borrow-shared parameters) (borrow-shared bindings) (borrow-shared records) (borrow-mut statements)

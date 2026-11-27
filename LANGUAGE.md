@@ -1160,6 +1160,27 @@ C zero-initializes the omitted native members. Pass `shared-ref` or
 Bridge `const` exposes an integer constant, `let` reads a C value, and
 `let-mut` also accepts a `set` on the imported C lvalue.
 
+A writable native `char *` lvalue can opt in to retaining writable literals.
+
+```wove
+(let-mut program_invocation_name
+    (:pragma (c_snapshot cstr) (c_static_mut_cstr))
+    (optional (owned-array u8)))
+```
+
+Read the selected name or one of its aliases into a local to copy the
+current NUL-terminated string. A null pointer produces an absent owner.
+Write with `(set program_invocation_name "tool")`. The replacement must be
+a direct literal without embedded NULs. A native build checks that the
+addressable C variable has type `char *`.
+
+Each assignment site has one writable static buffer in the executable.
+The literal initializes it once. Repeating the assignment installs the
+same address with its current contents, including edits made by C. Native
+code may retain that address for the life of the executable. Native code
+that edits the bytes must stay within the buffer and keep a NUL terminator.
+Concurrent native access to the lvalue or the bytes requires synchronization.
+
 A native record field written `(name (array char 255))` describes the
 header's exact inline plain C `char[255]` member. Use `array.len`,
 `array.load`, and `array.store` directly on `(struct.get record name)`.
