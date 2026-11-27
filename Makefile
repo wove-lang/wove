@@ -45,18 +45,10 @@ BYTE_MATCH_MODULE := stage-2/text/match.wove
 BOOLEAN_TEXT_MODULE := stage-2/text/boolean.wove
 VALUE_TEXT_MODULES := $(BYTE_TEXT_MODULE) stage-2/text/decimal.wove
 DECIMAL_WRITER := stage-2/text/decimal_write.wove
-SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
-SOURCE_MODULE_READER := stage-2/source/module.wove stage-2/source/target.wove stage-2/source/functions.wove stage-2/source/exports.wove
 SOURCE_TYPE_MODULE := stage-2/source/types.wove
-TEST_DISCOVERY_MODULE := stage-2/scalar/tests.wove
-SOURCE_CALLERS := stage-2/source/callers.wove
-SOURCE_EXPECTATIONS := stage-2/source/expectations.wove
-SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/owned.wove stage-2/source/imports.wove stage-2/source/paths.wove stage-2/source/c_headers.wove stage-2/source/c_markers.wove stage-2/source/c_names.wove stage-2/source/c_formals.wove stage-2/source/c_scope.wove stage-2/source/c_dependencies.wove stage-2/source/c_dependency_paths.wove stage-2/source/tree_copy.wove stage-2/source/c_arguments.wove stage-2/source/c_owners.wove stage-2/source/c_records.wove stage-2/source/c_record_out.wove stage-2/source/c_record_in.wove stage-2/source/c_snapshots.wove stage-2/source/c_record_snapshots.wove
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_STANDARD_MODULE := stage-2/c/standard.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
-C_EMITTER_SOURCES := $(BOOLEAN_TEXT_MODULE) $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,c/export_names.wove source/assets.wove source/array_growth.wove source/slice_options.wove source/numeric_ops.wove source/integer_ops.wove source/integer_bits.wove source/integer_compare.wove source/integer_checks.wove source/literals.wove source/extent.wove source/float_ops.wove source/enum_forms.wove source/generics.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/function_names.wove emit/workers.wove emit/conditional.wove emit/matches.wove emit/loops.wove emit/arrays.wove emit/array_growth.wove emit/slice_options.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/integer_checks.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_callbacks.wove emit/c_formals.wove emit/c_vectors.wove emit/c_prototype.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_record_out.wove emit/c_record_in.wove emit/c_record_snapshots.wove emit/c_storage.wove emit/owners.wove emit/owner_assignment.wove emit/owned_fields.wove emit/owned_aggregates.wove emit/owner_checks.wove emit/graph.wove emit/units.wove emit/library.wove emit/library_views.wove emit/headers.wove emit/names.wove emit/collisions.wove emit/records.wove emit/callable_types.wove emit/text.wove \
-	scalar/syntax.wove scalar/constants.wove scalar/constant_arithmetic.wove scalar/fixed.wove scalar/function_rows.wove scalar/function_refs.wove scalar/value_types.wove scalar/callable_types.wove scalar/callback_types.wove scalar/signatures.wove scalar/borrowed_results.wove scalar/slice_options.wove scalar/worker.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/fields.wove scalar/plan.wove scalar/conditional.wove scalar/integer_literals.wove scalar/matches.wove scalar/match_patterns.wove scalar/graph.wove scalar/c_record_snapshots.wove scalar/c_record_inputs.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/type_sites.wove scalar/specializations.wove scalar/generics/workspace.wove scalar/generics/clone.wove scalar/generics/key_order.wove scalar/generics/operations.wove scalar/generics/functions.wove scalar/owners.wove scalar/optional.wove scalar/recoverable_growth.wove scalar/native_owner_types.wove) $(DECIMAL_WRITER)
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
@@ -124,7 +116,6 @@ CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
 CLANG_QUERY_SOURCES := $(CLANG_SOURCES) $(C_STANDARD_MODULE) $(JSON_FRAME_MODULE) stage-2/c/probe.wove stage-2/clang/query.wove stage-2/clang/run.wove stage-2/clang/trace.wove
 AST_LIVE := $(STAGE2)/ast/live
 NUMBERED_HEADERS := $(STAGE2)/numbered-headers
-NUMBERED_HEADER_SOURCES := stage-2/driver/numbered_headers.wove stage-2/clang/replay.wove stage-2/driver/files.wove stage-2/driver/paths.wove
 AST_LIVE_SOURCES := $(sort $(CLANG_QUERY_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) \
 	$(PROCESS_LAUNCHER_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/llvm-libc/stdio.wove)
 AST_FIXTURES := tests/support/ast
@@ -132,9 +123,8 @@ AST_PROBE := $(STAGE2)/ast/probe
 SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
+SOURCE_PROBE_DEPS := $(SOURCE_PROBE_C).d
 BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
-GRAPH_COMPILER_SOURCES := $(BOOTSTRAP_WOVE_SOURCES) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
-	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(TEST_DISCOVERY_MODULE) $(C_EMITTER_SOURCES) stage-2/emit/tests.wove $(HASHING_SOURCES)
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
 SEED_EMIT := stage-1/emit.py
 RUNTIME := runtime/wove_runtime.c
@@ -466,17 +456,21 @@ $(STAGE1)/wovec.c: $(SOURCE_SCAN) $(SELF_HOST_SOURCE)/.ready stage-1/build.py $(
 		trap 'rm -f "$$c_output"' 0; WOVE_BUILD_DIR="$(abspath $(BUILD_DIR))" $(PYTHON) stage-1/build.py > "$$c_output"; \
 		mv "$$c_output" "$@")
 
-# Track the graph modules needed by the scanner fixture.
-$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(GRAPH_COMPILER_SOURCES) $(SEED)
-
-# Replace the generated C only after the seed succeeds.
-$(SOURCE_PROBE_C):
+# An old build without a dependency file needs one successful seed invocation.
+.PHONY: force-source-probe-deps
+$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SEED) $(wildcard $(SOURCE_PROBE_DEPS)) \
+	$(if $(wildcard $(SOURCE_PROBE_DEPS)),,force-source-probe-deps)
 	mkdir -p "$(@D)"
 	set -eu; \
-	c_output="$@.tmp.$$$$"; \
-	trap 'rm -f "$$c_output"' 0; \
-	$(PYTHON) stage-1/wovec.py "$<" > "$$c_output"; \
+	c_output="$@.tmp.$$$$"; deps="$(SOURCE_PROBE_DEPS).tmp.$$$$"; \
+	trap 'rm -f "$$c_output" "$$deps"' 0; \
+	$(PYTHON) stage-1/wovec.py --make-deps "$$deps" "$<" > "$$c_output"; \
+	mv "$$deps" "$(SOURCE_PROBE_DEPS)"; \
 	mv "$$c_output" "$@"
+
+# Load the last successful import graph without remaking it for unrelated goals.
+wove_seed_target := $(SOURCE_PROBE_C)
+-include $(wildcard $(SOURCE_PROBE_DEPS))
 
 # Link the first compiler with the ordinary runtime.
 $(BOOTSTRAP_COMPILER): $(STAGE1)/wovec.c $(RUNTIME) $(RUNTIME_HEADER)
@@ -489,7 +483,8 @@ $(SOURCE_SCAN): tests/stage-2/source_scan.probe.c $(SOURCE_PROBE_C) $(STAGE1)/ru
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 $(NUMBERED_HEADERS): export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
-$(NUMBERED_HEADERS): tests/stage-2/numbered_units/bridges/check.wove $(NUMBERED_HEADER_SOURCES) $(GRAPH_COMPILER_SOURCES) $(AST_LIVE_SOURCES) $(NATIVE_COMPILER)
+# All of this fixture's imports are in the tree already tracked by the native compiler.
+$(NUMBERED_HEADERS): tests/stage-2/numbered_units/bridges/check.wove $(NATIVE_COMPILER) $(BUILD_CLANG)
 	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
 
 # Check the current Git commit or explicit override on each native build.
@@ -635,7 +630,7 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
-REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(GRAPH_COMPILER_SOURCES) \
+REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) \
 	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
 	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \
