@@ -545,6 +545,22 @@ allocation and diagnoses the original operand before calling C.
 | `POLLMSG`, `POLLREMOVE`, and `POLLRDHUP` | GNU glibc extensions. Optional selection follows the actual feature flags. |
 | `ppoll` | The audited glibc headers declare it with GNU features. Darwin's header has no declaration. A user bridge with concrete native timeout and mask references passed the Clang prototype check. Its valid null mask operand still fails Wove checking with `c_nullable` on the shared native reference. The native binding needs the same nullable shared-reference contract for each pointer. [Compiler prerequisite #686](https://github.com/wove-lang/wove/issues/686) |
 
+## Bundled `<sys/times.h>` CPU accounting
+
+The macOS 27.2 SDK and Debian glibc 2.41 declare `times` as
+`clock_t times(struct tms *)`. On the audited arm64 and x86-64 targets,
+`clock_t` is an eight-byte unsigned long on Darwin and a signed long
+on glibc. The native record is 32 bytes with the four `clock_t` fields
+at offsets 0, 8, 16, and 24. All declarations are visible in the tested
+C11, C17, and C23 profiles with Apple Clang 21 and LLVM Clang 22.
+[LLVM libc header checklist](https://libc.llvm.org/headers/index.html#all-headers)
+
+| Native members | Bridge contract |
+| --- | --- |
+| `clock_t` | `ClockTicks` keeps the native typedef, including its signedness. The error sentinel has the native value of `(clock_t)-1`. |
+| `struct tms`, `tms_utime`, `tms_stime`, `tms_cutime`, and `tms_cstime` | The caller owns the complete native record. Each field uses the same native tick type. The fixture seeds four distinct values above 32 bits in C and verifies each Wove projection separately. |
+| `times` | C fills the four CPU time fields through a mutable loan and returns the raw native value. The bundled and project fixtures compare the result with direct C calls, confirm that C overwrote the seeded sentinel in all four fields, and pass the native error sentinel through the same scalar ABI. |
+
 ## Bundled message formatting
 
 The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public
