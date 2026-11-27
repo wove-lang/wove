@@ -28,6 +28,10 @@ SELF_HOST_ENTRY := $(SELF_HOST_SOURCE)/$(COMPILER_ROOT)
 SELF_HOST_VERIFIED := $(STAGE2)/wovec-self-hosted
 SELF_HOST_SMOKE := $(BUILD_DIR)/self-host-smoke
 SELF_HOST_INPUTS := tools/stage-compiler-inputs.sh
+SELF_HOST_FIXTURES := tests/stage-2/self_host
+# Track files and directories in the copied trees. The /. spelling avoids the stage-2 goal.
+COMPILER_INPUTS := stage-2/. $(sort $(filter-out stage-2,$(shell find stage-2 -print)))
+SELF_HOST_TREE_INPUTS := $(COMPILER_INPUTS) $(sort $(shell find runtime -print))
 BUILD_CLANG := tools/run-build-clang.sh
 NATIVE_DRIVER := stage-2/driver
 C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
@@ -91,14 +95,7 @@ COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
 NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_units.wove graph_storage.wove output.wove publication.wove platform.wove target.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/cleanup.wove bin/units.wove bin/parallel.wove bin/parallel_options.wove bin/staged.wove bin/library.wove bin/image.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove record_headers.wove numeric_target.wove int256_target.wove header_origin.wove clang.wove)
-BUNDLED_C_PROVIDERS := $(addprefix stage-2/llvm-libc/,stdlib.wove stdio.wove unistd.wove spawn.wove fcntl.wove errno.wove sys_stat.wove sys_wait.wove dirent.wove math.wove sys_file.wove)
-NATIVE_BUILD_ASSETS = runtime/wove_runtime.c runtime/wove_runtime.h runtime/probes/wide_integer.c $(CLANG_TEMPLATE)
 NATIVE_STDIO := stage-2/io/stdio.wove
-DRIVER_C_PROVIDERS := $(addprefix stage-2/llvm-libc/,stdlib.wove stdio.wove sys_stat.wove fcntl.wove unistd.wove errno.wove sys_file.wove)
-NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
-	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
-	$(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/io/process_file.wove \
-	$(PROCESS_LAUNCHER_SOURCES) $(OBJECT_JOB_SOURCES) $(DRIVER_C_PROVIDERS) $(CLANG_QUERY_SOURCES) $(NUMBERED_HEADER_SOURCES) stage-2/clang/macros.wove)
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
 WORKER_FIXTURES := $(NATIVE_CLI_FIXTURES)/workers
 WORKER_RUNTIME := $(STAGE2)/workers/runtime.o
@@ -136,8 +133,6 @@ SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
 BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
-BOOTSTRAP_DRIVER_SOURCES := $(addprefix $(NATIVE_DRIVER)/,bootstrap/entry.wove bootstrap/graph.wove bootstrap/emit.wove bootstrap/files.wove graph_emit.wove graph_storage.wove assets.wove paths.wove bundled_paths.wove) \
-	stage-2/text/copy.wove
 BOOTSTRAP_RUNTIME := runtime/wove_bootstrap.c
 GRAPH_COMPILER_SOURCES := $(BOOTSTRAP_WOVE_SOURCES) $(SOURCE_STRINGS_MODULE) $(SOURCE_MODULE_READER) $(VALUE_TEXT_MODULES) \
 	$(SOURCE_GRAPH_MODULES) $(SOURCE_TYPE_MODULE) $(SOURCE_CALLERS) $(TEST_DISCOVERY_MODULE) $(C_EMITTER_SOURCES) stage-2/emit/tests.wove $(HASHING_SOURCES)
@@ -200,7 +195,7 @@ NATIVE_INTEROP_TESTS := $(addprefix test-native/,$(NATIVE_INTEROP_CASES))
 .PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-workers test-stage-2-process test-stage-2-version force-build-info
 .PHONY: test-stage-2-inventory vscode test-stage-1 test-stage-2-source test-stage-2-language test-stage-2-utilities
 .PHONY: test-stage-2-interop test-stage-2-runtime test-stage-2-self-host test-stage-2-array-copy
-.PHONY: test-stage-2-native-cli test-stage-2-native-interop $(GRAPH_TESTS)
+.PHONY: test-stage-2-native-cli test-stage-2-native-interop test-stage-2-self-host-incremental $(GRAPH_TESTS)
 .DELETE_ON_ERROR:
 .SECONDARY:
 
@@ -244,6 +239,10 @@ test-stage-2-utilities: test-stage-2-hashing test-stage-2-json test-stage-2-cli 
 test-stage-2-interop: $(GRAPH_INTEROP_TESTS) test-stage-2-clang test-stage-2-native-interop test-stage-2-f80
 test-stage-2-runtime: test-stage-2-array-copy test-stage-2-process test-stage-2-workers test-stage-2-inventory test-stage-2-object-jobs test-stage-2-staged-build
 test-stage-2-self-host: self-host test-stage-2-version
+
+# Exercise real incremental builds in a disposable source archive.
+test-stage-2-self-host-incremental: $(BUILD_VERSION)
+	sh "$(SELF_HOST_FIXTURES)/check.sh" "$(MAKE)" "$(abspath $(BUILD_DIR))" "$(BUILD_VERSION)"
 
 # Preserve quoting in compiler settings until the runner splits them into arguments.
 test-stage-2-source: export WOVE_TEST_CLANG = $(CLANG)
@@ -432,7 +431,7 @@ test-stage-2-staged-build: $(STAGE2)/staged-build
 	$(PYTHON) "$(STAGED_BUILD_FIXTURES)/check.py" "$<" "$(abspath $(BUILD_CLANG))" "$(STAGED_BUILD_FIXTURES)/cases.jsonc"
 
 $(STAGE2)/staged-build: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
-$(STAGE2)/staged-build: $(STAGED_BUILD_FIXTURES)/main.wove $(NATIVE_DRIVER)/bin/staged.wove $(OBJECT_JOB_SOURCES) $(NATIVE_WOVE_SOURCES) $(NATIVE_COMPILER)
+$(STAGE2)/staged-build: $(STAGED_BUILD_FIXTURES)/main.wove $(NATIVE_DRIVER)/bin/staged.wove $(OBJECT_JOB_SOURCES) $(NATIVE_COMPILER)
 	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
 
 # Check generated C, archived JSON, and live tool invocation.
@@ -459,8 +458,10 @@ test-stage-1: stage-1 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TE
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 	sh "$(OWNERSHIP_TESTS)/check_includes.sh" "$(STAGE1)/imports.c_headers.c" "$(OWNERSHIP_TESTS)/imports/c_headers/includes.txt"
 
-# Track the imports active in each seed root.
-$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(BOOTSTRAP_DRIVER_SOURCES) $(GRAPH_COMPILER_SOURCES) $(CLI_SOURCES) $(SEED)
+# The seed builds the bootstrap-selected compiler from the same source tree.
+$(STAGE1)/wovec.c: $(COMPILER_ROOT) $(COMPILER_INPUTS) $(SEED)
+
+# Track the graph modules needed by the scanner fixture.
 $(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(GRAPH_COMPILER_SOURCES) $(SEED)
 
 # Replace the generated C only after the seed succeeds.
@@ -503,7 +504,7 @@ define build_versioned
 endef
 
 # Keep the relative version and runtime embeds inside the selected build directory.
-$(SELF_HOST_SOURCE)/.ready: $(SELF_HOST_INPUTS) $(COMPILER_ROOT) $(NATIVE_WOVE_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) $(BUILD_VERSION) force-build-info
+$(SELF_HOST_SOURCE)/.ready: $(SELF_HOST_INPUTS) $(COMPILER_ROOT) $(SELF_HOST_TREE_INPUTS) $(BUILD_VERSION) force-build-info
 	$(call build_versioned,sh "$(SELF_HOST_INPUTS)" "$(@D)" "$(BUILD_VERSION)")
 
 # Give the seed-built Wove compiler one entry. It opens the selected imports and assets.
@@ -631,7 +632,7 @@ $(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
 $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
-REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(NATIVE_WOVE_SOURCES) $(GRAPH_COMPILER_SOURCES) $(BUNDLED_C_PROVIDERS) $(NATIVE_BUILD_ASSETS) $(BOOTSTRAP_DRIVER_SOURCES) $(BOOTSTRAP_RUNTIME) \
+REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) $(SOURCE_EXPECTATIONS) $(GRAPH_COMPILER_SOURCES) $(BOOTSTRAP_RUNTIME) \
 	$(JOB_BUDGET_MODULE) $(CLI_FIXTURES)/jobs.wove \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
 	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \
