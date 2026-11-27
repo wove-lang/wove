@@ -11,6 +11,10 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 ## Implementation notes
 
+The installed compiler may launch Clang and the native linker for
+toolchain work. Use native bridges for filesystem operations, environment
+queries, cleanup, and other work inside the compiler process.
+
 When compiler work exposes a Wove language gap, land the smallest language
 slice that supports the intended source before landing the code that uses it.
 Use the archived compiler as the behavioral reference for ports. Keep Stage 1
