@@ -26,14 +26,14 @@
 #define form_parts wv_seed_fn_86
 #define read_module_for_target wv_seed_fn_101
 #define emit_module wv_seed_fn_145
-#define resolve_graph_for_target wv_seed_fn_266
+#define resolve_graph_for_target wv_seed_fn_267
 #define default_selection wv_seed_fn_102
 #define target_os wv_seed_fn_103
 #define target_arch wv_seed_fn_104
-#define inspect_callers wv_seed_fn_1263
-#define run_scalar_graph wv_seed_fn_1287
-#define discover_graph_tests wv_seed_fn_1296
-#define inspect_graph_expectations wv_seed_fn_1275
+#define inspect_callers wv_seed_fn_1268
+#define run_scalar_graph wv_seed_fn_1292
+#define discover_graph_tests wv_seed_fn_1301
+#define inspect_graph_expectations wv_seed_fn_1280
 
 typedef wv_seed_record_1 Token;
 typedef wv_seed_record_2 SourceDiagnostic;
@@ -47,21 +47,21 @@ typedef wv_seed_record_15 SelectedDeclaration;
 typedef wv_seed_record_16 ModuleRead;
 typedef wv_seed_record_18 SelectionContext;
 typedef wv_seed_record_20 EmitResult;
-typedef wv_seed_record_92 EmbedAsset;
+typedef wv_seed_record_93 EmbedAsset;
 typedef wv_seed_record_24 GraphModule;
 typedef wv_seed_record_25 GraphBinding;
 typedef wv_seed_record_28 GraphUse;
 typedef wv_seed_record_29 GraphSelector;
 typedef wv_seed_record_30 GraphResult;
-typedef wv_seed_record_94 CallSite;
+typedef wv_seed_record_95 CallSite;
 typedef wv_seed_record_40 SuppliedFile;
-typedef wv_seed_record_109 CallerInspection;
-typedef wv_seed_record_114 GraphOutput;
-typedef wv_seed_record_116 DiscoveredTest;
-typedef wv_seed_record_117 TestDiscovery;
-typedef wv_seed_record_110 ExpectationLink;
-typedef wv_seed_record_111 ExpectationResult;
-typedef wv_seed_record_112 ExpectationQuery;
+typedef wv_seed_record_110 CallerInspection;
+typedef wv_seed_record_115 GraphOutput;
+typedef wv_seed_record_117 DiscoveredTest;
+typedef wv_seed_record_118 TestDiscovery;
+typedef wv_seed_record_111 ExpectationLink;
+typedef wv_seed_record_112 ExpectationResult;
+typedef wv_seed_record_113 ExpectationQuery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 

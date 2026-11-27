@@ -1013,6 +1013,15 @@ C zero-initializes the omitted native members. Pass `shared-ref` or
 Bridge `const` exposes an integer constant, `let` reads a C value, and
 `let-mut` also accepts a `set` on the imported C lvalue.
 
+A native record field written `(name (array char 255))` describes the
+header's exact inline plain C `char[255]` member. Use `array.len`,
+`array.load`, and `array.store` directly on `(struct.get (local record) name)`.
+A store needs a mutable record. Loads and stores check the index and read or
+write `u8` byte representations in the original record. A native build checks
+the field's C element type and extent against the header and includes the
+Wove declaration span in a mismatch diagnostic.
+
+
 Attach native contracts to the relevant declaration with `:pragma`.
 
 | Directive | Contract |

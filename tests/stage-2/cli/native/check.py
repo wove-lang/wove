@@ -29,8 +29,13 @@ def supplied_arguments(arguments):
 	return [value if isinstance(value, str) else bytes.fromhex(value["hex"]) for value in arguments]
 
 
-# Compare an entire stream against one exact expectation or an explicit list of alternatives.
+# Compare an exact stream or check patterns in tool output with variable paths.
 def check_stream(label, phase, name, actual, expected, fixtures):
+	# Match against bytes so path spelling and source positions remain exact.
+	if isinstance(expected, dict) and expected.keys() == {"matches"}:
+		for pattern in expected["matches"]:
+			assert re.search(pattern.encode("utf-8"), actual), (label, phase, name, pattern, actual)
+		return
 	values = expected if isinstance(expected, list) else [expected]
 	snapshots = [phase_bytes(value, fixtures) for value in values]
 	assert actual in snapshots, (label, phase, name, actual, snapshots)
