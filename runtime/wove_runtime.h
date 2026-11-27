@@ -453,7 +453,7 @@ typedef struct wvrt_worker_receipt wvrt_worker_receipt;
 typedef struct WvrtWorkerPool WvrtWorkerPool;
 typedef struct WvrtWorkerPool WvrtWorkerPermit;
 
-// Declare record transport and fallible launch only in translation units that use them.
+// Declare record transport and fallible launch for a program that uses them.
 #define WVRT_DECLARE_RECORD_WORKERS() \
 	typedef wvrt_array *(*wvrt_record_worker)(wvrt_array *job, int32_t file, int32_t start, int32_t end); \
 	wvrt_array *wvrt_worker_pack_at_span(void *value, size_t size, size_t alignment, \
@@ -480,8 +480,12 @@ typedef struct WvrtWorkerPool WvrtWorkerPermit;
 		slot##_drop, (file), (start), (end))
 
 // Use the ordinary record destructor through the runtime's erased drop callback.
+#define WVRT_WORKER_DROP_CALLBACK(type) void wvrt_worker_drop_##type(void *value)
+#define WVRT_DECLARE_WORKER_DROP(type) WVRT_WORKER_DROP_CALLBACK(type);
+#define WVRT_DEFINE_LINKED_WORKER_DROP(type, drop) \
+	WVRT_WORKER_DROP_CALLBACK(type) { drop((type *)value); }
 #define WVRT_DEFINE_WORKER_DROP(type, drop) \
-	static inline __attribute__((unused)) void wvrt_worker_drop_##type(void *value) { drop((type *)value); }
+	static inline __attribute__((unused)) WVRT_DEFINE_LINKED_WORKER_DROP(type, drop)
 
 // Evaluate the incoming value once and move it into the worker transport.
 #define WVRT_WORKER_PACK(type, value, drop, file, start, end) \

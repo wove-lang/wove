@@ -130,6 +130,8 @@ def check_native(probe, case, layout, parts):
 	# The ownership fixture uses the existing runtime allocation ledger.
 	if case.get("tracked"):
 		runtime = os.environ["WOVE_TEST_TRACKED_RUNTIME"]
+	elif case.get("worker_ledger"):
+		runtime = os.environ["WOVE_TEST_WORKER_RUNTIME"]
 	with TemporaryDirectory(prefix="units-", dir=Path(probe).parent) as temporary:
 		root = Path(temporary)
 		stage_headers(case, root)
@@ -149,6 +151,11 @@ def check_native(probe, case, layout, parts):
 			# Shared descriptors and values are external. Their byte backing arrays remain private.
 			data = {name for name, kind in table.items() if kind != "U" and name.startswith(("wgb", "wga"))}
 			assert data == set(layout.get("data", {}).get(unit, [])), (unit, data)
+			# Numbered adapters and erased drop callbacks each have one definition owner.
+			if "workers" in layout:
+				workers = {name for name, kind in table.items()
+					if kind == "T" and name.startswith(("wvrt_worker_adapter_", "wvrt_worker_drop_"))}
+				assert workers == set(layout["workers"].get(unit, [])), (unit, workers)
 			for dependency in layout.get("imports", {}).get(unit, []):
 				assert table.get(dependency) == "U", (unit, dependency, table)
 			objects.append(str(object_file))
