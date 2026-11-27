@@ -1407,7 +1407,7 @@ def load_modules(root: Module) -> tuple[list[Module], list[str]]:
 
 
 # Emit a complete C translation unit after the source graph succeeds.
-def compile_source(source: str, filename: str) -> str:
+def compile_source(source: str, filename: str, *, imports: list[str] | None = None) -> str:
 	root = read_module(source, filename, 0, 0, 0, entry=True)
 	modules, headers = load_modules(root)
 	functions = [function for module in modules for function in module.functions.values()]
@@ -1452,4 +1452,7 @@ def compile_source(source: str, filename: str) -> str:
 				# Reuse the same borrowed host argument vector as the native compiler.
 				if function.is_entry:
 					lines.extend([f"WVRT_HOST_ENTRY({function.c_name})", ""])
+	# Record the same ordered module identities that supplied the emitted C.
+	if imports is not None:
+		imports.extend(module.filename for module in modules[1:])
 	return "\n".join(lines)
