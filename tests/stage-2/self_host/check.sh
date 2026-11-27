@@ -24,8 +24,8 @@ numbered_entry=tests/stage-2/numbered_units/bridges/check.wove
 mkdir -p "$project/$(dirname "$numbered_entry")"
 cp "$numbered_entry" "$project/$numbered_entry"
 
-# Keep two independent utility entries to check that each sidecar tracks its own graph.
-for entry in tests/stage-2/hashing/fnv1a.wove tests/stage-2/json/utf8.wove; do
+# Keep the independent fixture entries used by the incremental checks.
+for entry in tests/stage-2/hashing/fnv1a.wove tests/stage-2/json/utf8.wove tests/support/ast/live.wove; do
 	mkdir -p "$project/$(dirname "$entry")"
 	cp "$entry" "$project/$entry"
 done
@@ -116,6 +116,45 @@ sleep 1
 rm "$added"
 build "$snapshot/.ready"
 test ! -e "$snapshot/$added"
+
+# The native fixture tracks its transitive source and its template independently.
+live=stage-2/ast/live
+live_import=stage-2/clang/query.wove
+products="$live $live.c $live.c.d"
+build "$output/$live"
+save_products
+build "$output/$live"
+check_unchanged
+sleep 1
+printf '\n' >> "$live_import"
+build "$output/$live"
+test -n "$(find "$output/$live.c" -newer "$work/before/$live.c")"
+
+save_products
+sleep 1
+printf '\n' >> "$asset"
+build "$output/$live"
+! cmp -s "$output/$live.c" "$work/before/$live.c"
+
+# Missing inputs must retain the previous executable and generated pair.
+save_products
+mv "$live_import" "$work/live-import"
+if build "$output/$live" > "$work/live-failure" 2>&1; then
+	printf 'live Clang fixture accepted a missing import\n' >&2
+	exit 1
+fi
+grep -q '^tests/support/ast/live.wove error ' "$work/live-failure"
+check_unchanged
+mv "$work/live-import" "$live_import"
+
+mv "$asset" "$work/live-template"
+if build "$output/$live" > "$work/live-failure" 2>&1; then
+	printf 'live Clang fixture accepted a missing embed\n' >&2
+	exit 1
+fi
+grep -q '^stage-2/c/probe.wove error ' "$work/live-failure"
+check_unchanged
+mv "$work/live-template" "$asset"
 
 # Add a dependency to an existing import without changing Make's source inventory.
 scanner_unit="$output/stage-2/source_scan.c"

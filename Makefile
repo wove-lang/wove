@@ -45,7 +45,6 @@ BYTE_MATCH_MODULE := stage-2/text/match.wove
 BOOLEAN_TEXT_MODULE := stage-2/text/boolean.wove
 VALUE_TEXT_MODULES := $(BYTE_TEXT_MODULE) stage-2/text/decimal.wove
 DECIMAL_WRITER := stage-2/text/decimal_write.wove
-SOURCE_TYPE_MODULE := stage-2/source/types.wove
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_STANDARD_MODULE := stage-2/c/standard.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
@@ -54,8 +53,6 @@ HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
 HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,fnv1a base32hex base16)
-BASE32HEX_SOURCE := stage-2/hashing/base32hex.wove
-BASE16_SOURCES = $(BYTE_TEXT_MODULE) stage-2/emit/text.wove stage-2/hashing/base16.wove $(C_IDENTIFIER_MODULE) $(SOURCE_TYPE_MODULE) $(BASE32HEX_SOURCE) $(BOOTSTRAP_WOVE_SOURCES)
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
 BLAKE2B_SOURCE := stage-2/hashing/blake2b.wove
@@ -97,21 +94,14 @@ STAGED_BUILD_FIXTURES := $(NATIVE_CLI_FIXTURES)/staged_build
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
 PROCESS_DESCRIPTOR_CASES := $(PROCESS_FIXTURES)/descriptors.tsv
 PROCESS_INHERITANCE_CASES := $(PROCESS_FIXTURES)/inheritance.tsv
-PROCESS_LAUNCHER_SOURCES := $(PROCESS_MODULES) stage-2/text/copy.wove \
-	$(addprefix stage-2/llvm-libc/,errno.wove fcntl.wove spawn.wove stdlib.wove sys_stat.wove sys_wait.wove unistd.wove)
 TEST_RUNNER_ROOT := stage-2/test/runner.wove
-TEST_RUNNER_SOURCES := $(sort $(PROCESS_LAUNCHER_SOURCES) $(NATIVE_STDIO) $(DECIMAL_WRITER) \
-	$(BYTE_TEXT_MODULE) stage-2/llvm-libc/stdio.wove)
 TEST_RUNNER := $(STAGE2)/test/runner
 TEST_RUNTIME := $(STAGE2)/test/libwove_test.a
 CLANG_FIXTURES := tests/stage-2/clang
 CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
-CLANG_QUERY_SOURCES := $(CLANG_SOURCES) $(C_STANDARD_MODULE) $(JSON_FRAME_MODULE) stage-2/c/probe.wove stage-2/clang/query.wove stage-2/clang/run.wove stage-2/clang/trace.wove
 AST_LIVE := $(STAGE2)/ast/live
 NUMBERED_HEADERS := $(STAGE2)/numbered-headers
-AST_LIVE_SOURCES := $(sort $(CLANG_QUERY_SOURCES) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) \
-	$(PROCESS_LAUNCHER_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/llvm-libc/stdio.wove)
 AST_FIXTURES := tests/support/ast
 AST_PROBE := $(STAGE2)/ast/probe
 SOURCE_SCAN := $(STAGE2)/source_scan
@@ -119,10 +109,13 @@ SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
 SEED_UTILITY_PROGRAMS := $(HASHING_PROGRAMS) $(JSON_PROGRAMS) $(CLI_PROGRAMS) $(DIAGNOSTIC_PROGRAM)
 SEED_UTILITY_C := $(addsuffix .c,$(SEED_UTILITY_PROGRAMS) $(CONFIG_PROGRAM) $(COMMAND_PROGRAM))
-SEED_GRAPH_C := $(SOURCE_PROBE_C) $(SEED_UTILITY_C)
-BOOTSTRAP_WOVE_SOURCES := $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
-SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py
+NATIVE_FIXTURE_C := $(addsuffix .c,$(TEST_RUNNER) $(AST_LIVE) $(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE))
+SEED_GRAPH_C := $(SOURCE_PROBE_C) $(SEED_UTILITY_C) $(NATIVE_FIXTURE_C)
+SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py stage-1/make_deps.py
 SEED_EMIT := stage-1/emit.py
+SEED_EMIT_SOURCES := $(SEED_EMIT) stage-1/inputs.py stage-1/syntax.py stage-1/make_deps.py
+NATIVE_FIXTURE_TOOLS := $(SOURCE_SCAN) $(SEED_EMIT_SOURCES)
+EMIT_NATIVE_FIXTURE = $(PYTHON) "$(SEED_EMIT)" "$(SOURCE_SCAN)"
 RUNTIME := runtime/wove_runtime.c
 RUNTIME_HEADER := runtime/wove_runtime.h
 OWNERSHIP_TESTS := tests/stage-1
@@ -376,9 +369,8 @@ test-stage-2-inventory: $(SOURCE_SCAN) $(TEST_RUNTIME) $(NUMBERED_HEADERS)
 	$(PYTHON) tests/stage-2/check_units.py "$(SOURCE_SCAN)" tests/stage-2/numbered_units/test_dispatch.jsonc "$(NUMBERED_HEADERS)"
 
 # Keep generated runner helpers local to their translation unit.
-$(TEST_RUNNER).c: $(TEST_RUNNER_ROOT) $(TEST_RUNNER_SOURCES) $(SOURCE_SCAN) $(SEED_EMIT) | $(BUILD_VERSION)
-	mkdir -p "$(@D)"
-	$(PYTHON) "$(SEED_EMIT)" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" --private-helpers $(filter %.wove,$^)
+$(TEST_RUNNER).c: $(TEST_RUNNER_ROOT) $(NATIVE_FIXTURE_TOOLS)
+	$(call emit_seed_graph,$(EMIT_NATIVE_FIXTURE) --private-helpers)
 
 # Expose only the host argument entry under the test-specific C name.
 $(TEST_RUNNER).o: $(TEST_RUNNER).c $(RUNTIME_HEADER)
@@ -426,10 +418,9 @@ test-stage-2-clang: $(AST_PROBE) $(AST_LIVE) $(CLANG_TEMPLATE)
 	sh "$(AST_FIXTURES)/check.sh" "$(AST_PROBE)" "$(CLANG_TEMPLATE)" "$(CLANG_FIXTURES)/cases.tsv" $(CLANG)
 	sh "$(CLANG_FIXTURES)/check-live.sh" "$(AST_LIVE)" "$(CLANG_FIXTURES)/live.tsv" $(CLANG)
 
-# Embed the C probe template in the live Clang query fixture.
-$(AST_LIVE).c: $(AST_FIXTURES)/live.wove $(AST_LIVE_SOURCES) $(CLANG_TEMPLATE) $(SOURCE_SCAN) $(SEED_EMIT) | $(BUILD_VERSION)
-	mkdir -p "$(@D)"
-	$(PYTHON) "$(SEED_EMIT)" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^) --asset "$(CLANG_TEMPLATE)"
+# Build the live Clang fixture with its declared probe template embed.
+$(AST_LIVE).c: $(AST_FIXTURES)/live.wove $(NATIVE_FIXTURE_TOOLS)
+	$(call emit_seed_graph,$(EMIT_NATIVE_FIXTURE))
 
 $(AST_LIVE): $(AST_LIVE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -I runtime $^ -o "$@"
@@ -447,7 +438,7 @@ test-stage-1: stage-1 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TE
 
 # Build the compiler from its ordinary entry with the seed-built Wove emitter.
 $(STAGE1)/wovec.c: export WOVE_BUILD_CLANG = $(CLANG) -std=c11 $(CFLAGS)
-$(STAGE1)/wovec.c: $(SOURCE_SCAN) $(SELF_HOST_SOURCE)/.ready stage-1/build.py $(SEED_EMIT) $(BUILD_CLANG) $(BUILD_VERSION) force-build-info
+$(STAGE1)/wovec.c: $(SOURCE_SCAN) $(SELF_HOST_SOURCE)/.ready stage-1/build.py $(SEED_EMIT_SOURCES) $(BUILD_CLANG) $(BUILD_VERSION) force-build-info
 	$(call build_versioned,mkdir -p "$(@D)"; c_output="$@.tmp.$$$$"; \
 		trap 'rm -f "$$c_output"' 0; WOVE_BUILD_DIR="$(abspath $(BUILD_DIR))" $(PYTHON) stage-1/build.py > "$$c_output"; \
 		mv "$$c_output" "$@")
@@ -458,16 +449,16 @@ mkdir -p "$(@D)"
 set -eu; \
 c_output="$@.tmp.$$$$"; deps="$@.d.tmp.$$$$"; \
 trap 'rm -f "$$c_output" "$$deps"' 0; \
-$(PYTHON) stage-1/wovec.py --make-deps "$$deps" "$<" > "$$c_output"; \
+$(1) --make-deps "$$deps" "$<" > "$$c_output"; \
 mv "$$deps" "$@.d"; \
 mv "$$c_output" "$@"
 endef
 
 $(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SEED)
-	$(emit_seed_graph)
+	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
 
 $(SEED_UTILITY_C): $(STAGE2)/%.c: tests/stage-2/%.wove $(SEED)
-	$(emit_seed_graph)
+	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
 
 # Read each sidecar for its own target and create it on the next build if missing.
 .PHONY: force-seed-deps
@@ -531,16 +522,12 @@ $(FINAL_COMPILER): $(NATIVE_COMPILER) $(SELF_HOST_SOURCE)/.ready $(BUILD_CLANG) 
 $(SEED_UTILITY_PROGRAMS): %: %.c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$<" "$(STAGE1)/runtime.o" -o "$@"
 
-# Use the supplied native graph to exercise the shared encoders and fixed-array digest.
-$(addsuffix .c,$(HASHING_NATIVE_PROGRAMS)): $(STAGE2)/hashing/native/%.c: $(HASHING_FIXTURES)/%.wove
-$(STAGE2)/hashing/native/fnv1a.c: stage-2/hashing/fnv1a.wove
-$(STAGE2)/hashing/native/base32hex.c: $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)
-$(STAGE2)/hashing/native/base16.c: $(BASE16_SOURCES)
-$(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(BLAKE2B_SOURCE) $(BASE32HEX_SOURCE) $(BYTE_TEXT_MODULE)
+# Emit the native hash fixtures from their ordinary entry modules.
+$(addsuffix .c,$(HASHING_NATIVE_PROGRAMS)): $(STAGE2)/hashing/native/%.c: $(HASHING_FIXTURES)/%.wove $(NATIVE_FIXTURE_TOOLS)
+	$(call emit_seed_graph,$(EMIT_NATIVE_FIXTURE))
 
-$(addsuffix .c,$(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE)): $(SOURCE_SCAN) $(SEED_EMIT) | $(BUILD_VERSION)
-	mkdir -p "$(@D)"
-	$(PYTHON) "$(SEED_EMIT)" "$(SOURCE_SCAN)" "$@" "$(BUILD_VERSION)" $(filter %.wove,$^)
+$(BLAKE2B_PROBE).c: $(BLAKE2B_FIXTURES)/probe.wove $(NATIVE_FIXTURE_TOOLS)
+	$(call emit_seed_graph,$(EMIT_NATIVE_FIXTURE))
 
 $(HASHING_NATIVE_PROGRAMS): %: %.c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime "$<" "$(STAGE1)/runtime.o" -o "$@"
@@ -591,6 +578,8 @@ $(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
 REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) \
+	$(TEST_RUNNER_ROOT) $(AST_FIXTURES)/live.wove $(BLAKE2B_FIXTURES)/probe.wove \
+	$(patsubst $(STAGE2)/hashing/native/%,$(HASHING_FIXTURES)/%.wove,$(HASHING_NATIVE_PROGRAMS)) \
 	$(patsubst $(STAGE2)/%.c,tests/stage-2/%.wove,$(SEED_UTILITY_C)) $(JOB_BUDGET_MODULE) \
 	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
 	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \
