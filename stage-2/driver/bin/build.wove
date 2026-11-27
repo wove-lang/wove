@@ -19,8 +19,12 @@
 	(use wove-file "./library.wove" (only lock_library_directory install_library (value library_stage_header) (value library_stage_exports)))
 	(use wove-file "../../source/target.wove" (only (type SelectionContext)))
 	(use wove-file "./debug.wove" (only debug_directory name_debug_unit stage_debug_source))
+	(use wove-file "./cleanup.wove" (only discard_private_stage (value temporary_name)))
 	(use wove-file "./dependencies.wove" (only check_resolved_headers))
 	(use wove-file "./jobs.wove" (only clang_trace_environment read_job_sysroot))
+	(use wove-file "./parallel_options.wove" (only parallel_partition))
+	(use wove-file "./parallel.wove" (only run_parallel_clang (type NativeTool)))
+	(use wove-file "../../emit/units.wove" (only write_unit_name (value unit_name_template)))
 	(use wove-file "../output.wove" (only retain_checked_unit))
 	(use wove-file "../diagnostics.wove" (only report_argv (value project_file)))
 	(use wove-file "../protection.wove" (only (type BuildProtection)))
@@ -33,28 +37,24 @@
 	(use wove-file "../../cli/command/args.wove" (only (type CommandArgument)))
 	(use wove-file "../../config/project.wove" (only (type ProjectSetting)))
 	(use wove-file "../../json/reader.wove" (only (type JsonNode)))
-	(use wove-file "../../io/process.wove" (only run_process_capture))
 	(use wove-file "../../io/process_file.wove" (only run_process_stdout_file))
 	(use wove-file "../../text/copy.wove" (only append_bytes))
 	(use wove-file "../../text/decimal_write.wove" (only write_decimal_i32))
 
-	(struct NativeBuild (fields (status i32) (retained bool)))
-	(struct NativeTool (fields (status i32) (checked i32)))
+	(struct NativeBuild (fields (status i32) (retained bool) (numbered bool)))
 
-	(let temporary_name ".wovec-bin.XXXXXX")
 	(let main_suffix "/main.c")
 	(let binary_suffix "/program")
 	(let source_suffix "/wove_runtime.c")
 	(let header_suffix "/wove_runtime.h")
 	(let dependency_suffix "/clang.stdout")
 	(let job_suffix "/clang.jobs")
-	(let remove_program "rm")
-	(let remove_arguments "-rf\u0000--\u0000")
 	(let publish_library_failure "could not publish shared library")
 	(let publish_binary_failure "could not publish executable")
 	(let retained_image_failure "retained C strings require an executable image")
 	(let native_argument_failure "could not pack native compiler arguments")
 	(let clang_failure "clang failed with status ")
+	(let compile_unit " while compiling ")
 
 	(fn empty_path
 		(:doc `Return a zero-length owner to mark a failed path operation.`)
@@ -117,11 +117,20 @@
 
 	(fn report_clang_status
 		(:doc `Make the native status visible in the diagnostic and propagate child exit or signal status.`)
-		(params (status i32) (human bool)) (returns i32)
+		(params (status i32) (failed_unit i32) (human bool)) (returns i32)
 		(body
-			(let-mut message (array.alloc u8 (i32.add (array.len clang_failure) 11i32)))
+			(let capacity (i32.add (i32.add (array.len clang_failure) 11i32)
+				(i32.add (array.len compile_unit) (array.len unit_name_template))))
+			(let-mut message (array.alloc u8 capacity))
 			(let start (call append_bytes (borrow-shared clang_failure) (borrow-mut message) 0i32))
-			(let end (call write_decimal_i32 (borrow-mut message) start status))
+			(let-mut end (call write_decimal_i32 (borrow-mut message) start status))
+			(if
+				(:doc "A failed object adds its deterministic source-unit name to the existing native error.")
+				(i32.not-ltz failed_unit)
+				(then
+					(let at (call append_bytes (borrow-shared compile_unit) (borrow-mut message) end))
+					(let width (call write_unit_name failed_unit (borrow-mut (array.range message at capacity))))
+					(set end (i32.add at width))))
 			(let diagnostic (call report_argv 68u32 0i32 (borrow-shared (array.range message 0i32 end)) human))
 			(if (i32.gtz status) (then (return status)))
 			(return diagnostic)))
@@ -162,29 +171,12 @@
 			(let root (call read_job_sysroot (borrow-shared jobs)))
 			(let checked (call check_resolved_headers (borrow-shared trace) (borrow-shared root)
 				protection status target_index human))
-			(return (struct.new NativeTool (status status) (checked checked)))))
+			(return (struct.new NativeTool (status status) (checked checked) (failed_unit -1i32)))))
 
 	(fn native_build_result
 		(:doc `Keep the public status with whether optional side outputs may enter the retained tree.`)
 		(params (status i32) (retained bool)) (returns NativeBuild)
-		(body (return (struct.new NativeBuild (status status) (retained retained)))))
-
-	(fn discard_private_stage
-		(:doc `Remove optional tool output only from the compiler's reserved private directory.`)
-		(params (directory (shared-array u8))) (returns void)
-		(body
-			(let prefix (array.len remove_arguments))
-			(let width (array.len directory))
-			(if
-				(:doc `The absolute stage path and its argument terminator must fit the launcher buffer.`)
-				(bool.or (i32.eqz width) (i32.lt (i32.sub 2147483646i32 prefix) width))
-				(then (return)))
-			(let-mut packed (array.alloc u8 (i32.add prefix (i32.inc width))))
-			(let start (call append_bytes (borrow-shared remove_arguments) (borrow-mut packed) 0i32))
-			(let end (call append_bytes (borrow-shared directory) (borrow-mut packed) start))
-			(array.store packed end 0u8)
-			(let-mut output (array.alloc u8 0i32))
-			(let removed (call run_process_capture (borrow-shared remove_program) (borrow-shared packed) (borrow-mut output)))))
+		(body (return (struct.new NativeBuild (status status) (retained retained) (numbered (bool false))))))
 
 	(fn publish_debug
 		(:doc `Make the complete debug directory available before installing the executable that names it.`)
@@ -305,12 +297,30 @@
 				(:doc "The ordinary binary still resolves its own target from the staged frontend options.")
 				(bool.not library)
 				(then (set context (call effective_selection (borrow-shared (array.range options 0i32 probe_end))))))
+			(let partition (call parallel_partition invocation (borrow-shared arguments)
+				(borrow-shared nodes) (borrow-shared settings) (borrow-shared (array.range options 0i32 probe_end))))
 			(let emitted (call compile_input (borrow-shared path) (borrow-shared retained)
 				(borrow-shared unit) (borrow-shared (array.range options 0i32 probe_end))
 				(borrow-shared (array.range options probe_end libraries_end))
-				context protection target_index (bool false) human))
-			(if (i32.not-eqz emitted) (then (return (call native_build_result emitted (bool false)))))
+				context protection target_index (bool false) partition human))
+			(if (i32.gtz emitted) (then (return (call native_build_result emitted (bool false)))))
 			(let executable_storage (call requires_executable_image (borrow-shared unit)))
+			(if
+				(:doc "A negative emission result is the complete private numbered stage's unit count.")
+				(i32.ltz emitted)
+				(then
+					(let program (call clang_program))
+					(let tool (call run_parallel_clang (borrow-shared program) (borrow-shared unit) (borrow-shared binary)
+						(i32.sub 0i32 emitted) partition (struct.get context os) library
+						(borrow-shared exports) (borrow-shared name) (borrow-shared bytes) (borrow-shared config)
+						invocation (borrow-shared arguments) (borrow-shared nodes) (borrow-shared settings)
+						protection target_index human))
+					(let result (call publish_clang_result (borrow-shared path) (borrow-shared target)
+						(borrow-shared retained) (borrow-shared unit) (borrow-shared binary) (borrow-shared public_header)
+						(borrow-shared directory) (borrow-shared debug) (borrow-shared trace) (borrow-shared jobs)
+						library_os (bool false) executable_storage tool target_index human))
+					(return (struct.new NativeBuild (status (struct.get result status))
+						(retained (struct.get result retained)) (numbered (bool true))))))
 			(let debug_build (bool.and (bool.not library) (u32.eq (struct.get invocation mode) 1u32)))
 			(if
 				(:doc `Add the final source location while the exact translation unit is still private.`)
@@ -336,6 +346,19 @@
 			(let tool (call run_clang_with_trace (borrow-shared program)
 				(borrow-shared (array.range options 0i32 end)) (borrow-shared trace)
 				(borrow-shared jobs) protection target_index human))
+			(return (call publish_clang_result (borrow-shared path) (borrow-shared target)
+				(borrow-shared retained) (borrow-shared unit) (borrow-shared binary) (borrow-shared public_header)
+				(borrow-shared directory) (borrow-shared debug) (borrow-shared trace) (borrow-shared jobs)
+				library_os debug_build executable_storage tool target_index human))))
+
+	(fn publish_clang_result
+		(:doc "Use the same executable and library publication policy for both native compile paths.")
+		(params (path (shared-array u8)) (target (shared-array u8)) (retained (shared-array u8)) (unit (shared-array u8))
+			(binary (shared-array u8)) (public_header (shared-array u8)) (directory (shared-array u8)) (debug (shared-array u8))
+			(trace (shared-array u8)) (jobs (shared-array u8)) (library_os u8) (debug_build bool) (executable_storage bool)
+			(tool NativeTool) (target_index i32) (human bool)) (returns NativeBuild)
+		(body
+			(let library (u8.gtz library_os))
 			(let status (struct.get tool status))
 			(let checked (struct.get tool checked))
 			(if (i32.gtz checked) (then (return (call native_build_result checked (bool false)))))
@@ -351,7 +374,7 @@
 				library
 				(then
 					(if (i32.not-eqz status)
-						(then (return (call native_build_result (call report_clang_status status human) (bool false)))))
+						(then (return (call native_build_result (call report_clang_status status (struct.get tool failed_unit) human) (bool false)))))
 					(return (call publish_library (borrow-shared path) (borrow-shared target)
 						(borrow-shared retained) (borrow-shared unit) (borrow-shared binary)
 						(borrow-shared public_header) library_os target_index human))))
@@ -360,7 +383,7 @@
 				debug_build
 				(then
 					(if (i32.not-eqz status)
-						(then (return (call native_build_result (call report_clang_status status human) (bool false)))))
+						(then (return (call native_build_result (call report_clang_status status (struct.get tool failed_unit) human) (bool false)))))
 					(return (call native_build_result (call publish_debug (borrow-shared path)
 						(borrow-shared target) (borrow-shared directory) (borrow-shared debug)
 						(borrow-shared trace) (borrow-shared jobs) target_index human) (bool false)))))
@@ -370,7 +393,7 @@
 			(if
 				(:doc `An ordinary tool failure still leaves the checked C available for inspection.`)
 				(i32.not-eqz status)
-				(then (return (call native_build_result (call report_clang_status status human) (bool true)))))
+				(then (return (call native_build_result (call report_clang_status status (struct.get tool failed_unit) human) (bool true)))))
 			(return (call native_build_result (call install_binary (borrow-shared path) (borrow-shared target)
 				(borrow-shared binary) target_index human) (bool true)))))
 
@@ -425,6 +448,12 @@
 				(borrow-shared runtime) (borrow-shared header) (borrow-shared binary) (borrow-shared trace) (borrow-shared jobs)
 				(borrow-shared bytes) (borrow-shared config) invocation
 				(borrow-shared arguments) (borrow-shared nodes) (borrow-shared settings) human))
+			(if
+				(:doc "Numbered units, objects, and traces remain private. The canonical serial C is retained separately.")
+				(struct.get result numbered)
+				(then
+					(call discard_private_stage (borrow-shared directory))
+					(return (struct.get result status))))
 			(if
 				(:doc `A published debug directory already owns the private source and runtime files.`)
 				(bool.and (bool.and (u8.eqz (struct.get library_context os)) (u32.eq (struct.get invocation mode) 1u32))
