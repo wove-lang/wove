@@ -465,6 +465,30 @@ The relocated compiler and Clang verified all 21 values for both bridge
 origins across the 240 configurations. Both fixtures also link under 12
 host C mode and feature profile combinations.
 
+## Bundled `<tar.h>` archive constants
+
+Apple Clang 21 and LLVM Clang 22 exposed 25 public macros across the
+macOS SDK 27.2 and Debian glibc 2.41 configurations on arm64 and x86-64.
+The 24 common names were present in C11, C17, and C23 in all ten audited
+feature profiles. Darwin also exposes `TSVTX` in every profile. Glibc hides
+it in the audited POSIX.1-2001, POSIX.1-2008, and default-source profiles.
+The binding uses `c_optional` to follow the selected header. The installed
+and project bridge fixtures check the native value when present and the
+original selector span when hidden. [LLVM libc header index](https://libc.llvm.org/headers/index.html)
+
+The file type codes and mode bits are C `int` values, including the NUL
+character code `AREGTYPE`. Darwin's header marks `SYMTYPE` and `CONTTYPE`
+reserved. Glibc describes a symbolic link and a contiguous file. The
+numeric codes agree across the SDKs. `TMAGIC` and `TVERSION` are immutable
+shared views. The magic view contains five bytes, with the terminator
+counted by `TMAGLEN` outside the view. The version view contains exactly
+the two bytes counted by `TVERSLEN`. The fixtures compare both lengths and
+each byte to the native header.
+
+Across the 240 SDK configurations, both bridge origins passed 11,928
+value comparisons and 72 unavailable-selector diagnostics. The fixtures
+also link under the host C mode and feature profile matrix.
+
 ## Bundled message formatting
 
 The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public
