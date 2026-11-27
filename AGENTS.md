@@ -33,6 +33,12 @@ notes immediately after the opening names.
 Start a C bridge with `(bridge c-header "<header.h>"`. Place its metadata
 prefix after the quoted header and before its members.
 
+Treat bundled libc bridges as user-authored code. Every pragma or compiler
+check used by a bundled bridge must behave identically for an equivalent
+user bridge. Use shared pragmas to express and check ownership, borrowing,
+and lifetimes. Surface Clang's diagnostics when native declarations fail
+under the effective build settings.
+
 In Wove modules under `stage-2/`, document each function and multiline
 control-flow form with a `(:doc "...")` entry at the start of its metadata
 prefix. Explain the form's purpose or an important invariant. Attach a
