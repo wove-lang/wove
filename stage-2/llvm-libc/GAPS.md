@@ -598,6 +598,29 @@ entire C allocation so a later wait bridge can lend the same record.
 | Darwin `RUSAGE_INFO_V0` through `RUSAGE_INFO_V6`, `RUSAGE_INFO_CURRENT`, `RU_PROC_RUNS_RESLIDE`, `rusage_info_t`, and the versioned records including `rusage_info_current` | These are full-profile members for `proc_pid_rusage` from `libproc.h`. Each flavor needs the matching native output record and extent. |
 | Darwin `getiopolicy_np`, `setiopolicy_np`, `IOPOL_*`, `RLIMIT_*_MONITOR`, `RLIMIT_THREAD_CPULIMITS`, `RLIMIT_FOOTPRINT_INTERVAL`, `WAKEMON_*`, `CPUMON_MAKE_FATAL`, `FOOTPRINT_INTERVAL_RESET`, and `struct proc_rlimit_control_wakeupmon` | These names require Darwin's full profile. The audited SDK publishes the monitor data and syscall number. The two I/O policy calls form a separate selector family. |
 
+## Bundled `<sys/time.h>` wall time and interval timers
+
+The macOS 27.2 SDK and Debian glibc 2.41 expose `gettimeofday`,
+`getitimer`, `setitimer`, and all three `ITIMER_*` values in every
+audited C11, C17, and C23 profile on arm64 and x86-64. The native
+`Timeval` uses `time_t` and `suseconds_t`. The latter resolves to
+signed `int` on Darwin and signed `long` on glibc. The `timeval`
+record is 16 bytes and `itimerval` is 32 bytes, both aligned to eight
+bytes. Resource accounting and wait usage consume the same `Timeval`
+declaration through ordinary bridge imports.
+[LLVM libc time checklist](https://libc.llvm.org/headers/sys/time.html)
+
+| Native members | Coverage or outstanding contract |
+| --- | --- |
+| `gettimeofday`, `struct timeval`, `time_t`, and `suseconds_t` | The caller supplies a mutable `Timeval` loan. The binding supplies a fixed typed `void *` null and preserves the C status. The project and bundled fixtures check a seeded full-width value, live field writes, and the raw status against C. |
+| `struct timezone` and the nonnull timezone operand | Darwin extension and glibc miscellaneous profiles expose the legacy record. The native formal remains `void *` in every tested profile. A project binding using `c_void_ptr` on a typed mutable timezone record fails source checking. The record adaptation needs an exact native void-pointer loan that retains size, alignment, and type. |
+| `struct itimerval`, `ITIMER_REAL`, `ITIMER_VIRTUAL`, `ITIMER_PROF`, `getitimer`, and `setitimer` | The selector uses the native `int` on Darwin and glibc's `__itimer_which_t` across GNU and standard profiles. Both records contain canonical `Timeval` members. The fixture reads all three timers and verifies a process-local update, the saved previous setting, and restoration before expiration. Passing a null previous-setting pointer needs the nullable record contract. [Compiler prerequisite #686](https://github.com/wove-lang/wove/issues/686) |
+| `select`, `fd_set`, and `FD_*` | The general descriptor-set slice needs all four nullable native record arguments and fixtures for the actual platform macros. Glibc re-exposes the descriptor-set interfaces from `<sys/select.h>`. Darwin exposes `FD_COPY` in extension profiles. [Compiler prerequisite #686](https://github.com/wove-lang/wove/issues/686) |
+| `adjtime` and `settimeofday` | Darwin extension and glibc miscellaneous profiles expose these clock-setting interfaces. Their native shared and mutable record pointer positions can be nullable. [Compiler prerequisite #686](https://github.com/wove-lang/wove/issues/686) |
+| `utimes`, `futimes`, `lutimes`, and `futimesat` | The file-time group needs an exact borrowed pair of native `timeval` values and the null form for current time. The audited headers always expose `utimes`, gate `futimes` and `lutimes` in extension profiles, and expose `futimesat` only on GNU glibc. |
+| `timeradd`, `timersub`, `timerclear`, `timerisset`, `timercmp`, `timevalcmp`, `TIMEVAL_TO_TIMESPEC`, and `TIMESPEC_TO_TIMEVAL` | These extension macros need per-operation fixtures and exact pointer contracts. Comparison macros take an operator token. The conversion macros are GNU-only on glibc and appear in Darwin extension profiles. Darwin also exposes `timevalcmp`. |
+| Darwin `struct timeval64`, `struct clockinfo`, and `DST_*` | These are extension-profile members for separate coverage. The portable wall-time binding uses the native `struct timeval` and a typed null timezone. |
+
 ## Bundled message formatting
 
 The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public
