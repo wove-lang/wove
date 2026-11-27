@@ -1,0 +1,142 @@
+(module parallel_build_options
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Resolve opt-in job budgets and recognize Clang options safe to repeat per object.")
+
+	(use wove-file "../jobs.wove" (only compiler_job_budget))
+	(use wove-file "../../cli/command/resolve.wove" (only command_setting (type CommandInvocation)))
+	(use wove-file "../../cli/command/args.wove" (only (type CommandArgument)))
+	(use wove-file "../../config/project.wove" (only (type ProjectSetting)))
+	(use wove-file "../../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../../text/bytes.wove" (only same_bytes))
+	(use wove-file "../../text/equal.wove" (only equal_bytes))
+	(use c-header "<unistd.h>" (only sysconf _SC_NPROCESSORS_ONLN))
+
+	(let compiler_prefixes "-D\u0000-U\u0000-I\u0000-W\u0000-std=\u0000--target=\u0000--sysroot=\u0000-flto=\u0000-fsanitize=\u0000-fno-sanitize=\u0000-mmacosx-version-min=\u0000--gcc-toolchain=\u0000--ld-path=\u0000-fuse-ld=\u0000-march=\u0000-mcpu=\u0000-mabi=\u0000-L\u0000")
+	(let operand_options "-I\u0000-D\u0000-U\u0000-isystem\u0000-iquote\u0000-idirafter\u0000-isysroot\u0000--target\u0000-target\u0000--sysroot\u0000-L\u0000")
+	(let unsafe_warning_prefixes "-Wa,\u0000-Wl,\u0000-Wp,\u0000")
+	(let repeatable_options "-pthread\u0000-Qunused-arguments\u0000-O\u0000-O0\u0000-O1\u0000-O2\u0000-O3\u0000-O4\u0000-Os\u0000-Oz\u0000-Og\u0000-Ofast\u0000-m32\u0000-m64\u0000")
+	(let frontend_arg "-Xclang")
+	(let c_standard "-std=")
+	(let response_file "@")
+
+	(fn starts_with
+		(:doc "Match one packed option prefix within the current argument.")
+		(params (bytes (shared-array u8)) (prefix (shared-array u8))) (returns bool)
+		(body
+			(let width (array.len prefix))
+			(return (bool.and (i32.ge (array.len bytes) width)
+				(call same_bytes (borrow-shared bytes) 0i32 width (borrow-shared prefix) 0i32 width)))))
+
+	(fn argument_end
+		(:doc "Find the next terminator in the counted argument view.")
+		(params (packed (shared-array u8)) (start i32)) (returns i32)
+		(body
+			(let-mut end start)
+			(while
+				(:doc "An unterminated prefix cannot authorize a split.")
+				(bool.and (i32.lt end (array.len packed)) (u8.not-eqz (array.load packed end)))
+				(body (set end (i32.inc end))))
+			(return end)))
+
+	(fn list_matches
+		(:doc "Match packed constant words exactly or as prefixes.")
+		(params (option (shared-array u8)) (words (shared-array u8)) (prefix bool)) (returns bool)
+		(body
+			(let-mut cursor 0i32)
+			(while
+				(:doc "Each constant word has its own NUL terminator.")
+				(i32.lt cursor (array.len words))
+				(body
+					(let end (call argument_end (borrow-shared words) cursor))
+					(let word (borrow-shared (array.range words cursor end)))
+					(let matches (if prefix
+						(then (call starts_with (borrow-shared option) (borrow-shared word)))
+						(else (call equal_bytes (borrow-shared option) (borrow-shared word)))))
+					(if matches (then (return (bool true))))
+					(set cursor (i32.inc end))))
+			(return (bool false))))
+
+	(fn repeatable_flag
+		(:doc "Recognize ordinary compiler settings without shared output filenames.")
+		(params (option (shared-array u8))) (returns bool)
+		(body
+			(return (bool.and
+				(bool.not (call list_matches (borrow-shared option) (borrow-shared unsafe_warning_prefixes) (bool true)))
+				(bool.or (call list_matches (borrow-shared option) (borrow-shared repeatable_options) (bool false))
+					(call list_matches (borrow-shared option) (borrow-shared compiler_prefixes) (bool true)))))))
+
+	(fn repeatable_compiler_options
+		(:doc "Keep opaque response files, shared depfiles and other unknown effects on the existing serial path.")
+		(params (packed (shared-array u8))) (returns bool)
+		(body
+			(let-mut cursor 0i32)
+			(let length (array.len packed))
+			(while
+				(:doc "Walk full argument words because separate option operands may begin with a dash or @.")
+				(i32.lt cursor length)
+				(body
+					(let end (call argument_end (borrow-shared packed) cursor))
+					(if (i32.eq end length) (then (return (bool false))))
+					(let option (borrow-shared (array.range packed cursor end)))
+					(set cursor (i32.inc end))
+					(let frontend (call equal_bytes (borrow-shared option) (borrow-shared frontend_arg)))
+					(if
+						(:doc "Only the resolved standard may be forwarded directly to the Clang frontend.")
+						(bool.or frontend (call list_matches (borrow-shared option) (borrow-shared operand_options) (bool false)))
+						(then
+							(let last (call argument_end (borrow-shared packed) cursor))
+							(if (bool.or (i32.eq cursor last) (i32.eq last length)) (then (return (bool false))))
+							(let operand (borrow-shared (array.range packed cursor last)))
+							(if
+								(:doc "Clang expands response files before consuming option values.")
+								(bool.or (call starts_with (borrow-shared operand) (borrow-shared response_file))
+									(bool.and frontend (bool.not (call starts_with (borrow-shared operand) (borrow-shared c_standard)))))
+								(then (return (bool false))))
+							(set cursor (i32.inc last)))
+						(else
+							(if (bool.not (call repeatable_flag (borrow-shared option)))
+								(then (return (bool false))))))))
+			(return (bool true))))
+
+	(fn parallel_partition
+		(:doc "Choose the same budget for numbered emission and object workers when options admit a split.")
+		(params (invocation CommandInvocation) (arguments (shared-array CommandArgument))
+			(nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting)) (drivers (shared-array u8)))
+		(returns i32)
+		(body
+			(let enabled (call command_setting invocation (borrow-shared arguments)
+				(borrow-shared nodes) (borrow-shared settings) 1u32 6i32))
+			(if
+				(:doc "Debug source retention still needs the serial stage and its symbol publication path.")
+				(bool.or (u32.eqz (struct.get enabled scalar)) (u32.eq (struct.get invocation mode) 1u32))
+				(then (return 1i32)))
+			(let limit (call command_setting invocation (borrow-shared arguments)
+				(borrow-shared nodes) (borrow-shared settings) 1u32 7i32))
+			(let requested (struct.get limit scalar))
+			(if (u32.eq requested 1u32) (then (return 1i32)))
+			(let links (call command_setting invocation (borrow-shared arguments)
+				(borrow-shared nodes) (borrow-shared settings) 3u32 17i32))
+			(let config_links (bool.and (u32.eq (struct.get links origin) 1u32)
+				(i32.not-ltz (struct.get (array.load nodes (struct.get links row)) first_child))))
+			(if
+				(:doc "Unclassified link paths can add additional C frontends to the final link.")
+				(bool.or (bool.or (i32.gtz (struct.get links count)) config_links)
+					(bool.not (call repeatable_compiler_options (borrow-shared drivers))))
+				(then (return 1i32)))
+			(let-mut cpus 0i32)
+			(if
+				(:doc "Only automatic sizing queries the host CPU count.")
+				(u32.eqz requested)
+				(then
+					(let available (int.convert i64 (call sysconf _SC_NPROCESSORS_ONLN)))
+					(if
+						(:doc "A failed or oversized native count must remain representable by the sizing policy.")
+						(i64.gtz available)
+						(then
+							(set cpus (if (i64.gt available 2147483647i64)
+								(then 2147483647i32) (else (i32.from-i64 available))))))))
+			(let budget (call compiler_job_budget (bool true) requested cpus))
+			(if (u32.gt budget 2147483647u32) (then (return 2147483647i32)))
+			(return (i32.from-u32 budget))))
+)

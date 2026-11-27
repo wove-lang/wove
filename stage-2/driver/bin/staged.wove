@@ -4,8 +4,9 @@
 	(:doc "Compile ordered staged C units with the bounded runner and link their private objects once.")
 
 	(use wove-file "../arguments.wove" (only frontend_capacity write_probe_options write_plain_argument
-		write_library_compile_options write_library_link_options write_link_inputs write_clang_standard write_native_output))
+		write_library_compile_options write_library_link_options write_link_inputs write_clang_standard write_native_output write_include_trace))
 	(use wove-file "../paths.wove" (only directory_width join_file_path))
+	(use wove-file "./jobs.wove" (only clang_trace_environment))
 	(use wove-file "./object_jobs.wove" (only run_object_jobs (type ObjectJob)))
 	(use wove-file "../../io/process.wove" (only copy_argument valid_program))
 	(use wove-file "../../io/process_file.wove" (only start_process_files))
@@ -27,7 +28,9 @@
 	(let object_suffix ".o")
 	(let stdout_suffix ".stdout")
 	(let stderr_suffix ".stderr")
+	(let jobs_suffix ".jobs")
 	(let linker_stdout "link.stdout")
+	(let linker_jobs "link.jobs")
 	(let linker_stderr "link.stderr")
 	(let compile_only "-c")
 	(let language_flag "-x")
@@ -84,10 +87,10 @@
 
 	(fn pack_object_arguments
 		(:doc "Carry effective driver options to the C compile, including target and SDK options supplied in ldflags.")
-		(params (prefix (shared-array u8)) (unit (shared-array u8)) (object (shared-array u8)) (library bool))
+		(params (prefix (shared-array u8)) (unit (shared-array u8)) (object (shared-array u8)) (library bool) (traced bool))
 		(returns (owned-array u8))
 		(body
-			(let width (u64.add 64u64 (u64.add (u64.from-i32 (array.len prefix))
+			(let width (u64.add 128u64 (u64.add (u64.from-i32 (array.len prefix))
 				(u64.add (u64.from-i32 (array.len unit)) (u64.from-i32 (array.len object))))))
 			(if
 				(:doc "All per-unit options and paths must fit one packed argv buffer.")
@@ -104,7 +107,11 @@
 			(let language (call write_plain_argument (borrow-shared language_flag) (borrow-mut packed) phase))
 			(let dialect (call write_plain_argument (borrow-shared c_language) (borrow-mut packed) language))
 			(let input (call write_plain_argument (borrow-shared unit) (borrow-mut packed) dialect))
-			(let end (call write_native_output (borrow-shared object) (borrow-mut packed) input))
+			(let-mut end (call write_native_output (borrow-shared object) (borrow-mut packed) input))
+			(if
+				(:doc "Each frontend writes its private include graph alongside that unit's stdout.")
+				traced
+				(then (set end (call write_include_trace (borrow-mut packed) end))))
 			(if (i32.ltz end) (then (return (array.alloc u8 0i32))))
 			(return (call copy_argument (borrow-shared (array.range packed 0i32 end))))))
 
@@ -123,12 +130,18 @@
 
 	(fn link_staged_objects
 		(:doc "Run one link with private output and logs, waiting even if closing a parent descriptor failed.")
-		(params (program (shared-array u8)) (packed (shared-array u8)) (binary (shared-array u8)) (attempted i32))
+		(params (program (shared-array u8)) (packed (shared-array u8)) (binary (shared-array u8)) (attempted i32) (traced bool))
 		(returns StagedBuild)
 		(body
 			(let trace (call join_file_path (borrow-shared binary) (borrow-shared linker_stdout)))
 			(let errors (call join_file_path (borrow-shared binary) (borrow-shared linker_stderr)))
-			(let environment environ)
+			(let-mut environment environ)
+			(if
+				(:doc "Override inherited option logging just as for the serial Clang command.")
+				traced
+				(then
+					(let log (call join_file_path (borrow-shared binary) (borrow-shared linker_jobs)))
+					(set environment (call clang_trace_environment (borrow-shared log)))))
 			(let child (call start_process_files (borrow-shared program) (borrow-shared packed)
 				(borrow-shared trace) (borrow-shared errors) (borrow-shared environment)))
 			(let pid (struct.get child pid))
@@ -153,21 +166,25 @@
 		bin options. For shared images it supplies the staged export list and
 		the final basename. Forwarded compiler options must support separate
 		compile and link phases. The caller owns stage cleanup, image validation
-		and publication. The object-N.stdout, object-N.stderr and link.* logs
+		and publication. Supply one trace status slot per unit to record
+		dependencies and child statuses, or an empty view to omit tracing. The object-N.stdout, object-N.stderr and link.* logs
 		remain in the stage for replay. Status -3 means missing or nonregular
 		tool output. failed_unit is -1 outside an identified compile.`)
 		(:expect (tests "stage-2/cli/native/staged_build/cases.jsonc") (issues "gh:wove-lang/wove:218"))
 		(params (program (shared-array u8)) (units (shared-array (owned-array u8))) (binary (shared-array u8))
 			(budget u32) (os u8) (library bool) (exports (shared-array u8)) (name (shared-array u8))
 			(bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
-			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting)))
+			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting))
+			(trace_statuses (mut-array i32)))
 		(returns StagedBuild)
 		(body
 			(let count (array.len units))
+			(let traced (i32.gtz (array.len trace_statuses)))
 			(let directory (call directory_width (borrow-shared binary)))
 			(if
 				(:doc "Require a nonempty build, a resolved bin invocation and an unused private image path.")
-				(bool.or (bool.or (i32.eqz count) (u32.eqz budget))
+				(bool.or (bool.or (bool.or (i32.eqz count) (u32.eqz budget))
+						(bool.and traced (i32.not-eq (array.len trace_statuses) count)))
 					(bool.or (u32.not-eq (struct.get invocation command) 2u32)
 						(bool.not (call vacant_image (borrow-shared binary) directory))))
 				(then (return (call staged_result -1i32 -1i32 0i32 (bool false)))))
@@ -205,9 +222,15 @@
 						(then (return (call staged_result -1i32 index 0i32 (bool false)))))
 					(let packed (call pack_object_arguments
 						(borrow-shared (array.range options 0i32 (struct.get frontend probe_end)))
-						(borrow-shared unit) (borrow-shared object) library))
+						(borrow-shared unit) (borrow-shared object) library traced))
 					(if (i32.eqz (array.len packed)) (then (return (call staged_result -1i32 index 0i32 (bool false)))))
-					(let environment environ)
+					(let-mut environment environ)
+					(if
+						(:doc "Only the compile jobs have frontend sysroots to capture.")
+						traced
+						(then
+							(let log (call indexed_object_path (borrow-shared binary) index (borrow-shared jobs_suffix)))
+							(set environment (call clang_trace_environment (borrow-shared log)))))
 					(array.store jobs index (struct.new ObjectJob (arguments (move packed))
 						(stdout_path (call indexed_object_path (borrow-shared binary) index (borrow-shared stdout_suffix)))
 						(stderr_path (call indexed_object_path (borrow-shared binary) index (borrow-shared stderr_suffix)))
@@ -227,6 +250,15 @@
 			(let compiled (call run_object_jobs (borrow-shared program) (borrow-shared jobs) budget))
 			(let attempted (struct.get compiled attempted))
 			(if
+				(:doc "Record exact status for each attempted trace, including launches without a capture file.")
+				traced
+				(then
+					(let statuses (borrow-shared (struct.get compiled statuses)))
+					(for
+						(:doc "Unattempted rows have no include graph to validate.")
+						(let index) (range 0i32 attempted)
+						(body (array.store trace_statuses index (array.load statuses index))))))
+			(if
 				(:doc "The runner returns after reaping every started compiler. A failed compile prevents linking.")
 				(i32.not-eqz (struct.get compiled status))
 				(then (return (call staged_result (struct.get compiled status)
@@ -242,5 +274,5 @@
 				(bool.not (call vacant_output (borrow-shared binary)))
 				(then (return (call staged_result -1i32 -1i32 attempted (bool false)))))
 			(return (call link_staged_objects (borrow-shared program)
-				(borrow-shared (array.range options 0i32 end)) (borrow-shared binary) attempted))))
+				(borrow-shared (array.range options 0i32 end)) (borrow-shared binary) attempted traced))))
 )
