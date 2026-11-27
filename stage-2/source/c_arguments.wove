@@ -35,31 +35,35 @@
 	(let open_tail "...")
 
 	(fn read_c_view_type
-		(:doc `Retain the access mode and single element operand of a native view parameter.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
+		(:doc "Retain access and element type for the requested ordinary or exact-length view shape.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (exact bool))
 		(returns CViewType)
 		(body
 			(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 			(let head (struct.get (local parts) head))
 			(let element (struct.get (local parts) operands))
 			(if
-				(:doc "A native view must have one element operand.")
+				(:doc "A native view always names its element type.")
 				(bool.or (i32.ltz (local head)) (i32.ltz (local element)))
 				(then (return (struct.new CViewType (access 0u32) (element -1i32)))))
 			(let mode (call source_builtin_type (borrow-shared (local source)) (array.load (local nodes) (local head))))
+			(let size (struct.get (array.load (local nodes) (local element)) next_sibling))
+			(let shape (bool.or
+				(bool.and (bool.not (local exact)) (i32.ltz (local size)))
+				(bool.and (local exact) (bool.and (i32.not-ltz (local size))
+					(i32.ltz (struct.get (array.load (local nodes) (local size)) next_sibling))))))
 			(if
 				(:doc "Keep mutability and the original element node for native type resolution.")
-				(bool.and (bool.or (u32.eq (local mode) 34u32) (u32.eq (local mode) 38u32))
-					(i32.ltz (struct.get (array.load (local nodes) (local element)) next_sibling)))
+				(bool.and (bool.or (u32.eq (local mode) 34u32) (u32.eq (local mode) 38u32)) (local shape))
 				(then (return (struct.new CViewType (access (local mode)) (element (local element))))))
 			(return (struct.new CViewType (access 0u32) (element -1i32)))))
 
 	(fn c_byte_slice_type
-		(:doc `Return the byte-slice access mode, or zero for another type.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
+		(:doc "Return the access mode of a byte view with the requested extent shape.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (exact bool))
 		(returns u32)
 		(body
-			(let view (call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let view (call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (local exact)))
 			(let element (struct.get (local view) element))
 			(if
 				(:doc "Byte contracts accept only the built-in u8 element.")
@@ -73,7 +77,7 @@
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
 		(returns u32)
 		(body
-			(let view (call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
+			(let view (call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local node) (bool false)))
 			(let element (struct.get (local view) element))
 			(if
 				(:doc "Only owned byte rows can be marshalled into a C string table.")
@@ -184,9 +188,11 @@
 				(call is_c_value_mode (local mode))
 				(then (return (struct.get (local formal) integer))))
 			(if
-				(:doc "Only a scalar place can use this borrowed void pointer ABI.")
+				(:doc "A native void pointer borrows a scalar place or an exact-length byte view.")
 				(u8.eq (local mode) (local c_void_pointer_mode))
-				(then (return (u32.gtz (struct.get (local formal) scalar_ref)))))
+				(then (return (bool.or (u32.gtz (struct.get (local formal) scalar_ref))
+					(u32.gtz (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local type) (bool true)))))))
 			(let rows (call c_row_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
 			(if
 				(:doc "C string vectors borrow the rows through a shared projection.")
@@ -197,7 +203,7 @@
 				(call is_c_array_mode (local mode))
 				(then (return (bool.and (u32.eqz (local rows))
 					(u32.gtz (struct.get
-						(call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)) access))))))
+						(call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (bool false)) access))))))
 			(if
 				(:doc "Initialization needs a mutable native owner and excludes nullable formals.")
 				(call is_c_storage_init_mode (local mode))
@@ -215,8 +221,8 @@
 					(return (bool.or
 						(u32.gtz (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
 						(u32.gtz (struct.get (call read_c_view_type (borrow-shared (local source))
-							(borrow-shared (local nodes)) (local type)) access))))))
-			(let view (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
+							(borrow-shared (local nodes)) (local type) (bool false)) access))))))
+			(let view (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (bool false)))
 			(return (bool.or (u32.eq (local view) 34u32)
 				(bool.and (bool.or (bool.or (call is_c_bytes_mode (local mode)) (call is_c_string_mode (local mode)))
 					(bool.or (call is_c_null_mode (local mode)) (call is_c_null_mode (struct.get (local formal) mode))))
@@ -307,7 +313,7 @@
 				(call accepts_c_null (local mode))
 				(then (return (call checked_c_arguments 0i32 0i32 1i32 (bool false) 0i32))))
 			(if
-				(:doc "The final contract table records vectors, initializers, and scalar void pointers.")
+				(:doc "The final contract table records vectors, initializers, and void pointers.")
 				(bool.or (u8.eq (local mode) (local c_void_pointer_mode))
 					(bool.or (call is_c_init_mode (local mode)) (call is_c_vector_mode (local mode))))
 				(then (return (call checked_c_arguments 0i32 0i32 0i32 (bool false) 0i32))))
@@ -650,7 +656,7 @@
 					(set (local vectors) (bool.or (local vectors) (local vector)))
 					(set (local void_pointer) (bool.or (local void_pointer) (local void_formal)))
 					(if
-						(:doc "Scalar void pointers require an exact nonvariadic C function. Other adapted arguments keep their existing signature rules.")
+						(:doc "Borrowed void pointers require an exact nonvariadic C function. Other adapted arguments keep their existing signature rules.")
 						(bool.and (bool.or (local void_formal) (bool.or (local vector)
 								(bool.or (call accepts_c_null (local mode)) (call is_c_init_mode (local mode)))))
 							(bool.or (struct.get (local arguments) macro)
@@ -666,8 +672,10 @@
 					(if
 						(:doc "An unannotated view is unavailable in a native signature.")
 						(bool.and (call is_c_value_mode (local mode))
-							(u32.gtz (struct.get
-								(call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)) access)))
+							(bool.or (u32.gtz (struct.get
+								(call read_c_view_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type) (bool false)) access))
+								(u32.gtz (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes))
+									(local type) (bool true)))))
 						(then (return (call c_argument_error_at (local type)))))
 					(if
 						(:doc "Count each distinct owner initialization formal.")
