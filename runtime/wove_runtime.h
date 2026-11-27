@@ -284,6 +284,40 @@ _Bool wvrt_c_storage_active(const wvrt_c_storage *wvrt_storage);
 void wvrt_c_storage_finish_init(wvrt_c_storage *wvrt_storage, int32_t wvrt_status);
 void wvrt_c_storage_free(wvrt_c_storage *wvrt_storage);
 
+// Use the selected C layout to initialize only the native reserved prefix.
+#define WVRT_CSTR_VECTOR_ALLOC(type, offset, reserved, file, start, end) \
+	__extension__ ({ \
+		_Static_assert(_Generic(&((type *)0)->offset, size_t *: 1, default: 0), \
+			"Wove C string vector offset must be size_t"); \
+		extern size_t wvrt_c_string_vector_offset(int64_t, int32_t, int32_t, int32_t); \
+		size_t wvrt_reserved = wvrt_c_string_vector_offset((reserved), (file), (start), (end)); \
+		wvrt_c_storage *wvrt_owner = wvrt_c_storage_new(sizeof(type), _Alignof(type), (file), (start), (end)); \
+		((type *)wvrt_c_storage_data(wvrt_owner))->offset = wvrt_reserved; \
+		wvrt_owner; \
+	})
+
+// Check each native member before lending the original array of pointers.
+#define WVRT_CSTR_VECTOR_VIEW(type, paths, count, offset, owner, file, start, end) \
+	__extension__ ({ \
+		_Static_assert(_Generic(&((type *)0)->paths, char ***: 1, default: 0), \
+			"Wove C string vector field must be char **"); \
+		_Static_assert(_Generic(&((type *)0)->count, size_t *: 1, default: 0), \
+			"Wove C string vector count must be size_t"); \
+		_Static_assert(_Generic(&((type *)0)->offset, size_t *: 1, default: 0), \
+			"Wove C string vector offset must be size_t"); \
+		extern wvrt_slice wvrt_c_string_vector(char *const *, size_t, size_t, int32_t, int32_t, int32_t); \
+		const type *wvrt_result = wvrt_c_storage_data((owner)); \
+		wvrt_c_string_vector(wvrt_result->paths, wvrt_result->count, wvrt_result->offset, \
+			(file), (start), (end)); \
+	})
+
+// Keep the row accessor's declaration in units that actually use it.
+#define WVRT_CSTR_VECTOR_LOAD(paths, index, file, start, end) \
+	__extension__ ({ \
+		extern wvrt_slice wvrt_c_string_vector_load(wvrt_slice, int32_t, int32_t, int32_t, int32_t); \
+		wvrt_c_string_vector_load((paths), (index), (file), (start), (end)); \
+	})
+
 // Transfer one owning array pointer and leave the original slot empty.
 static inline wvrt_array *wvrt_array_take(wvrt_array **wvrt_slot) {
 	wvrt_array *wvrt_result = *wvrt_slot;

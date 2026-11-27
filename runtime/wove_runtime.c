@@ -272,6 +272,48 @@ wvrt_slice wvrt_borrow_callback_path(const char *wvrt_path, int32_t wvrt_file,
 	return (wvrt_slice){wvrt_path, (int32_t)wvrt_length, 1};
 }
 
+// Check reserved entries before passing a native size to the owning library.
+size_t wvrt_c_string_vector_offset(int64_t wvrt_reserved, int32_t wvrt_file,
+	int32_t wvrt_start, int32_t wvrt_end) {
+	// Leave capacity for the table's terminating pointer.
+	if (wvrt_reserved < 0 || (uint64_t)wvrt_reserved >= PTRDIFF_MAX / sizeof(char *)) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "invalid C string vector offset");
+	}
+	return (size_t)wvrt_reserved;
+}
+
+// Lend the original pointer table, excluding reserved and terminating slots.
+wvrt_slice wvrt_c_string_vector(char *const *wvrt_paths, size_t wvrt_count, size_t wvrt_reserved,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	size_t wvrt_limit = PTRDIFF_MAX / sizeof(char *);
+	// Validate the full counted extent before taking a pointer offset.
+	if (wvrt_count > INT32_MAX || wvrt_reserved >= wvrt_limit ||
+		wvrt_count >= wvrt_limit - wvrt_reserved || (wvrt_count != 0 && wvrt_paths == NULL)) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "invalid C string vector extent");
+	}
+	return (wvrt_slice){wvrt_count == 0 ? NULL : wvrt_paths + wvrt_reserved,
+		(int32_t)wvrt_count, sizeof(char *)};
+}
+
+// Return one immutable string view without copying the native bytes.
+wvrt_slice wvrt_c_string_vector_load(wvrt_slice wvrt_paths, int32_t wvrt_index,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	size_t wvrt_offset = wvrt_slice_offset_at_span(wvrt_paths.wvrt_length, wvrt_index,
+		wvrt_file, wvrt_start, wvrt_end);
+	char *const *wvrt_items = wvrt_paths.wvrt_items;
+	const char *wvrt_path = wvrt_items[wvrt_offset];
+	// The bridge contract guarantees NUL termination for each counted, present row.
+	if (wvrt_path == NULL) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "missing C string vector row");
+	}
+	size_t wvrt_length = strlen(wvrt_path);
+	// Reject strings that cannot fit in a Wove byte descriptor.
+	if (wvrt_length > INT32_MAX) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C string vector row is too long");
+	}
+	return (wvrt_slice){wvrt_path, (int32_t)wvrt_length, 1};
+}
+
 // A borrowed native handle must be present before it is passed to C.
 void wvrt_check_c_handle(const volatile void *wvrthandle, int32_t wvrtfile,
 	int32_t wvrtstart, int32_t wvrtend) {
