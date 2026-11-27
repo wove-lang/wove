@@ -45,6 +45,15 @@ def check_phase(phase, compiler, clang, root, manifest, values, groups):
 	preserved = {path: entry_snapshot(root / path) for path in phase.get("preserve", [])}
 	env = {**os.environ, "CLANG": str(root / "clang"), "WOVE_PARALLEL_LOG": str(log),
 		"WOVE_PARALLEL_CLANG": json.dumps(clang), "WOVE_PARALLEL_ACTIONS": json.dumps(phase.get("actions", {}))}
+	# The compiler sees only the executable needed by the fixture's shebang.
+	if phase.get("isolated_path"):
+		minimal = root / "tool-path"
+		minimal.mkdir(exist_ok=True)
+		python = minimal / "python3"
+		if not python.exists():
+			python.symlink_to(sys.executable)
+		env["WOVE_FIXTURE_TOOL_PATH"] = env.get("PATH", os.defpath)
+		env["PATH"] = str(minimal)
 	result = subprocess.run([compiler, *words(phase["argv"], values, groups)], cwd=root, env=env,
 		capture_output=True, timeout=30)
 	assert result.returncode == phase.get("exit", 0), result
