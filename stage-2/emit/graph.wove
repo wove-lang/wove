@@ -20,10 +20,11 @@
 	(use wove-file "../scalar/tests.wove" (only discover_graph_tests (type DiscoveredTest)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/plan.wove" (only plan_bodies (type CallSite)))
-	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/trees.wove" (only (type ScalarTree)))
 	(use wove-file "../scalar/graph.wove" (only layout_trees signature_capacity prepare_graph))
 	(use wove-file "./c.wove" (only write_translation_unit))
+	(use wove-file "./units.wove" (only plan_unit_assignments can_share_program_preamble write_numbered_pass (type UnitIndex)))
 	(use wove-file "./library.wove" (only check_library_exports write_library_abi))
 	(use wove-file "../source/target.wove" (only (value library_mode)))
 	(use wove-file "./tests.wove" (only write_test_entry))
@@ -415,6 +416,46 @@
 					(borrow-mut (local output)) (local width) (local name_prefix) (local writing)))))
 			(return (local width))))
 
+	(fn write_partitioned_graph
+		(:doc "Check a test partition's complete output capacity before publishing bytes or unit boundaries.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
+			(trees (shared-array ScalarTree)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
+			(parameters (shared-array ScalarParameter)) (statements (shared-array ScalarStatement))
+			(records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
+			(root i32) (plan GraphPlan) (assignments (shared-array UnitIndex)) (count i32)
+			(output (mut-array u8)) (unit_ends (mut-array UnitIndex))) (returns GraphOutput)
+		(body
+			(let tree (array.load (local trees) (local root)))
+			(if
+				(:doc "Bridge preprocessing, module storage, and generated entry wrappers need explicit ownership before partitioning.")
+				(bool.or (bool.or (u8.not-eqz (struct.get (local plan) library_os)) (i32.not-ltz (struct.get (local plan) test_count)))
+					(bool.not (call can_share_program_preamble (borrow-shared (local bindings))
+						(borrow-shared (local statements)) (borrow-shared (local expressions)))))
+				(then (return (call graph_output 0i32 -2i32 (local root)
+					(struct.get (local tree) start) (struct.get (local tree) end) 0u32))))
+			(let-mut occupied (array.alloc u8 (call native_prefix_capacity (borrow-shared (local bindings)) (borrow-shared (local records)))))
+			(let name_prefix (call choose_name_prefix (borrow-shared (local arena)) (borrow-shared (local files))
+				(borrow-shared (local bindings)) (borrow-shared (local nodes)) (borrow-shared (local records))
+				(borrow-shared (local functions)) (borrow-mut (local occupied))))
+			(let measured (call write_numbered_pass (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+				(borrow-shared (local assignments)) (local count) (local name_prefix)
+				(borrow-mut (local output)) (borrow-mut (local unit_ends)) (bool false)))
+			(if
+				(:doc "On a short buffer leave all segments unwritten and retain the serial emitter's source span.")
+				(u32.lt (u32.from-i32 (array.len (local output))) (local measured))
+				(then (return (call short_graph_output (borrow-shared (local nodes)) (local root)
+					(struct.get (local plan) entry) (struct.get (array.load (local files) (local root)) source_start)
+					(struct.get (local tree) start) (struct.get (local tree) end)))))
+			(let written (call write_numbered_pass (borrow-shared (local arena)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (borrow-shared (local functions)) (borrow-shared (local parameters))
+				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
+				(borrow-shared (local assignments)) (local count) (local name_prefix)
+				(borrow-mut (local output)) (borrow-mut (local unit_ends)) (bool true)))
+			(return (call graph_output (i32.from-u32 (local written)) -1i32 (local root)
+				(struct.get (local tree) start) (struct.get (local tree) end) 0u32))))
+
 	(fn run_scalar_graph
 		(:doc `Consume the successful graph resolver's active modules and populated binding prefix.
 
@@ -422,13 +463,18 @@
 		Ordinary builds use the canonical root for ABI main. Test builds
 		use a synthetic entry with the discovered inventory. A negative query path
 		selects C emission, otherwise inspect the given name through the path
-		row's local bindings. Both destinations remain untouched on failure.`)
+		row's local bindings. Output views remain untouched on failure.
+
+		The graph probe can request a partition using one boundary row per
+		requested unit plus one for the common header. A declaration of -2
+		indicates a graph outside the supported numbered subset.
+		An empty boundary table selects the serial path.`)
 		(:expect
 			(tests "stage-2/scalar_graphs.tsv" "stage-2/test_execution.tsv" "stage-2/native_alias/cases.tsv" "stage-2/native_records/cases.tsv" "stage-2/native_values/cases.tsv")
 			(issues "gh:wove-lang/wove:71" "gh:wove-lang/wove:129" "gh:wove-lang/wove:140" "gh:wove-lang/wove:142" "gh:wove-lang/wove:144" "gh:wove-lang/wove:146" "gh:wove-lang/wove:154" "gh:wove-lang/wove:186" "gh:wove-lang/wove:194" "gh:wove-lang/wove:223" "gh:wove-lang/wove:222"))
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
 			(bindings (shared-array GraphBinding)) (resolved GraphResult) (root i32) (query_path i32) (name (shared-array u8))
-			(assets (shared-array SuppliedFile)) (private_helpers bool) (output (mut-array u8)) (callers (mut-array CallSite)))
+			(assets (shared-array SuppliedFile)) (private_helpers bool) (output (mut-array u8)) (callers (mut-array CallSite)) (unit_ends (mut-array UnitIndex)))
 		(returns GraphOutput)
 		(body
 			(let-mut trees (array.alloc ScalarTree (array.len (local files))))
@@ -454,7 +500,8 @@
 					(let result (call run_scalar_graph_workspace (borrow-shared (local arena)) (borrow-shared (local files))
 						(borrow-shared (local modules)) (borrow-shared (local bindings)) (local resolved) (local root)
 						(local query_path) (borrow-shared (local name)) (borrow-shared (local assets)) (local private_helpers)
-						(borrow-shared (local trees)) (local rows) (local capacity) (borrow-mut (local output)) (borrow-mut (local callers))))
+						(borrow-shared (local trees)) (local rows) (local capacity) (borrow-mut (local output)) (borrow-mut (local callers))
+						(borrow-mut (local unit_ends))))
 					(if
 						(:doc "Only the private pre-emission clone shortage can be retried.")
 						(u32.not-eq (struct.get (local result) error) (local function_workspace_full))
@@ -473,7 +520,7 @@
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
 			(resolved_bindings (shared-array GraphBinding)) (resolved GraphResult) (root i32) (query_path i32) (name (shared-array u8))
 			(assets (shared-array SuppliedFile)) (private_helpers bool) (trees (shared-array ScalarTree)) (rows i32)
-			(signatures_capacity i32) (output (mut-array u8)) (callers (mut-array CallSite))) (returns GraphOutput)
+			(signatures_capacity i32) (output (mut-array u8)) (callers (mut-array CallSite)) (unit_ends (mut-array UnitIndex))) (returns GraphOutput)
 		(body
 			(let-mut bindings (array.alloc GraphBinding (array.len (local resolved_bindings))))
 			(call copy_graph_bindings (borrow-shared (local resolved_bindings)) (borrow-mut (local bindings)))
@@ -522,12 +569,34 @@
 				(u32.gtz (struct.get (local embedded) error))
 				(then (return (call graph_output 0i32 -1i32 (struct.get (local embedded) file)
 					(struct.get (local embedded) start) (struct.get (local embedded) end) (struct.get (local embedded) error)))))
-			(return (call write_graph_c (borrow-shared (local arena)) (borrow-shared (local files))
+			(if
+				(:doc "The private probe can group the checked definitions before rendering any C.")
+				(i32.lt 2i32 (array.len (local unit_ends)))
+				(then
+					(let function_count (call checked_function_count (borrow-shared (local functions))))
+					(let-mut assignments (array.alloc UnitIndex (local function_count)))
+					(let count (call plan_unit_assignments
+						(borrow-shared (local functions))
+						(array.len (local files)) (i32.dec (array.len (local unit_ends))) (borrow-mut (local assignments))))
+					(if
+						(:doc "A graph with one body fits the complete serial emitter.")
+						(i32.lt 1i32 (local count))
+						(then (return (call write_partitioned_graph (borrow-shared (local arena)) (borrow-shared (local files))
+							(borrow-shared (local bindings)) (borrow-shared (local trees)) (borrow-shared (local nodes))
+							(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local statements))
+							(borrow-shared (local records)) (borrow-shared (local expressions)) (local root) (local plan)
+							(borrow-shared (local assignments)) (local count) (borrow-mut (local output)) (borrow-mut (local unit_ends))))))))
+			(let emitted (call write_graph_c (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (borrow-shared (local trees))
 				(borrow-shared (local nodes)) (borrow-shared (local functions)) (borrow-shared (local parameters))
 				(borrow-shared (local statements)) (borrow-shared (local records)) (borrow-shared (local expressions))
 				(local root) (local plan) (borrow-shared (local tests)) (local private_helpers)
-				(bool false) (bool false) -1i32 (borrow-mut (local output))))))
+				(bool false) (bool false) -1i32 (borrow-mut (local output))))
+			(if
+				(:doc "Expose the serial translation unit as one numbered part on a successful probe request.")
+				(bool.and (i32.gtz (array.len (local unit_ends))) (u32.eqz (struct.get (local emitted) error)))
+				(then (array.store (local unit_ends) 0i32 (struct.new UnitIndex (value (struct.get (local emitted) count))))))
+			(return (local emitted))))
 
 	(fn bind_entry_assets
 		(:doc "Attach loaded ranges to the already checked expressions and preserve source-relative diagnostics.")
