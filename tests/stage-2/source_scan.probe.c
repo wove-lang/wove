@@ -30,11 +30,11 @@
 #define default_selection wv_seed_fn_102
 #define target_os wv_seed_fn_103
 #define target_arch wv_seed_fn_104
-#define inspect_callers wv_seed_fn_1300
-#define run_scalar_graph wv_seed_fn_1325
-#define discover_graph_tests wv_seed_fn_1335
-#define inspect_graph_expectations wv_seed_fn_1312
-#define write_unit_name wv_seed_fn_1366
+#define inspect_callers wv_seed_fn_1301
+#define run_scalar_graph wv_seed_fn_1326
+#define discover_graph_tests wv_seed_fn_1336
+#define inspect_graph_expectations wv_seed_fn_1313
+#define write_unit_name wv_seed_fn_1367
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_1 SourceDiagnostic;
@@ -1126,7 +1126,7 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 			(expect_link && strcmp(argv[4], "issue") != 0 && strcmp(argv[4], "test") != 0)) {
 		fputs("usage: source_scan --graph ENTRY SCRATCH (IDENTITY PATH FILE)...\n"
 			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
-			"       source_scan --emit-graph-units ENTRY SCRATCH CAPACITY UNITS (IDENTITY PATH FILE)...\n"
+			"       source_scan --emit-graph-units ENTRY SCRATCH CAPACITY UNITS (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --emit-private-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n"
 			"       source_scan --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n"
