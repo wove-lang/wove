@@ -419,6 +419,32 @@ verify both values and preserve the emitted include order. [Private intrinsic ty
 | `FLT_SNAN`, `DBL_SNAN`, `LDBL_SNAN` | The Clang 22 resource header exposes the three exact signaling NaN expressions in C23. The fixtures compare their representations with the native macros and exclude the six x86-64 extended-format padding bytes. The Clang 21 profiles and Clang 22 C11/C17 profiles report unavailable imports at their original names. |
 | `FLT_IS_IEC_60559`, `DBL_IS_IEC_60559`, `LDBL_IS_IEC_60559`, `__STDC_VERSION_FLOAT_H__`, and decimal floating-point limit macros | Unavailable in the audited headers and feature profiles. |
 
+## Bundled integer limits
+
+The bundled `limits.h.wove` binds 146 native integer names, including 48
+of the 54 on the LLVM checklist. The audit used Apple Clang 21, Clang 22,
+macOS SDK 27.2, and Debian glibc 2.41 for arm64 and x86-64. It covered C11,
+C17, and C23 with ten ISO, POSIX, X/Open, and extension feature profiles
+per frontend and target. The headers supply the values. The Wove
+declarations retain signed minima and the full unsigned range of the
+native values. [LLVM libc limits.h checklist](https://libc.llvm.org/headers/limits.html)
+
+The relocated compiler emitted typed comparisons against direct C macro
+reads. Clang folded all 24,792 comparisons across the 240 configurations
+to equality. The host fixture also links under C11, C17, and C23 with
+standard, POSIX, and extension modes, including unsigned plain `char`.
+The glibc X/Open cases with an invalid expansion verify Clang's diagnostic
+through `wovec bin`.
+
+| Members | Coverage or outstanding contract |
+| --- | --- |
+| `CHAR_BIT`, `CHAR_MIN`, `CHAR_MAX`, `MB_LEN_MAX`, and signed and unsigned integer bounds | Nineteen standard limits are available in every tested profile. `CHAR_MIN` and `CHAR_MAX` follow the frontend's plain-char mode. `UINT_MAX` is `u32`, `LONG_MIN` and `LLONG_MIN` are `i64`, and `ULONG_MAX` and `ULLONG_MAX` are `u64`. |
+| C23 widths, POSIX and X/Open limits, and SDK extensions | Explicit optional declarations follow the preprocessed header in the effective C mode. The manifest records the native name and Wove integer type of each binding. |
+| `PTHREAD_STACK_MIN` | Darwin declares an `i32` constant. On glibc, it is a C `int` constant in strict POSIX and a C `long` runtime expression with dynamic stack sizes. The glibc binding needs an explicit conversion contract that can read both expansions at the declared width. [Generic integer expression contract #677](https://github.com/wove-lang/wove/issues/677) |
+| `_XOPEN_IOV_MAX` | In audited glibc X/Open profiles the header can publish the macro while leaving `_POSIX_UIO_MAXIOV` undefined. The ordinary Clang error from that expansion reaches users. The same binding works where the native expansion is usable. |
+| `UCHAR_MIN`, `UINT_MIN`, `ULLONG_MIN`, `ULONG_MIN`, `USHRT_MIN`, and `__STDC_VERSION_LIMITS_H__` | Absent from the audited headers. |
+| `_POSIX_C_SOURCE`, `_POSIX_SOURCE`, `_XOPEN_SOURCE`, `_XOPEN_SOURCE_EXTENDED`, and `_XOPEN_LIM_H` | Feature selectors and an include guard observed during preprocessing. |
+
 ## Bundled message formatting
 
 The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public
