@@ -39,7 +39,7 @@
 			(type_start i32) (type_end i32) (name_node i32)
 			(header_file i32) (bridge_node i32) (default_file i32) (default_node i32) (native_file i32)
 			(optional bool) (scalar_typedef bool) (requested_start i32) (requested_end i32) (value_macro bool) (extent i32)
-			(integer_constant bool) (constant_bits u32) (prerequisite_start i32) (prerequisite_end i32)))
+			(integer_constant bool) (constant_bits u32) (prerequisite_start i32) (prerequisite_end i32) (wove_result_layout bool)))
 
 	(fn copy_graph_bindings
 		(:doc "Copy the initialized prefix into the exact binding view consumed by a checker.")
@@ -72,7 +72,8 @@
 				(value_macro (struct.get binding value_macro))
 				(extent extent) (integer_constant (bool true)) (constant_bits bits)
 				(prerequisite_start (struct.get binding prerequisite_start))
-				(prerequisite_end (struct.get binding prerequisite_end))))))
+				(prerequisite_end (struct.get binding prerequisite_end))
+				(wove_result_layout (struct.get binding wove_result_layout))))))
 
 	(let c_dependency_provider 10u32)
 
@@ -212,7 +213,7 @@
 					(type_start 0i32) (type_end 0i32) (name_node name)
 					(header_file -1i32) (bridge_node -1i32) (default_file -1i32) (default_node -1i32) (native_file -1i32)
 					(optional (bool false)) (scalar_typedef (bool false)) (requested_start -1i32) (requested_end -1i32) (value_macro (bool false)) (extent extent) (integer_constant (bool false)) (constant_bits 0u32)
-					(prerequisite_start 0i32) (prerequisite_end 0i32)))
+					(prerequisite_start 0i32) (prerequisite_end 0i32) (wove_result_layout (bool false))))
 			(return (call graph_read (i32.inc count) 0i32 0i32 0u32))))
 
 	(fn collect_wove_definition
@@ -601,7 +602,8 @@
 					(requested_end (struct.get selector original_end)) (value_macro (struct.get target value_macro))
 					(extent (struct.get target extent)) (integer_constant (bool false)) (constant_bits 0u32)
 					(prerequisite_start (struct.get target prerequisite_start))
-					(prerequisite_end (struct.get target prerequisite_end))))
+					(prerequisite_end (struct.get target prerequisite_end))
+					(wove_result_layout (struct.get target wove_result_layout))))
 			(return (call graph_read (i32.inc index) 0i32 0i32 0u32))))
 
 	(fn bind_edge
@@ -777,7 +779,8 @@
 						(default_file (struct.get header default_file)) (default_node (struct.get header default_node))
 						(native_file native_file) (optional (struct.get member optional)) (scalar_typedef (struct.get member scalar_typedef))
 						(requested_start -1i32) (requested_end -1i32) (value_macro (struct.get member value_macro)) (extent -1i32) (integer_constant (bool false)) (constant_bits 0u32)
-						(prerequisite_start prerequisite_start) (prerequisite_end offset)))
+						(prerequisite_start prerequisite_start) (prerequisite_end offset)
+						(wove_result_layout (struct.get member wove_result_layout))))
 					(let published (call publish_binding (borrow-shared source) selector importer
 						target (borrow-mut bindings) count))
 					(if
@@ -835,6 +838,31 @@
 			(return (call bind_c_header_scope (borrow-shared arena) (borrow-shared files) (borrow-shared source)
 				importer header edge (borrow-shared selectors) (borrow-mut bindings)
 				offset context (borrow-mut visiting) 0i32))))
+
+	(fn pending_c_layout_provider
+		(:doc "An owning bridge result brings its defining module into the ordinary graph privately.")
+		(params (files (shared-array SuppliedFile)) (modules (shared-array GraphModule))
+			(bindings (shared-array GraphBinding)) (first i32) (end i32))
+		(returns i32)
+		(body
+			(let-mut index first)
+			(while
+				(:doc "Consider only the bindings from this C-header operation.")
+				(i32.lt index end)
+				(body
+					(let binding (array.load bindings index))
+					(if
+						(:doc "Record snapshots have an ordinary Wove result layout in the defining module.")
+						(struct.get binding wove_result_layout)
+						(then
+							(let path (struct.get binding file))
+							(let identity (struct.get (array.load files path) identity))
+							(if
+								(:doc "Already reached modules have their own ordinary declarations and imports.")
+								(u32.eqz (struct.get (array.load modules identity) state))
+								(then (return path)))))
+					(set index (i32.inc index))))
+			(return -1i32)))
 
 	(fn measure_c_tree
 		(:doc "Measure the selected provider's checked source view before reserving temporary nodes.")
@@ -926,7 +954,7 @@
 				(default_file (struct.get use default_file)) (default_node (struct.get use default_node))
 				(native_file native_file) (optional (bool false)) (scalar_typedef (bool false))
 				(requested_start -1i32) (requested_end -1i32) (value_macro (bool false)) (extent -1i32) (integer_constant (bool false)) (constant_bits 0u32)
-				(prerequisite_start 0i32) (prerequisite_end 0i32)))
+				(prerequisite_start 0i32) (prerequisite_end 0i32) (wove_result_layout (bool false))))
 			(return (call graph_read (i32.inc count) 0i32 0i32 0u32))))
 
 	(fn c_scope_visiting
@@ -1529,10 +1557,11 @@
 						(else
 							(let edge (array.load uses next))
 							(if
-								(:doc "C header imports and project declarations resolve a key without traversing a Wove-file edge.")
+								(:doc "Resolve native declarations and activate any ordinary layout their selected results require.")
 								(bool.or (u32.eq (struct.get edge provider) 8u32)
 									(u32.eq (struct.get edge provider) 9u32))
 								(then
+									(let-mut layout_provider -1i32)
 									(if
 										(:doc "A header declaration can live in a file reached by a later Wove edge.")
 										(bool.and (bool.not loading) (bool.not (struct.get frame failed)))
@@ -1563,16 +1592,30 @@
 														length binding module_count binding_count
 														(struct.get bound next) use_count selector_count
 														(borrow-mut modules) (borrow-mut progress)))))
-											(set binding_count (struct.get bound next))))
+											(let end (struct.get bound next))
+											(set layout_provider (call pending_c_layout_provider (borrow-shared files)
+												(borrow-shared modules) (borrow-shared bindings) binding_count end))
+											(if
+												(:doc "Publish the C selectors only after their layout modules have been reached.")
+												(i32.ltz layout_provider)
+												(then (set binding_count end)))))
 									(call update_frame (borrow-mut modules) current 1u32
-										(i32.inc next)))
+										(i32.inc next))
+									(if
+										(:doc "Suspend on this C selection and resolve the layout module's ordinary dependencies.")
+										(i32.not-ltz layout_provider)
+										(then
+											(set pending_parent current)
+											(set pending_path layout_provider)
+											(set current (struct.get (array.load files layout_provider) identity)))))
 								(else
+									(let disk_edge (bool.and disk (bool.not (struct.get file bundled))))
 									(let resolved (call resolve_graph_edge (borrow-shared arena) (borrow-shared files)
 										(borrow-shared (array.range arena source_start source_end))
-										current (struct.get frame path) edge disk (borrow-shared edges)))
+										current (struct.get frame path) edge disk_edge (borrow-shared edges)))
 									(if
-										(:doc "Suspend before opening the next active disk edge. Malformed uses have no request span.")
-										(bool.and (bool.and disk (u32.eq (struct.get resolved error) 27u32))
+										(:doc "Request host files for project imports. Bundled modules resolve within supplied sources.")
+										(bool.and (bool.and disk_edge (u32.eq (struct.get resolved error) 27u32))
 											(bool.and (i32.lt -1i32 (struct.get edge path_start))
 												(i32.ltz (struct.get resolved file))))
 										(then
@@ -1614,47 +1657,53 @@
 											(set pending_path path)
 											(set current target)))))))
 					(if
-						(:doc "Bind exactly once after the provider completes, including for a cached identity.")
+						(:doc "Resume the edge that reached this provider or consume its cached declarations.")
 						(bool.and (i32.not-ltz importer) (i32.not-ltz provider))
 						(then
 							(let importer_frame (array.load modules importer))
+							(let edge (array.load uses edge_index))
 							(if
 								(:doc "A failed provider blocks its importers without a second diagnostic.")
 								(struct.get (array.load modules provider) failed)
 								(then (call fail_graph_file (borrow-mut modules) importer
 									(struct.get importer_frame next_use)))
 								(else
-									(let from (array.load files importer))
-									(let target (array.load files provider))
-									(let bound (call bind_edge
-										(borrow-shared (array.range arena
-											(struct.get from source_start) (struct.get from source_end)))
-										(borrow-shared (array.range arena
-											(struct.get target source_start) (struct.get target source_end)))
-										importer provider (array.load uses edge_index)
-										(borrow-shared selectors) (borrow-mut bindings) binding_count))
-									(let error (struct.get bound error))
 									(if
-										(:doc "A short table retries this edge with the same published prefix.")
-										(u32.eq error 16u32)
-										(then (call save_graph_progress (borrow-mut progress) length binding current
-											pending_path pending_parent module_count binding_count
-											use_count selector_count)))
-									(if
-										(:doc "An invalid selection poisons the importer without discarding the resolved provider.")
-										(u32.gtz error)
-										(then
+										(:doc "A C edge activates layouts without importing the provider's ordinary names.")
+										(u32.eq (struct.get edge provider) 8u32)
+										(then (call update_frame (borrow-mut modules) importer 1u32 edge_index))
+										(else
+											(let from (array.load files importer))
+											(let target (array.load files provider))
+											(let bound (call bind_edge
+												(borrow-shared (array.range arena
+													(struct.get from source_start) (struct.get from source_end)))
+												(borrow-shared (array.range arena
+													(struct.get target source_start) (struct.get target source_end)))
+												importer provider edge
+												(borrow-shared selectors) (borrow-mut bindings) binding_count))
+											(let error (struct.get bound error))
 											(if
-												(:doc "A finished provider stays available to subsequent importers.")
-												(bool.and exhausted (bool.and recover (u32.not-eq error 16u32)))
-												(then (call update_frame (borrow-mut modules) current 2u32 next)))
-											(return (call finish_edge_error context recover error
-												importer (struct.get bound start) (struct.get bound end)
-												importer (i32.inc edge_index)
-												length binding module_count binding_count
-												(struct.get bound next) use_count selector_count
-												(borrow-mut modules) (borrow-mut progress)))))
-									(set binding_count (struct.get bound next))))))
+												(:doc "A short table retries this edge with the same published prefix.")
+												(u32.eq error 16u32)
+												(then (call save_graph_progress (borrow-mut progress) length binding current
+													pending_path pending_parent module_count binding_count
+													use_count selector_count)))
+											(if
+												(:doc "An invalid selection poisons the importer without discarding the resolved provider.")
+												(u32.gtz error)
+												(then
+													(if
+														(:doc "A finished provider stays available to subsequent importers.")
+														(bool.and exhausted (bool.and recover (u32.not-eq error 16u32)))
+														(then (call update_frame (borrow-mut modules) current 2u32 next)))
+													(return (call finish_edge_error context recover error
+														importer (struct.get bound start) (struct.get bound end)
+														importer (i32.inc edge_index)
+														length binding module_count binding_count
+														(struct.get bound next) use_count selector_count
+														(borrow-mut modules) (borrow-mut progress)))))
+											(set binding_count (struct.get bound next))))))))
 					(if
 						(:doc "Publish frame changes only after binding succeeds so capacity retries stay on this edge.")
 						exhausted
