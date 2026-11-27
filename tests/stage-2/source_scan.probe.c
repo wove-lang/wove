@@ -25,15 +25,16 @@
 #define decode_string wv_seed_fn_83
 #define form_parts wv_seed_fn_86
 #define read_module_for_target wv_seed_fn_101
-#define emit_module wv_seed_fn_145
-#define resolve_graph_for_target wv_seed_fn_267
+#define emit_module wv_seed_fn_147
+#define resolve_graph_for_target wv_seed_fn_269
 #define default_selection wv_seed_fn_102
 #define target_os wv_seed_fn_103
 #define target_arch wv_seed_fn_104
-#define inspect_callers wv_seed_fn_1276
-#define run_scalar_graph wv_seed_fn_1300
-#define discover_graph_tests wv_seed_fn_1309
-#define inspect_graph_expectations wv_seed_fn_1288
+#define inspect_callers wv_seed_fn_1279
+#define run_scalar_graph wv_seed_fn_1304
+#define discover_graph_tests wv_seed_fn_1313
+#define inspect_graph_expectations wv_seed_fn_1291
+#define write_unit_name wv_seed_fn_1344
 
 typedef wv_seed_record_1 Token;
 typedef wv_seed_record_2 SourceDiagnostic;
@@ -57,6 +58,7 @@ typedef wv_seed_record_95 CallSite;
 typedef wv_seed_record_40 SuppliedFile;
 typedef wv_seed_record_110 CallerInspection;
 typedef wv_seed_record_115 GraphOutput;
+typedef wv_seed_record_122 UnitIndex;
 typedef wv_seed_record_117 DiscoveredTest;
 typedef wv_seed_record_118 TestDiscovery;
 typedef wv_seed_record_111 ExpectationLink;
@@ -930,9 +932,45 @@ static void write_graph_error(wvrt_slice arena, const SuppliedFile *files, uint3
 	write_related_span(source, 0, file, related_start, related_end);
 }
 
+// Check the strictly increasing byte boundaries and any unused rows in the probe's sink.
+static int32_t graph_part_count(const UnitIndex *ends, int32_t capacity, int32_t written) {
+	int32_t count = 0;
+	int32_t start = 0;
+	// Each reported part consumes a nonempty, consecutive run of the packed output.
+	while (count < capacity && ends[count].wv_field_0 > start && ends[count].wv_field_0 <= written) {
+		start = ends[count++].wv_field_0;
+	}
+	// An error must leave every boundary unwritten. A successful partition covers all bytes.
+	if (capacity != 0 && start != written) { return -1; }
+	for (int32_t index = count; index < capacity; ++index) {
+		if (ends[index].wv_field_0 != -1) { return -1; }
+	}
+	return count;
+}
+
+// Frame the compiler's C parts with their names and byte sizes for the fixture runner.
+static bool write_graph_parts(const UnitIndex *ends, int32_t count) {
+	int32_t start = 0;
+	// A grouped program begins with the common header. The one-unit result is self-contained.
+	for (int32_t part = 0; part < count; ++part) {
+		const int32_t end = ends[part].wv_field_0;
+		if (count > 1 && part == 0) {
+			printf("unit program.h %" PRId32 "\n", end);
+		} else {
+			uint8_t name[14];
+			const int32_t ordinal = count > 1 ? part - 1 : part;
+			const int32_t length = write_unit_name(ordinal, (wvrt_mut_slice){name, sizeof(name), sizeof(uint8_t)});
+			if (length != sizeof(name)) { return false; }
+			printf("unit %.*s %" PRId32 "\n", (int)length, (const char *)name, end - start);
+		}
+		start = end;
+	}
+	return putchar('\n') != EOF;
+}
+
 // Compile or inspect a resolved graph and check that the chosen destination remains bounded.
 static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, wvrt_slice modules, wvrt_slice bindings,
-		GraphResult resolved, int32_t root, int32_t query, const char *name, int32_t capacity, bool private_helpers) {
+		GraphResult resolved, int32_t root, int32_t query, const char *name, int32_t capacity, bool private_helpers, int32_t unit_limit) {
 	const bool emit = query < 0;
 	const int32_t byte_capacity = emit ? capacity : 0;
 	const int32_t site_capacity = emit ? 0 : capacity;
@@ -945,16 +983,23 @@ static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, w
 	unsigned char *sites = storage->wvrt_items;
 	const size_t site_bytes = (size_t)site_capacity * sizeof(CallSite);
 	memset(sites, 0xa5, site_bytes);
+	const int32_t end_capacity = unit_limit == 0 ? 0 : unit_limit + 1;
+	wvrt_array *unit_storage = wvrt_array_new(end_capacity, sizeof(UnitIndex), _Alignof(UnitIndex), site);
+	UnitIndex *ends = unit_storage->wvrt_items;
+	// Keep a sentinel in spare rows so failure and clamping cannot publish an unintended part.
+	for (int32_t index = 0; index < end_capacity; ++index) { ends[index].wv_field_0 = -1; }
 	const GraphOutput result = run_scalar_graph(arena, files, modules, bindings, resolved, root, query,
 		(wvrt_slice){name, (int32_t)strlen(name), sizeof(uint8_t)}, assets, private_helpers,
 		(wvrt_mut_slice){bytes + 1, byte_capacity, sizeof(uint8_t)},
-		(wvrt_mut_slice){sites, site_capacity, sizeof(CallSite)});
+		(wvrt_mut_slice){sites, site_capacity, sizeof(CallSite)},
+		(wvrt_mut_slice){ends, end_capacity, sizeof(UnitIndex)});
 	const int32_t written = result.wv_field_0;
 	const int32_t byte_count = emit ? written : 0;
 	const int32_t site_count = emit ? 0 : written;
+	const int32_t parts = graph_part_count(ends, end_capacity, byte_count);
 	int status = EXIT_FAILURE;
 	// Inspect the output canaries before publishing either a result or its diagnostic.
-	if (!output_intact(bytes, byte_capacity, byte_count) || site_count < 0 || site_count > site_capacity) {
+	if (!output_intact(bytes, byte_capacity, byte_count) || site_count < 0 || site_count > site_capacity || parts < 0) {
 		fputs("scalar graph result exceeded its output view\n", stderr);
 	} else {
 		size_t offset = (size_t)site_count * sizeof(CallSite);
@@ -963,6 +1008,8 @@ static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, w
 		}
 		if (offset != site_bytes) {
 			fputs("scalar graph modified unused caller rows\n", stderr);
+		} else if (unit_limit != 0 && result.wv_field_1 == -2) {
+			fputs("unsupported numbered graph\n", stdout);
 		} else if (result.wv_field_5 != 0) {
 			write_graph_error(arena, files.wvrt_items, result.wv_field_5, result.wv_field_2,
 				result.wv_field_3, result.wv_field_4, result.wv_field_6, result.wv_field_7);
@@ -970,7 +1017,10 @@ static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, w
 			printf("ok %" PRId32 " %" PRId32 " %" PRId32 " %" PRId32 "\n",
 				written, result.wv_field_2, result.wv_field_3, result.wv_field_4);
 			if (emit) {
-				status = fwrite(bytes + 1, 1, (size_t)written, stdout) == (size_t)written ? EXIT_SUCCESS : EXIT_FAILURE;
+				if ((unit_limit == 0 || write_graph_parts(ends, parts)) &&
+						fwrite(bytes + 1, 1, (size_t)written, stdout) == (size_t)written) {
+					status = EXIT_SUCCESS;
+				}
 			} else {
 				write_callers((CallerSources){arena, {0}, files.wvrt_items}, result.wv_field_2,
 					result.wv_field_1, written, storage->wvrt_items);
@@ -978,6 +1028,7 @@ static int finish_graph(wvrt_slice arena, wvrt_slice files, wvrt_slice assets, w
 			}
 		}
 	}
+	wvrt_array_drop(unit_storage);
 	wvrt_array_drop(storage);
 	free(bytes);
 	return status;
@@ -1053,25 +1104,29 @@ static int finish_expectations(wvrt_slice arena, wvrt_slice supplied, wvrt_slice
 // Resolve a supplied graph before exposing bindings, compiled C, or inspection rows.
 static int graph_mode(int argc, char **argv, SelectionContext context) {
 	const bool private_helpers = strcmp(argv[1], "--emit-private-graph") == 0;
-	const bool emit = private_helpers || strcmp(argv[1], "--emit-graph") == 0;
+	const bool grouped = strcmp(argv[1], "--emit-graph-units") == 0;
+	const bool emit = grouped || private_helpers || strcmp(argv[1], "--emit-graph") == 0;
 	const bool inspect = strcmp(argv[1], "--graph-callers") == 0;
 	const bool tests = strcmp(argv[1], "--graph-tests") == 0;
 	const bool expect_name = strcmp(argv[1], "--graph-expect") == 0;
 	const bool expect_link = strcmp(argv[1], "--graph-expect-link") == 0;
 	const bool expectations = expect_name || expect_link;
-	const int first_file = (inspect || expectations) ? 7 : (emit || tests) ? 5 : 4;
+	const int first_file = (inspect || expectations) ? 7 : grouped ? 6 : (emit || tests) ? 5 : 4;
 	int32_t entry;
 	int32_t capacity;
 	int32_t output = 0;
 	int32_t query = -1;
+	int32_t unit_limit = 0;
 	// The fixture supplies graph scratch capacity and an independent result limit for each consumer.
 	if (argc < first_file + 3 || (argc - first_file) % 3 != 0 ||
 			!read_offset(argv[2], &entry) || !read_offset(argv[3], &capacity) ||
-			((emit || inspect || tests || expectations) && !read_offset(argv[first_file - 1], &output)) ||
+			((emit || inspect || tests || expectations) && !read_offset(argv[grouped ? 4 : first_file - 1], &output)) ||
+			(grouped && (!read_offset(argv[5], &unit_limit) || unit_limit < 1 || unit_limit == INT32_MAX)) ||
 			((inspect || expect_name) && !read_offset(argv[4], &query)) ||
 			(expect_link && strcmp(argv[4], "issue") != 0 && strcmp(argv[4], "test") != 0)) {
 		fputs("usage: source_scan --graph ENTRY SCRATCH (IDENTITY PATH FILE)...\n"
 			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
+			"       source_scan --emit-graph-units ENTRY SCRATCH CAPACITY UNITS (IDENTITY PATH FILE)...\n"
 			"       source_scan --emit-private-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n"
 			"       source_scan --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n"
@@ -1130,7 +1185,7 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 		status = finish_graph(arena, supplied, (wvrt_slice){asset_storage->wvrt_items, asset_count, sizeof(SuppliedFile)},
 			(wvrt_slice){modules->wvrt_items, count, sizeof(GraphModule)},
 			(wvrt_slice){bindings->wvrt_items, result.wv_field_1, sizeof(GraphBinding)}, result, files[entry].wv_field_0,
-			query, inspect ? argv[5] : "", output, private_helpers);
+			query, inspect ? argv[5] : "", output, private_helpers, unit_limit);
 	} else {
 		write_graph(bytes, files, count, modules->wvrt_items, bindings->wvrt_items, result);
 		status = EXIT_SUCCESS;
@@ -1260,7 +1315,7 @@ static int probe_command(int argc, char **argv) {
 		return EXIT_FAILURE;
 	}
 	const bool graph = strcmp(argv[1], "--graph") == 0 || strcmp(argv[1], "--emit-graph") == 0 ||
-		strcmp(argv[1], "--emit-private-graph") == 0 ||
+		strcmp(argv[1], "--emit-private-graph") == 0 || strcmp(argv[1], "--emit-graph-units") == 0 ||
 		strcmp(argv[1], "--graph-callers") == 0 || strcmp(argv[1], "--graph-tests") == 0 ||
 		strcmp(argv[1], "--graph-expect") == 0 || strcmp(argv[1], "--graph-expect-link") == 0;
 	return graph ? graph_mode(argc, argv, context) : source_mode(argc, argv, context);
