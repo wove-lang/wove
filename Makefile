@@ -5,6 +5,14 @@ PYTHON ?= python3
 CLANG ?= clang
 CFLAGS ?= -O2 -Wall -Wextra
 BUILD_DIR ?= build
+VSCE ?= npx --yes @vscode/vsce@4.1.1
+VSCODE_EXTENSION := editors/vscode
+VSCODE_PACKAGE := $(BUILD_DIR)/editors/vscode/wove-language.vsix
+VSCODE_GRAMMAR := $(VSCODE_EXTENSION)/syntaxes/wove.tmLanguage.json
+VSCODE_SOURCES := $(addprefix $(VSCODE_EXTENSION)/,package.json package.json.license \
+	language-configuration.json language-configuration.json.license README.md LICENSE)
+VSCODE_LICENSES := LICENSE-MIT LICENSE-APACHE
+
 BUILD_VERSION := $(BUILD_DIR)/version.txt
 VERSION_GENERATOR := tools/build-info.sh
 VERSION_FIXTURES := tests/stage-2/version
@@ -141,11 +149,26 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 
 .PHONY: all stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
 .PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-workers test-stage-2-process test-stage-2-version force-build-info
-.PHONY: test-stage-2-inventory
+.PHONY: test-stage-2-inventory vscode
 .DELETE_ON_ERROR:
 .SECONDARY:
 
 all: $(FINAL_COMPILER)
+
+# Package the editor extension without building the compiler.
+vscode: $(VSCODE_PACKAGE)
+
+# Stage only the extension files and both license texts for the packager.
+$(VSCODE_PACKAGE): $(VSCODE_SOURCES) $(VSCODE_GRAMMAR) $(VSCODE_GRAMMAR).license $(VSCODE_LICENSES)
+	mkdir -p "$(@D)"
+	set -eu; \
+	package_dir=$$(mktemp -d "$(@D)/package.XXXXXX"); \
+	trap 'rm -rf "$$package_dir"' EXIT; \
+	mkdir "$$package_dir/syntaxes"; \
+	cp $(VSCODE_SOURCES) $(VSCODE_LICENSES) "$$package_dir/"; \
+	cp "$(VSCODE_GRAMMAR)" "$(VSCODE_GRAMMAR).license" "$$package_dir/syntaxes/"; \
+	(cd "$$package_dir" && $(VSCE) package --no-dependencies --out wove-language.vsix); \
+	mv "$$package_dir/wove-language.vsix" "$@"
 
 stage-1: $(BOOTSTRAP_COMPILER)
 

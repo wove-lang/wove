@@ -32,3 +32,9 @@ make
 
 The compiler is `build/wovec`. Run `make test` for the test suite and
 `make self-host` to verify the bootstrap chain.
+
+## VS Code
+
+Build the [Wove extension](editors/vscode/) with `make vscode`.
+Install `build/editors/vscode/wove-language.vsix` using **Extensions: Install
+from VSIX...** in VS Code.
