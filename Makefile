@@ -34,7 +34,7 @@ BOOLEAN_TEXT_MODULE := stage-2/text/boolean.wove
 VALUE_TEXT_MODULES := $(BYTE_TEXT_MODULE) stage-2/text/decimal.wove
 DECIMAL_WRITER := stage-2/text/decimal_write.wove
 SOURCE_STRINGS_MODULE := stage-2/source/strings.wove
-SOURCE_MODULE_READER := stage-2/source/module.wove stage-2/source/target.wove stage-2/source/functions.wove
+SOURCE_MODULE_READER := stage-2/source/module.wove stage-2/source/target.wove stage-2/source/functions.wove stage-2/source/exports.wove
 SOURCE_TYPE_MODULE := stage-2/source/types.wove
 TEST_DISCOVERY_MODULE := stage-2/scalar/tests.wove
 SOURCE_CALLERS := stage-2/source/callers.wove
@@ -43,7 +43,7 @@ SOURCE_GRAPH_MODULES := stage-2/source/graph.wove stage-2/source/owned.wove stag
 C_HEADER_MODULE := stage-2/c/headers.wove
 C_STANDARD_MODULE := stage-2/c/standard.wove
 C_ARGUMENT_MODULE := stage-2/c/arguments.wove
-C_EMITTER_SOURCES := $(BOOLEAN_TEXT_MODULE) $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/array_growth.wove source/slice_options.wove source/numeric_ops.wove source/integer_ops.wove source/integer_bits.wove source/integer_compare.wove source/integer_checks.wove source/literals.wove source/extent.wove source/float_ops.wove source/enum_forms.wove source/generics.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/function_names.wove emit/workers.wove emit/conditional.wove emit/matches.wove emit/loops.wove emit/arrays.wove emit/array_growth.wove emit/slice_options.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/integer_checks.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_prototype.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/owner_assignment.wove emit/owned_fields.wove emit/owned_aggregates.wove emit/owner_checks.wove emit/graph.wove emit/headers.wove emit/names.wove emit/collisions.wove emit/records.wove emit/callable_types.wove emit/text.wove \
+C_EMITTER_SOURCES := $(BOOLEAN_TEXT_MODULE) $(C_HEADER_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(addprefix stage-2/,source/assets.wove source/array_growth.wove source/slice_options.wove source/numeric_ops.wove source/integer_ops.wove source/integer_bits.wove source/integer_compare.wove source/integer_checks.wove source/literals.wove source/extent.wove source/float_ops.wove source/enum_forms.wove source/generics.wove emit/floats.wove emit/embeds.wove emit/c.wove emit/function_names.wove emit/workers.wove emit/conditional.wove emit/matches.wove emit/loops.wove emit/arrays.wove emit/array_growth.wove emit/slice_options.wove emit/bindings.wove emit/static.wove emit/enums.wove emit/integer_bytes.wove emit/integers.wove emit/integer_checks.wove emit/runtime.wove emit/c_values.wove emit/c_arguments.wove emit/c_formals.wove emit/c_vectors.wove emit/c_prototype.wove emit/c_extents.wove emit/c_snapshots.wove emit/c_storage.wove emit/owners.wove emit/owner_assignment.wove emit/owned_fields.wove emit/owned_aggregates.wove emit/owner_checks.wove emit/graph.wove emit/library.wove emit/headers.wove emit/names.wove emit/collisions.wove emit/records.wove emit/callable_types.wove emit/text.wove \
 	scalar/syntax.wove scalar/constants.wove scalar/constant_arithmetic.wove scalar/fixed.wove scalar/function_rows.wove scalar/function_refs.wove scalar/value_types.wove scalar/callable_types.wove scalar/signatures.wove scalar/borrowed_results.wove scalar/slice_options.wove scalar/worker.wove scalar/flow.wove scalar/locals.wove scalar/loops.wove scalar/control.wove scalar/loans.wove scalar/fields.wove scalar/host_entry.wove scalar/plan.wove scalar/conditional.wove scalar/integer_literals.wove scalar/matches.wove scalar/match_patterns.wove scalar/graph.wove scalar/trees.wove scalar/c_types.wove scalar/records.wove scalar/type_sites.wove scalar/specializations.wove scalar/generics/workspace.wove scalar/generics/clone.wove scalar/generics/key_order.wove scalar/generics/operations.wove scalar/generics/functions.wove scalar/owners.wove scalar/optional.wove scalar/recoverable_growth.wove scalar/native_owner_types.wove) $(DECIMAL_WRITER)
 HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove)
 HASHING_FIXTURES := tests/stage-2/hashing
@@ -82,11 +82,11 @@ CONFIG_SOURCES := $(C_STANDARD_MODULE) $(addprefix stage-2/config/,compiler.wove
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
 COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_storage.wove output.wove publication.wove platform.wove target.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove numeric_target.wove header_origin.wove clang.wove)
-BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove unistd.wove spawn.wove fcntl.wove errno.wove sys_stat.wove sys_wait.wove dirent.wove math.wove)
+NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_storage.wove output.wove publication.wove platform.wove target.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/library.wove bin/image.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove numeric_target.wove header_origin.wove clang.wove)
+BUNDLED_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove unistd.wove spawn.wove fcntl.wove errno.wove sys_stat.wove sys_wait.wove dirent.wove math.wove sys_file.wove)
 NATIVE_BUILD_ASSETS = runtime/wove_runtime.c runtime/wove_runtime.h $(CLANG_TEMPLATE)
 NATIVE_STDIO := stage-2/io/stdio.wove
-DRIVER_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove sys_stat.wove fcntl.wove unistd.wove errno.wove)
+DRIVER_C_PROVIDERS := $(addprefix stage-2/c-stdlib/,stdlib.wove stdio.wove sys_stat.wove fcntl.wove unistd.wove errno.wove sys_file.wove)
 NATIVE_WOVE_SOURCES = $(sort $(GRAPH_COMPILER_SOURCES) \
 	$(CLI_SOURCES) $(COMMAND_SOURCES) $(CONFIG_SOURCES) $(JSON_READER_SOURCES) $(JSON_WRITER_SOURCES) \
 	$(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) stage-2/io/write.wove stage-2/io/process_file.wove \
@@ -229,6 +229,7 @@ test-stage-2-native: $(NATIVE_COMPILER) test-stage-2-f80 test-stage-2-workers
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/optional-macros.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/record-init.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/bin.tsv"
+	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/library/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/library/cases.jsonc"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/standard.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/protection.tsv"
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/phases.tsv"

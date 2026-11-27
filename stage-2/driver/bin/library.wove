@@ -1,0 +1,288 @@
+(module driver_bin_library
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Select explicit project library entries and publish their native C interface after a successful link.")
+
+	(use c-header "<sys/stat.h>" (only lstat S_ISREG (type Stat)))
+	(use c-header "<stdio.h>" (only fopen fgetc rename))
+	(use c-header "<unistd.h>" (only link unlink close))
+	(use c-header "<fcntl.h>" (only open O_RDONLY O_CLOEXEC O_DIRECTORY (type Mode)))
+	(use c-header "<sys/file.h>" (only flock LOCK_EX))
+	(use c-header "<errno.h>" (only errno ENOENT EINTR))
+	(use wove-file "../paths.wove" (only directory_width join_file_path))
+	(use wove-file "../files.wove" (only path_identity same_path_identity))
+	(use wove-file "../publication.wove" (only stage_file))
+	(use wove-file "../../json/reader.wove" (only json_decode_string (type JsonNode)))
+	(use wove-file "../../cli/command/resolve.wove" (only command_setting (type CommandInvocation)))
+	(use wove-file "../../cli/command/args.wove" (only (type CommandArgument)))
+	(use wove-file "../../config/project.wove" (only (type ProjectSetting)))
+	(use wove-file "../../emit/library.wove" (only write_library_abi (value library_header_marker)))
+	(use wove-file "../../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../../text/bytes.wove" (only same_bytes))
+	(use wove-file "../../text/copy.wove" (only append_bytes))
+
+	(let library_stage_header "library.h")
+	(let library_stage_exports "library.exports")
+	(let library_header_backup "library.previous.h")
+	(let linux_library_suffix ".so")
+	(let macos_library_suffix ".dylib")
+	(let wove_suffix ".wove")
+	(let c_header_suffix ".h")
+	(let library_prefix "lib")
+	(let read_binary "rb")
+	(let current_directory ".")
+
+	(fn valid_configured_path
+		(:doc "Screen decoded paths before exposing them to a C string parameter.")
+		(params (path (shared-array u8))) (returns bool)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "An escaped JSON terminator cannot name a filesystem path.")
+				(i32.lt (local index) (array.len (local path)))
+				(body
+					(if (u8.eqz (array.load (local path) (local index))) (then (return (bool false))))
+					(set (local index) (i32.inc (local index)))))
+			(return (i32.gtz (local index)))))
+
+	(fn configured_library_entry
+		(:doc "Test the effective entry.lib list against the explicit source, including existing filesystem aliases.")
+		(params (path (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
+			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting)))
+		(returns bool)
+		(body
+			(let setting (call command_setting (local invocation) (borrow-shared (local arguments))
+				(borrow-shared (local nodes)) (borrow-shared (local settings)) 6u32 24i32))
+			(let entry (struct.get (local setting) row))
+			(if
+				(:doc "An absent list leaves bin in executable mode.")
+				(i32.ltz (local entry))
+				(then (return (bool false))))
+			(let identity (call path_identity (borrow-shared (local path))))
+			(let-mut row (struct.get (array.load (local nodes) (local entry)) first_child))
+			(while
+				(:doc "Compare each decoded entry relative to the project working directory.")
+				(i32.not-ltz (local row))
+				(body
+					(let node (array.load (local nodes) (local row)))
+					(let start (struct.get (local node) start))
+					(let end (struct.get (local node) end))
+					(let-mut bytes (array.alloc u8 (i32.sub (local end) (local start))))
+					(let decoded (call json_decode_string (borrow-shared (local config))
+						(local start) (local end) (borrow-mut (local bytes))))
+					(let candidate (borrow-shared (array.range (local bytes) 0i32 (struct.get (local decoded) written))))
+					(if
+						(:doc "Exact text can select a missing entry. Existing aliases must name the same file.")
+						(bool.and (u32.eqz (struct.get (local decoded) error))
+							(bool.or (call same_bytes (borrow-shared (local path)) 0i32 (array.len (local path))
+								(borrow-shared (local candidate)) 0i32 (array.len (local candidate)))
+								(bool.and (call valid_configured_path (borrow-shared (local candidate)))
+									(call same_path_identity (local identity) (call path_identity (borrow-shared (local candidate)))))))
+						(then (return (bool true))))
+					(set (local row) (struct.get (local node) next_sibling))))
+			(return (bool false))))
+
+	(fn suffix_start
+		(:doc "Strip the exact suffix only when it leaves a nonempty final path component.")
+		(params (path (shared-array u8)) (suffix (shared-array u8))) (returns i32)
+		(body
+			(let width (array.len (local path)))
+			(let start (i32.sub (local width) (array.len (local suffix))))
+			(if
+				(:doc "A suffix may not consume the entire basename.")
+				(bool.and (i32.lt (call directory_width (borrow-shared (local path))) (local start))
+					(call same_bytes (borrow-shared (local path)) (local start) (local width)
+						(borrow-shared (local suffix)) 0i32 (array.len (local suffix))))
+				(then (return (local start))))
+			(return (local width))))
+
+	(fn library_path
+		(:doc "Derive the target's libNAME sibling from the explicit Wove input spelling.")
+		(params (path (shared-array u8)) (suffix (shared-array u8))) (returns (owned-array u8))
+		(body
+			(let directory (call directory_width (borrow-shared (local path))))
+			(let stem (call suffix_start (borrow-shared (local path)) (borrow-shared (local wove_suffix))))
+			(let extra (i32.add (array.len (local library_prefix)) (array.len (local suffix))))
+			(if
+				(:doc "The prefix and extension must fit the path's signed length.")
+				(i32.lt (i32.sub 2147483647i32 (local extra)) (local stem))
+				(then (return (array.alloc u8 0i32))))
+			(let-mut result (array.alloc u8 (i32.add (local stem) (local extra))))
+			(let dir (call append_bytes (borrow-shared (array.range (local path) 0i32 (local directory))) (borrow-mut (local result)) 0i32))
+			(let prefix (call append_bytes (borrow-shared (local library_prefix)) (borrow-mut (local result)) (local dir)))
+			(let name (call append_bytes (borrow-shared (array.range (local path) (local directory) (local stem))) (borrow-mut (local result)) (local prefix)))
+			(let end (call append_bytes (borrow-shared (local suffix)) (borrow-mut (local result)) (local name)))
+			(return (move (local result)))))
+
+	(fn default_library_path
+		(:doc "Default to the explicitly selected target's shared library extension.")
+		(params (path (shared-array u8)) (os u8)) (returns (owned-array u8))
+		(body
+			(if
+				(:doc "Darwin and Linux use different shared-library extensions.")
+				(u8.eq (local os) 2u8)
+				(then (return (call library_path (borrow-shared (local path)) (borrow-shared (local macos_library_suffix))))))
+			(return (call library_path (borrow-shared (local path)) (borrow-shared (local linux_library_suffix))))))
+
+	(fn public_header_path
+		(:doc "Replace the selected platform suffix, or append .h to a custom library basename.")
+		(params (target (shared-array u8)) (os u8)) (returns (owned-array u8))
+		(body
+			(let-mut stem (call suffix_start (borrow-shared (local target)) (borrow-shared (local linux_library_suffix))))
+			(if
+				(:doc "Darwin uses the complete .dylib extension.")
+				(u8.eq (local os) 2u8)
+				(then (set (local stem) (call suffix_start (borrow-shared (local target)) (borrow-shared (local macos_library_suffix))))))
+			(if
+				(:doc "The sibling name must leave room for its C header suffix.")
+				(i32.lt 2147483645i32 (local stem))
+				(then (return (array.alloc u8 0i32))))
+			(let-mut header (array.alloc u8 (i32.add (local stem) 2i32)))
+			(let start (call append_bytes (borrow-shared (array.range (local target) 0i32 (local stem))) (borrow-mut (local header)) 0i32))
+			(let end (call append_bytes (borrow-shared (local c_header_suffix)) (borrow-mut (local header)) (local start)))
+			(return (move (local header)))))
+
+	(fn generated_header
+		(:doc "Check the generator marker with a bounded read of a proven regular header.")
+		(params (path (shared-array u8))) (returns bool)
+		(body
+			(let file (call fopen (borrow-shared (local path)) (borrow-shared (local read_binary))))
+			(if (owner.is-null (local file)) (then (return (bool false))))
+			(let-mut offset 0i32)
+			(while
+				(:doc "Read only the fixed marker and let the stream owner close at scope exit.")
+				(i32.lt (local offset) (array.len (local library_header_marker)))
+				(body
+					(if
+						(:doc "Short or user-written content cannot be replaced.")
+						(i32.not-eq (call fgetc (borrow-shared (local file))) (i32.from-u8 (array.load (local library_header_marker) (local offset))))
+						(then (return (bool false))))
+					(set (local offset) (i32.inc (local offset)))))
+			(return (bool true))))
+
+	(fn public_header_state
+		(:doc "Classify an absent header, an owned generated header, or an entry the compiler cannot replace.")
+		(params (path (shared-array u8))) (returns i32)
+		(body
+			(let-mut info (struct.new Stat))
+			(let status (call lstat (borrow-shared (local path)) (borrow-mut (local info))))
+			(if
+				(:doc "A genuinely absent basename is available. Dangling symlinks are inspected as entries.")
+				(i32.not-eqz (local status))
+				(then
+					(if (i32.eq (local errno) (local ENOENT)) (then (return 0i32)))
+					(return -1i32)))
+			(if
+				(:doc "Read the marker only on the original regular directory entry.")
+				(bool.and (call S_ISREG (struct.get (local info) st_mode)) (call generated_header (borrow-shared (local path))))
+				(then (return 1i32)))
+			(return -1i32)))
+
+	(fn stage_abi_file
+		(:doc "Measure the exact interface file before staging it beside the private C unit.")
+		(params (path (shared-array u8)) (arena (shared-array u8)) (nodes (shared-array SourceNode))
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter)) (form u32))
+		(returns bool)
+		(body
+			(let-mut empty (array.alloc u8 0i32))
+			(let width (call write_library_abi (borrow-shared (local arena)) (borrow-shared (local nodes)) (borrow-shared (local functions))
+				(borrow-shared (local parameters)) (borrow-mut (local empty)) 0u32 0i32 (local form) (bool false)))
+			(if
+				(:doc "A saturated writer cannot create a complete interface file.")
+				(u32.lt 1073741824u32 (local width))
+				(then (return (bool false))))
+			(let-mut bytes (array.alloc u8 (i32.from-u32 (local width))))
+			(let written (call write_library_abi (borrow-shared (local arena)) (borrow-shared (local nodes)) (borrow-shared (local functions))
+				(borrow-shared (local parameters)) (borrow-mut (local bytes)) 0u32 0i32 (local form) (bool true)))
+			(return (bool.and (u32.eq (local width) (local written))
+				(call stage_file (borrow-shared (local path)) (borrow-shared (local bytes)))))))
+
+	(fn stage_library_abi
+		(:doc "Stage the header and native linker allowlist from the checked graph.")
+		(params (unit (shared-array u8)) (arena (shared-array u8)) (nodes (shared-array SourceNode))
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter)) (os u8))
+		(returns bool)
+		(body
+			(let header (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_stage_header))))
+			(let exports (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_stage_exports))))
+			(let-mut form 2u32)
+			(if (u8.eq (local os) 2u8) (then (set (local form) 3u32)))
+			(return (bool.and (call stage_abi_file (borrow-shared (local header)) (borrow-shared (local arena)) (borrow-shared (local nodes))
+					(borrow-shared (local functions)) (borrow-shared (local parameters)) 1u32)
+				(call stage_abi_file (borrow-shared (local exports)) (borrow-shared (local arena)) (borrow-shared (local nodes))
+					(borrow-shared (local functions)) (borrow-shared (local parameters)) (local form))))))
+
+	(fn open_library_directory
+		(:doc "Open the publication directory itself so locking needs no extra file in the project.")
+		(params (path (shared-array u8))) (returns i32)
+		(body
+			(let flags (i32.from-u32 (u32.or (u32.from-i32 (local O_RDONLY))
+				(u32.or (u32.from-i32 (local O_CLOEXEC)) (u32.from-i32 (local O_DIRECTORY))))))
+			(return (call open (borrow-shared (local path)) (local flags) (int.convert Mode 0i32)))))
+
+	(fn lock_library_directory
+		(:doc "Serialize publication of adjacent headers and libraries even through directory aliases.")
+		(params (target (shared-array u8))) (returns i32)
+		(body
+			(let width (call directory_width (borrow-shared (local target))))
+			(let-mut descriptor -1i32)
+			(if
+				(:doc "A bare output name and its header live in the current directory.")
+				(i32.eqz (local width))
+				(then (set (local descriptor) (call open_library_directory (borrow-shared (local current_directory)))))
+				(else (set (local descriptor) (call open_library_directory (borrow-shared (array.range (local target) 0i32 (local width)))))))
+			(if (i32.ltz (local descriptor)) (then (return -1i32)))
+			(while
+				(:doc "The open description owns the lock until the caller closes it. Retry only interrupted acquisition.")
+				(bool true)
+				(body
+					(if (i32.eqz (call flock (local descriptor) (local LOCK_EX))) (then (return (local descriptor))))
+					(if
+						(:doc "A permanent lock failure cannot publish either artifact.")
+						(i32.not-eq (local errno) (local EINTR))
+						(then
+							(let closed (call close (local descriptor)))
+							(return -1i32)))))))
+
+	(fn install_library
+		(:doc "Install the generated header and library, restoring the prior header if the binary rename fails.")
+		(params (binary (shared-array u8)) (target (shared-array u8)) (staged_header (shared-array u8)) (header (shared-array u8)))
+		(returns bool)
+		(body
+			(let state (call public_header_state (borrow-shared (local header))))
+			(if (i32.ltz (local state)) (then (return (bool false))))
+			(let backup (call join_file_path (borrow-shared (local staged_header)) (borrow-shared (local library_header_backup))))
+			(if
+				(:doc "Preserve the inode of an older generated header until both names are installed.")
+				(i32.gtz (local state))
+				(then
+					(if
+						(:doc "A backup failure leaves both published destinations intact.")
+						(i32.not-eqz (call link (borrow-shared (local header)) (borrow-shared (local backup))))
+						(then (return (bool false))))
+					(if
+						(:doc "Replace only the previously checked generated header.")
+						(i32.not-eqz (call rename (borrow-shared (local staged_header)) (borrow-shared (local header))))
+						(then
+							(let removed (call unlink (borrow-shared (local backup))))
+							(return (bool false)))))
+				(else
+					(if
+						(:doc "An initially absent header must still be absent at publication.")
+						(i32.not-eqz (call link (borrow-shared (local staged_header)) (borrow-shared (local header))))
+						(then (return (bool false))))))
+			(let installed (i32.eqz (call rename (borrow-shared (local binary)) (borrow-shared (local target)))))
+			(if
+				(:doc "Commit the pair only when the binary rename succeeds.")
+				(local installed)
+				(then
+					(let removed (call unlink (borrow-shared (local backup))))
+					(return (bool true))))
+			(if
+				(:doc "Restore the old generated header or remove the newly published one.")
+				(i32.gtz (local state))
+				(then (let restored (call rename (borrow-shared (local backup)) (borrow-shared (local header)))))
+				(else (let removed (call unlink (borrow-shared (local header))))))
+			(return (bool false))))
+)

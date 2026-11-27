@@ -1,7 +1,7 @@
 (module native_bin_build
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc `Build one native executable and install it with a same-filesystem rename.
+	(:doc `Compile one native C unit and publish the staged executable or shared library.
 
 	The private directory holds an immutable copy of the generated C and
 	the embedded runtime. Clang never receives the final executable path.
@@ -10,11 +10,14 @@
 
 	(use (:pragma (cfg (os "linux"))) c-header "<stdlib.h>" (only mkdtemp))
 	(use (:pragma (cfg (os "macos"))) c-header "<unistd.h>" (only mkdtemp))
-	(use c-header "<unistd.h>" (only access X_OK unlink rmdir))
+	(use c-header "<unistd.h>" (only access X_OK unlink rmdir close))
 	(use c-header "<stdio.h>" (only rename))
 	(use c-header "<sys/stat.h>" (only lstat S_ISREG (type Stat)))
 	(use wove-file "../clang.wove" (only clang_program))
 	(use wove-file "../arguments.wove" (only frontend_capacity write_probe_options write_clang_arguments))
+	(use wove-file "./image.wove" (only linked_image))
+	(use wove-file "./library.wove" (only lock_library_directory install_library public_header_state (value library_stage_header) (value library_stage_exports)))
+	(use wove-file "../../source/target.wove" (only (type SelectionContext)))
 	(use wove-file "./debug.wove" (only debug_directory name_debug_unit stage_debug_source))
 	(use wove-file "./dependencies.wove" (only check_resolved_headers))
 	(use wove-file "./jobs.wove" (only clang_trace_environment read_job_sysroot))
@@ -47,6 +50,7 @@
 	(let job_suffix "/clang.jobs")
 	(let remove_program "rm")
 	(let remove_arguments "-rf\u0000--\u0000")
+	(let publish_library_failure "could not publish shared library")
 	(let publish_binary_failure "could not publish executable")
 	(let native_argument_failure "could not pack native compiler arguments")
 	(let clang_failure "clang failed with status ")
@@ -216,10 +220,53 @@
 			(return (call stage_debug_source (borrow-shared (local path)) (borrow-shared (local retained))
 				(borrow-shared (local source))))))
 
+	(fn publish_library
+		(:doc "Hold the destination directory lock across retained C and public interface publication.")
+		(params (path (shared-array u8)) (target (shared-array u8)) (retained (shared-array u8))
+			(unit (shared-array u8)) (binary (shared-array u8)) (public_header (shared-array u8)) (os u8) (target_index i32) (human bool))
+		(returns NativeBuild)
+		(body
+			(let lock (call lock_library_directory (borrow-shared (local target))))
+			(if
+				(:doc "A lock failure leaves the old retained and published files untouched.")
+				(i32.ltz (local lock))
+				(then (return (call native_build_result
+					(call report_argv 69u32 (local target_index) (borrow-shared (local publish_library_failure)) (local human)) (bool false)))))
+			(let result (call publish_locked_library (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local retained))
+				(borrow-shared (local unit)) (borrow-shared (local binary)) (borrow-shared (local public_header)) (local os) (local target_index) (local human)))
+			(let released (call close (local lock)))
+			(return (local result))))
+
+	(fn publish_locked_library
+		(:doc "Verify the staged file before retaining C or publishing the adjacent public ABI.")
+		(params (path (shared-array u8)) (target (shared-array u8)) (retained (shared-array u8))
+			(unit (shared-array u8)) (binary (shared-array u8)) (public_header (shared-array u8)) (os u8) (target_index i32) (human bool))
+		(returns NativeBuild)
+		(body
+			(if
+				(:doc "Require a supported linked image and destinations that are still safe to replace.")
+				(bool.or (bool.not (call linked_image (borrow-shared (local binary)) (local os)))
+					(bool.or (call protected_target (borrow-shared (local path)) (borrow-shared (local target)))
+						(i32.ltz (call public_header_state (borrow-shared (local public_header))))))
+				(then (return (call native_build_result
+					(call report_argv 69u32 (local target_index) (borrow-shared (local publish_library_failure)) (local human)) (bool false)))))
+			(let retained_status (call retain_checked_unit (borrow-shared (local path)) (borrow-shared (local retained))
+				(borrow-shared (local unit)) (local target_index) (local human)))
+			(if (i32.gtz (local retained_status)) (then (return (call native_build_result (local retained_status) (bool false)))))
+			(let header (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_stage_header))))
+			(if
+				(:doc "Keep the header paired with the successfully linked shared library.")
+				(call install_library (borrow-shared (local binary)) (borrow-shared (local target))
+					(borrow-shared (local header)) (borrow-shared (local public_header)))
+				(then (return (call native_build_result 0i32 (bool true)))))
+			(return (call native_build_result
+				(call report_argv 69u32 (local target_index) (borrow-shared (local publish_library_failure)) (local human)) (bool false)))))
+
 	(fn build_in_directory
 		(:doc `Keep the runtime and executable private until the generated source has compiled successfully.`)
 		(params (path (shared-array u8)) (target (shared-array u8)) (retained (shared-array u8))
-			(protection BuildProtection) (target_index i32) (directory (shared-array u8))
+			(protection BuildProtection) (target_index i32) (library_context SelectionContext)
+			(public_header (shared-array u8)) (directory (shared-array u8))
 			(debug (shared-array u8)) (unit (shared-array u8))
 			(runtime (shared-array u8)) (header (shared-array u8)) (binary (shared-array u8)) (trace (shared-array u8)) (jobs (shared-array u8))
 			(bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
@@ -235,8 +282,17 @@
 						(borrow-shared (local header_suffix)) (borrow-shared (local runtime_header)))))
 				(then (return (call native_build_result
 					(call report_argv 69u32 (local target_index) (borrow-shared (local publish_binary_failure)) (local human)) (bool false)))))
-			(let paths (u64.add (u64.from-i32 (array.len (local directory)))
+			(let library_os (struct.get (local library_context) os))
+			(let library (u8.not-eqz (local library_os)))
+			(let exports (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_stage_exports))))
+			(let name (borrow-shared (array.range (local target) (call directory_width (borrow-shared (local target))) (array.len (local target)))))
+			(let-mut paths (u64.add (u64.from-i32 (array.len (local directory)))
 				(u64.add (u64.from-i32 (array.len (local unit))) (u64.from-i32 (array.len (local binary))))))
+			(if
+				(:doc "The shared link also carries an allowlist path and the final library basename.")
+				(local library)
+				(then (set (local paths) (u64.add (local paths)
+					(u64.add 256u64 (u64.add (u64.from-i32 (array.len (local exports))) (u64.from-i32 (array.len (local name)))))))))
 			(let capacity (call frontend_capacity (array.len (local bytes)) (array.len (local config))
 				(array.len (local arguments)) (local paths)))
 			(let-mut options (array.alloc u8 (local capacity)))
@@ -244,12 +300,16 @@
 				(local invocation) (borrow-shared (local arguments)) (borrow-shared (local nodes))
 				(borrow-shared (local settings)) (borrow-shared (local directory)) (borrow-mut (local options))))
 			(let probe_end (struct.get (local frontend) probe_end))
-			(let context (call effective_selection (borrow-shared (array.range (local options) 0i32 (local probe_end)))))
+			(let-mut context (local library_context))
+			(if
+				(:doc "The ordinary binary still resolves its own target from the staged frontend options.")
+				(bool.not (local library))
+				(then (set (local context) (call effective_selection (borrow-shared (array.range (local options) 0i32 (local probe_end)))))))
 			(let emitted (call compile_input (borrow-shared (local path)) (borrow-shared (local retained))
 				(borrow-shared (local unit)) (borrow-shared (array.range (local options) 0i32 (local probe_end)))
 				(local context) (local protection) (local target_index) (bool false) (local human)))
 			(if (i32.not-eqz (local emitted)) (then (return (call native_build_result (local emitted) (bool false)))))
-			(let debug_build (u32.eq (struct.get (local invocation) mode) 1u32))
+			(let debug_build (bool.and (bool.not (local library)) (u32.eq (struct.get (local invocation) mode) 1u32)))
 			(if
 				(:doc `Add the final source location while the exact translation unit is still private.`)
 				(local debug_build)
@@ -263,7 +323,8 @@
 							(bool false)))))))
 			(let end (call write_clang_arguments (borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings))
-				(borrow-shared (local unit)) (borrow-shared (local binary)) (borrow-mut (local options)) (local frontend)))
+				(borrow-shared (local unit)) (borrow-shared (local binary)) (local library_os)
+				(borrow-shared (local exports)) (borrow-shared (local name)) (borrow-mut (local options)) (local frontend)))
 			(if
 				(:doc `Reject invalid compiler or linker arguments before starting the native tool.`)
 				(i32.ltz (local end))
@@ -276,6 +337,15 @@
 			(let status (struct.get (local tool) status))
 			(let checked (struct.get (local tool) checked))
 			(if (i32.gtz (local checked)) (then (return (call native_build_result (local checked) (bool false)))))
+			(if
+				(:doc "A failed shared link leaves the last library, header, and retained source intact.")
+				(local library)
+				(then
+					(if (i32.not-eqz (local status))
+						(then (return (call native_build_result (call report_clang_status (local status) (local human)) (bool false)))))
+					(return (call publish_library (borrow-shared (local path)) (borrow-shared (local target))
+						(borrow-shared (local retained)) (borrow-shared (local unit)) (borrow-shared (local binary))
+						(borrow-shared (local public_header)) (local library_os) (local target_index) (local human)))))
 			(if
 				(:doc `Only a successful debug invocation can publish its own source and symbol directory.`)
 				(local debug_build)
@@ -318,8 +388,8 @@
 	(fn compile_binary
 		(:doc `Own the private stage across emission, native compilation, and publication.`)
 		(:expect (tests "stage-2/cli/native/bin.tsv") (issues "gh:wove-lang/wove:192"))
-		(params (path (shared-array u8)) (target (shared-array u8)) (retained (shared-array u8))
-			(protection BuildProtection) (target_index i32) (bytes (shared-array u8)) (config (shared-array u8))
+		(params (path (shared-array u8)) (target (shared-array u8)) (public_header (shared-array u8)) (retained (shared-array u8))
+			(protection BuildProtection) (target_index i32) (library_context SelectionContext) (bytes (shared-array u8)) (config (shared-array u8))
 			(invocation CommandInvocation) (arguments (shared-array CommandArgument))
 			(nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting)) (human bool)) (returns i32)
 		(body
@@ -334,17 +404,21 @@
 			(let binary (call append_path (borrow-shared (local directory)) (borrow-shared (local binary_suffix))))
 			(let trace (call append_path (borrow-shared (local directory)) (borrow-shared (local dependency_suffix))))
 			(let jobs (call append_path (borrow-shared (local directory)) (borrow-shared (local job_suffix))))
-			(let debug (call debug_directory (borrow-shared (local target)) (borrow-shared (local retained))
-				(borrow-shared (local directory)) (struct.get (local invocation) mode)))
+			(let-mut debug (array.alloc u8 0i32))
+			(if
+				(:doc "Executable debug source relocation is independent of library interface publication.")
+				(u8.eqz (struct.get (local library_context) os))
+				(then (set (local debug) (call debug_directory (borrow-shared (local target)) (borrow-shared (local retained))
+					(borrow-shared (local directory)) (struct.get (local invocation) mode)))))
 			(let result (call build_in_directory (borrow-shared (local path)) (borrow-shared (local target)) (borrow-shared (local retained))
-				(local protection) (local target_index) (borrow-shared (local directory))
+				(local protection) (local target_index) (local library_context) (borrow-shared (local public_header)) (borrow-shared (local directory))
 				(borrow-shared (local debug)) (borrow-shared (local unit))
 				(borrow-shared (local runtime)) (borrow-shared (local header)) (borrow-shared (local binary)) (borrow-shared (local trace)) (borrow-shared (local jobs))
 				(borrow-shared (local bytes)) (borrow-shared (local config)) (local invocation)
 				(borrow-shared (local arguments)) (borrow-shared (local nodes)) (borrow-shared (local settings)) (local human)))
 			(if
 				(:doc `A published debug directory already owns the private source and runtime files.`)
-				(bool.and (u32.eq (struct.get (local invocation) mode) 1u32)
+				(bool.and (bool.and (u8.eqz (struct.get (local library_context) os)) (u32.eq (struct.get (local invocation) mode) 1u32))
 					(i32.eqz (struct.get (local result) status)))
 				(then (return 0i32)))
 			(let removed_binary (call unlink (borrow-shared (local binary))))
@@ -353,6 +427,14 @@
 			(let removed_unit (call unlink (borrow-shared (local unit))))
 			(let removed_trace (call unlink (borrow-shared (local trace))))
 			(let removed_jobs (call unlink (borrow-shared (local jobs))))
+			(if
+				(:doc "Remove the private symbol list and any remaining interface stage on either result.")
+				(u8.not-eqz (struct.get (local library_context) os))
+				(then
+					(let exports (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_stage_exports))))
+					(let public (call join_file_path (borrow-shared (local unit)) (borrow-shared (local library_stage_header))))
+					(let removed_exports (call unlink (borrow-shared (local exports))))
+					(let removed_public (call unlink (borrow-shared (local public))))))
 			(call finish_stage (borrow-shared (local directory)) (borrow-shared (local retained)) (struct.get (local result) retained))
 			(return (struct.get (local result) status))))
 )

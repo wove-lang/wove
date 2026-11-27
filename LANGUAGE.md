@@ -46,6 +46,45 @@ concatenates the user arguments without terminators. Each span is
 half-open and indexes that view. The executable name is omitted. Empty
 arguments have equal endpoints, and no user arguments give two empty views.
 
+### Shared libraries
+
+Add the source to the selected project's `entry.lib` list and pass it
+explicitly to `wovec bin`. The library entry can omit `main`. A named profile
+inherits the default profile's list unless it supplies its own list, which
+can be empty.
+
+```jsonc
+{"profiles": [{"name": "default", "entry": {"lib": ["counter.wove"]}}]}
+```
+
+```lisp
+(module counter
+    (fn Twice (:pragma (c_export)) (params (value i32)) (returns i32)
+        (body (return (i32.mul (local value) 2i32)))))
+```
+
+```sh
+wovec bin counter.wove
+```
+
+A concrete function marked `(:pragma (c_export))` is callable from C under
+its original, case-sensitive name. This includes exports in reached Wove
+modules. A Wove import alias has no effect on the public symbol. Public
+names must be unique in the graph and available in the C interface.
+Parameters and results use `bool`, exact-width integers up to 64 bits,
+`f32` as C `float`, and `f64` as C `double`, all by value. Results may
+also be `void`. A Wove runtime trap can terminate the calling process.
+
+Select one Linux or macOS target per build. The default destination is beside
+the supplied source, as `lib<stem>.dylib`
+for macOS or `lib<stem>.so` for Linux. The adjacent `lib<stem>.h` declares
+the public functions. An explicit `-o` replaces the destination and derives
+the header by replacing the platform suffix with `.h` or appending `.h`.
+Add the library's directory to the consumer's link and runtime search paths
+as needed. The library publishes only its declared C exports. A failed
+native compile or link preserves the previous library, header, and retained
+C.
+
 ## Modules, imports, and metadata
 
 Select names from another Wove file explicitly. A relative path resolves

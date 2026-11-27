@@ -30,6 +30,16 @@
 	(let clang_frontend_flag "-Xclang")
 	(let include_trace_flag "-dependency-dot")
 	(let stdout_path "-")
+	(let pic "-fPIC")
+	(let hidden_visibility "-fvisibility=hidden")
+	(let shared_flag "-shared")
+	(let dylib_flag "-dynamiclib")
+	(let linker_flag "-Xlinker")
+	(let elf_export_flag "--version-script")
+	(let darwin_export_flag "-exported_symbols_list")
+	(let elf_identity_flag "-soname")
+	(let darwin_identity_flag "-install_name")
+	(let rpath_prefix "@rpath/")
 	(let math_library "-lm")
 
 	(fn write_argument
@@ -294,11 +304,43 @@
 			(let file (call write_plain_argument (borrow-shared (local clang_frontend_flag)) (borrow-mut (local output)) (local name)))
 			(return (call write_plain_argument (borrow-shared (local stdout_path)) (borrow-mut (local output)) (local file)))))
 
+	(fn write_linker_value
+		(:doc "Forward a linker option and value as separate arguments, preserving spaces and commas.")
+		(params (flag (shared-array u8)) (prefix (shared-array u8)) (value (shared-array u8))
+			(output (mut-array u8)) (cursor i32)) (returns i32)
+		(body
+			(let first (call write_plain_argument (borrow-shared (local linker_flag)) (borrow-mut (local output)) (local cursor)))
+			(let key (call write_plain_argument (borrow-shared (local flag)) (borrow-mut (local output)) (local first)))
+			(let next (call write_plain_argument (borrow-shared (local linker_flag)) (borrow-mut (local output)) (local key)))
+			(return (call write_argument (borrow-shared (local value)) (borrow-shared (local prefix)) (borrow-mut (local output)) (local next)))))
+
+	(fn write_library_options
+		(:doc "Link one position-independent C unit with an exact export list and the final library identity.")
+		(params (os u8) (exports (shared-array u8)) (name (shared-array u8)) (output (mut-array u8)) (cursor i32)) (returns i32)
+		(body
+			(let relocation (call write_plain_argument (borrow-shared (local pic)) (borrow-mut (local output)) (local cursor)))
+			(let hidden (call write_plain_argument (borrow-shared (local hidden_visibility)) (borrow-mut (local output)) (local relocation)))
+			(if
+				(:doc "Mach-O advertises the final basename relative to the consumer's runtime search paths.")
+				(u8.eq (local os) 2u8)
+				(then
+					(let kind (call write_plain_argument (borrow-shared (local dylib_flag)) (borrow-mut (local output)) (local hidden)))
+					(let list (call write_linker_value (borrow-shared (local darwin_export_flag)) (borrow-shared (local no_prefix))
+						(borrow-shared (local exports)) (borrow-mut (local output)) (local kind)))
+					(return (call write_linker_value (borrow-shared (local darwin_identity_flag)) (borrow-shared (local rpath_prefix))
+						(borrow-shared (local name)) (borrow-mut (local output)) (local list)))))
+			(let kind (call write_plain_argument (borrow-shared (local shared_flag)) (borrow-mut (local output)) (local hidden)))
+			(let list (call write_linker_value (borrow-shared (local elf_export_flag)) (borrow-shared (local no_prefix))
+				(borrow-shared (local exports)) (borrow-mut (local output)) (local kind)))
+			(return (call write_linker_value (borrow-shared (local elf_identity_flag)) (borrow-shared (local no_prefix))
+				(borrow-shared (local name)) (borrow-mut (local output)) (local list)))))
+
 	(fn write_clang_arguments
 		(:doc `Append the native input and linker options, then apply the resolved C standard.`)
 		(params (bytes (shared-array u8)) (config (shared-array u8)) (invocation CommandInvocation)
 			(arguments (shared-array CommandArgument)) (nodes (shared-array JsonNode)) (settings (shared-array ProjectSetting))
-			(unit (shared-array u8)) (binary (shared-array u8)) (output (mut-array u8)) (frontend FrontendOptions))
+			(unit (shared-array u8)) (binary (shared-array u8)) (library_os u8) (exports (shared-array u8)) (name (shared-array u8))
+			(output (mut-array u8)) (frontend FrontendOptions))
 		(returns i32)
 		(body
 			(let-mut end (call write_plain_argument (borrow-shared (local unit)) (borrow-mut (local output))
@@ -316,10 +358,15 @@
 					(set (local index) (i32.inc (local index)))))
 			(if
 				(:doc `Linux keeps the system math library as a separate link dependency.`)
-				(u8.eq (call host_os) 1u8)
+				(bool.or (u8.eq (local library_os) 1u8) (bool.and (u8.eqz (local library_os)) (u8.eq (call host_os) 1u8)))
 				(then
 					(set (local end) (call write_plain_argument (borrow-shared (local math_library))
 						(borrow-mut (local output)) (local end)))))
+			(if
+				(:doc "The native library link uses the target's export controls after user flags.")
+				(u8.not-eqz (local library_os))
+				(then (set (local end) (call write_library_options (local library_os) (borrow-shared (local exports)) (borrow-shared (local name))
+					(borrow-mut (local output)) (local end)))))
 			(let standard (call write_clang_standard (struct.get (local frontend) standard) (borrow-mut (local output)) (local end)))
 			(let option (call write_plain_argument (borrow-shared (local output_flag)) (borrow-mut (local output)) (local standard)))
 			(let binary_end (call write_plain_argument (borrow-shared (local binary)) (borrow-mut (local output)) (local option)))
