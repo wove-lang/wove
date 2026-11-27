@@ -1,0 +1,64 @@
+(module driver_bin_image
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Recognize linked ELF and Mach-O libraries before publishing a staged native output.")
+
+	(use c-header "<fcntl.h>" (only open O_RDONLY O_CLOEXEC O_NOFOLLOW O_NONBLOCK (type Mode)))
+	(use c-header "<unistd.h>" (only close read (type Size)))
+	(use c-header "<sys/stat.h>" (only fstat S_ISREG (type Stat)))
+
+	(fn elf_shared_image
+		(:doc "Check ELF identification and ET_DYN at e_type in the encoded byte order.")
+		(params (header (shared-array u8))) (returns bool)
+		(body
+			(let magic (u32.from-be-bytes (borrow-shared (array.range (local header) 0i32 4i32))))
+			(if (u32.not-eq (local magic) 0x7f454c46u32) (then (return (bool false))))
+			(let data (array.load (local header) 5i32))
+			(let kind (borrow-shared (array.range (local header) 16i32 18i32)))
+			(if
+				(:doc "ELFDATA2LSB stores the type least-significant byte first.")
+				(u8.eq (local data) 1u8)
+				(then (return (u16.eq (u16.from-le-bytes (borrow-shared (local kind))) 3u16))))
+			(return (bool.and (u8.eq (local data) 2u8)
+				(u16.eq (u16.from-be-bytes (borrow-shared (local kind))) 3u16)))))
+
+	(fn mach_dylib_header
+		(:doc "Check the Mach-O magic and MH_DYLIB filetype in the encoded byte order.")
+		(params (header (shared-array u8))) (returns bool)
+		(body
+			(let magic (u32.from-be-bytes (borrow-shared (array.range (local header) 0i32 4i32))))
+			(let kind (borrow-shared (array.range (local header) 12i32 16i32)))
+			(if
+				(:doc "The swapped Mach magic marks a little-endian header.")
+				(bool.or (u32.eq (local magic) 0xcefaedfeu32) (u32.eq (local magic) 0xcffaedfeu32))
+				(then (return (u32.eq (u32.from-le-bytes (borrow-shared (local kind))) 6u32))))
+			(return (bool.and (bool.or (u32.eq (local magic) 0xfeedfaceu32) (u32.eq (local magic) 0xfeedfacfu32))
+				(u32.eq (u32.from-be-bytes (borrow-shared (local kind))) 6u32)))))
+
+	(fn linked_image
+		(:doc "Reject nonregular and nonlibrary output even if the Clang driver reported success.")
+		(params (path (shared-array u8)) (os u8)) (returns bool)
+		(body
+			(let flags (i32.from-u32 (u32.or (u32.from-i32 (local O_RDONLY))
+				(u32.or (u32.from-i32 (local O_CLOEXEC))
+					(u32.or (u32.from-i32 (local O_NOFOLLOW)) (u32.from-i32 (local O_NONBLOCK)))))))
+			(let descriptor (call open (borrow-shared (local path)) (local flags) (int.convert Mode 0i32)))
+			(if (i32.ltz (local descriptor)) (then (return (bool false))))
+			(let-mut info (struct.new Stat))
+			(let-mut header (array.alloc u8 32i32))
+			(let width (int.convert Size (array.len (local header))))
+			(let-mut valid (bool false))
+			(if
+				(:doc "Only complete headers from regular staged files qualify for native format checking.")
+				(bool.and (bool.and (i32.eqz (call fstat (local descriptor) (borrow-mut (local info))))
+						(call S_ISREG (struct.get (local info) st_mode)))
+					(i64.eq (int.convert i64 (call read (local descriptor) (borrow-mut (local header)) (local width))) 32i64))
+				(then
+					(if
+						(:doc "Use the explicit Clang target's executable format.")
+						(u8.eq (local os) 2u8)
+						(then (set (local valid) (call mach_dylib_header (borrow-shared (local header)))))
+						(else (set (local valid) (call elf_shared_image (borrow-shared (local header))))))))
+			(let closed (call close (local descriptor)))
+			(return (bool.and (local valid) (i32.eqz (local closed))))))
+)

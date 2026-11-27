@@ -24,6 +24,8 @@
 	(use wove-file "../scalar/trees.wove" (only (type ScalarTree)))
 	(use wove-file "../scalar/graph.wove" (only layout_trees signature_capacity prepare_graph))
 	(use wove-file "./c.wove" (only write_translation_unit))
+	(use wove-file "./library.wove" (only check_library_exports write_library_abi))
+	(use wove-file "../source/target.wove" (only (value library_mode)))
 	(use wove-file "./tests.wove" (only write_test_entry))
 	(use wove-file "./embeds.wove" (only bind_graph_embeds bind_module_embeds))
 	(use wove-file "./text.wove" (only native_name_prefix_slot))
@@ -38,7 +40,7 @@
 	(struct
 		(:doc "Entry and inventory indices or the first error from checking the graph.")
 		GraphPlan
-		(fields (entry i32) (test_count i32) (call_count i32) (file i32) (start i32) (end i32) (error u32)
+		(fields (entry i32) (library_os u8) (test_count i32) (call_count i32) (file i32) (start i32) (end i32) (error u32)
 			(related_start i32) (related_end i32)))
 
 	(fn graph_output
@@ -342,7 +344,7 @@
 					(let measured (call write_c_pass (borrow-shared (local arena)) (borrow-shared (local files))
 						(borrow-shared (local bindings)) (borrow-shared (local nodes)) (borrow-shared (local functions))
 						(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local records))
-						(borrow-shared (local expressions)) (borrow-shared (local tests)) (local test_count) (local private_helpers)
+						(borrow-shared (local expressions)) (borrow-shared (local tests)) (local test_count) (local private_helpers) (struct.get (local plan) library_os)
 						(borrow-shared (local paths)) (borrow-shared (local includes)) (local headers) (local name_prefix)
 						(borrow-mut (local output)) (bool false)))
 					(if
@@ -365,7 +367,7 @@
 			(let written (call write_c_pass (borrow-shared (local arena)) (borrow-shared (local files))
 				(borrow-shared (local bindings)) (borrow-shared (local nodes)) (borrow-shared (local functions))
 				(borrow-shared (local parameters)) (borrow-shared (local statements)) (borrow-shared (local records))
-				(borrow-shared (local expressions)) (borrow-shared (local tests)) (local test_count) (local private_helpers)
+				(borrow-shared (local expressions)) (borrow-shared (local tests)) (local test_count) (local private_helpers) (struct.get (local plan) library_os)
 				(borrow-shared (local paths)) (borrow-shared (local includes)) (local headers) (local name_prefix)
 				(borrow-mut (local output)) (bool true)))
 			(return (call graph_output (i32.from-u32 (local written)) -1i32 (local root)
@@ -388,7 +390,7 @@
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
 			(statements (shared-array ScalarStatement)) (records (shared-array ScalarRecord)) (expressions (shared-array ScalarExpression))
-			(tests (shared-array DiscoveredTest)) (test_count i32) (private_helpers bool) (paths (shared-array u8))
+			(tests (shared-array DiscoveredTest)) (test_count i32) (private_helpers bool) (library_os u8) (paths (shared-array u8))
 			(includes (shared-array CInclude)) (headers Includes) (name_prefix i32) (output (mut-array u8)) (writing bool))
 		(returns u32)
 		(body
@@ -398,7 +400,13 @@
 				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local statements))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-shared (local expressions))
 				(borrow-mut (local output)) (local first) (struct.get (local headers) stdint)
-				(struct.get (local headers) runtime) (local private_helpers) (local name_prefix) (local writing)))
+				(struct.get (local headers) runtime) (bool.or (local private_helpers) (u8.not-eqz (local library_os))) (local name_prefix) (local writing)))
+			(if
+				(:doc "Append public wrappers to the same native C unit as the private definitions.")
+				(u8.not-eqz (local library_os))
+				(then (return (call write_library_abi (borrow-shared (local arena)) (borrow-shared (local nodes))
+					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-mut (local output))
+					(local width) (local name_prefix) 0u32 (local writing)))))
 			(if
 				(:doc "An empty test inventory still needs a synthetic entry.")
 				(i32.not-ltz (local test_count))
@@ -543,7 +551,7 @@
 		(params (file i32) (start i32) (end i32) (error u32) (related_start i32) (related_end i32))
 		(returns GraphPlan)
 		(body
-			(return (struct.new GraphPlan (entry -1i32) (test_count -1i32) (call_count 0i32)
+			(return (struct.new GraphPlan (entry -1i32) (library_os 0u8) (test_count -1i32) (call_count 0i32)
 				(file (local file)) (start (local start)) (end (local end)) (error (local error))
 				(related_start (local related_start)) (related_end (local related_end))))))
 
@@ -580,6 +588,20 @@
 				(then (return (call graph_plan_error (struct.get (local signatures) file)
 					(struct.get (local signatures) start) (struct.get (local signatures) end)
 					(struct.get (local signatures) error) -1i32 -1i32))))
+			(let-mut library_os 0u8)
+			(if
+				(:doc "Check public C signatures only when this graph supplies a library ABI.")
+				(u32.eq (struct.get (local resolved) mode) (local library_mode))
+				(then
+					(set (local library_os) (struct.get (local resolved) os))
+					(let exports (call check_library_exports (borrow-shared (local arena)) (borrow-shared (local nodes))
+						(borrow-shared (local functions)) (borrow-shared (local parameters))))
+					(if
+						(:doc "A public ABI conflict remains attached to the defining declaration.")
+						(u32.gtz (struct.get (local exports) error))
+						(then (return (call graph_plan_error (struct.get (local exports) file)
+							(struct.get (local exports) start) (struct.get (local exports) end)
+							(struct.get (local exports) error) -1i32 -1i32))))))
 			(let checked (call plan_bodies (borrow-shared (local arena)) (borrow-shared (local nodes))
 				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local bindings))
 				(borrow-mut (local records)) (borrow-mut (local statements)) (borrow-mut (local expressions))
@@ -591,7 +613,7 @@
 					(struct.get (local checked) start) (struct.get (local checked) end) (struct.get (local checked) error)
 					(struct.get (local checked) related_start) (struct.get (local checked) related_end)))))
 			(return (struct.new GraphPlan (entry (struct.get (local signatures) entry))
-				(test_count (local test_count))
+				(library_os (local library_os)) (test_count (local test_count))
 				(call_count (struct.get (local checked) count)) (file (local root)) (start 0i32) (end 0i32) (error 0u32)
 				(related_start -1i32) (related_end -1i32)))))
 )

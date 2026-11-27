@@ -5,9 +5,14 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # C standard library bridge corpus
 
-The fourteen Wove files mirror the archived directory at `8ac13c06`. They are
-standalone source for the bridge design. Each uses the current `c-header`
-provider. Native fixtures select bundled members from `stdio.wove`, `math.wove`, and the Linux and macOS `Stat` views. [Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
+Fourteen Wove files mirror the archived directory at `8ac13c06`. Each uses
+the current `c-header` provider. Native fixtures select bundled members from
+`stdio.wove`, `math.wove`, and the Linux and macOS `Stat` views.
+[Archived directory](https://github.com/wove-lang/.0.wove/tree/8ac13c06c422a2e2e9c66f59ec1a54f1fe106e52/stage-2/c-stdlib)
+
+The bundled `sys_file.wove` provider exposes `flock` and `LOCK_EX` for
+serializing shared-library publication. The `c_export` pragma applies to
+Wove definitions with bodies.
 
 ## Source forms
 
