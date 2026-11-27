@@ -440,6 +440,14 @@
 		(:doc `The seed's representation of the generated C name role enum. Use the named role constructors.`)
 		(fields (tag u8)))
 
+	(struct CNameParent
+		(:doc "Carry the checked declaration fingerprint or scoped ordinal and its assigned collision slot.")
+		(fields (identity u32) (slot i32)))
+
+	(struct CNameSpelling
+		(:doc "Select the original name bytes and an optional single-byte suffix for call scratch names.")
+		(fields (start i32) (end i32) (trailing u8)))
+
 	(fn open_static_storage
 		(:doc `Write the shared storage qualifier for a read-only C definition.`)
 		(params (output (mut-array u8)) (offset u32) (writing bool))
@@ -633,18 +641,18 @@
 				(borrow-mut output) offset writing))
 			(return (call write_name_digits (borrow-mut output) prefix writing (u32.from-i32 index)))))
 
-	(fn write_declaration_name
+	(fn get_name
 		(:doc `Generate the chosen prefix, role letter, seven lowercase Base32hex digits, and source suffix.
 
-		Start with the requested extra w bytes followed by wg. The caller
-		supplies the role and its checked 32-bit fingerprint. A positive slot selects an uppercase
-		role and a second fixed-width word, reserved by the same prefix check.
-		The source name is a byte
-		span in the original view. An empty span gives an empty suffix.`)
-		(params (output (mut-array u8)) (offset u32) (writing bool)
-			(name_prefix i32) (role CNameRole) (identity u32) (slot i32) (source (shared-array u8)) (start i32) (end i32))
+		The parent supplies the resolved word and any assigned collision slot.
+		The selected graph prefix applies to every role. A positive slot uses
+		an uppercase role and a second fixed-width word in that same prefix.
+		The name selects exact source bytes and can add a scratch-storage suffix.`)
+		(params (parent CNameParent) (role CNameRole) (name CNameSpelling) (source (shared-array u8))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
+			(let slot (struct.get parent slot))
 			(let-mut next offset)
 			(let-mut extra name_prefix)
 			(while
@@ -660,7 +668,7 @@
 				(i32.gtz slot)
 				(then (set tag (u8.from-i32 (i32.sub (i32.from-u8 tag) 32i32)))))
 			(set next (call c_byte (borrow-mut output) next tag writing))
-			(set next (call write_name_digits (borrow-mut output) next writing identity))
+			(set next (call write_name_digits (borrow-mut output) next writing (struct.get parent identity)))
 			(if
 				(:doc "A collision group distinguishes its members after retaining their original fingerprint.")
 				(i32.gtz slot)
@@ -670,15 +678,21 @@
 				(:doc "Stop before walking the suffix when the complete digit prefix could not fit.")
 				(u32.eq next c_output_limit)
 				(then (return next)))
-			(return (call c_span (borrow-shared source) start end
-				(borrow-mut output) next writing))))
+			(let written (call c_span (borrow-shared source) (struct.get name start) (struct.get name end)
+				(borrow-mut output) next writing))
+			(let trailing (struct.get name trailing))
+			(if
+				(:doc "Distinguish descriptors from backing pointers in one C-string call's scope.")
+				(u8.not-eqz trailing)
+				(then (return (call c_byte (borrow-mut output) written trailing writing))))
+			(return written)))
 
-	(fn write_c_name
-		(:doc "Write a generated name whose role and identity already identify a unique C spelling.")
-		(params (output (mut-array u8)) (offset u32) (writing bool) (name_prefix i32)
-			(role CNameRole) (identity u32) (source (shared-array u8)) (start i32) (end i32)) (returns u32)
-		(body (return (call write_declaration_name (borrow-mut output) offset writing
-			name_prefix role identity 0i32 (borrow-shared source) start end))))
+	(fn storage_name_role
+		(:doc "Use a for module backing bytes and b for module values or function-local C-string scratch.")
+		(params (backing bool)) (returns CNameRole)
+		(body
+			(if backing (then (return (struct.new CNameRole (tag 97u8)))))
+			(return (struct.new CNameRole (tag 98u8)))))
 
 	(fn write_local_place
 		(:doc `Write a direct local or the place reached through an iteration item pointer.`)
@@ -708,9 +722,11 @@
 		(returns u32)
 		(body
 			(let name (array.load nodes index))
-			(return (call write_c_name (borrow-mut output) offset writing name_prefix (call local_name_role)
-				(u32.from-i32 (i32.sub index tree_base)) (borrow-shared source)
-				(struct.get name start) (struct.get name end)))))
+			(return (call get_name
+				(struct.new CNameParent (identity (u32.from-i32 (i32.sub index tree_base))) (slot 0i32))
+				(call local_name_role)
+				(struct.new CNameSpelling (start (struct.get name start)) (end (struct.get name end)) (trailing 0u8))
+				(borrow-shared source) (borrow-mut output) offset name_prefix writing))))
 
 	(fn write_temporary_name
 		(:doc `Use the original expression row as a unique temporary name inside the C function.`)
@@ -718,9 +734,10 @@
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
-			(return (call write_c_name (borrow-mut output) offset writing name_prefix (call temporary_name_role)
-				(u32.from-i32 (i32.sub index tree_base))
-				(borrow-shared source) 0i32 0i32))))
+			(return (call get_name
+				(struct.new CNameParent (identity (u32.from-i32 (i32.sub index tree_base))) (slot 0i32))
+				(call temporary_name_role) (struct.new CNameSpelling (start 0i32) (end 0i32) (trailing 0u8))
+				(borrow-shared source) (borrow-mut output) offset name_prefix writing))))
 
 	(fn write_loop_label
 		(:doc `Write the same file-local label at a loop and at each break that targets it.`)
@@ -728,8 +745,9 @@
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
-			(return (call write_c_name (borrow-mut output) offset writing name_prefix (call loop_label_name_role)
-				(u32.from-i32 (i32.sub loop tree_base))
-				(borrow-shared source) 0i32 0i32))))
+			(return (call get_name
+				(struct.new CNameParent (identity (u32.from-i32 (i32.sub loop tree_base))) (slot 0i32))
+				(call loop_label_name_role) (struct.new CNameSpelling (start 0i32) (end 0i32) (trailing 0u8))
+				(borrow-shared source) (borrow-mut output) offset name_prefix writing))))
 
 )
