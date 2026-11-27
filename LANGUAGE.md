@@ -310,7 +310,7 @@ respectively. These operations retain signed zero and NaN payloads. For example,
 little-endian bytes can widen with `(f64.from-f32 (f32.from-bits (local word)))`.
 
 The same `<destination>.from-<source>` syntax handles checked numeric conversions
-involving floats, with integer operands and results through 128 bits where
+involving floats, with integer operands and results through 256 bits where
 those types are available. Integer-to-float casts check finite limits at the
 original integer width before rounding to the destination.
 Floating-to-integer conversions truncate toward zero and

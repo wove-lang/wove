@@ -3,7 +3,7 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc `Write native floating literals, bit copies, and checked numerical conversions.`)
 
-	(use wove-file "../source/types.wove" (only is_builtin_float is_128bit_integer is_signed_integer_value (value f16_type) (value f32_type) (value f64_type) (value f80_type) (value f128_type)
+	(use wove-file "../source/types.wove" (only is_builtin_float is_128bit_integer is_256bit_integer is_signed_integer_value (value f16_type) (value f32_type) (value f64_type) (value f80_type) (value f128_type)
 		(value i16_type) (value u16_type) (value i64_type)))
 	(use wove-file "../source/float_ops.wove" (only (value float_from_bits) (value float_to_bits)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
@@ -43,10 +43,14 @@
 	(let u64_bounds ",-1.0,0x1p64")
 	(let check_wide_input "wvrt_check_float_to_wide_int(")
 	(let check_wide_output "wvrt_check_wide_int_to_float(")
+	(let int256_to_extended "wvrt_int256_to_f80(")
 	(let i128_float_bounds ",-0x1p127,0x1p127,1")
 	(let u128_float_bounds ",-1.0,0x1p128,0")
+	(let i256_float_bounds ",-0x1p255,0x1p255,1")
+	(let u256_float_bounds ",-1.0,0x1p256,0")
 	(let signed_half_limit ",65504,1")
 	(let unsigned_half_limit ",65504,0")
+	(let signed_f32_limit ",0x1.fffffep127F,1")
 	(let unsigned_f32_limit ",0x1.fffffep127F,0")
 
 	(fn write_floating_literal
@@ -258,9 +262,20 @@
 		(returns u32)
 		(body
 			(if
-				(:doc "The significand of each source format is too short to represent a fraction below INT128_MIN.")
+				(:doc "The significand of each source format is too short to represent a fraction just below the signed minimum.")
 				(bool.not (local float_target))
 				(then
+					(if
+						(:doc "The optional 256-bit width uses its own exact powers of two.")
+						(call is_256bit_integer (local target))
+						(then
+							(if
+								(:doc "Select the signed 256-bit interval when the result carries a sign.")
+								(call is_signed_integer_value (local target))
+								(then (return (call c_literal_text (borrow-shared (local i256_float_bounds))
+									(borrow-mut (local output)) (local offset) (local writing)))))
+							(return (call c_literal_text (borrow-shared (local u256_float_bounds))
+								(borrow-mut (local output)) (local offset) (local writing)))))
 					(if
 						(:doc "Signed truncation includes the negative power of two and excludes the positive one.")
 						(call is_signed_integer_value (local target))
@@ -269,10 +284,16 @@
 					(return (call c_literal_text (borrow-shared (local u128_float_bounds))
 						(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
-				(:doc "A u128 can exceed the exact finite binary32 limit.")
+				(:doc "Binary32 checks its finite limit against the captured integer.")
 				(u32.eq (local target) (local f32_type))
-				(then (return (call c_literal_text (borrow-shared (local unsigned_f32_limit))
-					(borrow-mut (local output)) (local offset) (local writing)))))
+				(then
+					(if
+						(:doc "A signed 256-bit input can exceed the negative binary32 limit.")
+						(call is_signed_integer_value (local input))
+						(then (return (call c_literal_text (borrow-shared (local signed_f32_limit))
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(return (call c_literal_text (borrow-shared (local unsigned_f32_limit))
+						(borrow-mut (local output)) (local offset) (local writing)))))
 			(if
 				(:doc "The binary16 range is symmetric for signed input.")
 				(call is_signed_integer_value (local input))
@@ -288,11 +309,21 @@
 		(returns u32)
 		(body
 			(let target (struct.get (local row) type))
+			(if
+				(:doc "Round straight to x87 precision. Clang's direct cast can round through binary128 first.")
+				(bool.and (u32.eq (local target) (local f80_type)) (call is_256bit_integer (local input)))
+				(then
+					(let open (call c_literal_text (borrow-shared (local int256_to_extended))
+						(borrow-mut (local output)) (local offset) (local writing)))
+					(let end (call write_temporary_name (borrow-shared (local source)) (struct.get (local row) first)
+						(local tree_base) (borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
+					(return (call c_byte (borrow-mut (local output)) (local end) 41u8 (local writing)))))
 			(let float_target (call is_builtin_float (local target)))
 			(let half (bool.or (u32.eq (local input) (local f16_type)) (u32.eq (local target) (local f16_type))))
 			(let check (bool.or (bool.not (local float_target))
 				(bool.or (local half) (bool.and (u32.eq (local target) (local f32_type))
-					(bool.not (call is_signed_integer_value (local input)))))))
+					(bool.or (call is_256bit_integer (local input))
+						(bool.not (call is_signed_integer_value (local input))))))))
 			(let-mut cursor (call c_cast (borrow-mut (local output)) (local offset) (local target) (local writing)))
 			(if
 				(:doc "Every admitted binary16 integer fits exactly in i32. This avoids unavailable wide half cast helpers.")
@@ -331,7 +362,8 @@
 			(let target (struct.get (local row) type))
 			(if
 				(:doc "The wide mixed cases require exact checks before converting the captured operand.")
-				(bool.or (call is_128bit_integer (local input)) (call is_128bit_integer (local target)))
+				(bool.or (bool.or (call is_128bit_integer (local input)) (call is_128bit_integer (local target)))
+					(bool.or (call is_256bit_integer (local input)) (call is_256bit_integer (local target))))
 				(then (return (call write_wide_floating_conversion (borrow-shared (local source)) (local row) (local input)
 					(local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
 			(let from_bits (u32.eq (local kind) (local float_from_bits)))

@@ -130,6 +130,41 @@ long double wvrt_f80_to_integer(long double wvrtvalue, long double wvrtlower, lo
 	return wvrtvalue;
 }
 
+#ifdef WVRT_HAS_INT256
+// Round the high significand once in x87 precision, retaining the discarded bits' relation to a tie.
+static long double wvrt_int256_magnitude_to_f80(wvrt_u256 magnitude, bool negative) {
+	const int32_t width = 256 - wvrt_clz256(magnitude);
+	const int32_t discarded = width > 64 ? width - 64 : 0;
+	const uint64_t whole = (uint64_t)(magnitude >> discarded);
+	long double fraction = 0.0L;
+	// A quarter, half, or three quarters produces the same rounding as the original tail.
+	if (discarded > 0) {
+		const wvrt_u256 halfway = (wvrt_u256)1 << (discarded - 1);
+		const wvrt_u256 tail = magnitude & ((halfway << 1) - 1);
+		fraction = tail == 0 ? 0.0L : tail < halfway ? 0.25L : tail == halfway ? 0.5L : 0.75L;
+	}
+	const long double rounded = negative ? -(long double)whole - fraction : (long double)whole + fraction;
+	long double scale = (long double)(UINT64_C(1) << (discarded % 64));
+	// Multiplying by an exact power of two restores the exponent without altering the significand.
+	for (int32_t bits = discarded / 64; bits > 0; --bits) {
+		scale *= 0x1p64L;
+	}
+	return rounded * scale;
+}
+
+// The magnitude of INT256_MIN is representable in the unsigned domain.
+long double wvrt_i256_to_f80(wvrt_i256 value) {
+	const wvrt_u256 bits = (wvrt_u256)value;
+	const bool negative = value < 0;
+	return wvrt_int256_magnitude_to_f80(negative ? (wvrt_u256)0 - bits : bits, negative);
+}
+
+// An unsigned value rounds at the full positive magnitude.
+long double wvrt_u256_to_f80(wvrt_u256 value) {
+	return wvrt_int256_magnitude_to_f80(value, false);
+}
+#endif
+
 // Keep nonfinite values and compare finite inputs at their original precision.
 static void wvrt_check_f80_range(long double wvrtvalue, long double wvrtlimit,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {

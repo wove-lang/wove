@@ -99,6 +99,14 @@ _Float16 wvrt_f16_narrow(double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, 
 #define WVRT_HAS_F80 1
 long double wvrt_f80_to_integer(long double wvrtvalue, long double wvrtlower, long double wvrtupper,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
+#ifdef WVRT_HAS_INT256
+long double wvrt_i256_to_f80(wvrt_i256 wvrt_value);
+long double wvrt_u256_to_f80(wvrt_u256 wvrt_value);
+
+// The signed entry rounds with the final sign already applied.
+#define wvrt_int256_to_f80(value) \
+	_Generic((value), wvrt_i256: wvrt_i256_to_f80, wvrt_u256: wvrt_u256_to_f80)((value))
+#endif
 double wvrt_f80_to_f64(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
 float wvrt_f80_to_f32(long double wvrtvalue, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend);
 // The half destination also needs the target's binary16 ABI.
