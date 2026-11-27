@@ -135,7 +135,7 @@ def check_native(certifier, probe, case, layout, parts, prefix):
 				assert (table.get("main") == "T") == (unit == layout["entry_unit"]), (unit, table)
 			assert {name for name, kind in table.items() if kind == "T" and name.startswith("wgf")} == set(names), (unit, table, names)
 			# Shared descriptors and values are external. Their byte backing arrays remain private.
-			data = {name for name, kind in table.items() if kind != "U" and name.startswith(("wgb", "wga"))}
+			data = {name for name, kind in table.items() if kind != "U" and name.startswith(("wgd", "wgs", "wgD", "wgS", "wgb", "wga"))}
 			assert data == set(layout.get("data", {}).get(unit, [])), (unit, data)
 			# Numbered adapters and erased drop callbacks each have one definition owner.
 			if "workers" in layout:

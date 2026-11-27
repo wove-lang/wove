@@ -9,19 +9,25 @@
 	(use wove-file "../source/generics.wove" (only function_generic_list))
 	(use wove-file "../source/module.wove" (only form_parts))
 	(use wove-file "../scalar/function_rows.wove" (only function_with_c_name_slot (type ScalarFunction)))
+	(use wove-file "../scalar/binding_names.wove" (only module_binding_key module_binding_identity (value module_binding_key_kind)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only is_generic_template record_with_c_name_slot scope_at (type ScalarRecord)))
 	(use wove-file "../scalar/generics/functions.wove" (only (type FunctionInstance)))
 	(use wove-file "../scalar/generics/key_order.wove" (only order_definitions order_record_keys order_application_keys application_site))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "./names.wove" (only child_identity (value module_data_role)))
 
 	(struct Bucket (fields (head i32)))
-	(struct Candidate (fields (role u32) (fingerprint u32) (start i32) (end i32) (next i32)))
+	(struct Candidate (fields (role u32) (fingerprint u32) (name i32) (start i32) (end i32) (next i32)))
+	(let function_candidate 1u32)
+	(let record_candidate 2u32)
+	(let binding_candidate 3u32)
 
 	(fn base_candidate
 		(:doc "Retain the fingerprint and source suffix of one generated file-scope name.")
-		(params (name SourceNode) (role u32) (fingerprint u32)) (returns Candidate)
+		(params (name SourceNode) (row i32) (role u32) (fingerprint u32)) (returns Candidate)
 		(body (return (struct.new Candidate (role role) (fingerprint fingerprint)
-			(start (struct.get name start)) (end (struct.get name end)) (next 0i32)))))
+			(name row) (start (struct.get name start)) (end (struct.get name end)) (next 0i32)))))
 
 	(fn same_suffix
 		(:doc "Compare the validated source bytes emitted as each generated suffix.")
@@ -43,6 +49,7 @@
 			(let chain (call bucket (struct.get name fingerprint) (array.len buckets)))
 			(array.store candidates row (struct.new Candidate
 				(role (struct.get name role)) (fingerprint (struct.get name fingerprint))
+				(name (struct.get name name))
 				(start (struct.get name start)) (end (struct.get name end))
 				(next (struct.get (array.load buckets chain) head))))
 			(array.store buckets chain (struct.new Bucket (head (i32.inc row))))))
@@ -76,7 +83,7 @@
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
 			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)) (functions (shared-array ScalarFunction))
 			(instances (shared-array FunctionInstance)) (first_instance i32) (function_count i32)
-			(candidates (shared-array Candidate)) (row i32) (head i32)) (returns i32)
+			(expressions (shared-array ScalarExpression)) (candidates (shared-array Candidate)) (row i32) (head i32)) (returns i32)
 		(body
 			(let name (array.load candidates row))
 			(let-mut cursor head)
@@ -98,17 +105,27 @@
 							(set collision (bool true))
 							(let-mut order 0i32)
 							(if
-								(:doc "Construct ranks in the function and named-record namespaces independently.")
-								(i32.lt row function_count)
+								(:doc "Use the complete nominal function key, including checked specialization arguments.")
+								(u32.eq (struct.get name role) function_candidate)
 								(then (set order (call order_function_keys (borrow-shared arena)
 									(borrow-shared files) (borrow-shared nodes) (borrow-shared records)
 									(borrow-shared bindings) (array.load functions other)
 									(array.load functions row) (borrow-shared instances)
 									(i32.sub other first_instance) (i32.sub row first_instance))))
-								(else (set order (call order_record_keys (borrow-shared arena)
-									(borrow-shared files) (borrow-shared nodes) (borrow-shared records)
-									(borrow-shared bindings) (array.load records (i32.sub other function_count))
-									(array.load records (i32.sub row function_count))))))
+								(else
+									(if
+										(:doc "Named layouts keep exact template and argument ordering.")
+										(u32.eq (struct.get name role) record_candidate)
+										(then (set order (call order_record_keys (borrow-shared arena)
+											(borrow-shared files) (borrow-shared nodes) (borrow-shared records)
+											(borrow-shared bindings) (array.load records (i32.sub other function_count))
+											(array.load records (i32.sub row function_count)))))
+										(else
+											(let left (struct.get candidate name))
+											(let right (struct.get name name))
+											(set order (call order_definitions (borrow-shared arena) (borrow-shared files) (borrow-shared nodes)
+												(struct.get (array.load expressions left) first) left
+												(struct.get (array.load expressions right) first) right))))))
 							(if (i32.ltz order) (then (set rank (i32.inc rank))))))
 					(set cursor (struct.get candidate next))))
 			(if collision (then (return rank)))
@@ -118,7 +135,8 @@
 		(:doc "Resolve private generated name collisions before either C emission pass.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
 			(bindings (shared-array GraphBinding)) (instances (shared-array FunctionInstance)) (first_instance i32)
-			(functions (mut-array ScalarFunction)) (function_count i32) (records (mut-array ScalarRecord)))
+			(functions (mut-array ScalarFunction)) (function_count i32) (records (mut-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
 		(returns void)
 		(body
 			(let-mut record_count 0i32)
@@ -127,7 +145,16 @@
 				(bool.and (i32.lt record_count (array.len records))
 					(i32.not-eqz (struct.get (array.load records record_count) name)))
 				(body (set record_count (i32.inc record_count))))
-			(let count (i32.add function_count record_count))
+			(let binding_start (i32.add function_count record_count))
+			(let-mut count binding_start)
+			(let-mut index 0i32)
+			(while
+				(:doc "Count each selected Wove binding once, regardless of its uses or aliases.")
+				(i32.lt index (array.len expressions))
+				(body
+					(if (u32.eq (struct.get (array.load expressions index) kind) module_binding_key_kind)
+						(then (set count (i32.inc count))))
+					(set index (i32.inc index))))
 			(let-mut width 1i32)
 			(while
 				(:doc "Use a power-of-two bucket table with enough space for ordinary small chains.")
@@ -135,14 +162,15 @@
 				(body (set width (i32.add width width))))
 			(let-mut buckets (array.alloc Bucket width))
 			(let-mut candidates (array.alloc Candidate count))
-			(let-mut index 0i32)
+			(set index 0i32)
 			(while
 				(:doc "Place Wove definitions into their generated-role buckets.")
 				(i32.lt index function_count)
 				(body
 					(let function (array.load functions index))
 					(call link_candidate (borrow-mut buckets) (borrow-mut candidates) index
-						(call base_candidate (array.load nodes (struct.get function name)) 1u32
+						(call base_candidate (array.load nodes (struct.get function name))
+							(struct.get function name) function_candidate
 							(struct.get function identity)))
 					(set index (i32.inc index))))
 			(set index 0i32)
@@ -157,8 +185,27 @@
 							(bool.and (i32.not-gtz (struct.get record native)) (bool.not (call is_generic_template record))))
 						(then (call link_candidate (borrow-mut buckets) (borrow-mut candidates)
 							(i32.add function_count index)
-							(call base_candidate (array.load nodes (struct.get record name)) 2u32
+							(call base_candidate (array.load nodes (struct.get record name))
+								(struct.get record name) record_candidate
 								(struct.get record identity)))))
+					(set index (i32.inc index))))
+			(let-mut binding binding_start)
+			(set index 0i32)
+			(while
+				(:doc "Index each binding's complete descriptor name. With a fixed suffix, each role's FNV-1a continuation is bijective, so the backing name has the same collision group.")
+				(i32.lt index (array.len expressions))
+				(body
+					(let key (array.load expressions index))
+					(if
+						(:doc "Only reserved defining-name rows describe generated module storage.")
+						(u32.eq (struct.get key kind) module_binding_key_kind)
+						(then
+							(let name (array.load nodes index))
+							(let identity (call child_identity (borrow-shared arena) (struct.get name start)
+								(struct.get name end) (call module_binding_identity key) module_data_role))
+							(call link_candidate (borrow-mut buckets) (borrow-mut candidates) binding
+								(call base_candidate name index binding_candidate identity))
+							(set binding (i32.inc binding))))
 					(set index (i32.inc index))))
 			(set index 0i32)
 			(while
@@ -174,7 +221,7 @@
 							(let rank (call collision_rank (borrow-shared arena) (borrow-shared files)
 								(borrow-shared nodes) (borrow-shared records) (borrow-shared bindings)
 								(borrow-shared functions) (borrow-shared instances) first_instance
-								function_count (borrow-shared candidates) index head))
+								function_count (borrow-shared expressions) (borrow-shared candidates) index head))
 							(if
 								(:doc "An unchanged definition keeps the normal generated spelling.")
 								(i32.gtz rank)
@@ -186,8 +233,17 @@
 											(array.store functions index
 												(call function_with_c_name_slot (array.load functions index) rank)))
 										(else
-											(let row (i32.sub index function_count))
-											(array.store records row
-												(call record_with_c_name_slot (array.load records row) rank))))))))
+											(if
+												(:doc "Record type rows precede defining module name rows.")
+												(i32.lt index binding_start)
+												(then
+													(let row (i32.sub index function_count))
+													(array.store records row
+														(call record_with_c_name_slot (array.load records row) rank)))
+												(else
+													(let row (struct.get name name))
+													(let key (array.load expressions row))
+													(array.store expressions row
+														(call module_binding_key (call module_binding_identity key) (struct.get key first) rank))))))))))
 					(set index (i32.inc index))))))
 )
