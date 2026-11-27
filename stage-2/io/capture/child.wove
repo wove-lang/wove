@@ -13,7 +13,7 @@
 	(use c-header "<spawn.h>" (only (type Pid) (type Actions) (type Attributes)
 		posix_spawn_file_actions_init posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addclose
 		posix_spawnattr_init posix_spawnp))
-	(use c-header "<sys/wait.h>" (only (type (as Pid WaitPid)) waitpid WIFEXITED WEXITSTATUS WIFSIGNALED WTERMSIG))
+	(use c-header "<sys/wait.h>" (only (type (as Pid WaitPid)) waitpid WNOHANG WIFEXITED WEXITSTATUS WIFSIGNALED WTERMSIG))
 
 	(fn spawn_capture_child
 		(:doc `Start one executable through PATH and return its process ID, or -1 on host failure.`)
@@ -84,23 +84,43 @@
 				(then (return (i32.add 128i32 (call WTERMSIG status)))))
 			(return -1i32)))
 
-	(fn reap_capture_child
-		(:doc `Wait for the selected child across interruptions and return its decoded status.`)
-		(params (pid i32)) (returns i32)
+	(struct ChildWait (fields (ready bool) (status i32)))
+
+	(fn wait_capture_child
+		(:doc "Wait or poll one owned child across interruptions. An empty poll leaves its status pending.")
+		(params (pid i32) (options i32)) (returns ChildWait)
 		(body
+			(if
+				(:doc "Only a positive ID identifies one process owned by the caller.")
+				(i32.not-gtz pid)
+				(then (return (struct.new ChildWait (ready (bool true)) (status -1i32)))))
 			(let target (int.convert WaitPid pid))
 			(let-mut status 0i32)
 			(while
 				(:doc "A signal can interrupt waitpid before it collects the child.")
 				(bool true)
 				(body
-					(let result (int.convert i32 (call waitpid target (borrow-mut status) 0i32)))
+					(let result (int.convert i32 (call waitpid target (borrow-mut status) options)))
 					(if
-						(:doc "Without WNOHANG a positive result reaps this child.")
+						(:doc "The selected child has been reaped with its final native status.")
 						(i32.eq result pid)
-						(then (return (call decode_child_status status))))
+						(then (return (struct.new ChildWait (ready (bool true)) (status (call decode_child_status status))))))
+					(if
+						(:doc "A nonblocking wait leaves a running child owned by the caller.")
+						(i32.eqz result)
+						(then (return (struct.new ChildWait (ready (bool false)) (status 0i32)))))
 					(if
 						(:doc "Only an interrupted system call is retried.")
-						(bool.not (bool.and (i32.ltz result) (i32.eq errno EINTR)))
-						(then (return -1i32)))))))
+						(i32.not-eq errno EINTR)
+						(then (return (struct.new ChildWait (ready (bool true)) (status -1i32)))))))))
+
+	(fn poll_capture_child
+		(:doc "Reap one selected child if it has finished.")
+		(params (pid i32)) (returns ChildWait)
+		(body (return (call wait_capture_child pid WNOHANG))))
+
+	(fn reap_capture_child
+		(:doc "Reap the selected child and return its decoded status.")
+		(params (pid i32)) (returns i32)
+		(body (return (struct.get (call wait_capture_child pid 0i32) status))))
 )
