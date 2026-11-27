@@ -16,15 +16,16 @@
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "../c/arguments.wove"
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
-			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail)))
+			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode)))
 
-	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (mutable_scalar bool) (owner_mode u8) (nullable bool)))
-	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (handle_out bool) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
+	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (scalar_ref u32) (owner_mode u8) (nullable bool)))
+	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (handle_out bool) (void_pointer bool) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
 	(struct CFormal (fields (row i32) (position i32) (type_node i32) (start i32) (end i32)))
 
 	(struct CViewType (fields (access u32) (element i32)))
 
 	(let array_directive "c_array")
+	(let void_pointer_directive "c_void_ptr")
 	(let vector_directive "c_cstrs")
 	(let null_directive "c_null")
 	(let nullable_directive "c_nullable")
@@ -98,6 +99,10 @@
 				(call matches_pragma (borrow-shared (local source)) (local head) (borrow-shared (local array_directive)))
 				(then (return (call c_array_mode))))
 			(if
+				(:doc "A typed scalar loan can use the native void pointer ABI.")
+				(call matches_pragma (borrow-shared (local source)) (local head) (borrow-shared (local void_pointer_directive)))
+				(then (return (local c_void_pointer_mode))))
+			(if
 				(:doc "Allow explicit null where the nullable contract is implemented.")
 				(call matches_pragma (borrow-shared (local source)) (local head) (borrow-shared (local nullable_directive)))
 				(then (return (call c_nullable_mode))))
@@ -136,7 +141,7 @@
 		(:doc `Point an invalid native argument contract at its original source span.`)
 		(params (start i32) (end i32))
 		(returns CArguments)
-		(body (return (struct.new CArguments (strings 0i32) (vectors (bool false)) (extents 0i32) (nulls 0i32) (initializers 0i32) (handle_out (bool false)) (macro (bool false)) (variadic 0i32)
+		(body (return (struct.new CArguments (strings 0i32) (vectors (bool false)) (extents 0i32) (nulls 0i32) (initializers 0i32) (handle_out (bool false)) (void_pointer (bool false)) (macro (bool false)) (variadic 0i32)
 			(start (local start)) (end (local end)) (error 23u32)))))
 
 	(fn c_argument_error_at
@@ -149,7 +154,7 @@
 		(:doc `Retain conversion counts, a macro marker, and the first variadic formal's source row.`)
 		(params (strings i32) (extents i32) (nulls i32) (macro bool) (variadic i32))
 		(returns CArguments)
-		(body (return (struct.new CArguments (strings (local strings)) (vectors (bool false)) (extents (local extents)) (nulls (local nulls)) (initializers 0i32) (handle_out (bool false)) (macro (local macro)) (variadic (local variadic))
+		(body (return (struct.new CArguments (strings (local strings)) (vectors (bool false)) (extents (local extents)) (nulls (local nulls)) (initializers 0i32) (handle_out (bool false)) (void_pointer (bool false)) (macro (local macro)) (variadic (local variadic))
 			(start 0i32) (end 0i32) (error 0u32)))))
 
 	(fn c_formal
@@ -161,12 +166,12 @@
 
 	(fn mark_c_argument_type
 		(:doc `Record resolved argument types before applying the contracts.`)
-		(params (contracts (mut-array CArgument)) (index i32) (integer bool) (mutable_scalar bool) (owner_mode u8))
+		(params (contracts (mut-array CArgument)) (index i32) (integer bool) (scalar_ref u32) (owner_mode u8))
 		(returns void)
 		(body
 			(array.store (local contracts) (local index)
 				(struct.new CArgument (mode (call c_value_mode)) (size 0i32) (count 0i32)
-					(integer (local integer)) (mutable_scalar (local mutable_scalar))
+					(integer (local integer)) (scalar_ref (local scalar_ref))
 					(owner_mode (local owner_mode)) (nullable (bool false))))))
 
 	(fn accepts_c_formal
@@ -178,6 +183,10 @@
 				(:doc "Both extent operands must have resolved to integer types.")
 				(call is_c_value_mode (local mode))
 				(then (return (struct.get (local formal) integer))))
+			(if
+				(:doc "Only a scalar place can use this borrowed void pointer ABI.")
+				(u8.eq (local mode) (local c_void_pointer_mode))
+				(then (return (u32.gtz (struct.get (local formal) scalar_ref)))))
 			(let rows (call c_row_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
 			(if
 				(:doc "C string vectors borrow the rows through a shared projection.")
@@ -198,6 +207,10 @@
 				(:doc "Nullable annotations name checked pointer shapes. Mutable scalar pointers can use this contract now.")
 				(call is_c_nullable_mode (local mode))
 				(then
+					(if
+						(:doc "Shared scalar void pointers always borrow a concrete place.")
+						(u32.eq (struct.get (local formal) scalar_ref) 1u32)
+						(then (return (bool false))))
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
 					(return (bool.or
 						(u32.gtz (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes)) (struct.get (local parts) head)))
@@ -283,7 +296,7 @@
 					(return (call c_argument_error (struct.get (local formal) start) (struct.get (local formal) end)))))
 			(array.store (local contracts) (local index)
 				(struct.new CArgument (mode (local mode)) (size (local size)) (count (local count))
-					(integer (struct.get (local prior) integer)) (mutable_scalar (struct.get (local prior) mutable_scalar))
+					(integer (struct.get (local prior) integer)) (scalar_ref (struct.get (local prior) scalar_ref))
 					(owner_mode (struct.get (local prior) owner_mode)) (nullable (struct.get (local prior) nullable))))
 			(if
 				(:doc "Each bounded pointer contributes one extent check.")
@@ -294,8 +307,9 @@
 				(call accepts_c_null (local mode))
 				(then (return (call checked_c_arguments 0i32 0i32 1i32 (bool false) 0i32))))
 			(if
-				(:doc "Vector and initializer formals are found in the final checked contract table.")
-				(bool.or (call is_c_init_mode (local mode)) (call is_c_vector_mode (local mode)))
+				(:doc "The final contract table records vectors, initializers, and scalar void pointers.")
+				(bool.or (u8.eq (local mode) (local c_void_pointer_mode))
+					(bool.or (call is_c_init_mode (local mode)) (call is_c_vector_mode (local mode))))
 				(then (return (call checked_c_arguments 0i32 0i32 0i32 (bool false) 0i32))))
 			(return (call checked_c_arguments 1i32 0i32 0i32 (bool false) 0i32))))
 
@@ -420,11 +434,11 @@
 							(array.store (local contracts) (local position)
 								(struct.new CArgument (mode (struct.get (local slot) mode))
 									(size (struct.get (local slot) size)) (count (struct.get (local slot) count))
-									(integer (struct.get (local slot) integer)) (mutable_scalar (struct.get (local slot) mutable_scalar))
+									(integer (struct.get (local slot) integer)) (scalar_ref (struct.get (local slot) scalar_ref))
 									(owner_mode (local owner_mode)) (nullable (bool true))))))
 					(if
 						(:doc "Other nullable pointer shapes keep their existing lowering until their contracts are implemented.")
-						(bool.or (bool.not (call is_c_nullable_mode (local mode))) (struct.get (local slot) mutable_scalar))
+						(bool.or (bool.not (call is_c_nullable_mode (local mode))) (u32.eq (struct.get (local slot) scalar_ref) 2u32))
 						(then
 							(let bound (call reserve_c_argument (borrow-mut (local contracts)) (local formal) (local bound_mode) -1i32 -1i32))
 							(if
@@ -603,8 +617,9 @@
 	(fn read_c_arguments
 		(:doc `Read bridge metadata into one contract slot per checked formal.
 
-		Mark integer slots before applying pragmas. Null-only slots suppress
-		string preparation and every native view needs an explicit contract.`)
+		Mark integer and scalar reference slots before applying pragmas.
+		Null-only slots suppress string preparation. Native views and shared
+		scalar references need explicit contracts.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function FormParts)
 			(first i32) (contracts (mut-array CArgument)))
 		(returns CArguments)
@@ -620,6 +635,7 @@
 			(let-mut initializers 0i32)
 			(let-mut handle_out (bool false))
 			(let-mut vectors (bool false))
+			(let-mut void_pointer (bool false))
 			(while
 				(:doc "Every slice formal must define its native ABI.")
 				(i32.not-ltz (local parameter))
@@ -627,14 +643,26 @@
 					(let node (array.load (local nodes) (local parameter)))
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local node)))
 					(let type (array.load (local nodes) (struct.get (local parts) operands)))
-					(let mode (struct.get (array.load (local contracts) (local index)) mode))
+					(let slot (array.load (local contracts) (local index)))
+					(let mode (struct.get (local slot) mode))
 					(let vector (call is_c_vector_mode (local mode)))
+					(let void_formal (u8.eq (local mode) (local c_void_pointer_mode)))
 					(set (local vectors) (bool.or (local vectors) (local vector)))
+					(set (local void_pointer) (bool.or (local void_pointer) (local void_formal)))
 					(if
-						(:doc "Converted vectors, nullable pointers, and initializers use fixed C signatures.")
-						(bool.and (bool.or (local vector) (bool.or (call accepts_c_null (local mode)) (call is_c_init_mode (local mode))))
-							(bool.or (struct.get (local arguments) macro) (i32.gtz (struct.get (local arguments) variadic))))
+						(:doc "Scalar void pointers require an exact nonvariadic C function. Other adapted arguments keep their existing signature rules.")
+						(bool.and (bool.or (local void_formal) (bool.or (local vector)
+								(bool.or (call accepts_c_null (local mode)) (call is_c_init_mode (local mode)))))
+							(bool.or (struct.get (local arguments) macro)
+								(bool.or (i32.gtz (struct.get (local arguments) variadic))
+									(bool.and (local void_formal) (i32.ltz (struct.get (local arguments) variadic))))))
 						(then (return (call c_argument_error_at (local type)))))
+					(if
+						(:doc "A shared scalar formal requires an explicit native void pointer contract.")
+						(bool.and (u32.eq (struct.get (local slot) scalar_ref) 1u32) (bool.not (local void_formal)))
+						(then
+							(let reference (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
+							(return (call c_argument_error_at (array.load (local nodes) (struct.get (local reference) operands))))))
 					(if
 						(:doc "An unannotated view is unavailable in a native signature.")
 						(bool.and (call is_c_value_mode (local mode))
@@ -652,5 +680,5 @@
 			(return (struct.new CArguments (strings (struct.get (local arguments) strings)) (vectors (local vectors))
 				(extents (struct.get (local arguments) extents))
 				(nulls (i32.add (struct.get (local nulls) nulls) (struct.get (local arguments) nulls)))
-				(initializers (local initializers)) (handle_out (local handle_out)) (macro (struct.get (local arguments) macro))
+				(initializers (local initializers)) (handle_out (local handle_out)) (void_pointer (local void_pointer)) (macro (struct.get (local arguments) macro))
 				(variadic (struct.get (local arguments) variadic)) (start 0i32) (end 0i32) (error 0u32))))))

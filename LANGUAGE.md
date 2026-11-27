@@ -936,6 +936,7 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_cstr parameter ...)` | Copy byte views into NUL-terminated C strings and reject embedded NUL. Mutable views copy back their original length. |
 | `(c_cstr_raw parameter ...)` | Copy all bytes, including embedded NUL, before adding a terminator. |
 | `(c_cstrs parameter ...)` | Copy shared byte rows into a null-terminated array of C-string pointers. Reject embedded NUL. |
+| `(c_void_ptr parameter ...)` | Pass a scalar place's original address to a native function that uses a void pointer. The exact Wove `shared-ref` or `mut-ref` pointee and ordinary borrow rules still apply. The native prototype must use `const void *` for a shared reference and `void *` for a mutable reference. The callee may use the address for the duration of the call. |
 | `(c_bytes data count)` or `(c_bytes data size count)` | Borrow bytes after checking the requested count or product fits the view. |
 | `(c_array data count)` | Borrow an integer slice after checking its element count. Use a literal or a named integer parameter. |
 | `(c_variadic)` | Call a C variadic function with just its declared fixed arguments. |
@@ -959,6 +960,8 @@ option leaves scope, the stream can be read, rewound, or closed again.
 
 A fixed C argument in `params` supplies a native operand at that position.
 Use `(const command i32 F_SETFL)` for a header constant,
+`(const property (c-type "filesec_property_t") FILESEC_MODE)` for a header
+constant at its exact native integer or enum type,
 `(const length i32 -1)` for a checked signed literal, or
 `(const tail (c-type "const char **") null)` for a null pointer with the
 exact C type. A fixed `i32` literal may also carry its `i32` suffix or

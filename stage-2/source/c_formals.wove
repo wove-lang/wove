@@ -7,7 +7,7 @@
 	(use wove-file "./module.wove" (only form_parts (type FormParts)))
 	(use wove-file "./imports.wove" (only import_keyword is_import_name))
 	(use wove-file "./types.wove" (only source_builtin_type))
-	(use wove-file "./c_owners.wove" (only is_native_name is_c_pointer_candidate read_c_type_form))
+	(use wove-file "./c_owners.wove" (only is_native_name is_c_pointer_candidate read_c_type_form check_c_type_spelling))
 	(use wove-file "./generics.wove" (only read_i32_constant generic_i32_value))
 	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -15,13 +15,13 @@
 	(let null_literal "null")
 
 	(struct CFixedFormal
-		(fields (name i32) (constant i32) (pointer_type i32) (value i32)
+		(fields (name i32) (constant i32) (native_type i32) (value i32)
 			(start i32) (end i32) (error u32)))
 
 	(fn fixed_formal_error
 		(:doc "Keep the invalid operand or directive at its original source span.")
 		(params (start i32) (end i32) (error u32)) (returns CFixedFormal)
-		(body (return (struct.new CFixedFormal (name -1i32) (constant -1i32) (pointer_type -1i32)
+		(body (return (struct.new CFixedFormal (name -1i32) (constant -1i32) (native_type -1i32)
 			(value 0i32) (start (local start)) (end (local end)) (error (local error))))))
 
 	(fn invalid_fixed_formal
@@ -31,10 +31,10 @@
 			(struct.get (local node) end) 23u32))))
 
 	(fn checked_fixed_formal
-		(:doc "Store the checked header name, pointer spelling, or signed literal value.")
-		(params (name i32) (constant i32) (pointer_type i32) (value i32)) (returns CFixedFormal)
+		(:doc "Store the checked header name, exact C type spelling, or signed literal value.")
+		(params (name i32) (constant i32) (native_type i32) (value i32)) (returns CFixedFormal)
 		(body (return (struct.new CFixedFormal (name (local name)) (constant (local constant))
-			(pointer_type (local pointer_type)) (value (local value)) (start 0i32) (end 0i32) (error 0u32)))))
+			(native_type (local native_type)) (value (local value)) (start 0i32) (end 0i32) (error 0u32)))))
 
 	(fn is_fixed_null
 		(:doc "Match the exact bare null literal.")
@@ -54,10 +54,10 @@
 				(bool.and (u32.eq (call import_keyword (borrow-shared (local source)) (array.load (local nodes) (local head))) 14u32)
 					(i32.lt -1i32 (struct.get (array.load (local nodes) (local first)) next_sibling)))))))
 
-	(fn read_fixed_pointer
-		(:doc "Validate the decoded C pointer spelling and require a null value for the hidden slot.")
+	(fn read_fixed_native
+		(:doc "Validate an exact C scalar constant or a typed native null operand.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
-			(name i32) (type SourceNode) (value SourceNode))
+			(name i32) (type SourceNode) (value SourceNode) (value_index i32))
 		(returns CFixedFormal)
 		(body
 			(let native (call read_c_type_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
@@ -67,6 +67,21 @@
 				(then (return (call fixed_formal_error (struct.get (local native) start)
 					(struct.get (local native) end) (struct.get (local native) error)))))
 			(let literal (array.load (local nodes) (struct.get (local native) native)))
+			(if
+				(:doc "A fixed native scalar accepts a header constant. The C compiler checks the integer type and range.")
+				(bool.not (call is_fixed_null (borrow-shared (local source)) (local value)))
+				(then
+					(if
+						(:doc "An exact scalar argument must name a native header constant.")
+						(bool.not (call is_native_name (borrow-shared (local source)) (local value)))
+						(then (return (call invalid_fixed_formal (local value)))))
+					(let checked (call check_c_type_spelling (borrow-shared (local source)) (borrow-shared (local nodes)) (local native)))
+					(if
+						(:doc "Keep an invalid C type spelling at the original quoted operand.")
+						(u32.gtz (struct.get (local checked) error))
+						(then (return (call fixed_formal_error (struct.get (local checked) start)
+							(struct.get (local checked) end) (struct.get (local checked) error)))))
+					(return (call checked_fixed_formal (local name) (local value_index) (struct.get (local native) native) 0i32))))
 			(let start (struct.get (local literal) start))
 			(let end (struct.get (local literal) end))
 			(let-mut text (array.alloc u8 (i32.sub (local end) (local start))))
@@ -79,14 +94,10 @@
 					(bool.not (call is_c_pointer_candidate
 						(borrow-shared (array.range (local text) 0i32 (struct.get (local decoded) written))))))
 				(then (return (call invalid_fixed_formal (local literal)))))
-			(if
-				(:doc "A hidden pointer supplies no storage and can only pass null.")
-				(bool.not (call is_fixed_null (borrow-shared (local source)) (local value)))
-				(then (return (call invalid_fixed_formal (local value)))))
 			(return (call checked_fixed_formal (local name) -1i32 (struct.get (local native) native) 0i32))))
 
 	(fn read_c_fixed_formal
-		(:doc "Read a hidden i32 literal or header constant, or a null at its exact C pointer type.")
+		(:doc "Read a hidden i32 literal, an integer header constant, or a null at its exact C pointer type.")
 		(:expect (issues "gh:wove-lang/wove:489"))
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (row i32) (parts FormParts))
 		(returns CFixedFormal)
@@ -106,10 +117,10 @@
 				(then (return (call invalid_fixed_formal (local named)))))
 			(let value (array.load (local nodes) (local constant)))
 			(if
-				(:doc "A compound type annotation gives the exact C pointer spelling.")
+				(:doc "A compound type annotation gives the exact native scalar or pointer spelling.")
 				(u32.eq (struct.get (local type) kind) 40u32)
-				(then (return (call read_fixed_pointer (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local name) (local type) (local value)))))
+				(then (return (call read_fixed_native (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local name) (local type) (local value) (local constant)))))
 			(if
 				(:doc "Integer operands use the existing exact i32 contract.")
 				(u32.not-eq (call source_builtin_type (borrow-shared (local source)) (local type)) 5u32)
