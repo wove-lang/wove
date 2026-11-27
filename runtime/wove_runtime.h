@@ -215,24 +215,34 @@ void wvrt_check_c_handle_empty(const volatile void *wvrt_handle, int32_t wvrt_fi
 
 typedef struct wvrt_c_storage wvrt_c_storage;
 
-// Match the GNU trailing zero-byte array and its compatible incomplete array type.
-__extension__ typedef unsigned char wvrt_c_zero_bytes[0];
-
-// Check the actual native member types before allocating at their C layout.
+// Check the native members and use their actual C layout only in byte-tail units.
 #define WVRT_C_TAIL_ALLOC(type, count, bytes, capacity, file, start, end) \
-	((void)sizeof(char[_Generic(&((type *)0)->count, uint32_t *: 1, default: -1)]), \
-	(void)sizeof(char[_Generic(&((type *)0)->bytes, wvrt_c_zero_bytes *: 1, default: -1)]), \
-	wvrt_c_storage_new_tail(sizeof(type), _Alignof(type), offsetof(type, bytes), offsetof(type, count), \
-		(capacity), (file), (start), (end)))
+	__extension__ ({ \
+		_Static_assert(_Generic(&((type *)0)->count, uint32_t *: 1, default: 0), \
+			"Wove C byte-tail count must be uint32_t"); \
+		_Static_assert(_Generic(&((type *)0)->bytes, unsigned char (*)[0]: 1, default: 0), \
+			"Wove C byte tail must be a zero-length or incomplete unsigned char array"); \
+		extern wvrt_c_storage *wvrt_c_storage_new_tail(size_t, size_t, size_t, size_t, int64_t, \
+			int32_t, int32_t, int32_t); \
+		wvrt_c_storage_new_tail(sizeof(type), _Alignof(type), offsetof(type, bytes), offsetof(type, count), \
+			(capacity), (file), (start), (end)); \
+	})
+
+// Fetch even a sizing-only native report without expanding the usual runtime ABI.
+#define WVRT_C_TAIL_REPORT(storage, file, start, end) \
+	__extension__ ({ \
+		extern uint32_t wvrt_c_storage_tail_report(const wvrt_c_storage *, int32_t, int32_t, int32_t); \
+		wvrt_c_storage_tail_report((storage), (file), (start), (end)); \
+	})
+
+// Read one byte through the runtime's allocation and native-length checks.
+#define WVRT_C_TAIL_AT(storage, index, file, start, end) \
+	__extension__ ({ \
+		extern uint8_t wvrt_c_storage_tail_at(wvrt_c_storage *, int64_t, int32_t, int32_t, int32_t); \
+		wvrt_c_storage_tail_at((storage), (index), (file), (start), (end)); \
+	})
 
 wvrt_c_storage *wvrt_c_storage_new(size_t wvrt_size, size_t wvrt_alignment,
-	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
-wvrt_c_storage *wvrt_c_storage_new_tail(size_t wvrt_size, size_t wvrt_alignment,
-	size_t wvrt_tail, size_t wvrt_count, int64_t wvrt_capacity,
-	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
-uint32_t wvrt_c_storage_tail_report(const wvrt_c_storage *wvrt_storage,
-	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
-uint8_t wvrt_c_storage_tail_at(wvrt_c_storage *wvrt_storage, int64_t wvrt_index,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);

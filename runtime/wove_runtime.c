@@ -519,8 +519,8 @@ uint32_t wvrt_c_storage_tail_report(const wvrt_c_storage *wvrt_storage,
 	return wvrt_count;
 }
 
-// Require inactive storage for initialization and an active object for other native calls.
-void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing,
+// Require inactive storage for initialization and an active object for ordinary access.
+static void wvrt_c_storage_require_state(const wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
 	// Check the owner before accessing its lifetime state.
 	if (wvrt_storage == NULL) {
@@ -531,6 +531,23 @@ void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing
 		const char *wvrt_problem = wvrt_initializing ? "C storage is already initialized" : "C storage is not initialized";
 		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, wvrt_problem);
 	}
+}
+
+// Check the count that a read or native loan will use against the original capacity.
+static uint32_t wvrt_c_storage_checked_tail_count(const wvrt_c_storage *wvrt_storage,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	uint32_t wvrt_count = wvrt_c_storage_tail_report(wvrt_storage, wvrt_file, wvrt_start, wvrt_end);
+	// The native report can grow independently of the allocation.
+	if (wvrt_count > wvrt_storage->wvrt_tail_capacity) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "native byte-tail length exceeds capacity");
+	}
+	return wvrt_count;
+}
+
+// Prepare a stable native storage loan according to the initialization contract.
+void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	wvrt_c_storage_require_state(wvrt_storage, wvrt_initializing, wvrt_file, wvrt_start, wvrt_end);
 	// Only byte-tail owners carry a mutable native count.
 	if (wvrt_storage->wvrt_count_offset != SIZE_MAX) {
 		// Start each initialization with the actual capacity. Failed calls may overwrite the count.
@@ -539,9 +556,8 @@ void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing
 			memcpy((unsigned char *)wvrt_storage->wvrt_data + wvrt_storage->wvrt_count_offset,
 				&wvrt_count, sizeof wvrt_count);
 		// A live loan may expose only a report that fits its original allocation.
-		} else if (wvrt_c_storage_tail_report(wvrt_storage, wvrt_file, wvrt_start, wvrt_end) >
-			wvrt_storage->wvrt_tail_capacity) {
-			wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "native byte-tail length exceeds capacity");
+		} else {
+			(void)wvrt_c_storage_checked_tail_count(wvrt_storage, wvrt_file, wvrt_start, wvrt_end);
 		}
 	}
 }
@@ -549,8 +565,8 @@ void wvrt_c_storage_access(wvrt_c_storage *wvrt_storage, _Bool wvrt_initializing
 // Load one byte from a successfully initialized, bounded native tail.
 uint8_t wvrt_c_storage_tail_at(wvrt_c_storage *wvrt_storage, int64_t wvrt_index,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
-	uint32_t wvrt_count = wvrt_c_storage_tail_report(wvrt_storage, wvrt_file, wvrt_start, wvrt_end);
-	wvrt_c_storage_access(wvrt_storage, 0, wvrt_file, wvrt_start, wvrt_end);
+	wvrt_c_storage_require_state(wvrt_storage, 0, wvrt_file, wvrt_start, wvrt_end);
+	uint32_t wvrt_count = wvrt_c_storage_checked_tail_count(wvrt_storage, wvrt_file, wvrt_start, wvrt_end);
 	// Only the valid native length, within the original capacity, admits an index.
 	if (wvrt_index < 0 || (uint64_t)wvrt_index >= wvrt_count) {
 		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C byte-tail index out of bounds");
