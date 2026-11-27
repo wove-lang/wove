@@ -93,7 +93,7 @@ verbatim disabled text. Counts below cover active declarations.
 
 | Directive and count | Header and affected declarations | Compiler behavior needed |
 | --- | --- | --- |
-| `c_array` · 8 | `dirent.h` `getdirentries{,64}`, `stdio.h` `fgets`, `sys/stat.h` `futimens` and `utimensat`, `unistd.h` `getgroups`, `pipe`, and `pipe2` | The scalar bridge checks literal and named element counts for shared and mutable slices of built-in and native integers. The native fixture exercises `pipe`. Native record element slices and composition with `c_nullable` still need support. |
+| `c_array` · 8 | `dirent.h` `getdirentries{,64}`, `stdio.h` `fgets`, `sys/stat.h` `futimens` and `utimensat`, `unistd.h` `getgroups`, `pipe`, and `pipe2` | The scalar bridge checks literal and named element counts for shared and mutable slices of built-in and native integers. The native fixture exercises `pipe`. Complete native record slices are verified by the poll fixture. Nullable array arguments still need their own lowering. |
 | `c_bytes` · 8 | `dirent.h` `getdents64`, `stdio.h` `fread`, `fwrite`, and `snprintf`, `unistd.h` `read`, `write`, `pread`, and `pwrite` | The scalar bridge checks byte counts and products for shared and mutable slices, including native integer factors. The native fixtures exercise `fread`, `fwrite`, and bounded `snprintf`, including zero capacity and an oversized count. Guarded declarations also need target selection. |
 | `c_callback` · 1 | `stdlib.h` `atexit` | Marshal `(fn-type (params) (returns void))` to a C-callable function pointer. The registered callable must remain valid through ordinary process exit. |
 | `c_cstr` · 54 | Text inputs in `dirent.h`, `fcntl.h`, `math.h`, `signal.h`, `spawn.h`, `stdio.h`, `stdlib.h`, `sys/stat.h`, and `unistd.h` | Shared and mutable byte slices have checked, call-scoped conversion. Mutable views get full-length copy-back, and borrowed results are copied while that storage is live. |
@@ -514,6 +514,31 @@ checks across both origins.
 | `SYS_NMLN` | Glibc exposes the `i32` width constant (65) in the tested default-source and GNU profiles. A public optional declaration follows native availability, including the original selector diagnostic on Darwin and in strict glibc profiles. |
 | `domainname` | The sixth glibc slot is 65 bytes. GNU profiles expose the public spelling and other profiles name the slot `__domainname`. Adding `domainname` to an equivalent project record passes with GNU features and fails the compiler-emitted field check in strict POSIX. A record-field `c_optional` annotation does not gate that check. The public field needs a generic feature-selected native field contract. |
 | `_SYS_NAMELEN` and glibc `_UTSNAME_*` | SDK layout macros used to declare the native extents. The bridge exposes the checked field widths directly. |
+
+## Bundled `<poll.h>` readiness
+
+Apple Clang 21 and LLVM Clang 22 checked the native record and declarations
+on macOS SDK 27.2 and Debian glibc 2.41, on arm64 and x86-64. Across the 240
+C11, C17, and C23 configurations, `struct pollfd` is eight bytes with
+`int fd` at offset 0 and `short events` and `short revents` at offsets 4
+and 6. `nfds_t` is `unsigned int` on Darwin and `unsigned long` on glibc.
+[LLVM libc poll.h checklist](https://libc.llvm.org/headers/poll.html)
+
+The declared `poll` takes a mutable native record slice, its native count,
+and a timeout in milliseconds. The `c_array` contract checks the requested
+prefix before calling C and preserves the count's original width. The
+host fixture exercises a pipe timeout, readiness, and native updates to
+both result fields. It checks a shorter prefix and an empty view. The
+out-of-bounds count fixture lends two elements from a three-element
+allocation and diagnoses the original operand before calling C.
+
+| Native members | Coverage or outstanding contract |
+| --- | --- |
+| `POLLERR`, `POLLHUP`, `POLLIN`, `POLLNVAL`, `POLLOUT`, and `POLLPRI` | All audited profiles expose these C `int` macro values. The fixtures compare them to the selected C header. |
+| `POLLRDNORM`, `POLLRDBAND`, `POLLWRNORM`, and `POLLWRBAND` | Darwin publishes these in every tested mode. Glibc gates them on X/Open or POSIX.1-2008 feature selection. `POLLWRNORM` is 4 on Darwin and 256 on glibc. `POLLWRBAND` is 256 on Darwin and 512 on glibc. |
+| `POLLEXTEND`, `POLLATTRIB`, `POLLNLINK`, `POLLWRITE`, and `POLLSTANDARD` | Darwin extensions exposed through ordinary optional integer declarations. |
+| `POLLMSG`, `POLLREMOVE`, and `POLLRDHUP` | GNU glibc extensions. Optional selection follows the actual feature flags. |
+| `ppoll` | The audited glibc headers declare it with GNU features. Darwin's header has no declaration. A user bridge with concrete native timeout and mask references passed the Clang prototype check. Its valid null mask operand still fails Wove checking with `c_nullable` on the shared native reference. The native binding needs the same nullable shared-reference contract for each pointer. [Compiler prerequisite #686](https://github.com/wove-lang/wove/issues/686) |
 
 ## Bundled message formatting
 

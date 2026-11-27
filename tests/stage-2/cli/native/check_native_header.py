@@ -16,12 +16,17 @@ from constant_result import folded_i32_result
 
 
 # Stage the shared fixture and give cc and bin the same C mode and feature flags.
-def stage_project(fixtures, project, header, source, standard, flags):
+def stage_project(fixtures, project, header, source, standard, flags, macro=None):
 	project.mkdir()
 	# Both bridge origins read the same native header through distinct import keys.
 	for name in ("project.wove", "oracle.h", "user.h"):
 		shutil.copy2(fixtures / name, project / name)
 	template = (fixtures / source).read_text()
+	# A parameterized optional fixture uses the manifest's native name in Wove and C.
+	if macro is not None:
+		template = template.replace("TEST_MEMBER", macro)
+		oracle = project / "oracle.h"
+		oracle.write_text(oracle.read_text().replace("TEST_MEMBER", macro))
 	(project / "main.wove").write_text(template.replace("TEST_HEADER", header))
 	config = {"profiles": [{"name": "default", "cc": {"cstd": standard},
 		"build": {"default": {"cflags": flags}}}]}
@@ -30,9 +35,9 @@ def stage_project(fixtures, project, header, source, standard, flags):
 
 # Verify values through the fixture result or check the original diagnostic.
 def check_case(compiler, clang, runtime, fixtures, project, header, standard, flags, *,
-		source="probe.wove", unavailable=None, execute=False):
+		source="probe.wove", unavailable=None, execute=False, macro=None):
 	flags = [*flags, "-I.", "-Wall", "-Wextra", "-Wpedantic", "-Werror"]
-	stage_project(fixtures, project, header, source, standard, flags)
+	stage_project(fixtures, project, header, source, standard, flags, macro)
 	env = {**os.environ, "CLANG": clang}
 	# Check-only matches the stored diagnostic when the SDK hides the selector.
 	if unavailable is not None:
@@ -78,7 +83,7 @@ def main():
 					continue
 				present = macro.encode() in macro_inventory(clang, standard, native, tuple(flags))
 				check_case(installed, clang, runtime, fixtures, project.with_name(f"{project.name}-{macro}"),
-					header, standard, flags, source=source, unavailable=None if present else diagnostic, execute=execute)
+					header, standard, flags, source=source, unavailable=None if present else diagnostic, macro=macro)
 	print(f"{fixtures.name}.h: bundled and project values checked in {3 * len(profiles)} host profiles")
 
 
