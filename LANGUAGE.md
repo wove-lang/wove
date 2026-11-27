@@ -7,15 +7,6 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 ## First program
 
-Wove source uses tagged forms. A file contains one named `module`. Each
-Wove function definition has a name and exactly one `params`, `returns`, and `body` form.
-Spell `(params)` for a zero-argument helper. Tags and names are case-sensitive.
-An identifier begins with an ASCII letter or underscore. Its remaining
-characters may also be ASCII digits. This grammar applies to module,
-declaration, binding, parameter, field, variant, generic parameter, and
-import names. Fixed words and operators retain their own spellings, such
-as `let-mut` and `u32.add-checked`.
-
 ```lisp
 (module example
     (:doc `Show how a program calls a helper and returns an exit status.`)
@@ -24,8 +15,11 @@ as `let-mut` and `u32.add-checked`.
         (body (return (i32.add (local value) (local value)))))
 
     (fn main (params (argv (shared-array (shared-array u8)))) (returns i32)
-        (:doc "Double 21 and return the result as the process exit status.")
-        (body (return (call twice 21i32)))))
+        (:doc "Return 42 when invoked without user arguments. Otherwise return 2.")
+        (body
+            (if (i32.gt (array.len (local argv)) 1i32)
+                (then (return 2i32)))
+            (return (call twice 21i32)))))
 ```
 
 Save this as `example.wove`, then build and run it.
@@ -35,8 +29,35 @@ wovec bin example.wove -o ./example
 ./example
 ```
 
-The program exits with status 42. From a compiler checkout, use
-`build/wovec` if `wovec` is outside your PATH.
+The program exits with status 42. Run `./example extra` to exercise the
+branch that exits with status 2. From a compiler checkout, use `build/wovec`
+if `wovec` is outside your PATH.
+
+### Print text
+
+```wove
+(module hello
+    (:doc "Print a line using the bundled C stdio bridge.")
+    (use c-header "<stdio.h>" (only puts))
+    (let text "Hello, Wove")
+
+    (fn main (params (argv (shared-array (shared-array u8)))) (returns i32)
+        (:doc "Return success unless puts reports a write failure.")
+        (body
+            (let status (call puts (borrow-shared (local text))))
+            (return (if (i32.ltz (local status)) (then 1i32) (else 0i32))))))
+```
+
+Save this as `hello.wove`. Use `cc --check` to validate it without writing
+output. Add `--human` for readable diagnostics. The default is JSON Lines.
+
+```sh
+wovec cc --check --human hello.wove
+wovec bin hello.wove -o ./hello
+./hello
+```
+
+It prints `Hello, Wove` and exits with status 0.
 
 ### Program entry
 
@@ -48,75 +69,66 @@ the host. User arguments follow in order. Each row contains the original
 bytes without the C terminator, and an empty argument has its own empty row.
 The views borrow the host strings for the duration of `main`.
 
-### Shared libraries
+## Source and scope
 
-Add the source to the selected project's `entry.lib` list and pass it
-explicitly to `wovec bin`. The library entry can omit `main`. A named profile
-inherits the default profile's list unless it supplies its own list, which
-can be empty.
+Use UTF-8 source. Spaces, tabs, and line breaks separate tokens and can
+be used freely between forms. Use `(:doc "text")` or a raw-string `:doc`
+to explain a form. Wove has no line or block comment delimiters. An
+unquoted semicolon is a lexical error. A `(disabled ...)` group keeps
+the enclosed source forms while skipping their semantic checks.
 
-```jsonc
-{"profiles": [{"name": "default", "entry": {"lib": ["counter.wove"]}}]}
-```
+Wove source uses tagged forms. A file contains one named `module`. Each
+Wove function definition has a name and exactly one `params`, `returns`, and `body` form.
+Spell `(params)` for a zero-argument helper. Tags and names are case-sensitive.
+An identifier begins with an ASCII letter or underscore. Its remaining
+characters may also be ASCII digits. This grammar applies to module,
+declaration, binding, parameter, field, variant, generic parameter, and
+import names. Fixed words and operators retain their own spellings, such
+as `let-mut` and `u32.add-checked`.
 
-```lisp
-(module counter
-    (fn Twice (:pragma (c_export)) (params (value i32)) (returns i32)
-        (body (return (i32.mul (local value) 2i32)))))
-```
+Read a binding with `(local name)`. Lookup starts in the current block,
+then checks enclosing blocks, parameters, module bindings, and selected
+value imports. A local comes into scope after its initializer. A nested
+block can shadow an outer binding. Two declarations of the same name in
+one block are an error. Loop and match payload bindings are visible in
+their body and arm, respectively.
 
-```sh
-wovec bin counter.wove
-```
+## Where forms go
 
-A concrete function marked `(:pragma (c_export))` is callable from C under
-its original, case-sensitive name. This includes exports in reached Wove
-modules. A Wove import alias has no effect on the public symbol. Public
-names must be unique in the graph. C and C++ keywords and reserved C
-library names are unavailable for export.
-Scalar parameters and results use `bool`, exact-width integers up to 64 bits,
-`f32` as C `float`, and `f64` as C `double`, all by value. Results may
-also be `void`. A Wove runtime trap can terminate the calling process.
+| Position | Rules and examples |
+| --- | --- |
+| Statement | Use declarations, assignments, control flow, or a call returning `void`. A value-returning call needs a value context. Use `(let ignored (call f ...))` to run a call and leave its result unused. |
+| Value | Bind it, pass it as an exact-typed argument, use it as an operand, or return it. A value `if` needs two arms of the same type. |
+| Place | A place denotes existing storage, such as `(local data)`, a field of a place, or an eligible indexed slot. Assignment and borrowing require suitable places. Exclusive borrowing and replacement require writable storage. Move an existing owner through its live place. |
+| Binding initializer | Bind a scoped borrow or a result that carries a loan so its lifetime has a name. `array.try-slice` uses a direct `let`. Bind a nullable native record call and its unwrap with immutable `let`. Bind a `worker.spawn` receipt directly to a local. A function can return a compatible view or borrowing result with a `(from parameter)` contract. |
+| String value | Define `(let text "hello")` at module scope and use `(borrow-shared (local text))` for a shared byte-view argument. Literals also appear in string operands such as metadata, paths, and C names. `c_static_cstr` specifically requires a direct literal. Ordinary call arguments, local initializers, and borrow operands do not accept a bare string literal. |
 
-Select one Linux or macOS target per build. The default destination is beside
-the supplied source, as `lib<stem>.dylib`
-for macOS or `lib<stem>.so` for Linux. The adjacent `lib<stem>.h` declares
-the public functions. An explicit `-o` replaces the destination and derives
-the header by replacing the platform suffix with `.h` or appending `.h`.
-Add the library's directory to the consumer's link and runtime search paths
-as needed. The library publishes only its declared C exports. A failed
-native compile or link preserves the previous library, header, and retained
-C.
+### Array layouts
 
-#### Borrowed array exports
+| Layout | Initial slots | Access and transfer |
+| --- | --- | --- |
+| Heap array of numeric values, native integer aliases, copyable Wove records, or supported copyable fixed arrays | Zero-initialized by `array.alloc`. | Load by value, borrow where a matching view is supported, and replace through writable storage. Read loops copy elements. Mutable loops give writable places. |
+| Heap array of owned rows | Unfilled until storing a row returned by a call or explicitly moved into the slot. | Borrow or replace a populated row. Use `array.remove` to transfer it. Shared iteration lends rows. Consuming iteration takes ownership of each row. |
+| Heap array of owning Wove records or owning fixed-array layouts | Unfilled until storing a fresh or moved element. | Borrow or replace through its slot. Remove to transfer an element. Owning fixed-array slots support indexed moves. Owning record slots cannot be copied or used as iteration items. |
+| Inline fixed array `(array T extent)` | `array.new` initializes every slot. `array.repeat` fills copyable layouts. | Copy only copyable layouts. For owners, borrow or move from a live slot and replace through a writable place. Moving from a slot empties it without changing the extent. |
 
-A `shared-array` of an ABI scalar expands to a `const T *` and a
-`size_t` element count. A `mut-array` expands to `T *` and a count. If the
-Wove parameter declares an exact extent, the count must equal that
-extent. For example, an export taking `(shared-array u8)` and
-`(mut-array u8 1024)` and returning `void` has this generated prototype.
+The compiler rejects incompatible element types, copying an owner, and
+overlapping live loans. A checked index or range outside the array and a
+read or transfer requiring an unfilled owner trap at runtime. Operations
+such as `array.try-alloc`, `array.try-reserve`, and `array.try-slice` report
+failure as an optional value or `bool`. See [Arrays, slices, and borrows](#arrays-slices-and-borrows).
 
-```c
-WvrtCStatus byte_histogram(const uint8_t *, size_t, uint8_t *, size_t);
-```
+### Optional values
 
-An export that takes a view returns `WvrtCStatus`. If the Wove function
-returns a scalar, the prototype ends in a required pointer to writable
-storage of that scalar type. The wrapper writes it on
-`WVRT_C_EXPORT_OK`, after the Wove call has released its views. That
-pointer may alias view storage if the storage is writable and has the
-correct C type.
+| Optional kind | Construction and use |
+| --- | --- |
+| `(optional (owned-array T))` | Use `optional.none`, `optional.some`, a fallible allocation, or a call returning that exact type. `owner.is-null` tests absence. Move `optional.unwrap` to take the owner. |
+| Shared array view | Bind the result of `array.try-slice`. Use `optional.is-none`, then borrow the exact view through `optional.unwrap`. |
+| Shared native record view | Bind a nullable bridge result with its declared source loan. Use `optional.is-none`, then bind `optional.unwrap` with `let`. |
 
-`WVRT_C_EXPORT_INVALID_ARGUMENT` covers a count outside the Wove
-`i32` range, an incorrect exact extent, an overflowing byte range, or
-a missing or misaligned required address. A zero-length view may use
-`NULL`. `WVRT_C_EXPORT_OVERLAP` reports overlapping byte ranges if
-either view is mutable. Both failures leave all caller storage untouched.
-
-The caller keeps each nonempty range valid and aligned for its declared
-count during the synchronous call. Shared ranges permit other reads.
-Mutable ranges permit access only through the callee's borrow, including
-when callbacks and other threads can reach the same storage.
+Unwrapping absence traps. A present empty array or view is distinct from
+absence. See [Records and ownership](#records-and-ownership),
+[Arrays, slices, and borrows](#arrays-slices-and-borrows), and [C interop](#c-interop).
 
 ## Modules, imports, and metadata
 
@@ -145,15 +157,66 @@ after the tag. A C bridge's prefix follows its header.
 ```
 
 The `:expect` groups are optional. Test paths are relative to `tests/`,
-and issues can also use full URLs. Use `(:pragma (cfg (os "linux")))`
-for a platform-selected declaration. Multiple `cfg` predicates must all
-pass. `(not predicate)` negates a selection. A `(decls ...)` group can
-apply selection to several declarations. A `disabled` group keeps its
-metadata and source forms while the compiler skips its contents.
+and issues can also use full URLs.
 
-A function marked `(:pragma (test))` uses `(params)` and `(returns void)`.
-Test-mode selection admits test functions and `(cfg test)` helpers. Ordinary
-builds exclude them.
+### Conditional selection
+
+Use `(:pragma (cfg predicate))` on a module, declaration, or `(decls ...)`
+group. Each `cfg` takes one predicate and all applied predicates must pass.
+
+| Predicate | When it selects |
+| --- | --- |
+| `(os "linux")`, `(os "macos")` | The selected Clang target has that OS. |
+| `(arch "aarch64")`, `(arch "x86_64")` | The target has that architecture. |
+| `(os_min 260400)`, `(os_max 260400)` | The target deployment version satisfies the inclusive lower or upper bound. |
+| `(not predicate)` | The predicate is false. |
+| `(all predicate ...)`, `(any predicate ...)` | All or any of the enclosed predicates pass. Empty `all` is true and empty `any` is false. |
+| `test` | The graph is selected in test mode. |
+
+OS and architecture operands are strings. An unknown identifier spelling
+matches no target. Deployment limits are unquoted nonnegative decimal
+integers up to 2147483647. A target version is encoded as
+`major * 10000 + minor * 100 + patch`, so 26.4 is `260400`.
+A target without a deployment version matches neither bound.
+
+```wove
+(:pragma (cfg (all (os "macos") (arch "aarch64") (os_min 260400))))
+```
+
+### Inline tests
+
+A test function uses `(:pragma (test))`, `(params)`, and `(returns void)`.
+Ordinary builds exclude these functions and declarations marked `(cfg test)`.
+In a compiler checkout, save this as `checks.wove`.
+
+```wove
+(module checks
+    (fn allocation_smoke
+        (:pragma (test))
+        (params) (returns void)
+        (body
+            (let data (array.alloc u8 1i32))
+            (let first (array.load (local data) 0i32)))))
+```
+
+Build the graph probe and test runtime, then discover, emit, and run the tests.
+
+```sh
+make build/stage-2/source_scan build/stage-2/test/libwove_test.a
+build/stage-2/source_scan --mode test --graph-tests 0 8192 65536 0 /checks.wove checks.wove
+build/stage-2/source_scan --mode test --emit-graph 0 8192 65536 0 /checks.wove checks.wove > tests-output.txt
+sed '1d' tests-output.txt > tests-output.c
+clang -std=c11 -I runtime -I stage-2/test tests-output.c build/stage-2/test/libwove_test.a -o ./wove-tests
+./wove-tests --list
+./wove-tests
+```
+
+The probe takes an entry ID, scratch and output capacities, then one
+`ID virtual-path disk-path` triple per module. The first emission line is
+the probe's success record. Continue to the link step only after successful
+emission. The executable runs each test in a separate process. Pass a
+zero-based index, such as `./wove-tests 0`, to run one test. This workflow
+uses the checkout's graph probe. Installed `wovec` exposes `cc` and `bin`.
 
 ## Literals
 
@@ -334,7 +397,7 @@ represent all signed and unsigned integers of up to 64 bits exactly.
 | `(set (struct.get place field) value)` | Replace an exact field through a mutable Wove record local or reference, including along a nested field path. |
 | `(struct.new Type (field value) ...)` | Construct a record from typed field values in written order. |
 | `(struct.get value field)` | Read a field with its declared type. |
-| `(array.alloc T count)` | Allocate an owned, zeroed buffer with an `i32` element count. |
+| `(array.alloc T count)` | Allocate an owned buffer with an `i32` element count. The layout determines its initial slot state. |
 | `(move (local buffer))` | Transfer ownership of a local buffer or hand a present native owner to a consuming C call. |
 | `(owner.is-null (local file))` | Test whether a native owner holds a missing handle. |
 
@@ -503,9 +566,8 @@ built-in scalar type. In the callee, `(local name)` reads the scalar and
 `(set (local name) value)` updates the caller's storage.
 
 A function with `(returns void)` can use `(return)` or finish its body.
-Call it as a statement. A value-returning function must return its declared
-type on every path. `let` creates a binding and `let-mut` makes it writable.
-A local name comes into scope after its initializer.
+A value-returning function must return its declared type on every path.
+`let` creates a binding and `let-mut` makes it writable.
 
 A struct field can hold any supported `owned-array` type, including a
 numeric array, an array of Wove records, or nested owned arrays.
@@ -694,8 +756,9 @@ owner as its storage grows. Selecting an unfilled slot traps.
 `array.alloc` supports numeric elements, Wove records, and nested owners.
 For example, `(array.alloc (owned-array Digest) count)` creates an
 `(owned-array (owned-array Digest))` with unfilled row slots. Fill a slot
-with `array.store` and a fresh or moved owner of the exact row type.
-Replacing a slot drops its previous row. Use
+with `array.store` and a row returned by a call or transferred with `move`.
+Bind an allocation before moving it into the slot. Replacing a slot drops
+its previous row. Use
 `(borrow-shared (array.load (local rows) index))` to read a populated row
 through its exact shared view.
 
@@ -1189,3 +1252,73 @@ result stays absent. After testing presence, use
 `(move (optional.unwrap (local result)))` to extract the byte owner.
 `(c_snapshot cstrs)` on a read-only native table copies it into an
 `(owned-array (owned-array u8))`.
+
+## Shared libraries
+
+Add the source to the selected project's `entry.lib` list and pass it
+explicitly to `wovec bin`. The library entry can omit `main`. A named profile
+inherits the default profile's list unless it supplies its own list, which
+can be empty.
+
+```jsonc
+{"profiles": [{"name": "default", "entry": {"lib": ["counter.wove"]}}]}
+```
+
+```lisp
+(module counter
+    (fn Twice (:pragma (c_export)) (params (value i32)) (returns i32)
+        (body (return (i32.mul (local value) 2i32)))))
+```
+
+```sh
+wovec bin counter.wove
+```
+
+A concrete function marked `(:pragma (c_export))` is callable from C under
+its original, case-sensitive name. This includes exports in reached Wove
+modules. A Wove import alias has no effect on the public symbol. Public
+names must be unique in the graph. C and C++ keywords and reserved C
+library names are unavailable for export.
+Scalar parameters and results use `bool`, exact-width integers up to 64 bits,
+`f32` as C `float`, and `f64` as C `double`, all by value. Results may
+also be `void`. A Wove runtime trap can terminate the calling process.
+
+Select one Linux or macOS target per build. The default destination is beside
+the supplied source, as `lib<stem>.dylib`
+for macOS or `lib<stem>.so` for Linux. The adjacent `lib<stem>.h` declares
+the public functions. An explicit `-o` replaces the destination and derives
+the header by replacing the platform suffix with `.h` or appending `.h`.
+Add the library's directory to the consumer's link and runtime search paths
+as needed. The library publishes only its declared C exports. A failed
+native compile or link preserves the previous library, header, and retained
+C.
+
+#### Borrowed array exports
+
+A `shared-array` of an ABI scalar expands to a `const T *` and a
+`size_t` element count. A `mut-array` expands to `T *` and a count. If the
+Wove parameter declares an exact extent, the count must equal that
+extent. For example, an export taking `(shared-array u8)` and
+`(mut-array u8 1024)` and returning `void` has this generated prototype.
+
+```c
+WvrtCStatus byte_histogram(const uint8_t *, size_t, uint8_t *, size_t);
+```
+
+An export that takes a view returns `WvrtCStatus`. If the Wove function
+returns a scalar, the prototype ends in a required pointer to writable
+storage of that scalar type. The wrapper writes it on
+`WVRT_C_EXPORT_OK`, after the Wove call has released its views. That
+pointer may alias view storage if the storage is writable and has the
+correct C type.
+
+`WVRT_C_EXPORT_INVALID_ARGUMENT` covers a count outside the Wove
+`i32` range, an incorrect exact extent, an overflowing byte range, or
+a missing or misaligned required address. A zero-length view may use
+`NULL`. `WVRT_C_EXPORT_OVERLAP` reports overlapping byte ranges if
+either view is mutable. Both failures leave all caller storage untouched.
+
+The caller keeps each nonempty range valid and aligned for its declared
+count during the synchronous call. Shared ranges permit other reads.
+Mutable ranges permit access only through the callee's borrow, including
+when callbacks and other threads can reach the same storage.
