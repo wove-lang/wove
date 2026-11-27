@@ -72,7 +72,7 @@ its original, case-sensitive name. This includes exports in reached Wove
 modules. A Wove import alias has no effect on the public symbol. Public
 names must be unique in the graph. C and C++ keywords and reserved C
 library names are unavailable for export.
-Parameters and results use `bool`, exact-width integers up to 64 bits,
+Scalar parameters and results use `bool`, exact-width integers up to 64 bits,
 `f32` as C `float`, and `f64` as C `double`, all by value. Results may
 also be `void`. A Wove runtime trap can terminate the calling process.
 
@@ -85,6 +85,36 @@ Add the library's directory to the consumer's link and runtime search paths
 as needed. The library publishes only its declared C exports. A failed
 native compile or link preserves the previous library, header, and retained
 C.
+
+#### Borrowed array exports
+
+A `shared-array` of an ABI scalar expands to a `const T *` and a
+`size_t` element count. A `mut-array` expands to `T *` and a count. If the
+Wove parameter declares an exact extent, the count must equal that
+extent. For example, an export taking `(shared-array u8)` and
+`(mut-array u8 1024)` and returning `void` has this generated prototype.
+
+```c
+WvrtCStatus byte_histogram(const uint8_t *, size_t, uint8_t *, size_t);
+```
+
+An export that takes a view returns `WvrtCStatus`. If the Wove function
+returns a scalar, the prototype ends in a required pointer to writable
+storage of that scalar type. The wrapper writes it on
+`WVRT_C_EXPORT_OK`, after the Wove call has released its views. That
+pointer may alias view storage if the storage is writable and has the
+correct C type.
+
+`WVRT_C_EXPORT_INVALID_ARGUMENT` covers a count outside the Wove
+`i32` range, an incorrect exact extent, an overflowing byte range, or
+a missing or misaligned required address. A zero-length view may use
+`NULL`. `WVRT_C_EXPORT_OVERLAP` reports overlapping byte ranges if
+either view is mutable. Both failures leave all caller storage untouched.
+
+The caller keeps each nonempty range valid and aligned for its declared
+count during the synchronous call. Shared ranges permit other reads.
+Mutable ranges permit access only through the callee's borrow, including
+when callbacks and other threads can reach the same storage.
 
 ## Modules, imports, and metadata
 

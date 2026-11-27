@@ -1,7 +1,9 @@
 // Copyright (c) 2026 wove contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#define WVRT_C_EXPORT_VIEWS
 #include "wove_runtime.h"
+#undef WVRT_C_EXPORT_VIEWS
 
 #include <errno.h>
 #include <float.h>
@@ -1589,6 +1591,57 @@ bool wvrt_array_try_extend(wvrt_array *buffer, wvrt_slice source) {
 	return true;
 }
 
+// Check half-open byte ranges without adding potentially overflowing pointer values.
+static bool wvrt_byte_ranges_overlap(const void *left, size_t left_bytes, const void *right, size_t right_bytes) {
+	if (left_bytes == 0 || right_bytes == 0) { return false; }
+	uintptr_t a = (uintptr_t)left;
+	uintptr_t b = (uintptr_t)right;
+	return a <= b ? b - a < left_bytes : a - b < right_bytes;
+}
+
+// Check the count before multiplying and make sure every nonempty range has a representable end.
+static bool wvrt_c_export_extent(const void *items, size_t count, size_t width, size_t alignment, size_t *bytes) {
+	if (count > INT32_MAX || width == 0 || alignment == 0 || count > SIZE_MAX / width) { return false; }
+	size_t extent = count * width;
+	uintptr_t address = (uintptr_t)items;
+	// A wrapper supplies aligned local storage for empty views.
+	if (extent != 0 && (items == NULL || address % alignment != 0 || extent > UINTPTR_MAX - address)) {
+		return false;
+	}
+	*bytes = extent;
+	return true;
+}
+
+// Validate every view before calling Wove. The result is used only after the loans end.
+int32_t wvrt_c_export_validate(wvrt_c_export_view *views, size_t length,
+	const void *result, size_t result_width, size_t result_alignment) {
+	enum { success = 0, invalid_argument = 1, overlap = 2 };
+	size_t result_bytes;
+	// A void wrapper supplies no result destination.
+	if (result_width != 0 && !wvrt_c_export_extent(result, 1, result_width, result_alignment, &result_bytes)) {
+		return invalid_argument;
+	}
+	// Match source order. Each prior view has already passed extent and alignment checks.
+	for (size_t i = 0; i < length; ++i) {
+		wvrt_c_export_view *view = &views[i];
+		// The exact extent is an element count, independent of the native byte stride.
+		if ((view->wvrt_exact_count >= 0 && view->wvrt_count != (size_t)view->wvrt_exact_count) ||
+			!wvrt_c_export_extent(view->wvrt_items, view->wvrt_count, view->wvrt_width, view->wvrt_alignment, &view->wvrt_bytes)) {
+			return invalid_argument;
+		}
+		// Shared ranges can alias. Exclusive loans exclude every intersecting view.
+		for (size_t j = 0; j < i; ++j) {
+			const wvrt_c_export_view *other = &views[j];
+			// Empty and adjacent ranges do not overlap.
+			if ((view->wvrt_writable || other->wvrt_writable) &&
+				wvrt_byte_ranges_overlap(view->wvrt_items, view->wvrt_bytes, other->wvrt_items, other->wvrt_bytes)) {
+				return overlap;
+			}
+		}
+	}
+	return success;
+}
+
 // Copy the entire source prefix after validating both descriptors and their separation.
 bool wvrt_slice_try_copy(wvrt_mut_slice destination, wvrt_slice source) {
 	size_t size = destination.wvrt_element_size;
@@ -1602,10 +1655,8 @@ bool wvrt_slice_try_copy(wvrt_mut_slice destination, wvrt_slice source) {
 	if (destination.wvrt_items == NULL || source.wvrt_items == NULL) { return false; }
 	size_t source_bytes = (size_t)source.wvrt_length * size;
 	size_t destination_bytes = (size_t)destination.wvrt_length * size;
-	uintptr_t target = (uintptr_t)destination.wvrt_items;
-	uintptr_t input = (uintptr_t)source.wvrt_items;
 	// Checked Wove loans are disjoint. Refuse overlapping descriptors at the C boundary as well.
-	if (target <= input ? input - target < destination_bytes : target - input < source_bytes) {
+	if (wvrt_byte_ranges_overlap(destination.wvrt_items, destination_bytes, source.wvrt_items, source_bytes)) {
 		return false;
 	}
 	memcpy(destination.wvrt_items, source.wvrt_items, source_bytes);

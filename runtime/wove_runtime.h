@@ -695,3 +695,23 @@ uint64_t wvrt_u64_rotr_at_span(uint64_t wvrt_value, int32_t wvrt_count,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 
 #endif
+
+// View wrappers may request these declarations after the main runtime header was included.
+#if defined(WVRT_C_EXPORT_VIEWS) && !defined(WVRT_C_EXPORT_VIEWS_DECLARED)
+#define WVRT_C_EXPORT_VIEWS_DECLARED
+
+// Describe one synchronous C export loan and its validated byte extent.
+typedef struct {
+	const void *wvrt_items;
+	size_t wvrt_count;
+	size_t wvrt_width;
+	size_t wvrt_alignment;
+	int32_t wvrt_exact_count;
+	bool wvrt_writable;
+	size_t wvrt_bytes;
+} wvrt_c_export_view;
+
+int32_t wvrt_c_export_validate(wvrt_c_export_view *views, size_t length,
+	const void *result, size_t result_width, size_t result_alignment);
+
+#endif

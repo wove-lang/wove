@@ -7,10 +7,12 @@
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/c_names.wove" (only native_symbol_start native_symbol_end))
 	(use wove-file "../source/exports.wove" (only c_export_directive))
-	(use wove-file "../source/types.wove" (only is_builtin_integer is_128bit_integer void_type (value f32_type) (value f64_type)))
+	(use wove-file "../source/types.wove" (only void_type))
+	(use wove-file "../scalar/records.wove" (only is_writable_slice))
+	(use wove-file "./library_views.wove" (only export_scalar export_view_element has_export_views write_export_type write_view_formals write_view_value write_result_formal write_view_checks write_view_return (value export_view_header) (value export_view_runtime) (value export_status_type)))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
-	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_type_text native_name_prefix_slot))
+	(use wove-file "./text.wove" (only c_byte c_span c_literal_text native_name_prefix_slot))
 	(use wove-file "./runtime.wove" (only write_c_number))
 	(use wove-file "./function_names.wove" (only write_function_name))
 
@@ -26,7 +28,6 @@
 	(let wrapper_body " { ")
 	(let return_word "return ")
 	(let wrapper_end "); }\n")
-	(let public_bool "bool")
 	(let empty_formals "void")
 	(let argument_separator ", ")
 	(let argument_name " wvex_arg")
@@ -54,14 +55,6 @@
 			(let end (struct.get (local name) end))
 			(return (bool.or (i32.not-ltz (call native_name_prefix_slot (borrow-shared (local source)) (local start) (local end)))
 				(call reserved_public_c_name (borrow-shared (local source)) (local start) (local end))))))
-
-	(fn export_scalar
-		(:doc "Allow only the archive's portable exact-width scalar ABI.")
-		(params (type u32)) (returns bool)
-		(body
-			(return (bool.or (bool.or (u32.eq (local type) (local f32_type)) (u32.eq (local type) (local f64_type)))
-				(bool.or (u32.eq (local type) 12u32)
-					(bool.and (call is_builtin_integer (local type)) (bool.not (call is_128bit_integer (local type)))))))))
 
 	(fn export_error
 		(:doc "Attach a rejected name or ABI type to its original declaration span.")
@@ -101,13 +94,14 @@
 							(let first (struct.get (local function) params))
 							(let-mut parameter 0i32)
 							(while
-								(:doc "Keep each parameter exactly scalar without any borrow or native conversion.")
+								(:doc "Admit only ABI scalars and borrows of ABI scalar elements.")
 								(i32.lt (local parameter) (struct.get (local function) arity))
 								(body
 									(let row (array.load (local parameters) (i32.add (local first) (local parameter))))
 									(if
 										(:doc "Report the unsupported formal's source name.")
-										(bool.not (call export_scalar (struct.get (local row) type)))
+										(bool.not (bool.or (call export_scalar (struct.get (local row) type))
+											(u32.gtz (call export_view_element (struct.get (local row) type)))))
 										(then (return (call export_error (local function) (array.load (local nodes) (struct.get (local row) name)) 23u32))))
 									(set (local parameter) (i32.inc (local parameter)))))
 							(let-mut other 0i32)
@@ -132,15 +126,32 @@
 					(set (local index) (i32.inc (local index)))))
 			(return (struct.new ExportCheck (file 0i32) (start 0i32) (end 0i32) (error 0u32)))))
 
-	(fn write_export_type
-		(:doc "Use the portable bool spelling in the public header, including when it is read by C++.")
-		(params (type u32) (public bool) (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+	(fn write_export_argument
+		(:doc "Write one ABI argument as a type, named formal, or forwarded Wove value.")
+		(params (type u32) (index i32) (form u32) (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
 		(body
+			(let element (call export_view_element (local type)))
 			(if
-				(:doc "C's stdbool.h and the C++ language agree on the bool spelling.")
-				(bool.and (local public) (u32.eq (local type) 12u32))
-				(then (return (call c_literal_text (borrow-shared (local public_bool)) (borrow-mut (local output)) (local offset) (local writing)))))
-			(return (call c_type_text (borrow-mut (local output)) (local offset) (local type) (local writing)))))
+				(:doc "A view expands in the C prototype and becomes one descriptor in the Wove call.")
+				(u32.gtz (local element))
+				(then
+					(let mutability (call is_writable_slice (local type)))
+					(if
+						(:doc "The call borrows only after validating the pointer and count.")
+						(u32.eq (local form) 2u32)
+						(then (return (call write_view_value (local mutability) (local index)
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(return (call write_view_formals (local element) (local mutability) (local index)
+						(u32.eqz (local form)) (borrow-mut (local output)) (local offset) (local writing)))))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "A call uses the scalar argument without restating its type.")
+				(u32.not-eq (local form) 2u32)
+				(then (set (local cursor) (call write_export_type (local type) (u32.eqz (local form))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(if (u32.eqz (local form)) (then (return (local cursor))))
+			(set (local cursor) (call c_literal_text (borrow-shared (local argument_name)) (borrow-mut (local output)) (local cursor) (local writing)))
+			(return (call write_c_number (borrow-mut (local output)) (local cursor) (local index) (local writing)))))
 
 	(fn write_export_arguments
 		(:doc "Write typed prototype formals, private named formals, or the forwarded argument list.")
@@ -162,18 +173,9 @@
 						(:doc "Only later arguments need separators.")
 						(i32.gtz (local index))
 						(then (set (local cursor) (call c_literal_text (borrow-shared (local argument_separator)) (borrow-mut (local output)) (local cursor) (local writing)))))
-					(if
-						(:doc "The call passes values without restating their types.")
-						(u32.not-eq (local form) 2u32)
-						(then
-							(let row (array.load (local parameters) (i32.add (struct.get (local function) params) (local index))))
-							(set (local cursor) (call write_export_type (struct.get (local row) type) (u32.eqz (local form)) (borrow-mut (local output)) (local cursor) (local writing)))))
-					(if
-						(:doc "Public header prototypes leave formals anonymous.")
-						(u32.not-eqz (local form))
-						(then
-							(set (local cursor) (call c_literal_text (borrow-shared (local argument_name)) (borrow-mut (local output)) (local cursor) (local writing)))
-							(set (local cursor) (call write_c_number (borrow-mut (local output)) (local cursor) (local index) (local writing)))))
+					(let row (array.load (local parameters) (i32.add (struct.get (local function) params) (local index))))
+					(set (local cursor) (call write_export_argument (struct.get (local row) type) (local index) (local form)
+						(borrow-mut (local output)) (local cursor) (local writing)))
 					(set (local index) (i32.inc (local index)))))
 			(return (local cursor))))
 
@@ -182,8 +184,17 @@
 		(params (source (shared-array u8)) (name SourceNode) (function ScalarFunction) (parameters (shared-array ScalarParameter))
 			(output (mut-array u8)) (offset u32) (private bool) (writing bool)) (returns u32)
 		(body
-			(let type (call write_export_type (struct.get (local function) result) (bool.not (local private)) (borrow-mut (local output)) (local offset) (local writing)))
-			(let-mut cursor (call c_byte (borrow-mut (local output)) (local type) 32u8 (local writing)))
+			(let checked (call has_export_views (local function) (borrow-shared (local parameters))))
+			(let result (struct.get (local function) result))
+			(let-mut cursor (local offset))
+			(if
+				(:doc "Checked wrappers return a status. Ordinary scalar or void exports retain their ABI.")
+				(local checked)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local export_status_type))
+					(borrow-mut (local output)) (local cursor) (local writing))))
+				(else (set (local cursor) (call write_export_type (local result) (bool.not (local private))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 32u8 (local writing)))
 			(let-mut form 0u32)
 			(if
 				(:doc "The wrapper's C identifier is independent of the public linker name.")
@@ -194,9 +205,14 @@
 			(let symbol (call c_span (borrow-shared (local source)) (struct.get (local name) start) (struct.get (local name) end)
 				(borrow-mut (local output)) (local cursor) (local writing)))
 			(let args (call c_byte (borrow-mut (local output)) (local symbol) 40u8 (local writing)))
-			(let end (call write_export_arguments (local function) (borrow-shared (local parameters)) (local form)
+			(set (local cursor) (call write_export_arguments (local function) (borrow-shared (local parameters)) (local form)
 				(borrow-mut (local output)) (local args) (local writing)))
-			(return (call c_byte (borrow-mut (local output)) (local end) 41u8 (local writing)))))
+			(if
+				(:doc "A scalar result of a checked wrapper has one final output parameter.")
+				(bool.and (local checked) (u32.not-eq (local result) (call void_type)))
+				(then (set (local cursor) (call write_result_formal (local result) (bool.not (local private))
+					(borrow-mut (local output)) (local cursor) (local writing)))))
+			(return (call c_byte (borrow-mut (local output)) (local cursor) 41u8 (local writing)))))
 
 	(fn write_export_wrapper
 		(:doc "Write an externally visible trampoline with an exact native label and a private Wove target.")
@@ -215,15 +231,28 @@
 			(let defined (call write_export_signature (borrow-shared (local source)) (local name) (local function)
 				(borrow-shared (local parameters)) (borrow-mut (local output)) (local next) (bool true) (local writing)))
 			(let-mut cursor (call c_literal_text (borrow-shared (local wrapper_body)) (borrow-mut (local output)) (local defined) (local writing)))
+			(let checked (call has_export_views (local function) (borrow-shared (local parameters))))
+			(let result (struct.get (local function) result))
 			(if
-				(:doc "Forward a scalar result or invoke the private void function as a statement.")
-				(u32.not-eq (struct.get (local function) result) (call void_type))
-				(then (set (local cursor) (call c_literal_text (borrow-shared (local return_word)) (borrow-mut (local output)) (local cursor) (local writing)))))
+				(:doc "Prepare validated loans or use the original scalar or void trampoline.")
+				(local checked)
+				(then (set (local cursor) (call write_view_checks (local function) (borrow-shared (local parameters))
+					(borrow-mut (local output)) (local cursor) (local writing))))
+				(else
+					(if
+						(:doc "An ordinary scalar result returns directly to C.")
+						(u32.not-eq (local result) (call void_type))
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local return_word))
+							(borrow-mut (local output)) (local cursor) (local writing)))))))
 			(let callee (call write_function_name (borrow-shared (local source)) (borrow-shared (local nodes)) (local function)
 				(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(let open (call c_byte (borrow-mut (local output)) (local callee) 40u8 (local writing)))
 			(let args (call write_export_arguments (local function) (borrow-shared (local parameters)) 2u32
 				(borrow-mut (local output)) (local open) (local writing)))
+			(if
+				(:doc "Store checked results after the Wove call and report success.")
+				(local checked)
+				(then (return (call write_view_return (local result) (borrow-mut (local output)) (local args) (local writing)))))
 			(return (call c_literal_text (borrow-shared (local wrapper_end)) (borrow-mut (local output)) (local args) (local writing)))))
 
 	(fn write_library_abi
@@ -252,6 +281,7 @@
 			(let count (call checked_function_count (borrow-shared (local functions))))
 			(let-mut index 0i32)
 			(let-mut first (bool true))
+			(let-mut view_support (bool false))
 			(while
 				(:doc "The output mode changes only representation, never the selected names.")
 				(i32.lt (local index) (local count))
@@ -262,6 +292,20 @@
 						(call is_library_export (borrow-shared (local source)) (borrow-shared (local nodes)) (local function))
 						(then
 							(let name (array.load (local nodes) (struct.get (local function) name)))
+							(if
+								(:doc "Declare checked status once in each unit or header, before its first view export.")
+								(bool.and (u32.lt (local form) 2u32)
+									(bool.and (bool.not (local view_support))
+										(call has_export_views (local function) (borrow-shared (local parameters)))))
+								(then
+									(if
+										(:doc "Only the private C unit needs the runtime helper declarations.")
+										(u32.eqz (local form))
+										(then (set (local cursor) (call c_literal_text (borrow-shared (local export_view_runtime))
+											(borrow-mut (local output)) (local cursor) (local writing)))))
+									(set (local cursor) (call c_literal_text (borrow-shared (local export_view_header))
+										(borrow-mut (local output)) (local cursor) (local writing)))
+									(set (local view_support) (bool true))))
 							(if
 								(:doc "The C unit has one forwarding definition for each public name.")
 								(u32.eqz (local form))
