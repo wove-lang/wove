@@ -739,9 +739,10 @@ can name an explicit record specialization. A fixed parameter such as
 and extent at every level.
 
 Pass a fresh value or transfer a complete owner with `(move (local rows))`.
-A live overlapping loan prevents the move. A fixed-array argument checks
-that its inline owner slots are occupied before later arguments are
-evaluated. An empty slot traps at the argument's source span. After a
+A live overlapping loan prevents the move. For an argument with inline
+owning array slots, Wove checks occupancy before evaluating later
+arguments. This applies to fixed arrays and to fixed arrays nested in
+structs. A vacant slot traps at the argument's source span. After a
 successful move the caller's original value is unavailable. The callee
 drops every field or slot it still owns at exit and can forward owners to
 another ordinary Wove call by explicit move.
