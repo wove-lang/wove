@@ -1028,8 +1028,9 @@ and the effective build flags. An optional native record uses the same
 marker on the bridge `struct` form, for example
 `(struct (:pragma (c_optional)) Ftw (c-type "struct FTW") (fields (base i32) (level i32)))`.
 The probe requires a complete definition in the selected header or its
-include subtree. It recognizes a `struct` or `union` tag or a typedef of
-a record. An unavailable definition is reported at the type selector.
+include subtree. It recognizes file-scope `struct` and `union` tags,
+including tags defined inside a record, and follows record typedefs across
+redeclarations. An unavailable definition is reported at the type selector.
 
 A bridge can use a type from a different C header in its private signatures.
 Write `(use c-header "<locale.h>" (only (type Locale)))` inside the
