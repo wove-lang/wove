@@ -39,7 +39,7 @@ def check_failure(bootstrap, native, root, expected):
 def check_case(bootstrap, native, bundled, fixtures, label, case):
 	with TemporaryDirectory(prefix="wove-emission-") as directory:
 		root = Path(directory).resolve()
-		shutil.copytree(bundled, root / "c-stdlib")
+		shutil.copytree(bundled, root / "llvm-libc")
 		copy_inputs(root, fixtures, case["files"])
 		# Repeated byte cycles exercise asset size and content without storing a large binary.
 		for target, cycle in case.get("byte_cycles", {}).items():

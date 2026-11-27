@@ -1001,10 +1001,10 @@ the pool. Receipts can be collected after either kind of closure.
 
 ## C interop
 
-Use a C header's bundled declarations or provide Wove signatures in
-`(bridge c-header "<header.h>" ...)`. A project header can use a quoted
-path such as `"./project.h"`. Select functions, types, or values explicitly,
-just as with a Wove module.
+Use a C header's bundled declarations in `stage-2/llvm-libc/` or provide
+Wove signatures in `(bridge c-header "<header.h>" ...)`. A project header
+can use a quoted path such as `"./project.h"`. Select functions, types, or
+values explicitly, just as with a Wove module.
 
 ```lisp
 (bridge c-header "<stdlib.h>"
