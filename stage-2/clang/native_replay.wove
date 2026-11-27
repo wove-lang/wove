@@ -1,7 +1,7 @@
-(module clang_lvalue_replay
+(module clang_native_replay
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Certify the direct external getter used by a native lvalue witness.")
+	(:doc "Compare the types and linked C functions resolved by native replay witnesses.")
 
 	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_kind_key)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode) json_parse))
@@ -9,6 +9,8 @@
 	(use wove-file "../text/copy.wove" (only append_bytes))
 
 	(let lvalue_witness_prefix "wove_native_lvalue_probe_")
+	(let storage_type_witness_prefix "wove_native_storage_type_probe_")
+	(let storage_drop_witness_prefix "wove_native_storage_drop_probe_")
 	(let id_key "id")
 	(let name_key "name")
 	(let type_key "type")
@@ -17,6 +19,7 @@
 	(let mangled_key "mangledName")
 	(let storage_key "storageClass")
 	(let inline_key "inline")
+	(let variadic_key "variadic")
 	(let opcode_key "opcode")
 	(let cast_key "castKind")
 	(let reference_key "referencedDecl")
@@ -29,6 +32,8 @@
 	(let cast_kind "\"ImplicitCastExpr\"")
 	(let reference_kind "\"DeclRefExpr\"")
 	(let function_kind "\"FunctionDecl\"")
+	(let function_prototype_kind "\"FunctionProtoType\"")
+	(let parameter_kind "\"ParmVarDecl\"")
 	(let nothrow_kind "\"NoThrowAttr\"")
 	(let const_kind "\"ConstAttr\"")
 	(let extern_storage "\"extern\"")
@@ -53,7 +58,7 @@
 		(body
 			(let inner (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-mut scratch)))
 			(if
-				(:doc "A wrapper with more operands cannot certify the same getter.")
+				(:doc "A wrapper with other operands does not certify a direct native reference.")
 				(bool.and (i32.not-ltz inner) (i32.not-ltz (struct.get (array.load nodes inner) next_sibling)))
 				(then (return -1i32)))
 			(return inner)))
@@ -99,12 +104,12 @@
 				(borrow-shared ast) (struct.get b start) (struct.get b end)))))
 
 	(fn witness_name
-		(:doc "Recognize the typedef prefix emitted for a selected writable C lvalue.")
+		(:doc "Recognize one class of private witness typedef by its prefix.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
-			(scratch (mut-array u8))) (returns i32)
+			(prefix (shared-array u8)) (scratch (mut-array u8))) (returns i32)
 		(body
 			(if
-				(:doc "Other declarations in the prefix cannot be lvalue witnesses.")
+				(:doc "Only generated typedefs record the unevaluated witness type.")
 				(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) row
 					(borrow-shared typedef_kind) (borrow-mut scratch)))
 				(then (return -1i32)))
@@ -112,17 +117,17 @@
 			(if (i32.ltz name) (then (return -1i32)))
 			(let token (array.load nodes name))
 			(let start (i32.inc (struct.get token start)))
-			(let end (i32.add start (array.len lvalue_witness_prefix)))
+			(let end (i32.add start (array.len prefix)))
 			(if
-				(:doc "The prefix must be followed by a nonempty native name.")
+				(:doc "The prefix must be followed by the witness's identifying suffix.")
 				(bool.and (i32.lt end (i32.dec (struct.get token end)))
-					(call same_bytes (borrow-shared ast) start end (borrow-shared lvalue_witness_prefix)
-						0i32 (array.len lvalue_witness_prefix)))
+					(call same_bytes (borrow-shared ast) start end (borrow-shared prefix)
+						0i32 (array.len prefix)))
 				(then (return name)))
 			(return -1i32)))
 
-	(fn getter_reference
-		(:doc "Accept only the address of a dereferenced zero-argument direct call.")
+	(fn witness_address
+		(:doc "Locate the unary address expression in a typename witness.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
 			(scratch (mut-array u8))) (returns i32)
 		(body
@@ -135,13 +140,28 @@
 			(if (i32.ltz expression) (then (return -1i32)))
 			(let pointer (struct.get (array.load nodes expression) next_sibling))
 			(if
-				(:doc "Taking the address must produce a pointer to the native slot.")
+				(:doc "Taking the address must produce an ordinary pointer.")
 				(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) pointer
 					(borrow-shared pointer_kind) (borrow-mut scratch)))
 				(then (return -1i32)))
 			(let address (call peel_parens (borrow-shared ast) (borrow-shared nodes) expression (borrow-mut scratch)))
 			(let ampersand (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) address
 				(borrow-shared opcode_key) (borrow-mut scratch)))
+			(if
+				(:doc "An expression other than unary address-of cannot certify a native operand.")
+				(bool.not (bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) address
+					(borrow-shared unary_kind) (borrow-mut scratch))
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) ampersand
+						(borrow-shared address_opcode))))
+				(then (return -1i32)))
+			(return address)))
+
+	(fn getter_reference
+		(:doc "Accept only the address of a dereferenced zero-argument direct call.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let address (call witness_address (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
 			(let operand (call single_inner (borrow-shared ast) (borrow-shared nodes) address (borrow-mut scratch)))
 			(let dereference (call peel_parens (borrow-shared ast) (borrow-shared nodes) operand (borrow-mut scratch)))
 			(let star (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) dereference
@@ -149,10 +169,8 @@
 			(if
 				(:doc "The raw lvalue must be an ordinary unary dereference, without a cast, subscript, or comma expression.")
 				(bool.not (bool.and
-					(bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) address (borrow-shared unary_kind) (borrow-mut scratch))
-						(call field_equals (borrow-shared ast) (borrow-shared nodes) ampersand (borrow-shared address_opcode)))
-					(bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) dereference (borrow-shared unary_kind) (borrow-mut scratch))
-						(call field_equals (borrow-shared ast) (borrow-shared nodes) star (borrow-shared dereference_opcode)))))
+					(call has_kind (borrow-shared ast) (borrow-shared nodes) dereference (borrow-shared unary_kind) (borrow-mut scratch))
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) star (borrow-shared dereference_opcode))))
 				(then (return -1i32)))
 			(let call_row (call peel_parens (borrow-shared ast) (borrow-shared nodes)
 				(call single_inner (borrow-shared ast) (borrow-shared nodes) dereference (borrow-mut scratch)) (borrow-mut scratch)))
@@ -177,21 +195,27 @@
 			(return (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) reference
 				(borrow-shared reference_key) (borrow-mut scratch)))))
 
-	(fn accepts_getter
-		(:doc "Require a body-free external void-parameter prototype with recognized non-linkage attributes.")
+	(fn is_linked_function
+		(:doc "Require a direct function declaration with external linkage and an object-code symbol.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
 			(scratch (mut-array u8))) (returns bool)
 		(body
 			(let storage (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-shared storage_key) (borrow-mut scratch)))
 			(let inline (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-shared inline_key) (borrow-mut scratch)))
-			(let prototype (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool false) (borrow-mut scratch)))
 			(let symbol (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-shared mangled_key) (borrow-mut scratch)))
-			(if
-				(:doc "Internal or inline functions cannot supply a shared external slot.")
-				(bool.or (bool.or (i32.ltz prototype) (i32.ltz symbol))
-					(bool.or (i32.not-ltz inline) (bool.and (i32.not-ltz storage)
-						(bool.not (call field_equals (borrow-shared ast) (borrow-shared nodes) storage (borrow-shared extern_storage))))))
-				(then (return (bool false))))
+			(return (bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) row
+					(borrow-shared function_kind) (borrow-mut scratch))
+				(bool.and (bool.and (i32.ltz inline) (i32.not-ltz symbol))
+					(bool.or (i32.ltz storage) (call field_equals (borrow-shared ast) (borrow-shared nodes)
+						storage (borrow-shared extern_storage))))))))
+
+	(fn accepts_getter
+		(:doc "Require a body-free external void-parameter prototype with recognized non-linkage attributes.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let prototype (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool false) (borrow-mut scratch)))
+			(if (i32.ltz prototype) (then (return (bool false))))
 			(let spelling (array.load nodes prototype))
 			(let end (struct.get spelling end))
 			(let suffix (i32.sub end (array.len void_prototype)))
@@ -214,12 +238,11 @@
 					(set child (struct.get (array.load nodes child) next_sibling))))
 			(return (bool true))))
 
-	(fn witness_getter
-		(:doc "Resolve the DeclRefExpr against the direct native declaration it actually names.")
-		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (witness i32)
+	(fn referenced_function
+		(:doc "Resolve the reference against the direct linked C declaration it names.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (reference i32)
 			(scratch (mut-array u8))) (returns i32)
 		(body
-			(let reference (call getter_reference (borrow-shared ast) (borrow-shared nodes) witness (borrow-mut scratch)))
 			(let identity (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) reference (borrow-shared id_key) (borrow-mut scratch)))
 			(if (i32.ltz identity) (then (return -1i32)))
 			(let-mut row (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
@@ -233,12 +256,57 @@
 						(call same_field (borrow-shared ast) (borrow-shared nodes) identity candidate)
 						(then
 							(if
-								(:doc "A different declaration kind or unsafe getter rejects the witness.")
-								(bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) row (borrow-shared function_kind) (borrow-mut scratch))
-									(call accepts_getter (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+								(:doc "A matching local or indirect reference does not provide an external symbol.")
+								(call is_linked_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch))
 								(then (return row)))
 							(return -1i32)))
 					(set row (struct.get (array.load nodes row) next_sibling))))
+			(return -1i32)))
+
+	(fn witness_getter
+		(:doc "Resolve a writable lvalue's direct getter and verify its exact calling form.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (witness i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let reference (call getter_reference (borrow-shared ast) (borrow-shared nodes) witness (borrow-mut scratch)))
+			(let getter (call referenced_function (borrow-shared ast) (borrow-shared nodes) reference (borrow-mut scratch)))
+			(if
+				(:doc "The getter must have its zero-argument prototype and only the supported attributes.")
+				(bool.and (i32.not-ltz getter)
+					(call accepts_getter (borrow-shared ast) (borrow-shared nodes) getter (borrow-mut scratch)))
+				(then (return getter)))
+			(return -1i32)))
+
+	(fn witness_destructor
+		(:doc "Resolve a storage destructor with a direct address and a body-free single-parameter prototype.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (witness i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let address (call witness_address (borrow-shared ast) (borrow-shared nodes) witness (borrow-mut scratch)))
+			(let operand (call peel_parens (borrow-shared ast) (borrow-shared nodes)
+				(call single_inner (borrow-shared ast) (borrow-shared nodes) address (borrow-mut scratch)) (borrow-mut scratch)))
+			(if
+				(:doc "An indirect function pointer cannot certify the called destructor.")
+				(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) operand
+					(borrow-shared reference_kind) (borrow-mut scratch)))
+				(then (return -1i32)))
+			(let reference (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) operand
+				(borrow-shared reference_key) (borrow-mut scratch)))
+			(let drop (call referenced_function (borrow-shared ast) (borrow-shared nodes) reference (borrow-mut scratch)))
+			(let parameter (call single_inner (borrow-shared ast) (borrow-shared nodes) drop (borrow-mut scratch)))
+			(let type (call single_inner (borrow-shared ast) (borrow-shared nodes) witness (borrow-mut scratch)))
+			(let expression (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) type (borrow-mut scratch)))
+			(let pointer (struct.get (array.load nodes expression) next_sibling))
+			(let prototype (call single_inner (borrow-shared ast) (borrow-shared nodes) pointer (borrow-mut scratch)))
+			(if
+				(:doc "Reject a body, attributes, an unprototyped C function, and a variadic destructor.")
+				(bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) parameter
+						(borrow-shared parameter_kind) (borrow-mut scratch))
+					(bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) prototype
+						(borrow-shared function_prototype_kind) (borrow-mut scratch))
+						(i32.ltz (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) prototype
+							(borrow-shared variadic_key) (borrow-mut scratch)))))
+				(then (return drop)))
 			(return -1i32)))
 
 	(fn mark_lvalue_getters
@@ -254,7 +322,8 @@
 				(body
 					(if
 						(:doc "Other typedefs and declarations do not authorize additional getters.")
-						(i32.not-ltz (call witness_name (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+						(i32.not-ltz (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared lvalue_witness_prefix) (borrow-mut scratch)))
 						(then
 							(let getter (call witness_getter (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
 							(if (i32.ltz getter) (then (return (bool false))))
@@ -275,7 +344,8 @@
 				(:doc "The suffix of a valid synthetic typedef is the selected native spelling.")
 				(i32.not-ltz row)
 				(body
-					(let witness (call witness_name (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+					(let witness (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared lvalue_witness_prefix) (borrow-mut scratch)))
 					(if
 						(:doc "Match the original macro name before resolving its checked getter.")
 						(i32.not-ltz witness)
@@ -309,7 +379,7 @@
 			(array.store output at 0u8)
 			(return (i32.inc at))))
 
-	(fn write_lvalue_identities
+	(fn write_native_identities
 		(:doc "Write only stable witness names, native link symbols, prototypes, and actual pointer types.")
 		(params (ast (shared-array u8)) (nodes (mut-array JsonNode)) (output (mut-array u8)))
 		(returns i32)
@@ -323,22 +393,40 @@
 				(:doc "Compare all witnesses in their direct declaration order.")
 				(i32.not-ltz row)
 				(body
-					(let name (call witness_name (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+					(let type_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared storage_type_witness_prefix) (borrow-mut scratch)))
+					(if
+						(:doc "Record the storage type independently of the selected destruction function.")
+						(i32.not-ltz type_name)
+						(then
+							(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool true) (borrow-mut scratch)))
+							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) type_name (borrow-mut output) length))
+							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) type (borrow-mut output) length))))
+					(let getter_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared lvalue_witness_prefix) (borrow-mut scratch)))
+					(let drop_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared storage_drop_witness_prefix) (borrow-mut scratch)))
+					(let getter (i32.not-ltz getter_name))
+					(let name (if getter (then getter_name) (else drop_name)))
 					(if
 						(:doc "A private witness contributes the actual resolved object-code symbol.")
 						(i32.not-ltz name)
 						(then
-							(let getter (call witness_getter (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
-							(if (i32.ltz getter) (then (return -1i32)))
-							(let symbol (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) getter
+							(let function (if
+								(:doc "The two witness forms resolve different expressions to a linked function.")
+								getter
+								(then (call witness_getter (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+								(else (call witness_destructor (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))))
+							(if (i32.ltz function) (then (return -1i32)))
+							(let symbol (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
 								(borrow-shared mangled_key) (borrow-mut scratch)))
-							(let prototype (call type_spelling (borrow-shared ast) (borrow-shared nodes) getter (bool false) (borrow-mut scratch)))
+							(let prototype (call type_spelling (borrow-shared ast) (borrow-shared nodes) function (bool false) (borrow-mut scratch)))
 							(let pointer (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool true) (borrow-mut scratch)))
 							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) name (borrow-mut output) length))
 							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) symbol (borrow-mut output) length))
 							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) prototype (borrow-mut output) length))
-							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) pointer (borrow-mut output) length))
-							(if (i32.ltz length) (then (return -1i32)))))
+							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) pointer (borrow-mut output) length))))
+					(if (i32.ltz length) (then (return -1i32)))
 					(set row (struct.get (array.load nodes row) next_sibling))))
 			(return length)))
 )
