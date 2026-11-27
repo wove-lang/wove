@@ -257,6 +257,21 @@ void wvrt_check_slice_extent_at_span(int32_t wvrt_length, int32_t wvrt_expected,
 	}
 }
 
+// Expose the NUL-delimited original bytes for one synchronous native visit.
+wvrt_slice wvrt_borrow_callback_path(const char *wvrt_path, int32_t wvrt_file,
+	int32_t wvrt_start, int32_t wvrt_end) {
+	// A native visit must supply a valid C string.
+	if (wvrt_path == NULL) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "missing C callback path");
+	}
+	size_t wvrt_length = strlen(wvrt_path);
+	// The borrowed Wove descriptor uses a signed 32-bit element count.
+	if (wvrt_length > INT32_MAX) {
+		wvrt_trap_at_span(wvrt_file, wvrt_start, wvrt_end, "C callback path is too long");
+	}
+	return (wvrt_slice){wvrt_path, (int32_t)wvrt_length, 1};
+}
+
 // A borrowed native handle must be present before it is passed to C.
 void wvrt_check_c_handle(const volatile void *wvrthandle, int32_t wvrtfile,
 	int32_t wvrtstart, int32_t wvrtend) {

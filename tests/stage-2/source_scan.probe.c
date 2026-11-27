@@ -26,15 +26,15 @@
 #define form_parts wv_seed_fn_86
 #define read_module_for_target wv_seed_fn_101
 #define emit_module wv_seed_fn_147
-#define resolve_graph_for_target wv_seed_fn_278
+#define resolve_graph_for_target wv_seed_fn_280
 #define default_selection wv_seed_fn_102
 #define target_os wv_seed_fn_103
 #define target_arch wv_seed_fn_104
-#define inspect_callers wv_seed_fn_1301
-#define run_scalar_graph wv_seed_fn_1326
-#define discover_graph_tests wv_seed_fn_1336
-#define inspect_graph_expectations wv_seed_fn_1313
-#define write_unit_name wv_seed_fn_1367
+#define inspect_callers wv_seed_fn_1320
+#define run_scalar_graph wv_seed_fn_1345
+#define discover_graph_tests wv_seed_fn_1355
+#define inspect_graph_expectations wv_seed_fn_1332
+#define write_unit_name wv_seed_fn_1386
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_1 SourceDiagnostic;
@@ -56,14 +56,14 @@ typedef wv_seed_record_28 GraphSelector;
 typedef wv_seed_record_29 GraphResult;
 typedef wv_seed_record_94 CallSite;
 typedef wv_seed_record_39 SuppliedFile;
-typedef wv_seed_record_109 CallerInspection;
-typedef wv_seed_record_114 GraphOutput;
-typedef wv_seed_record_121 UnitIndex;
-typedef wv_seed_record_116 DiscoveredTest;
-typedef wv_seed_record_117 TestDiscovery;
-typedef wv_seed_record_110 ExpectationLink;
-typedef wv_seed_record_111 ExpectationResult;
-typedef wv_seed_record_112 ExpectationQuery;
+typedef wv_seed_record_110 CallerInspection;
+typedef wv_seed_record_115 GraphOutput;
+typedef wv_seed_record_122 UnitIndex;
+typedef wv_seed_record_117 DiscoveredTest;
+typedef wv_seed_record_118 TestDiscovery;
+typedef wv_seed_record_111 ExpectationLink;
+typedef wv_seed_record_112 ExpectationResult;
+typedef wv_seed_record_113 ExpectationQuery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2 };
 
