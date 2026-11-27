@@ -13,7 +13,7 @@
 	(use wove-file "../clang/macros.wove" (only macro_header_presence object_macro_value))
 	(use wove-file "../clang/index.wove" (only clang_declaration clang_matches_declaration (type ClangIndex) (type ClangDeclaration)))
 	(use wove-file "./header_origin.wove" (only declaration_in_earlier_include))
-	(use wove-file "./record_headers.wove" (only lookup_native_record))
+	(use wove-file "./type_headers.wove" (only lookup_native_record lookup_native_scalar_typedef))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes include_position write_includes (type CInclude)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
@@ -25,6 +25,7 @@
 	(struct Availability (fields (error u32) (file i32) (start i32) (end i32)))
 	(let function_kind "FunctionDecl")
 	(let optional_record_unavailable 91u32)
+	(let optional_typedef_unavailable 92u32)
 	(let enum_kind "EnumDecl")
 	(let quote_option "-iquote")
 
@@ -67,7 +68,7 @@
 			(return (bool false))))
 
 	(fn native_declaration_available
-		(:doc "Look up the exact original C symbol or the decoded native record type.")
+		(:doc "Look up the exact C function, complete native record, or native scalar typedef.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (binding GraphBinding) (index ClangIndex) (boundary i32)
 			(declarations (shared-array ClangDeclaration)) (names (shared-array u8))
 			(ast (shared-array u8)) (nodes (shared-array JsonNode)) (trace (shared-array u8)))
@@ -78,18 +79,24 @@
 			(let start (i32.add base (struct.get binding native_start)))
 			(let end (i32.add base (struct.get binding native_end)))
 			(if
-				(:doc "Record spellings retain the quoted type operand from the declaring Wove bridge.")
+				(:doc "Decode the native type operand from its defining bridge before inspecting the header.")
 				(u32.eq (struct.get binding namespace) 1u32)
 				(then
 					(let-mut spelling (array.alloc u8 (i32.sub end start)))
 					(let type (call decode_string (borrow-shared arena)
 						(struct.new Token (kind 2u32) (start start) (end end) (error 0u32))
 						(borrow-mut spelling)))
-					(return (bool.and (u32.eqz (struct.get type error))
-						(call lookup_native_record (borrow-shared ast) (borrow-shared nodes)
+					(if (u32.not-eqz (struct.get type error)) (then (return (bool false))))
+					(let native (borrow-shared (array.range spelling 0i32 (struct.get type written))))
+					(if
+						(:doc "An ordinary scalar alias needs its exact typedef from the same ordered header query.")
+						(struct.get binding scalar_typedef)
+						(then (return (call lookup_native_scalar_typedef (borrow-shared ast) (borrow-shared nodes)
 							index boundary (borrow-shared declarations) (borrow-shared names)
-							(borrow-shared (array.range spelling 0i32 (struct.get type written)))
-							(borrow-shared trace))))))
+							(borrow-shared native) (borrow-shared trace)))))
+					(return (call lookup_native_record (borrow-shared ast) (borrow-shared nodes)
+						index boundary (borrow-shared declarations) (borrow-shared names)
+						(borrow-shared native) (borrow-shared trace)))))
 			(return (call matching_native_function (borrow-shared ast) (borrow-shared nodes)
 				index boundary (borrow-shared declarations) (borrow-shared names)
 				(borrow-shared (array.range arena start end)) (borrow-shared trace)))))
@@ -116,9 +123,11 @@
 						(then
 							(let-mut status 71u32)
 							(if
-								(:doc "Missing and incomplete records use a type-specific diagnostic.")
+								(:doc "Native record and scalar selections have distinct unavailable diagnostics.")
 								(u32.eq (struct.get candidate namespace) 1u32)
-								(then (set status optional_record_unavailable)))
+								(then
+									(set status optional_record_unavailable)
+									(if (struct.get candidate scalar_typedef) (then (set status optional_typedef_unavailable)))))
 							(if
 								(:doc "Only a present header can supply a usable declaration.")
 								(bool.and present (call native_declaration_available (borrow-shared arena)
@@ -503,8 +512,9 @@
 
 	(fn check_optional_c_members
 		(:doc "Leave graphs without selected optional members on their filesystem-only path.")
-		(:expect (tests "stage-2/cli/native/cases.tsv" "stage-2/cli/native/bin.tsv" "stage-2/cli/native/optional-macros.tsv")
-			(issues "gh:wove-lang/wove:212" "gh:wove-lang/wove:539" "gh:wove-lang/wove:577"))
+		(:expect (tests "stage-2/cli/native/cases.tsv" "stage-2/cli/native/bin.tsv"
+				"stage-2/cli/native/optional-macros.tsv" "stage-2/cli/native/optional-typedefs/cases.tsv")
+			(issues "gh:wove-lang/wove:212" "gh:wove-lang/wove:539" "gh:wove-lang/wove:577" "gh:wove-lang/wove:638"))
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(canonical (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8)))
 		(returns Availability)

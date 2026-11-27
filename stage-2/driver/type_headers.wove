@@ -1,7 +1,7 @@
-(module native_record_headers
+(module native_type_headers
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Recognize complete native records in the selected header's Clang AST.")
+	(:doc "Recognize complete records and native scalar typedefs in the selected header's Clang AST.")
 
 	(use wove-file "./header_origin.wove" (only declaration_in_earlier_include))
 	(use wove-file "../clang/fields.wove" (only clang_field clang_inner (value clang_kind_key) (value clang_name_key)))
@@ -27,6 +27,14 @@
 	(let typedef_type "\"TypedefType\"")
 	(let qualified_type "\"QualType\"")
 	(let attributed_type "\"AttributedType\"")
+	(let typeof_expression "\"TypeOfExprType\"")
+	(let typeof_type "\"TypeOfType\"")
+	(let builtin_type "\"BuiltinType\"")
+	(let bit_int_type "\"BitIntType\"")
+	(let enum_type "\"EnumType\"")
+	(let void_type "\"void\"")
+	(let type_key "type")
+	(let qualified_key "qualType")
 
 	(fn value_matches
 		(:doc "Compare a known AST string value with its complete quoted representation.")
@@ -59,45 +67,126 @@
 				(call declaration_in_earlier_include (borrow-shared ast) base
 					(borrow-shared nodes) node (borrow-shared trace))))))
 
-	(fn typedef_record_id
-		(:doc "Follow a typedef's value type to a RecordType, retaining Clang's exact declaration identity.")
+	(fn typedef_value_node
+		(:doc "Unwrap transparent Clang type nodes and return the first concrete value type.")
 		(params (ast (shared-array u8)) (base i32) (nodes (shared-array JsonNode))
 			(declaration i32) (scratch (mut-array u8))) (returns i32)
 		(body
 			(let-mut node (call clang_inner (borrow-shared ast) base
 				(borrow-shared nodes) declaration (borrow-mut scratch)))
 			(while
-				(:doc "Transparent type wrappers contain the next value type. Pointer and array nodes terminate the search.")
+				(:doc "Only wrappers that preserve the object type contribute another underlying node.")
 				(i32.not-ltz node)
 				(body
 					(let kind (call clang_field (borrow-shared ast) base (borrow-shared nodes)
 						node (borrow-shared clang_kind_key) (borrow-mut scratch)))
-					(if
-						(:doc "The linked declaration identity also works for an anonymous struct or union.")
+					(let expression (call value_matches (borrow-shared ast) base (borrow-shared nodes)
+						kind (borrow-shared typeof_expression)))
+					(let wrapper (bool.or
 						(call value_matches (borrow-shared ast) base (borrow-shared nodes)
-							kind (borrow-shared record_type))
-						(then
-							(let tag (call clang_field (borrow-shared ast) base (borrow-shared nodes)
-								node (borrow-shared declaration_key) (borrow-mut scratch)))
-							(return (call clang_field (borrow-shared ast) base (borrow-shared nodes)
-								tag (borrow-shared id_key) (borrow-mut scratch)))))
-					(if
-						(:doc "Only inspect children of wrappers that preserve the underlying object type.")
-						(bool.not (bool.or
+							kind (borrow-shared elaborated_type))
+						(bool.or
 							(call value_matches (borrow-shared ast) base (borrow-shared nodes)
-								kind (borrow-shared elaborated_type))
+								kind (borrow-shared typedef_type))
 							(bool.or
 								(call value_matches (borrow-shared ast) base (borrow-shared nodes)
-									kind (borrow-shared typedef_type))
+									kind (borrow-shared qualified_type))
 								(bool.or
 									(call value_matches (borrow-shared ast) base (borrow-shared nodes)
-										kind (borrow-shared qualified_type))
+										kind (borrow-shared attributed_type))
 									(call value_matches (borrow-shared ast) base (borrow-shared nodes)
-										kind (borrow-shared attributed_type))))))
-						(then (return -1i32)))
+										kind (borrow-shared typeof_type)))))))
+					(if
+						(:doc "A concrete record, enumeration, builtin, pointer, or array ends the walk.")
+						(bool.not (bool.or expression wrapper))
+						(then (return node)))
 					(set node (call clang_inner (borrow-shared ast) base
-						(borrow-shared nodes) node (borrow-mut scratch)))))
+						(borrow-shared nodes) node (borrow-mut scratch)))
+					(if
+						(:doc "Clang emits the operand expression before the underlying type in typeof(expression).")
+						(bool.and expression (i32.not-ltz node))
+						(then (set node (struct.get (array.load nodes node) next_sibling))))))
 			(return -1i32)))
+
+	(fn typedef_record_id
+		(:doc "Return the declaration identity for a typedef with a record value type.")
+		(params (ast (shared-array u8)) (base i32) (nodes (shared-array JsonNode))
+			(declaration i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(let node (call typedef_value_node (borrow-shared ast) base
+				(borrow-shared nodes) declaration (borrow-mut scratch)))
+			(let kind (call clang_field (borrow-shared ast) base (borrow-shared nodes)
+				node (borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if
+				(:doc "A pointer or another non-record type has no record identity.")
+				(bool.not (call value_matches (borrow-shared ast) base (borrow-shared nodes)
+					kind (borrow-shared record_type)))
+				(then (return -1i32)))
+			(let tag (call clang_field (borrow-shared ast) base (borrow-shared nodes)
+				node (borrow-shared declaration_key) (borrow-mut scratch)))
+			(return (call clang_field (borrow-shared ast) base (borrow-shared nodes)
+				tag (borrow-shared id_key) (borrow-mut scratch)))))
+
+	(fn scalar_typedef_value
+		(:doc "Recognize an arithmetic or enumeration value behind the selected typedef.")
+		(params (ast (shared-array u8)) (base i32) (nodes (shared-array JsonNode))
+			(declaration i32) (scratch (mut-array u8))) (returns bool)
+		(body
+			(let node (call typedef_value_node (borrow-shared ast) base
+				(borrow-shared nodes) declaration (borrow-mut scratch)))
+			(let kind (call clang_field (borrow-shared ast) base (borrow-shared nodes)
+				node (borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if
+				(:doc "Enumeration and bit-precise integer types carry scalar values.")
+				(bool.or (call value_matches (borrow-shared ast) base (borrow-shared nodes) kind (borrow-shared enum_type))
+					(call value_matches (borrow-shared ast) base (borrow-shared nodes) kind (borrow-shared bit_int_type)))
+				(then (return (bool true))))
+			(if
+				(:doc "Records, pointers, and arrays have distinct native bridge contracts.")
+				(bool.not (call value_matches (borrow-shared ast) base (borrow-shared nodes) kind (borrow-shared builtin_type)))
+				(then (return (bool false))))
+			(let type (call clang_field (borrow-shared ast) base (borrow-shared nodes)
+				node (borrow-shared type_key) (borrow-mut scratch)))
+			(let spelling (call clang_field (borrow-shared ast) base (borrow-shared nodes)
+				type (borrow-shared qualified_key) (borrow-mut scratch)))
+			(return (bool.and (i32.not-ltz spelling)
+				(bool.not (call value_matches (borrow-shared ast) base (borrow-shared nodes)
+					spelling (borrow-shared void_type)))))))
+
+	(fn lookup_native_scalar_typedef
+		(:doc "Find the exact public scalar typedef in the selected header or its include subtree.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (index ClangIndex) (boundary i32)
+			(declarations (shared-array ClangDeclaration)) (names (shared-array u8)) (spelling (shared-array u8))
+			(trace (shared-array u8))) (returns bool)
+		(body
+			(let first (call skip_whitespace (borrow-shared spelling) 0i32))
+			(let end (call c_type_word_end (borrow-shared spelling) first))
+			(if
+				(:doc "Only a single C identifier can name a public typedef.")
+				(bool.or (i32.eq first end)
+					(i32.not-eq (call skip_whitespace (borrow-shared spelling) end) (array.len spelling)))
+				(then (return (bool false))))
+			(let name (borrow-shared (array.range spelling first end)))
+			(let base (struct.get index start))
+			(let-mut scratch (array.alloc u8 (array.len qualified_key)))
+			(let-mut row (struct.get index entries))
+			(while
+				(:doc "Repeated declarations are usable only when a matching typedef belongs to the selected header.")
+				(i32.gtz row)
+				(body
+					(set row (i32.dec row))
+					(let entry (array.load declarations row))
+					(let node (struct.get entry node))
+					(if
+						(:doc "Reject a tag, function, unrelated include, or non-scalar typedef with the same name.")
+						(bool.and (call clang_matches_declaration entry (borrow-shared names)
+							(borrow-shared typedef_kind) (borrow-shared name))
+							(bool.and (call from_selected_header (borrow-shared ast) base (borrow-shared nodes)
+								node boundary (borrow-shared trace))
+								(call scalar_typedef_value (borrow-shared ast) base
+									(borrow-shared nodes) node (borrow-mut scratch))))
+						(then (return (bool true))))))
+			(return (bool false))))
 
 	(fn next_scope_member
 		(:doc "Find the next sibling, climbing out of exhausted record member lists.")
