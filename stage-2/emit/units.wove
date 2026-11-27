@@ -7,7 +7,7 @@
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
-	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only find_native_definition is_native_integer (type ScalarRecord)))
 	(use wove-file "../source/graph.wove" (only includes_c_header (type GraphBinding)))
 	(use wove-file "../scalar/tests.wove" (only (type DiscoveredTest)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
@@ -124,16 +124,35 @@
 					(set index (i32.inc index))))
 			(return width)))
 
+	(fn direct_scalar_abi
+		(:doc "Built-in scalars and checked native integer aliases use direct C value passing.")
+		(params (type u32)) (returns bool)
+		(body (return (bool.or (call is_builtin_scalar type) (call is_native_integer type)))))
+
+	(fn numbered_bridge_binding
+		(:doc "Require a function or a native integer typedef from the audited header prefix.")
+		(params (binding GraphBinding) (records (shared-array ScalarRecord))) (returns bool)
+		(body
+			(if (struct.get binding optional) (then (return (bool false))))
+			(let namespace (struct.get binding namespace))
+			(if (u32.eqz namespace) (then (return (bool true))))
+			(if (u32.not-eq namespace 1u32) (then (return (bool false))))
+			(let row (call find_native_definition (borrow-shared records)
+				(struct.get binding native_file) (struct.get binding native_type)))
+			(if (i32.ltz row) (then (return (bool false))))
+			(let layout (array.load records row))
+			(return (bool.and (i32.gtz (struct.get layout native)) (i32.eq (struct.get layout count) -1i32)))))
+
 	(fn ordinary_bridge_signature
 		(:doc "Admit direct scalar C calls and leave native adapters on the serial path.")
 		(params (function ScalarFunction) (parameters (shared-array ScalarParameter))) (returns bool)
 		(body
 			(let result (struct.get function result))
 			(if
-				(:doc "Void and built-in scalar results need no native type or ownership adapter.")
+				(:doc "Void and direct scalar results need no ownership adapter.")
 				(bool.or (bool.or (call has_c_arguments function)
 					(i32.not-eqz (struct.get function c_variadic)))
-					(bool.and (u32.not-eq result (call void_type)) (bool.not (call is_builtin_scalar result))))
+					(bool.and (u32.not-eq result (call void_type)) (bool.not (call direct_scalar_abi result))))
 				(then (return (bool false))))
 			(let-mut index (struct.get function params))
 			(let end (i32.add index (struct.get function arity)))
@@ -142,8 +161,8 @@
 				(i32.lt index end)
 				(body
 					(if
-						(:doc "Header-specific types belong to the native ABI follow-up.")
-						(bool.not (call is_builtin_scalar (struct.get (array.load parameters index) type)))
+						(:doc "Reject aggregate, reference, and adapted native parameters.")
+						(bool.not (call direct_scalar_abi (struct.get (array.load parameters index) type)))
 						(then (return (bool false))))
 					(set index (i32.inc index))))
 			(return (bool true))))
@@ -151,22 +170,22 @@
 	(fn can_share_program_preamble
 		(:doc "Keep the numbered header limited to ordinary native calls and stateless generated declarations.")
 		(params (bindings (shared-array GraphBinding)) (functions (shared-array ScalarFunction))
-			(parameters (shared-array ScalarParameter))) (returns bool)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))) (returns bool)
 		(body
 			(let-mut index 0i32)
 			(let-mut has_bridge (bool false))
 			(while
-				(:doc "Selected native values, types, and optional members have separate C contracts.")
+				(:doc "Check the binding contracts before trying to certify the include prefix.")
 				(i32.lt index (array.len bindings))
 				(body
 					(let binding (array.load bindings index))
 					(if
-						(:doc "Only a required function binding can contribute an audited native include.")
+						(:doc "Each selected native binding must share the same audited include context.")
 						(call includes_c_header binding)
 						(then
 							(if
-								(:doc "Other bridge namespaces and optional resolution remain separate.")
-								(bool.or (u32.gtz (struct.get binding namespace)) (struct.get binding optional))
+								(:doc "Integer typedefs contribute just their exact C spelling in the common header.")
+								(bool.not (call numbered_bridge_binding binding (borrow-shared records)))
 								(then (return (bool false))))
 							(set has_bridge (bool true))))
 					(set index (i32.inc index))))
