@@ -153,9 +153,9 @@ def check_native(probe, case, layout, parts):
 				assert table.get(dependency) == "U", (unit, dependency, table)
 			objects.append(str(object_file))
 		program = root / "linked"
-		# Give fixture objects a chance to supply their symbols before searching the runtime archive.
-		subprocess.run([*compiler, "-std=c11", *flags, *objects, *case.get("link", []), runtime,
-			"-o", str(program)], check=True, timeout=30)
+		# Fixture sources supply symbols before the runtime archive. Link options follow it.
+		subprocess.run([*compiler, "-std=c11", *flags, *objects, *case.get("sources", []), runtime,
+			*case.get("link", []), "-o", str(program)], check=True, timeout=30)
 		executions = case["executions"] if "executions" in case else [([], *case["execution"])]
 		for args, status, stdout, stderr in executions:
 			result = subprocess.run([program, *args], capture_output=True, timeout=30)
