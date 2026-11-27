@@ -25,16 +25,16 @@
 #define decode_string wv_seed_fn_92
 #define form_parts wv_seed_fn_96
 #define read_module_for_target wv_seed_fn_111
-#define emit_module wv_seed_fn_157
-#define resolve_graph_for_target wv_seed_fn_296
+#define emit_module wv_seed_fn_158
+#define resolve_graph_for_target wv_seed_fn_297
 #define default_selection wv_seed_fn_112
 #define target_os wv_seed_fn_113
 #define target_arch wv_seed_fn_114
-#define inspect_callers wv_seed_fn_1376
-#define run_scalar_graph wv_seed_fn_1401
-#define discover_graph_tests wv_seed_fn_1411
-#define inspect_graph_expectations wv_seed_fn_1388
-#define write_unit_name wv_seed_fn_1454
+#define inspect_callers wv_seed_fn_1377
+#define run_scalar_graph wv_seed_fn_1402
+#define discover_graph_tests wv_seed_fn_1412
+#define inspect_graph_expectations wv_seed_fn_1389
+#define write_unit_name wv_seed_fn_1455
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_1 SourceDiagnostic;
@@ -48,22 +48,22 @@ typedef wv_seed_record_14 SelectedDeclaration;
 typedef wv_seed_record_15 ModuleRead;
 typedef wv_seed_record_17 SelectionContext;
 typedef wv_seed_record_19 EmitResult;
-typedef wv_seed_record_91 EmbedAsset;
-typedef wv_seed_record_23 GraphModule;
-typedef wv_seed_record_24 GraphBinding;
-typedef wv_seed_record_27 GraphUse;
-typedef wv_seed_record_28 GraphSelector;
-typedef wv_seed_record_29 GraphResult;
-typedef wv_seed_record_93 CallSite;
-typedef wv_seed_record_39 SuppliedFile;
-typedef wv_seed_record_111 CallerInspection;
-typedef wv_seed_record_116 GraphOutput;
-typedef wv_seed_record_126 UnitIndex;
-typedef wv_seed_record_118 DiscoveredTest;
-typedef wv_seed_record_119 TestDiscovery;
-typedef wv_seed_record_112 ExpectationLink;
-typedef wv_seed_record_113 ExpectationResult;
-typedef wv_seed_record_114 ExpectationQuery;
+typedef wv_seed_record_92 EmbedAsset;
+typedef wv_seed_record_24 GraphModule;
+typedef wv_seed_record_25 GraphBinding;
+typedef wv_seed_record_28 GraphUse;
+typedef wv_seed_record_29 GraphSelector;
+typedef wv_seed_record_30 GraphResult;
+typedef wv_seed_record_94 CallSite;
+typedef wv_seed_record_40 SuppliedFile;
+typedef wv_seed_record_112 CallerInspection;
+typedef wv_seed_record_117 GraphOutput;
+typedef wv_seed_record_127 UnitIndex;
+typedef wv_seed_record_119 DiscoveredTest;
+typedef wv_seed_record_120 TestDiscovery;
+typedef wv_seed_record_113 ExpectationLink;
+typedef wv_seed_record_114 ExpectationResult;
+typedef wv_seed_record_115 ExpectationQuery;
 
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2, MODE_LIBRARY = 3 };
 
