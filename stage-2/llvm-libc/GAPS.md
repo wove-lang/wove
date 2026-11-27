@@ -121,7 +121,7 @@ the `WCORE_DUMPED` sketch disabled. Counts below describe the archive.
 | `c_nullable` · 12 | `signal.h` `sigprocmask`, `pthread_sigmask`, `psignal`, `spawn.h` `posix_spawn{,p}`, `stdio.h` `freopen`, `fflush`, `perror`, `sys/stat.h` `futimens`, `utimensat`, `sys/wait.h` `wait`, `waitpid` | Named mutable scalar references accept either an exclusive loan or explicit null. Native fixtures exercise both forms of `waitpid`. Nullable record and handle references, strings, and bounded arrays still need their own lowering. A Wove fallible exact slice can lend a present shared view after unwrapping. Passing the option itself requires a native nullable descriptor contract. |
 | `c_optional` · 289 | `math.h` optional functions, constants, and globals. The `fromfp`, `ufromfp`, `fromfpx`, and `ufromfpx` families use `__STDC_VERSION_MATH_H__`. The `totalorder` and `totalordermag` families use `pointer_parameters`. | Bare optional function markers probe for the selected native name and report an unavailable name at the import. Qualified markers need feature-macro or exact prototype queries. Optional constants and global values need their own availability checks. |
 | `c_owned` · 4 | `dirent.h` `Directory`, `stdio.h` `File`, `spawn.h` `Actions` and `Attributes` | The `c-header` provider supports pointer results as local owners with null preservation and lexical destruction. A `shared-ref` or `mut-ref` parameter can lend a present owned pointer for a call, with exclusive access for the mutable loan. A bare owner parameter consumes an explicit move. Storage owners allocate the exact C representation and track activation separately from the allocation. Nullable storage borrows and integer handles need further lowering. |
-| `c_snapshot` · 9 | `dirent.h` `readdir{,64}`, `stdio.h` `fgets`, `stdlib.h` `getenv`, `mkdtemp`, `realpath`, `string.h` `strerror`, `unistd.h` `mkdtemp` and `environ` | Stage 2 copies borrowed and allocating `cstr` function results and `cstrs` globals such as `environ`. Stage 2 also copies fixed inline `char` fields within their declared extent. The bundled `readdir` snapshots the terminated name returned by the native API, including extended entries. The Linux `readdir64` binding snapshots the name using the same runtime adapter. |
+| `c_snapshot` · 9 | `dirent.h` `readdir{,64}`, `stdio.h` `fgets`, `stdlib.h` `getenv`, `mkdtemp`, `realpath`, `string.h` `strerror`, `unistd.h` `mkdtemp` and `environ` | Stage 2 copies borrowed and allocating `cstr` function results and `cstrs` globals such as `environ`. Stage 2 also copies fixed inline `char` fields within their declared extent. The bundled `readdir` snapshots the terminated name returned by the native API, including extended entries. The Linux `readdir64` binding snapshots the name using the same field-and-extent contract. |
 | `c_variadic` · 16 | `fcntl.h` `open`, `openat`, and `fcntl_*`, `stdio.h` `fprintf`, `printf`, and `snprintf` | Named and open tails verify the fixed prefix and result against the header and use native default promotions. The fixed-command `fcntl_getfd`, `fcntl_getfl`, and `fcntl_getown` queries use an empty tail. Fixtures cover those queries, typed `fcntl` updates and opening modes, and the three open stdio bindings. |
 
 ## Native owner composition
@@ -240,10 +240,12 @@ The borrowed-entry fixture reads the native fields and copies the name
 while the stream is borrowed. It compares native and large-file records
 on glibc and checks Darwin's seek offset and name length.
 
-The current name snapshots use directory-specific runtime macros. Moving
-returned and borrowed record snapshots onto the public bridge contract
-requires a bounded copy of the terminated field using the native record
-extent. [Compiler prerequisite #688](https://github.com/wove-lang/wove/issues/688)
+Returned and borrowed name snapshots declare `d_name` and the native
+record byte extent `d_reclen` through `c_snapshot`. The shared bridge
+contract uses the actual C field offset and copies through the first
+terminator inside the reported extent. The borrowed projections use
+`(from entry)` to retain the original stream loan through the copy.
+[Shared snapshot contract #699](https://github.com/wove-lang/wove/pull/699)
 
 Clang exposed the same selected members in C11, C17, and C23 on arm64 and
 x86-64 with the macOS 27.2 SDK and Debian glibc 2.41. The audit used the
