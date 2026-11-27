@@ -194,10 +194,40 @@
 				(local converted) (local writing)))
 			(return (call c_string_text (borrow-mut (local output)) (local position) 5u32 (local writing)))))
 
+	(fn prepares_c_string
+		(:doc "Only a present string view contributes a descriptor and a scratch pointer.")
+		(params (parameter ScalarParameter) (argument ScalarExpression))
+		(returns bool)
+		(body (return (bool.and (call is_c_string_mode (struct.get (local parameter) c_mode))
+			(u32.not-eq (struct.get (local argument) kind) (call c_null_argument_kind))))))
+
+	(fn c_string_actuals
+		(:doc "Count the present converted strings before emitting scratch storage for this call.")
+		(params (nodes (shared-array SourceNode)) (parameters (shared-array ScalarParameter))
+			(expressions (shared-array ScalarExpression)) (first i32) (callee ScalarFunction))
+		(returns i32)
+		(body
+			(let-mut count 0i32)
+			(let-mut argument (local first))
+			(let-mut formal (struct.get (local callee) params))
+			(let limit (i32.add (local formal) (struct.get (local callee) arity)))
+			(while
+				(:doc "Present fixed arguments determine the compact descriptor order.")
+				(i32.lt (local formal) (local limit))
+				(body
+					(if
+						(:doc "An explicit null has no string conversion slot.")
+						(call prepares_c_string (array.load (local parameters) (local formal))
+							(array.load (local expressions) (local argument)))
+						(then (set (local count) (i32.inc (local count)))))
+					(set (local argument) (struct.get (array.load (local nodes) (local argument)) next_sibling))
+					(set (local formal) (i32.inc (local formal)))))
+			(return (local count))))
+
 	(fn write_c_string_descriptors
 		(:doc `Write the captured byte views, conversion modes, and argument sites in formal order.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (parameters (shared-array ScalarParameter))
-			(expression ScalarExpression) (caller ScalarFunction) (callee ScalarFunction) (index i32)
+			(expressions (shared-array ScalarExpression)) (expression ScalarExpression) (caller ScalarFunction) (callee ScalarFunction) (index i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -220,7 +250,7 @@
 					(let mode (struct.get (local param) c_mode))
 					(if
 						(:doc "Only a converted argument contributes a byte view to the preparation array.")
-						(call is_c_string_mode (local mode))
+						(call prepares_c_string (local param) (array.load (local expressions) (local argument)))
 						(then
 							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 123u8 (local writing)))
 							(let mutable (u32.eq (struct.get (local param) type) 38u32))
@@ -251,6 +281,7 @@
 			(return (call c_string_text (borrow-mut (local output)) (local cursor) 3u32 (local writing)))))
 
 	(let null_pointer "(void*)0")
+	(let null_string_pointer "(const char*)0")
 	(let open_variadic_cast "((__typeof__(&(")
 	(let open_variadic_target ")))&(")
 	(let close_variadic_target "))")
@@ -385,6 +416,7 @@
 								(else
 									(let param (array.load (local parameters) (local formal)))
 									(let mode (struct.get (local param) c_mode))
+									(let actual (array.load (local expressions) (local argument)))
 									(let discard (bool.and (local macro)
 										(struct.get (call read_c_macro_discard (borrow-shared (local source)) (borrow-shared (local nodes))
 											(local parts)) present)))
@@ -395,7 +427,7 @@
 											(borrow-mut (local output)) (local cursor) (local writing)))))
 									(if
 										(:doc "Use the prepared C pointer with the formal's original access mode.")
-										(call is_c_string_mode (local mode))
+										(call prepares_c_string (local param) (local actual))
 										(then
 											(if
 												(:doc "Only an exclusive Wove view exposes the writable native scratch.")
@@ -415,9 +447,15 @@
 												(else
 													(if
 														(:doc "A checked null contributes a pointer constant and has no evaluated temporary.")
-														(u32.eq (struct.get (array.load (local expressions) (local argument)) kind) (call c_null_argument_kind))
-														(then (set (local cursor) (call c_literal_text (borrow-shared (local null_pointer))
+												(u32.eq (struct.get (local actual) kind) (call c_null_argument_kind))
+												(then
+													(if
+														(:doc "Use the exact shared C-string pointer type for a nullable string.")
+														(call is_c_string_mode (local mode))
+														(then (set (local cursor) (call c_literal_text (borrow-shared (local null_string_pointer))
 															(borrow-mut (local output)) (local cursor) (local writing))))
+														(else (set (local cursor) (call c_literal_text (borrow-shared (local null_pointer))
+															(borrow-mut (local output)) (local cursor) (local writing))))))
 														(else
 															(if
 																(:doc "Storage owners lend the original native object behind the captured wrapper.")
@@ -479,28 +517,30 @@
 	(fn write_c_string_setup
 		(:doc `Prepare one scratch array for all captured C-string arguments.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (parameters (shared-array ScalarParameter))
-			(expression ScalarExpression) (caller ScalarFunction) (callee ScalarFunction) (index i32)
+			(expressions (shared-array ScalarExpression)) (expression ScalarExpression) (caller ScalarFunction)
+			(callee ScalarFunction) (index i32) (count i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let tree_base (struct.get (local caller) name_base))
 			(let-mut cursor (call write_c_string_descriptors (borrow-shared (local source)) (borrow-shared (local nodes))
-				(borrow-shared (local parameters)) (local expression) (local caller) (local callee) (local index)
+				(borrow-shared (local parameters)) (borrow-shared (local expressions))
+				(local expression) (local caller) (local callee) (local index)
 				(borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))
 			(set (local cursor) (call write_c_string_scratch (borrow-shared (local source)) (local index) (local tree_base)
 				98u8 (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 			(set (local cursor) (call c_string_text (borrow-mut (local output)) (local cursor) 4u32 (local writing)))
 			(set (local cursor) (call write_c_string_scratch (borrow-shared (local source)) (local index) (local tree_base)
 				97u8 (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-			(set (local cursor) (call write_site_number (borrow-mut (local output)) (local cursor)
-				(struct.get (local callee) c_strings) (local writing)))
+			(set (local cursor) (call write_site_number (borrow-mut (local output)) (local cursor) (local count) (local writing)))
 			(set (local cursor) (call c_string_text (borrow-mut (local output)) (local cursor) 7u32 (local writing)))
 			(return (local cursor))))
 
 	(fn write_c_string_copy_backs
 		(:doc `Copy each mutable string's original byte extent back before releasing the scratch.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (parameters (shared-array ScalarParameter))
-			(expression ScalarExpression) (tree_base i32) (callee ScalarFunction) (index i32)
+			(expressions (shared-array ScalarExpression)) (expression ScalarExpression) (tree_base i32)
+			(callee ScalarFunction) (index i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
@@ -516,7 +556,7 @@
 					(let param (array.load (local parameters) (local formal)))
 					(if
 						(:doc "Only converted strings occupy descriptor slots.")
-						(call is_c_string_mode (struct.get (local param) c_mode))
+						(call prepares_c_string (local param) (array.load (local expressions) (local argument)))
 						(then
 							(if
 								(:doc "Restore the captured mutable view after saving the return, including when it is null.")
@@ -552,13 +592,20 @@
 					(borrow-shared (local nodes)) (borrow-shared (local parameters)) (borrow-shared (local records))
 					(local expression) (local caller) (local callee)
 					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
-			(let strings (i32.gtz (struct.get (local callee) c_strings)))
+			(let-mut string_count 0i32)
+			(if
+				(:doc "Calls with only null string actuals need no descriptor array.")
+				(i32.gtz (struct.get (local callee) c_strings))
+				(then (set (local string_count) (call c_string_actuals (borrow-shared (local nodes))
+					(borrow-shared (local parameters)) (borrow-shared (local expressions))
+					(struct.get (local expression) first) (local callee)))))
+			(let strings (i32.gtz (local string_count)))
 			(if
 				(:doc "Only a C-string contract materializes backing storage.")
 				(local strings)
 				(then (set (local cursor) (call write_c_string_setup (borrow-shared (local source))
-					(borrow-shared (local nodes)) (borrow-shared (local parameters))
-					(local expression) (local caller) (local callee) (local index)
+					(borrow-shared (local nodes)) (borrow-shared (local parameters)) (borrow-shared (local expressions))
+					(local expression) (local caller) (local callee) (local index) (local string_count)
 					(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
 			(let vectors (struct.get (local callee) c_vectors))
 			(if
@@ -583,7 +630,8 @@
 				(local strings)
 				(then
 					(set (local cursor) (call write_c_string_copy_backs (borrow-shared (local source)) (borrow-shared (local nodes))
-						(borrow-shared (local parameters)) (local expression) (local tree_base) (local callee) (local index)
+						(borrow-shared (local parameters)) (borrow-shared (local expressions))
+						(local expression) (local tree_base) (local callee) (local index)
 						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
 					(set (local cursor) (call c_string_text (borrow-mut (local output)) (local cursor) 6u32 (local writing)))
 					(set (local cursor) (call write_c_string_scratch (borrow-shared (local source)) (local index) (local tree_base)
