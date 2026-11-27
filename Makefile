@@ -33,63 +33,32 @@ SELF_HOST_FIXTURES := tests/stage-2/self_host
 COMPILER_INPUTS := stage-2/. $(sort $(filter-out stage-2,$(shell find stage-2 -print)))
 SELF_HOST_TREE_INPUTS := $(COMPILER_INPUTS) $(sort $(shell find runtime -print))
 BUILD_CLANG := tools/run-build-clang.sh
-NATIVE_DRIVER := stage-2/driver
-C_IDENTIFIER_MODULE := stage-2/c/identifiers.wove
-SOURCE_SCAN_MODULE := stage-2/source/scan.wove $(C_IDENTIFIER_MODULE)
-UTF8_MODULE := stage-2/text/utf8.wove
-QUOTED_TEXT_MODULE := stage-2/text/quoted.wove
-HEX_TEXT_MODULE := stage-2/text/hex.wove
-CHARACTER_TEXT_MODULE := stage-2/text/character.wove
-BYTE_TEXT_MODULE := stage-2/text/bytes.wove
-BYTE_MATCH_MODULE := stage-2/text/match.wove
-BOOLEAN_TEXT_MODULE := stage-2/text/boolean.wove
-VALUE_TEXT_MODULES := $(BYTE_TEXT_MODULE) stage-2/text/decimal.wove
-DECIMAL_WRITER := stage-2/text/decimal_write.wove
-C_HEADER_MODULE := stage-2/c/headers.wove
-C_STANDARD_MODULE := stage-2/c/standard.wove
-C_ARGUMENT_MODULE := stage-2/c/arguments.wove
-HASHING_SOURCES := $(addprefix stage-2/hashing/,fnv1a.wove base16.wove base32hex.wove)
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
 HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
 HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,fnv1a base32hex base16)
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
-BLAKE2B_SOURCE := stage-2/hashing/blake2b.wove
-JSON_KEYWORDS_MODULE := stage-2/json/keywords.wove
-JSON_READER_SOURCES := stage-2/json/reader.wove stage-2/json/lex.wove \
-	$(JSON_KEYWORDS_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(UTF8_MODULE)
-JSON_FRAME_MODULE := stage-2/json/frame.wove
 JSON_FIXTURES := tests/stage-2/json
 JSON_CASES := $(JSON_FIXTURES)/cases.tsv
 JSON_PROGRAMS := $(addprefix $(STAGE2)/json/,writer writer_errors reader reader_errors utf8 frame)
 DIAGNOSTIC_FIXTURES := tests/stage-2/diagnostics
 DIAGNOSTIC_PROGRAM := $(STAGE2)/diagnostics/json
-DIAGNOSTIC_SOURCES := stage-2/diagnostics/record.wove stage-2/diagnostics/json.wove
-HUMAN_DIAGNOSTIC := stage-2/diagnostics/human.wove stage-2/text/display_width.wove
 CLI_FIXTURES := tests/stage-2/cli
 CLI_CASES := $(CLI_FIXTURES)/cases.tsv
 CLI_PROGRAMS := $(addprefix $(STAGE2)/cli/,argv argv_errors host_entry jobs options options_errors)
-JOB_BUDGET_MODULE := $(NATIVE_DRIVER)/jobs.wove
 CONFIG_FIXTURES := tests/stage-2/config
 CONFIG_PROGRAM := $(STAGE2)/config/project
-CONFIG_SOURCES := $(C_STANDARD_MODULE) stage-2/text/copy.wove $(addprefix stage-2/config/,compiler.wove defaults.wove project.wove schema.wove values.wove)
 COMMAND_FIXTURES := $(CLI_FIXTURES)/command
 COMMAND_PROGRAM := $(STAGE2)/cli/command
-COMMAND_SOURCES := $(addprefix stage-2/cli/command/,resolve.wove args.wove schema.wove values.wove)
-NATIVE_CLI_SOURCES := $(addprefix $(NATIVE_DRIVER)/,command.wove source.wove diagnostics.wove assets.wove version.wove bundled.wove bundled_paths.wove graph.wove graph_emit.wove graph_units.wove graph_storage.wove output.wove publication.wove platform.wove target.wove files.wove paths.wove disk.wove disk_files.wove check_graph.wove check_reports.wove protection.wove input_files.wove arguments.wove bin/build.wove bin/cleanup.wove bin/units.wove bin/parallel.wove bin/parallel_options.wove bin/staged.wove bin/library.wove bin/image.wove bin/debug.wove bin/dependencies.wove bin/jobs.wove bin/links.wove availability.wove type_headers.wove numeric_target.wove int256_target.wove header_origin.wove clang.wove)
-NATIVE_STDIO := stage-2/io/stdio.wove
 NATIVE_CLI_FIXTURES := $(CLI_FIXTURES)/native
 WORKER_FIXTURES := $(NATIVE_CLI_FIXTURES)/workers
 WORKER_RUNTIME := $(STAGE2)/workers/runtime.o
 WORKER_PROBE := $(STAGE2)/workers/failure
 WORKER_QUEUE_PROBE := $(STAGE2)/workers/queue-failure
 WORKER_POOL_PROBE := $(STAGE2)/workers/pool
-PROCESS_MODULES := stage-2/io/process.wove stage-2/io/temporary.wove stage-2/io/capture/descriptors.wove stage-2/io/capture/child.wove
 PROCESS_FIXTURES := tests/stage-2/process
 OBJECT_JOB_FIXTURES := tests/stage-2/cli/native/object_jobs
-OBJECT_JOB_SOURCES := $(NATIVE_DRIVER)/bin/object_jobs.wove $(JOB_BUDGET_MODULE) stage-2/llvm-libc/time.wove \
-	stage-2/io/process_file.wove $(PROCESS_MODULES) stage-2/text/copy.wove stage-2/cli/values.wove stage-2/text/decimal.wove
 STAGED_BUILD_FIXTURES := $(NATIVE_CLI_FIXTURES)/staged_build
 PROCESS_CASES := $(PROCESS_FIXTURES)/cases.tsv
 PROCESS_DESCRIPTOR_CASES := $(PROCESS_FIXTURES)/descriptors.tsv
@@ -98,7 +67,6 @@ TEST_RUNNER_ROOT := stage-2/test/runner.wove
 TEST_RUNNER := $(STAGE2)/test/runner
 TEST_RUNTIME := $(STAGE2)/test/libwove_test.a
 CLANG_FIXTURES := tests/stage-2/clang
-CLANG_SOURCES := $(C_HEADER_MODULE) $(addprefix stage-2/clang/,source.wove fields.wove index.wove values.wove)
 CLANG_TEMPLATE := stage-2/clang/templates/probe_header.tmpl.h
 AST_LIVE := $(STAGE2)/ast/live
 NUMBERED_HEADERS := $(STAGE2)/numbered-headers
@@ -110,7 +78,6 @@ SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
 SEED_UTILITY_PROGRAMS := $(HASHING_PROGRAMS) $(JSON_PROGRAMS) $(CLI_PROGRAMS) $(DIAGNOSTIC_PROGRAM)
 SEED_UTILITY_C := $(addsuffix .c,$(SEED_UTILITY_PROGRAMS) $(CONFIG_PROGRAM) $(COMMAND_PROGRAM))
 NATIVE_FIXTURE_C := $(addsuffix .c,$(TEST_RUNNER) $(AST_LIVE) $(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE))
-SEED_GRAPH_C := $(SOURCE_PROBE_C) $(SEED_UTILITY_C) $(NATIVE_FIXTURE_C)
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py stage-1/make_deps.py
 SEED_EMIT := stage-1/emit.py
 SEED_EMIT_SOURCES := $(SEED_EMIT) stage-1/inputs.py stage-1/syntax.py stage-1/make_deps.py
@@ -126,6 +93,9 @@ TEST_PROGRAMS := $(shell awk '$$1 ~ /^(run|run-argv|tracked|bounds-trap|conversi
 	name = $$2; sub(/\.wove$$/, "", name); print name; \
 	if ($$1 == "tracked") print name ".tracked" \
 	}' "$(OWNERSHIP_CASES)")
+
+STAGE1_FIXTURE_C := $(addprefix $(STAGE1)/,$(addsuffix .c,$(sort $(filter-out %.tracked,$(TEST_PROGRAMS)))))
+SEED_GRAPH_C := $(SOURCE_PROBE_C) $(SEED_UTILITY_C) $(NATIVE_FIXTURE_C) $(AST_PROBE).c $(STAGE1_FIXTURE_C)
 
 # Schedule independent manifests as Make prerequisites.
 GRAPH_LANGUAGE_CASES := \
@@ -236,9 +206,7 @@ test-stage-2-source: $(SOURCE_SCAN) $(STAGE1)/runtime.tracked.o $(NUMBERED_HEADE
 		tests/stage-2/source_trees.tsv tests/stage-2/source_metadata.tsv tests/stage-2/source_renderings.tsv \
 		tests/stage-2/source_decodings.tsv tests/stage-2/source_modules.tsv tests/stage-2/source_compilations.tsv \
 		tests/stage-2/source_callers.tsv \
-		stage-2/*.wove stage-2/source/*.wove stage-2/scalar/*.wove stage-2/emit/*.wove stage-2/llvm-libc/*.wove $(HASHING_SOURCES) $(BLAKE2B_SOURCE) \
-		$(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE) $(BOOLEAN_TEXT_MODULE) $(VALUE_TEXT_MODULES) $(DECIMAL_WRITER) stage-2/text/decimal_wide.wove stage-2/text/decimal_128.wove stage-2/text/decimal_256.wove $(CONFIG_SOURCES) $(COMMAND_SOURCES) $(JOB_BUDGET_MODULE) \
-		$(JSON_FRAME_MODULE) $(C_IDENTIFIER_MODULE) $(C_ARGUMENT_MODULE) $(CLANG_SOURCES) $(DIAGNOSTIC_SOURCES) $(HUMAN_DIAGNOSTIC) $(NATIVE_CLI_SOURCES) $(NATIVE_STDIO) $(PROCESS_MODULES) \
+		$(filter %.wove,$(COMPILER_INPUTS)) \
 		"$(SOURCE_PROBE_ROOT)" tests/stage-1/ownership.transfer.wove tests/stage-1/cfg.select.wove
 
 # Give each isolated graph manifest a Make target so checks can run side by side.
@@ -400,7 +368,7 @@ test-stage-2-object-jobs: $(STAGE2)/object-jobs
 	$(PYTHON) "$(NATIVE_CLI_FIXTURES)/check.py" --host "$<" "$(OBJECT_JOB_FIXTURES)/cases.tsv"
 
 $(STAGE2)/object-jobs: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
-$(STAGE2)/object-jobs: $(addprefix $(OBJECT_JOB_FIXTURES)/,main.wove tool.py scenarios.jsonc) $(OBJECT_JOB_SOURCES) $(NATIVE_COMPILER)
+$(STAGE2)/object-jobs: $(addprefix $(OBJECT_JOB_FIXTURES)/,main.wove tool.py scenarios.jsonc) $(NATIVE_COMPILER)
 	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
 
 # Exercise object compilation and linking from an already prepared private directory.
@@ -410,7 +378,7 @@ test-stage-2-staged-build: $(STAGE2)/staged-build
 	$(PYTHON) "$(STAGED_BUILD_FIXTURES)/check.py" "$<" "$(abspath $(BUILD_CLANG))" "$(STAGED_BUILD_FIXTURES)/cases.jsonc"
 
 $(STAGE2)/staged-build: export WOVE_BUILD_CLANG = $(CLANG) $(CFLAGS)
-$(STAGE2)/staged-build: $(STAGED_BUILD_FIXTURES)/main.wove $(NATIVE_DRIVER)/bin/staged.wove $(OBJECT_JOB_SOURCES) $(NATIVE_COMPILER)
+$(STAGE2)/staged-build: $(STAGED_BUILD_FIXTURES)/main.wove $(NATIVE_COMPILER)
 	CLANG="$(abspath $(BUILD_CLANG))" "$(NATIVE_COMPILER)" bin "$<" -o "$@"
 
 # Check generated C, archived JSON, and live tool invocation.
@@ -543,47 +511,31 @@ $(CONFIG_PROGRAM): $(CONFIG_FIXTURES)/project.probe.c $(CONFIG_PROGRAM).c $(STAG
 $(COMMAND_PROGRAM): $(CLI_FIXTURES)/command.probe.c $(COMMAND_PROGRAM).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
-# Bring only the JSON and byte helpers into the standalone probe fixture.
-$(AST_PROBE).c: $(AST_FIXTURES)/probe.wove $(CLANG_SOURCES) $(JSON_FRAME_MODULE) $(JSON_READER_SOURCES) $(VALUE_TEXT_MODULES) $(SEED)
-	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@"
+# Discover the standalone probe's imports with the Python seed.
+$(AST_PROBE).c: $(AST_FIXTURES)/probe.wove $(SEED)
+	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
 
 $(AST_PROBE): $(AST_FIXTURES)/probe.probe.c $(AST_PROBE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
+
+# Manifest-driven Stage 1 fixtures use the same successful-build sidecar rule.
+$(STAGE1_FIXTURE_C): $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
+	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
 	$(PYTHON) stage-1/wovec.py "$<" > "$@"
 
-# Keep required providers in the build graph even when a source file is missing.
-ROUND_TRIP_PROVIDERS := $(addprefix $(OWNERSHIP_TESTS)/imports/,left.wove right.wove nested/shared.wove)
-RUNTIME_LOCATION_PROVIDER := $(OWNERSHIP_TESTS)/array.load_negative.wove
-C_HEADER_IMPORT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,imports.c_headers.wove imports/c_headers/provider.wove)
+# The seed reports Wove imports. Keep the project C include inputs explicit.
 C_HEADER_PROJECT_HEADERS := $(addprefix $(OWNERSHIP_TESTS)/imports/c_headers/,project.h link lookup.h tree/lookup.h tree/leaf/value.h)
-MODULE_BINDINGS_PROVIDER := $(OWNERSHIP_TESTS)/modules/bindings.wove
-MODULE_IMPORTS_PROVIDER := $(OWNERSHIP_TESTS)/modules/import_values.wove
-MODULE_SELECT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,module.select.wove modules/bootstrap.wove \
-	modules/full.wove modules/testing.wove imports/nested/shared.wove)
-TYPE_IMPORT_SOURCES := $(addprefix $(OWNERSHIP_TESTS)/,types.round_trip.wove types/base.wove types/forward.wove)
-SOURCE_TREE_IMPORT := $(OWNERSHIP_TESTS)/types.source_tree.wove
-$(STAGE1)/imports.round_trip.c: $(ROUND_TRIP_PROVIDERS)
-$(STAGE1)/imports.host_declarations.c: $(OWNERSHIP_TESTS)/imports/nested/shared.wove
-$(STAGE1)/imports.c_headers.c: $(C_HEADER_IMPORT_SOURCES) $(C_HEADER_PROJECT_HEADERS)
-$(STAGE1)/imports.runtime_location.c: $(RUNTIME_LOCATION_PROVIDER)
-$(STAGE1)/module.select.c: $(MODULE_SELECT_SOURCES)
-$(STAGE1)/module.bindings.c: $(MODULE_BINDINGS_PROVIDER)
-$(STAGE1)/module.imports.c: $(MODULE_IMPORTS_PROVIDER)
-$(STAGE1)/types.round_trip.c: $(TYPE_IMPORT_SOURCES)
-$(STAGE1)/types.source_tree.c: $(SOURCE_TREE_IMPORT) $(SOURCE_SCAN_MODULE) $(UTF8_MODULE) $(QUOTED_TEXT_MODULE) $(HEX_TEXT_MODULE) $(CHARACTER_TEXT_MODULE) $(BYTE_MATCH_MODULE)
+$(STAGE1)/imports.c_headers.c: $(C_HEADER_PROJECT_HEADERS)
 
 # Force the compiler to report missing inputs that Make can skip under .SECONDARY.
 REQUIRED_BUILD_SOURCES := $(COMPILER_ROOT) $(SOURCE_PROBE_ROOT) \
-	$(TEST_RUNNER_ROOT) $(AST_FIXTURES)/live.wove $(BLAKE2B_FIXTURES)/probe.wove \
+	$(TEST_RUNNER_ROOT) $(AST_FIXTURES)/live.wove $(AST_FIXTURES)/probe.wove $(BLAKE2B_FIXTURES)/probe.wove \
 	$(patsubst $(STAGE2)/hashing/native/%,$(HASHING_FIXTURES)/%.wove,$(HASHING_NATIVE_PROGRAMS)) \
-	$(patsubst $(STAGE2)/%.c,tests/stage-2/%.wove,$(SEED_UTILITY_C)) $(JOB_BUDGET_MODULE) \
-	$(ROUND_TRIP_PROVIDERS) $(RUNTIME_LOCATION_PROVIDER) $(MODULE_SELECT_SOURCES) $(MODULE_BINDINGS_PROVIDER) \
-	$(MODULE_IMPORTS_PROVIDER) $(addprefix $(OWNERSHIP_TESTS)/,module.bindings.wove module.table_bounds.wove module.imports.wove) \
-	$(TYPE_IMPORT_SOURCES) $(SOURCE_TREE_IMPORT) $(C_HEADER_IMPORT_SOURCES) $(C_HEADER_PROJECT_HEADERS)
+	$(patsubst $(STAGE2)/%.c,tests/stage-2/%.wove,$(SEED_UTILITY_C)) \
+	$(patsubst $(STAGE1)/%.c,$(OWNERSHIP_TESTS)/%.wove,$(STAGE1_FIXTURE_C)) $(C_HEADER_PROJECT_HEADERS)
 .PHONY: $(filter-out $(wildcard $(REQUIRED_BUILD_SOURCES)),$(REQUIRED_BUILD_SOURCES))
 
 $(STAGE1)/runtime.o: $(RUNTIME) $(RUNTIME_HEADER)

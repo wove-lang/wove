@@ -103,11 +103,14 @@ save_products
 build all "$numbered"
 check_unchanged
 
-# A new file with an old timestamp relies on the source directory prerequisite.
-added=stage-2/incremental-input
+# A new nested module with an old timestamp must reach both tests and the staged tree.
+added=stage-2/incremental/nested/input.wove
 sleep 1
-cp "$asset" "$added"
+mkdir -p "$(dirname "$added")"
+cp stage-2/text/boolean.wove "$added"
 touch -t 200001010000 "$added"
+build -n test-stage-2-source > "$work/source-plan"
+sed -n '/check_streams[.]py/,$p' "$work/source-plan" | grep -Fq " $added "
 build "$snapshot/.ready"
 cmp "$added" "$snapshot/$added"
 
