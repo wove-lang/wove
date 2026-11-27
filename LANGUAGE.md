@@ -436,7 +436,7 @@ defining function have no effect.
 
 (fn apply (params (f (fn-type (params i32) (returns i32))) (value i32))
     (returns i32)
-    (body (return (call-value f value))))
+    (body (return (call f value))))
 
 (fn example (params) (returns i32)
     (body (return (call apply (fn-ref increment) 41i32))))
@@ -445,10 +445,20 @@ defining function have no effect.
 `(fn-ref name)` takes a concrete Wove function visible in the current
 module, including a selected import. Function values are copyable. Bind
 one with `let` or `let-mut`, or pass it to another Wove function with the
-same signature. Use `(call name args...)` for a named function and
-`(call-value f args...)` for a callable binding. A value call reads the target once, then
-evaluates each argument once from left to right. A callable with a
-`void` result uses the standalone call statement.
+same signature.
+
+In `(call f args...)`, Wove checks the innermost binding first, then outer
+bindings and parameters, then module bindings and selected value imports.
+A callable binding supplies its exact signature. A non-callable binding
+is an error at `f`, even when a function has that name. If there is no
+visible binding, Wove looks for a named function. A local comes into
+scope after its initializer, and `(fn-ref name)` selects the named
+function explicitly. The explicit `(call (specialize name ...) args...)`
+form selects a checked generic function instance.
+
+A callable binding is read once before the arguments, which are then
+evaluated once from left to right. A call with a `void` result uses the
+standalone call statement.
 
 Stage 2 supports built-in scalar parameters and scalar or `void`
 results in these signatures.

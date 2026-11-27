@@ -1104,7 +1104,7 @@
 
 	(fn plan_local
 		(:doc `Resolve a read to a checked binding and retain its defining name or parameter row.`)
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+		(params (for_call bool) (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
 			(expected u32) (index i32) (caller ScalarFunction) (statement i32)
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
 			(expressions (mut-array ScalarExpression)))
@@ -1147,6 +1147,10 @@
 				(then
 					(let declaration (array.load statements binding))
 					(let actual (struct.get declaration type))
+					(if
+						(:doc "A non-callable binding shadows a function even if the binding was moved.")
+						(bool.and for_call (bool.not (call is_callable_type actual)))
+						(then (return (call entry_at name -1i32 24u32))))
 					(let worker (call is_worker_owner actual))
 					(let-mut transfer (struct.get declaration move_site))
 					(if
@@ -1272,9 +1276,11 @@
 								(call expression_row 1u32 5u32 normalized_i32_literal -1i32 value 0i32 (bool false)))
 							(return (call entry_at node index 0u32))))
 					(if
-						(:doc "A compile-time operation can be called or forwarded but supplies no runtime value.")
+						(:doc "Without a lexical shadow, a substituted operation can only be called or forwarded.")
 						(u8.eq (struct.get name generic_kind) checked_operation_operand)
-						(then (return (call entry_at name -1i32 24u32))))
+						(then
+							(if for_call (then (return (call entry_at name -1i32 34u32))))
+							(return (call entry_at name -1i32 24u32))))
 					(let root (array.load statements (struct.get caller tree_base)))
 					(let module_binding (call find_module_binding (borrow-shared source) (borrow-shared nodes)
 						(borrow-shared statements) (struct.get root first) name))
@@ -1495,7 +1501,7 @@
 		(body
 			(let form (call check_binding_name (borrow-shared source) reference))
 			(if (u32.gtz (struct.get form error)) (then (return form)))
-			(return (call plan_local (borrow-shared source) (borrow-shared nodes)
+			(return (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes)
 				reference 57u32 index caller statement
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))))
 
@@ -1891,26 +1897,14 @@
 			(return (call entry_at node index 0u32))))
 
 	(fn plan_indirect_call
-		(:doc "Resolve the callable local before checking arguments in signature order.")
+		(:doc "Check a resolved callable binding and its arguments in signature order.")
 		(:expect (tests "stage-2/cli/native/function_values/cases.tsv") (issues "gh:wove-lang/wove:475"))
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(caller ScalarFunction) (index i32) (operand i32) (expected u32) (statement i32)
-			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
-			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+			(index i32) (operand i32) (expected u32) (records (shared-array ScalarRecord))
+			(expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
-			(if
-				(:doc "A value call requires a written callable binding.")
-				(i32.ltz operand)
-				(then (return (call entry_at node -1i32 34u32))))
 			(let target (array.load nodes operand))
-			(let form (call check_binding_name (borrow-shared source) target))
-			(if (u32.gtz (struct.get form error)) (then (return form)))
-			(let checked (call plan_local (borrow-shared source) (borrow-shared nodes)
-				target 42u32 operand caller statement
-				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements)
-				(borrow-mut expressions)))
-			(if (u32.gtz (struct.get checked error)) (then (return checked)))
 			(let type (struct.get (array.load expressions operand) type))
 			(if (bool.not (call is_callable_type type)) (then (return (call entry_at target -1i32 24u32))))
 			(let shape (call callable_layout_shape (array.load records (call callable_index type))))
@@ -1975,7 +1969,7 @@
 			(return (call entry_at argument index 0u32))))
 
 	(fn plan_call
-		(:doc `Resolve a direct call and seed each argument from its formal type.
+		(:doc `Resolve the callee and seed each argument from its formal type.
 
 		The verified call row is keyed by the original call node and refers to
 		the defining function row. Its operands retain their original links.`)
@@ -1991,27 +1985,47 @@
 				(i32.ltz operand)
 				(then (return (call entry_at node -1i32 34u32))))
 			(let name (array.load nodes operand))
+			(let bare (call is_scalar_name (borrow-shared source) name))
 			(let worker (call is_worker_launch kind))
 			(if
 				(:doc "A worker launch accepts a named Wove handler.")
-				(bool.and worker (bool.not (call is_scalar_name (borrow-shared source) name)))
+				(bool.and worker (bool.not bare))
 				(then (return (call entry_at name -1i32 34u32))))
-			(let-mut target -1i32)
 			(let annotation (struct.get name generic_kind))
 			(let operation (u8.eq annotation checked_operation_operand))
+			(let specialization (u8.eq annotation checked_function_operand))
 			(if
 				(:doc "An operation substitution is legal as an ordinary direct call target.")
 				(bool.and operation worker)
 				(then (return (call entry_at name -1i32 24u32))))
 			(if
-				(:doc "A specialized call or substituted operation names its already registered defining declaration.")
-				(bool.or operation (u8.eq annotation checked_function_operand))
+				(:doc "An ordinary bare target checks value bindings, including lexical shadows of generic operations.")
+				(bool.and bare (bool.not (bool.or worker specialization)))
+				(then
+					(let resolved (call plan_local (bool true) (borrow-shared source) (borrow-shared nodes)
+						name 42u32 operand caller statement
+						(borrow-shared parameters) (borrow-shared records)
+						(borrow-shared statements) (borrow-mut expressions)))
+					(let error (struct.get resolved error))
+					(if
+						(:doc "Capture the resolved callable before visiting any argument.")
+						(u32.eqz error)
+						(then (return (call plan_indirect_call (borrow-shared source) (borrow-shared nodes)
+							node index operand expected (borrow-shared records) (borrow-mut expressions)))))
+					(if
+						(:doc "Only an absent value permits checking the operation or function namespace.")
+						(u32.not-eq error 34u32)
+						(then (return resolved)))))
+			(let-mut target -1i32)
+			(if
+				(:doc "A specialized call or unshadowed operation names its already registered declaration.")
+				(bool.or operation specialization)
 				(then (set target (call find_function_instance (borrow-shared functions)
 					(i32.from-u32 (struct.get name generic_value)))))
 				(else
 					(if
-						(:doc "An ordinary call target begins with a bare function binding.")
-						(bool.not (call is_scalar_name (borrow-shared source) name))
+						(:doc "An ordinary direct call needs a bare name.")
+						(bool.not bare)
 						(then (return (call entry_at name -1i32 34u32))))
 					(set target (call resolve_call_target (borrow-shared source) (borrow-shared nodes)
 						(borrow-shared functions) (borrow-shared bindings) caller name))))
@@ -2424,7 +2438,7 @@
 				(then
 					(set lookup 55u32)
 					(if infer_mut (then (set lookup 56u32)))))
-			(let checked (call plan_local (borrow-shared source) (borrow-shared nodes)
+			(let checked (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes)
 				reference lookup index caller statement
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
 			(if
@@ -2664,7 +2678,7 @@
 			(if (u32.gtz (struct.get named error)) (then (return named)))
 			(let-mut access 57u32)
 			(if consume (then (set access c_handle_reference)))
-			(let checked (call plan_local (borrow-shared source) (borrow-shared nodes) reference access reference_index caller statement
+			(let checked (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes) reference access reference_index caller statement
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
 			(if
 				(:doc "Report the complete use span and preserve the prior transfer as related context.")
@@ -2715,7 +2729,7 @@
 				(:doc "A handle loan needs a named owner or library-owned pointer.")
 				(u32.gtz (struct.get named error))
 				(then (return named)))
-			(let checked (call plan_local (borrow-shared source) (borrow-shared nodes) reference c_handle_reference reference_index caller statement
+			(let checked (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes) reference c_handle_reference reference_index caller statement
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
 			(if
 				(:doc "A transfer remains related context for a borrow of a moved owner.")
@@ -2863,7 +2877,7 @@
 				(:doc "A record name can also resolve through an existing reference parameter.")
 				(call is_record_type lookup)
 				(then (set lookup 53u32)))
-			(let checked (call plan_local (borrow-shared source) (borrow-shared nodes) reference lookup
+			(let checked (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes) reference lookup
 				reference_index caller statement
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
 			(if
@@ -3900,7 +3914,7 @@
 				(then
 					(let form (call check_binding_name (borrow-shared source) site))
 					(if (u32.gtz (struct.get form error)) (then (return form)))
-					(return (call plan_local (borrow-shared source) (borrow-shared nodes)
+					(return (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes)
 						site 57u32 receiver caller statement
 						(borrow-shared parameters) (borrow-shared records)
 						(borrow-shared statements) (borrow-mut expressions)))))
@@ -4130,7 +4144,7 @@
 			(let reference (array.load nodes owner))
 			(let local_form (call check_binding_name (borrow-shared source) reference))
 			(if (u32.gtz (struct.get local_form error)) (then (return local_form)))
-			(let resolved (call plan_local (borrow-shared source) (borrow-shared nodes) reference c_handle_reference owner
+			(let resolved (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes) reference c_handle_reference owner
 				caller statement (borrow-shared parameters) (borrow-shared records)
 				(borrow-shared statements) (borrow-mut expressions)))
 			(if (u32.gtz (struct.get resolved error)) (then (return (call at_owner_use resolved borrow))))
@@ -4239,7 +4253,7 @@
 				(:doc "A local reference resolves among the caller's bindings visible at this statement.")
 				(call is_scalar_name (borrow-shared source) node)
 				(then
-					(let checked (call plan_local (borrow-shared source) (borrow-shared nodes)
+					(let checked (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes)
 						node expected index caller statement
 						(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
 					(let row (array.load expressions index))
@@ -4283,17 +4297,6 @@
 				(then (return (call plan_view_option (borrow-shared source) (borrow-shared nodes)
 					node index expected tag caller statement view_start
 					(borrow-shared parameters) (borrow-shared statements) (borrow-mut expressions)))))
-			(if
-				(:doc "The explicit value-call operator evaluates the checked callable binding before its arguments.")
-				(u32.eq tag indirect_call_kind)
-				(then
-					(let form (call entry_form (borrow-shared source) (borrow-shared nodes)
-						node indirect_call_kind 24u32))
-					(if (u32.gtz (struct.get form error)) (then (return form)))
-					(return (call plan_indirect_call (borrow-shared source) (borrow-shared nodes)
-						node caller index (struct.get form operand) expected statement
-						(borrow-shared parameters) (borrow-shared records)
-						(borrow-shared statements) (borrow-mut expressions)))))
 			(if
 				(:doc "A function reference yields the checked defining function's address.")
 				(u32.eq tag fn_ref_kind)
@@ -4507,7 +4510,7 @@
 					node operand index tag expected caller view_start
 					(borrow-shared records) (borrow-shared bindings) (borrow-mut expressions)))))
 			(if
-				(:doc "A call resolves in the selected function table.")
+				(:doc "Resolve an ordinary callee by scope or select a named worker handler.")
 				(bool.or worker (u32.eq tag 9u32))
 				(then
 					(let-mut kind 3u32)
@@ -4738,7 +4741,7 @@
 				(u32.gtz (struct.get local_form error))
 				(then (return (call body_error caller (struct.get local_form start) (struct.get local_form end)
 					(struct.get local_form error)))))
-			(let checked (call plan_local (borrow-shared source) (borrow-shared nodes)
+			(let checked (call plan_local (bool false) (borrow-shared source) (borrow-shared nodes)
 				reference 57u32 capture caller statement
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-mut expressions)))
 			(if

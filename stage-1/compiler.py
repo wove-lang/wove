@@ -406,23 +406,24 @@ class FunctionEmitter:
 		self.emit_line(f"{c_type(kind)} {name} = {expression};")
 		return Value(kind, name)
 
-	# Resolve the nearest live binding at the written operand.
-	def binding(self, node: Node) -> Binding:
-		symbol = identifier(node)
+	# Find the first visible declaration without checking its use.
+	def find_binding(self, symbol: str) -> Binding | None:
 		# The nearest declaration shadows any outer binding with the same name.
 		for scope in reversed(self.scopes):
 			binding = scope.get(symbol)
-			# Stop at the first declaration so a moved shadow still hides the outer name.
+			# A moved binding still shadows an outer declaration.
 			if binding is not None:
-				# A move on any incoming path makes this place unavailable.
-				if binding in self.moved:
-					raise SourceError(node.line)
 				return binding
 		declaration = self.values.get(symbol)
-		# A lexical lookup can fall back to a defining or selected module binding.
-		if declaration is not None:
-			return declaration.binding
-		raise SourceError(node.line)
+		return declaration.binding if declaration is not None else None
+
+	# Resolve the nearest live binding at the written operand.
+	def binding(self, node: Node) -> Binding:
+		binding = self.find_binding(identifier(node))
+		# A move on any incoming path makes this place unavailable.
+		if binding is None or binding in self.moved:
+			raise SourceError(node.line)
+		return binding
 
 	# Require the exact result type at the operation that consumes it.
 	def typed(self, node: Node, kind: Type) -> Value:
@@ -528,6 +529,9 @@ class FunctionEmitter:
 			raise SourceError(node.line)
 		name, *args = node.operands
 		symbol = identifier(name)
+		# A value shadows a function. The seed only supports named calls.
+		if self.find_binding(symbol) is not None:
+			raise SourceError(name.line)
 		callee = self.functions.get(symbol)
 		# The fixed host calls apply only when ordinary Wove lookup has no binding.
 		if callee is None:
