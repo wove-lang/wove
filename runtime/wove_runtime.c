@@ -2286,6 +2286,34 @@ int32_t wvrt_popcnt128(wvrt_u128 value) {
 }
 #endif
 
+#ifdef WVRT_HAS_INT256
+// Count full zero limbs from the high end, then count within the first nonzero limb.
+int32_t wvrt_clz256(wvrt_u256 value) {
+	// A zero word reaches the full width without shifting by 256.
+	for (int32_t shift = 192; shift >= 0; shift -= 64) {
+		const uint64_t limb = (uint64_t)(value >> shift);
+		if (limb != 0) { return 192 - shift + wvrt_clz(limb, 64); }
+	}
+	return 256;
+}
+
+// Count full zero limbs from the low end, then count within the first nonzero limb.
+int32_t wvrt_ctz256(wvrt_u256 value) {
+	// Each shift is the starting bit index of a real limb.
+	for (int32_t shift = 0; shift < 256; shift += 64) {
+		const uint64_t limb = (uint64_t)(value >> shift);
+		if (limb != 0) { return shift + wvrt_ctz(limb, 64); }
+	}
+	return 256;
+}
+
+// Sum the population of every 64-bit limb of the unsigned representation.
+int32_t wvrt_popcnt256(wvrt_u256 value) {
+	return wvrt_popcnt((uint64_t)value, 64) + wvrt_popcnt((uint64_t)(value >> 64), 64)
+		+ wvrt_popcnt((uint64_t)(value >> 128), 64) + wvrt_popcnt((uint64_t)(value >> 192), 64);
+}
+#endif
+
 // Interpret already masked bits using only representable signed casts.
 static int64_t wvrt_signed_word(uint64_t bits, uint64_t mask) {
 	if (bits <= (mask >> 1)) { return (int64_t)bits; }
@@ -2394,6 +2422,41 @@ wvrt_u128 wvrt_u128_rotate_at_span(wvrt_u128 wvrtvalue, int32_t wvrtcount, bool 
 wvrt_i128 wvrt_i128_rotate_at_span(wvrt_i128 wvrtvalue, int32_t wvrtcount, bool wvrtright,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	return wvrt_i128_from_wrapped_bits(wvrt_u128_rotate_at_span((wvrt_u128)wvrtvalue,
+		wvrtcount, wvrtright, wvrtfile, wvrtstart, wvrtend));
+}
+#endif
+
+#ifdef WVRT_HAS_INT256
+// Check the count before shifting the full unsigned representation.
+wvrt_u256 wvrt_u256_shift_at_span(wvrt_u256 wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrtcount = wvrt_shift_count_at_span(wvrtcount, 256, wvrtfile, wvrtstart, wvrtend);
+	return wvrtright ? wvrtvalue >> wvrtcount : wvrtvalue << wvrtcount;
+}
+
+// Shift in the unsigned domain and restore sign extension on a negative right shift.
+wvrt_i256 wvrt_i256_shift_at_span(wvrt_i256 wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrtcount = wvrt_shift_count_at_span(wvrtcount, 256, wvrtfile, wvrtstart, wvrtend);
+	const wvrt_u256 bits = (wvrt_u256)wvrtvalue;
+	if (!wvrtright) { return wvrt_i256_from_wrapped_bits(bits << wvrtcount); }
+	if (wvrtvalue < 0) { return wvrt_i256_from_wrapped_bits(~(~bits >> wvrtcount)); }
+	return (wvrt_i256)(bits >> wvrtcount);
+}
+
+// Rotate an unsigned 256-bit pattern with both component shifts below the width.
+wvrt_u256 wvrt_u256_rotate_at_span(wvrt_u256 wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_rotate_count(wvrtcount, 256, wvrtfile, wvrtstart, wvrtend);
+	if (wvrtcount == 0) { return wvrtvalue; }
+	const int32_t right = wvrtright ? wvrtcount : 256 - wvrtcount;
+	return (wvrtvalue >> right) | (wvrtvalue << (256 - right));
+}
+
+// Interpret the rotated pattern as the exact signed word.
+wvrt_i256 wvrt_i256_rotate_at_span(wvrt_i256 wvrtvalue, int32_t wvrtcount, bool wvrtright,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	return wvrt_i256_from_wrapped_bits(wvrt_u256_rotate_at_span((wvrt_u256)wvrtvalue,
 		wvrtcount, wvrtright, wvrtfile, wvrtstart, wvrtend));
 }
 #endif
