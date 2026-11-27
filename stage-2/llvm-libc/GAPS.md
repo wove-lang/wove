@@ -367,11 +367,13 @@ dependency. The Linux checks stop at link validation. [Debian glibc packages](ht
 
 ## Bundled floating-point limits
 
-Both drivers bundle `float.h.wove`. Apple Clang 21 selected its resource
-`float.h` and its two helper headers for the macOS SDK 27.2 and Debian glibc
-2.41 profiles on arm64 and x86-64. The audit found 40 macros in C11 and C17
-and 45 in C23. The default features and the Wove driver's feature defines
-exposed the same members in each mode. [LLVM libc float.h checklist](https://libc.llvm.org/headers/float.html)
+Both drivers bundle `float.h.wove`. Apple Clang 21.0.0
+(`clang-2100.4.1.1`) and Homebrew Clang 22.1.8 used their own resource
+`float.h` for the macOS SDK 27.2 and Debian glibc 2.41 profiles on arm64 and
+x86-64. Both expose 40 macros in C11 and C17. In C23, the Clang 21 resource
+header exposes 45 and the Clang 22 resource header exposes 48. The default
+features and the Wove driver's feature defines exposed the same members in
+each profile. [LLVM libc float.h checklist](https://libc.llvm.org/headers/float.html)
 
 The integer fixture builds with `--cflag=-ffp-model=strict` for its runtime
 rounding checks. `FLT_EVAL_METHOD` follows Clang's evaluation method, which
@@ -391,7 +393,8 @@ can still see an explicitly selected earlier header. [Private intrinsic types #5
 | `FLT_EPSILON`, `FLT_MAX`, `FLT_MIN`, `FLT_TRUE_MIN`, `DBL_EPSILON`, `DBL_MAX`, `DBL_MIN`, `DBL_TRUE_MIN` | The expression checks enforce exact C `float` or `double` types. The fixture compares all eight values against the header, including the smallest positive subnormals. |
 | `LDBL_EPSILON`, `LDBL_MAX`, `LDBL_MIN`, `LDBL_TRUE_MIN` | The installed fixture passes all four exact values through `fabsl` and compares the results with the native header. The audited type has 53 significand bits and occupies 8 bytes on Darwin arm64, 64 bits and 16 bytes on both x86-64 targets, and 113 bits and 16 bytes on glibc arm64. [Native long double #571](https://github.com/wove-lang/wove/issues/571) |
 | `FLT_NORM_MAX`, `DBL_NORM_MAX`, `LDBL_NORM_MAX`, `INFINITY`, and `NAN` | The audited Clang 21 profiles expose all five read-only bindings in C23. Float-only imports in C11 and C17 report unavailable macros at the original names. The fixtures verify all three normalized maxima, positive infinity, and a quiet NaN. [Optional expressions #572](https://github.com/wove-lang/wove/issues/572) |
-| `FLT_IS_IEC_60559`, `DBL_IS_IEC_60559`, `LDBL_IS_IEC_60559`, `FLT_SNAN`, `DBL_SNAN`, `LDBL_SNAN`, `__STDC_VERSION_FLOAT_H__`, and decimal floating-point limit macros | Unavailable in the audited headers and feature profiles. |
+| `FLT_SNAN`, `DBL_SNAN`, `LDBL_SNAN` | The Clang 22 resource header exposes the three exact signaling NaN expressions in C23. The fixtures compare their representations with the native macros and exclude the six x86-64 extended-format padding bytes. The Clang 21 profiles and Clang 22 C11/C17 profiles report unavailable imports at their original names. |
+| `FLT_IS_IEC_60559`, `DBL_IS_IEC_60559`, `LDBL_IS_IEC_60559`, `__STDC_VERSION_FLOAT_H__`, and decimal floating-point limit macros | Unavailable in the audited headers and feature profiles. |
 
 ## Bundled math coverage
 
