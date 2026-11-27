@@ -5,10 +5,10 @@
 
 import os
 from pathlib import Path
-import platform
+import subprocess
 import sys
 
-from emit import emit_native, native_target
+from emit import emit_native
 from syntax import Form, parse
 
 
@@ -52,19 +52,34 @@ def compiler_inputs():
 	return sources, assets
 
 
-# Forward the fixed compiler entry and the build host target to Wove.
+# Read the same target and deployment that Clang will use on the emitted C.
+def compiler_target():
+	environment = dict(os.environ)
+	environment.setdefault("WOVE_BUILD_CLANG", "clang -std=c11")
+	defines = subprocess.check_output(
+		[ROOT / "tools/run-build-clang.sh", "-Qunused-arguments", "-dM", "-E", "-x", "c", "-"],
+		input=b"", env=environment,
+	)
+	macros = {}
+	# Clang also reports macros with an empty replacement list.
+	for line in defines.decode().splitlines():
+		name, _, value = line.removeprefix("#define ").partition(" ")
+		macros[name] = value
+	os_name = "macos" if "__APPLE__" in macros else "linux"
+	arch = "aarch64" if "__aarch64__" in macros else "x86_64"
+	deployment = macros.get("__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__", "-")
+	# Older macOS deployments encode the minor and patch components as one digit each.
+	if deployment != "-" and (version := int(deployment)) < 100000:
+		deployment = str((version // 100) * 10000 + (version // 10 % 10) * 100 + version % 10)
+	return os_name, arch, deployment
+
+
+# Forward the fixed compiler entry, assets and target to the shared emitter.
 def main():
 	build = ROOT / os.environ.get("WOVE_BUILD_DIR", "build")
 	paths, assets = compiler_inputs()
-	os_name, arch, deployment = native_target()
-	# Preserve the configured macOS deployment for the native driver source.
-	if os_name == "macos":
-		version = os.environ.get("MACOSX_DEPLOYMENT_TARGET") or platform.mac_ver()[0]
-		if version:
-			parts = map(int, version.split("."))
-			deployment = str(sum(part * weight for part, weight in zip(parts, (10000, 100, 1))))
 	return emit_native(build / "stage-2/source_scan", None, build / "version.txt", paths, assets,
-		root=ROOT, target=(os_name, arch, deployment))
+		root=ROOT, target=compiler_target())
 
 
 # Print the generated unit for the ordinary build rule to publish.
