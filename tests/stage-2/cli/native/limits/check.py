@@ -31,25 +31,42 @@ def macro_names(clang, standard, flags):
 		if len(fields := line.split(None, 2)) == 3 and fields[0] == b"#define"}
 
 
-# Pair each selected Wove value with a typed expression that reads the same native macro.
-def stage_probe(project, template, members):
-	oracle = ["#include <limits.h>", "#include <stdint.h>", ""]
-	declarations = []
-	oracles = []
-	checks = []
-	# Reserve result codes 64 and above to identify which comparison failed.
-	for status, (name, kind) in enumerate(members, 64):
-		oracle_name = "wove_oracle_" + name
-		oracles.append(f"(value {oracle_name})")
-		declarations.append(f"(let {oracle_name} (:pragma (c_macro)) {kind})")
-		oracle.append(f"#define {oracle_name} (({C_TYPES[kind]})({name}))")
-		checks.append(f"(if ({kind}.not-eq {name} {oracle_name}) (then (return {status}i32)))")
-	(project / "oracle.h").write_text("\n".join(oracle) + "\n")
-	source = (template.replace("LIMIT_SELECTORS", "\n\t\t".join(f"(value {name})" for name, _ in members))
-		.replace("ORACLE_SELECTORS", "\n\t\t".join(oracles))
-		.replace("ORACLE_DECLARATIONS", "\n\t\t".join(declarations))
-		.replace("LIMIT_CHECKS", "\n\t\t\t".join(checks)))
-	(project / "main.wove").write_text(source)
+# Repeat each templated line once per native declaration in manifest order.
+def stage_probe(project, templates, members):
+	fields = re.compile(r"LIMIT_[A-Z_]+")
+	rows = [{"LIMIT_MEMBER": name, "LIMIT_ORACLE": "wove_oracle_" + name,
+		"LIMIT_TYPE": kind, "LIMIT_C_TYPE": C_TYPES[kind], "LIMIT_STATUS": str(status)}
+		for status, (name, kind) in enumerate(members, 64)]
+	# The Wove and C templates share row names and leave all other lines intact.
+	for target, template in templates:
+		source = []
+		# Expand only the lines marked with a per-member field.
+		for line in template.splitlines(keepends=True):
+			if fields.search(line):
+				source.extend(fields.sub(lambda match: row[match[0]], line) for row in rows)
+			else:
+				source.append(line)
+		(project / target).write_text("".join(source))
+
+
+# Read native member and diagnostic cases from tab-separated fixture data.
+def manifest_rows(path):
+	return (line.split("\t") for line in path.read_text().splitlines()
+		if line and not line.startswith("#"))
+
+
+# Apply diagnostics only in the native profiles where the named member is absent.
+def check_unavailable(compiler, project, env, native_names, cases):
+	# Fixtures keep the operand and source span independent of the test runner.
+	for macro, path, argv, status, expected in cases:
+		if macro in native_names:
+			continue
+		shutil.copy2(path, project / path.name)
+		result = subprocess.run([compiler, *argv], cwd=project, env=env,
+			capture_output=True, timeout=30)
+		assert result.returncode == status, (project.name, path.name, result)
+		assert [json.loads(line) for line in result.stderr.splitlines()] == expected, (
+			project.name, path.name, result.stderr)
 
 
 # Check the linked fixture's value comparisons without running its executable.
@@ -71,8 +88,8 @@ def assert_constant_result(clang, runtime, project, standard, flags, selected):
 	assert status == 42, (project.name, status)
 
 
-# Verify live bindings and one absent C23 selector when the frontend hides it.
-def check_profile(compiler, clang, runtime, project, template, members, standard, flags):
+# Verify live bindings and the applicable missing-declaration fixtures.
+def check_profile(compiler, clang, runtime, project, templates, members, cases, standard, flags):
 	project.mkdir()
 	native_names = macro_names(clang, standard, flags)
 	required = {name for name, _, availability in members if availability == "required"}
@@ -81,7 +98,7 @@ def check_profile(compiler, clang, runtime, project, template, members, standard
 	config = {"profiles": [{"name": "default", "cc": {"cstd": standard},
 		"build": {"default": {"cflags": [*flags, "-I.", "-Wall", "-Wextra", "-Wpedantic", "-Werror"]}}}]}
 	(project / "wovec.jsonc").write_text(json.dumps(config))
-	stage_probe(project, template, selected)
+	stage_probe(project, templates, selected)
 
 	env = {**os.environ, "CLANG": clang}
 	built = subprocess.run([compiler, "bin", "main.wove", "-o", "out"],
@@ -89,17 +106,7 @@ def check_profile(compiler, clang, runtime, project, template, members, standard
 	assert built.returncode == 0, (project.name, built.stderr)
 	# Every typed comparison against the C oracle must fold to success.
 	assert_constant_result(clang, runtime, project, standard, flags, selected)
-	# An absent optional macro must report the original import name.
-	if "BITINT_MAXWIDTH" not in native_names:
-		source = '(module absent (use c-header "<limits.h>" (only (value BITINT_MAXWIDTH))))\n'
-		(project / "absent.wove").write_text(source)
-		absent = subprocess.run([compiler, "cc", "--check", "absent.wove"],
-			cwd=project, env=env, capture_output=True, timeout=30)
-		start = source.index("BITINT_MAXWIDTH")
-		expected = {"code": 76, "message": "optional C integer macro is unavailable",
-			"location": {"kind": "source", "file": "absent.wove", "start": start, "end": start + len("BITINT_MAXWIDTH")}}
-		assert absent.returncode == 1, (project.name, absent)
-		assert [json.loads(line) for line in absent.stderr.splitlines()] == [expected], (project.name, absent.stderr)
+	check_unavailable(compiler, project, env, native_names, cases)
 	return {name for name, _ in selected}
 
 
@@ -108,11 +115,12 @@ def main():
 	fixtures = Path(__file__).resolve().parent
 	compiler, runtime = (Path(value).resolve() for value in sys.argv[1:])
 	clang = os.environ.get("CLANG", "clang")
-	template = (fixtures / "probe.wove").read_text()
-	rows = (line.split("	") for line in (fixtures / "members.tsv").read_text().splitlines()
-		if line and not line.startswith("#"))
-	members = [(name, kind, availability) for name, kind, availability in rows
+	templates = [("main.wove", (fixtures / "probe.wove").read_text()),
+		("oracle.h", (fixtures / "oracle.h").read_text())]
+	members = [(name, kind, availability) for name, kind, availability in manifest_rows(fixtures / "members.tsv")
 		if availability != "darwin" or sys.platform == "darwin"]
+	cases = [(macro, fixtures / source, json.loads(argv), int(status), json.loads(expected))
+		for macro, source, argv, status, expected in manifest_rows(fixtures / "unavailable.tsv")]
 	covered = set()
 	# The provider is embedded in the relocated executable.
 	with TemporaryDirectory(prefix="wove-limits-") as directory:
@@ -124,7 +132,7 @@ def main():
 			# The unsigned-char profile checks that CHAR_MIN comes from the current header.
 			for profile, flags in PROFILES.items():
 				covered.update(check_profile(installed, clang, runtime, stage / f"{standard}-{profile}",
-					template, members, standard, (*CLEAR_FEATURES, *flags)))
+					templates, members, cases, standard, (*CLEAR_FEATURES, *flags)))
 	print(f"limits.h: {len(covered)} live members checked across 12 host profiles")
 
 
