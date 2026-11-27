@@ -3,7 +3,8 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc "Admit only declaration and macro forms that are safe to replay across C units.")
 
-	(use wove-file "./fields.wove" (only clang_field clang_inner (value clang_kind_key)))
+	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_kind_key)))
+	(use wove-file "./lvalue_replay.wove" (only mark_lvalue_getters proved_lvalue_macro))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte))
 	(use wove-file "../json/reader.wove" (only json_parse (type JsonNode)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -77,16 +78,6 @@
 				(body (set index (i32.inc index))))
 			(return index)))
 
-	(fn field_equals
-		(:doc "Compare Clang's simple ASCII JSON enum strings including their delimiters.")
-		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (value (shared-array u8)))
-		(returns bool)
-		(body
-			(if (i32.ltz row) (then (return (bool false))))
-			(let item (array.load nodes row))
-			(return (call same_bytes (borrow-shared source) (struct.get item start) (struct.get item end)
-				(borrow-shared value) 0i32 (array.len value)))))
-
 	(fn external_object
 		(:doc "A plain extern declaration owns no storage, initializer, TLS, or attributes in this unit.")
 		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)))
@@ -138,9 +129,9 @@
 			(return (bool false))))
 
 	(fn harmless_define
-		(:doc "Permit inert definitions and audited single-identifier object aliases.")
+		(:doc "Permit inert definitions and the selected native operands verified by Clang.")
 		(params (source (shared-array u8)) (start i32) (end i32)
-			(ast (shared-array u8)) (nodes (shared-array JsonNode))) (returns bool)
+			(ast (shared-array u8)) (nodes (shared-array JsonNode)) (borrowed bool) (writable bool)) (returns bool)
 		(body
 			(let word (call skip_horizontal (borrow-shared source) (i32.inc start) end))
 			(let width (array.len define_word))
@@ -160,7 +151,8 @@
 				(:doc "Scan the name without accepting a function-like parameter list.")
 				(bool.and (i32.lt index end) (call is_c_identifier_byte (array.load source index)))
 				(body (set index (i32.inc index))))
-			(let value (call skip_horizontal (borrow-shared source) index end))
+			(let macro_end index)
+			(let value (call skip_horizontal (borrow-shared source) macro_end end))
 			(if (i32.eq value end) (then (return (bool true))))
 			(if (i32.eq value index) (then (return (bool false))))
 			(set index value)
@@ -171,8 +163,13 @@
 					(let token_end (call integer_token_end (borrow-shared source) value end))
 					(return (i32.eq (call skip_horizontal (borrow-shared source) token_end end) end))))
 			(if
+				(:doc "A selected object-like lvalue may expand to a proved external getter.")
+				(bool.and writable (call proved_lvalue_macro (borrow-shared ast) (borrow-shared nodes)
+					(borrow-shared (array.range source first macro_end))))
+				(then (return (bool true))))
+			(if
 				(:doc "Only borrowed-object replay can admit an identifier replacement.")
-				(bool.or (i32.eqz (array.len nodes)) (bool.not (call is_c_identifier_start (array.load source value))))
+				(bool.or (bool.not borrowed) (bool.not (call is_c_identifier_start (array.load source value))))
 				(then (return (bool false))))
 			(while
 				(:doc "A direct alias names one C object without invoking or composing another expression.")
@@ -185,7 +182,7 @@
 	(fn replay_directives_safe
 		(:doc "Check added directives, with external alias resolution only when the caller supplies a checked AST.")
 		(params (source (shared-array u8)) (start i32)
-			(ast (shared-array u8)) (nodes (shared-array JsonNode))) (returns bool)
+			(ast (shared-array u8)) (nodes (shared-array JsonNode)) (borrowed bool) (writable bool)) (returns bool)
 		(body
 			(let length (array.len source))
 			(let-mut index start)
@@ -206,7 +203,7 @@
 							(if
 								(:doc "A directive that can change the generated context requires serial emission.")
 								(bool.not (call harmless_define (borrow-shared source) first end
-								(borrow-shared ast) (borrow-shared nodes)))
+								(borrow-shared ast) (borrow-shared nodes) borrowed writable))
 								(then (return (bool false))))))
 					(set index end)
 					(if (i32.lt index length) (then (set index (i32.inc index))))))
@@ -254,14 +251,20 @@
 
 	(fn replay_declarations_safe
 		(:doc "Validate the complete AST and check only the direct declarations of its translation unit.")
-		(params (source (shared-array u8)) (nodes (mut-array JsonNode)) (borrowed bool)) (returns bool)
+		(params (source (shared-array u8)) (nodes (mut-array JsonNode)) (borrowed bool) (writable bool)) (returns bool)
 		(body
 			(let result (call json_parse (borrow-shared source) (borrow-mut nodes)))
 			(if (u32.not-eqz (struct.get result error)) (then (return (bool false))))
-			(let-mut scratch (array.alloc u8 12i32))
+			(let-mut scratch (array.alloc u8 24i32))
 			(let kind (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) 0i32
 				(borrow-shared clang_kind_key) (borrow-mut scratch)))
 			(if (bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared unit_kind)))
+				(then (return (bool false))))
+			(let-mut getters (array.alloc u8 (if writable (then (struct.get result rows)) (else 0i32))))
+			(if
+				(:doc "Only getters certified by selected writable operands can carry extra attributes.")
+				(bool.and writable (bool.not (call mark_lvalue_getters (borrow-shared source) (borrow-shared nodes)
+					(borrow-mut getters) (borrow-mut scratch))))
 				(then (return (bool false))))
 			(let-mut row (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
 			(while
@@ -270,7 +273,8 @@
 				(body
 					(if
 						(:doc "Every direct declaration must be safe to include in all numbered units.")
-						(bool.not (call declaration_only (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch) borrowed))
+						(bool.not (bool.or (bool.and writable (u8.gtz (array.load getters row)))
+							(call declaration_only (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch) borrowed)))
 						(then (return (bool false))))
 					(set row (struct.get (array.load nodes row) next_sibling))))
 			(return (bool true))))

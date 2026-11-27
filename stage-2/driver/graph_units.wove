@@ -6,6 +6,7 @@
 	(use wove-file "./bin/staged.wove" (only numbered_probe_arguments))
 	(use wove-file "./bin/units.wove" (only staged_unit_path (value program_header)))
 	(use wove-file "./clang.wove" (only clang_program))
+	(use wove-file "../clang/lvalue_replay.wove" (only (value lvalue_witness_prefix)))
 	(use wove-file "./diagnostics.wove" (only report_argv (value publish_failure)))
 	(use wove-file "./numbered_headers.wove" (only certify_numbered_includes (value names_begin) (value names_end)
 		(value implicit_runtime) (value implicit_stdint)))
@@ -13,7 +14,7 @@
 	(use wove-file "./paths.wove" (only join_file_path))
 	(use wove-file "./publication.wove" (only stage_file))
 	(use wove-file "../emit/c.wove" (only uses_runtime program_runtime))
-	(use wove-file "../emit/c_values.wove" (only is_borrowed_c_value is_c_integer_constant))
+	(use wove-file "../emit/c_values.wove" (only is_borrowed_c_value is_c_integer_constant is_writable_c_integer))
 	(use wove-file "../emit/text.wove" (only c_literal_text c_span))
 	(use wove-file "../emit/graph.wove" (only write_partitioned_graph (type GraphPlan)))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
@@ -57,6 +58,17 @@
 	(let guard_open "#ifdef ")
 	(let guard_close "\n#error native name is already a macro before the audited includes\n#endif\n")
 
+	(fn has_writable_values
+		(:doc "Request link-identity checks only if the checked plan selects a writable integer.")
+		(params (statements (shared-array ScalarStatement))) (returns bool)
+		(body
+			(for
+				(:doc "The checked table holds each exact defining C operand.")
+				(let row) (borrow-shared statements)
+				(body
+					(if (call is_writable_c_integer row) (then (return (bool true))))))
+			(return (bool false))))
+
 	(fn write_native_value_guards
 		(:doc "Keep preexisting macros from bypassing the proof of the selected header values.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
@@ -70,7 +82,8 @@
 				(body
 					(if
 						(:doc "Reject a preexisting macro before a selected header can establish its constant or object.")
-						(bool.or (call is_borrowed_c_value row) (call is_c_integer_constant row))
+						(bool.or (call is_borrowed_c_value row)
+							(bool.or (call is_c_integer_constant row) (call is_writable_c_integer row)))
 						(then
 							(let name (array.load nodes (struct.get row target)))
 							(set width (call c_literal_text (borrow-shared guard_open) (borrow-mut output) width writing))
@@ -84,9 +97,12 @@
 	(let witness_end ");\n")
 	(let constant_witness "typedef char wove_native_constant_probe[1+0*(")
 	(let constant_witness_end ")];\n")
+	(let writable_witness "typedef __typeof__(&(")
+	(let writable_name ")) ")
+	(let writable_end ";\n")
 
 	(fn write_native_value_witnesses
-		(:doc "Observe the exact expansions of borrowed objects and integer constants in each include context.")
+		(:doc "Observe the exact expansions of the checked native operands in each include context.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
 			(output (mut-array u8)) (writing bool))
 		(returns u32)
@@ -97,9 +113,10 @@
 				(let row) (borrow-shared statements)
 				(body
 					(let borrowed (call is_borrowed_c_value row))
+					(let writable (call is_writable_c_integer row))
 					(if
 						(:doc "Only replayed native operands need a witness in the Clang input.")
-						(bool.or borrowed (call is_c_integer_constant row))
+						(bool.or (bool.or borrowed writable) (call is_c_integer_constant row))
 						(then
 							(if
 								(:doc "Omit the witness section entirely when the plan has only native types.")
@@ -109,7 +126,7 @@
 							(let start (struct.get name start))
 							(let end (struct.get name end))
 							(if
-								(:doc "Redeclare the original external object or require a constant integer array bound.")
+								(:doc "Redeclare the original external object or emit a type-only witness.")
 								borrowed
 								(then
 									(set width (call c_literal_text (borrow-shared witness_type) (borrow-mut output) width writing))
@@ -118,9 +135,20 @@
 									(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
 									(set width (call c_literal_text (borrow-shared witness_end) (borrow-mut output) width writing)))
 								(else
-									(set width (call c_literal_text (borrow-shared constant_witness) (borrow-mut output) width writing))
-									(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
-									(set width (call c_literal_text (borrow-shared constant_witness_end) (borrow-mut output) width writing))))))))
+									(if
+										(:doc "Taking the operand's type exposes the resolved getter without evaluating the lvalue.")
+										writable
+										(then
+											(set width (call c_literal_text (borrow-shared writable_witness) (borrow-mut output) width writing))
+											(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
+											(set width (call c_literal_text (borrow-shared writable_name) (borrow-mut output) width writing))
+											(set width (call c_literal_text (borrow-shared lvalue_witness_prefix) (borrow-mut output) width writing))
+											(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
+											(set width (call c_literal_text (borrow-shared writable_end) (borrow-mut output) width writing)))
+										(else
+											(set width (call c_literal_text (borrow-shared constant_witness) (borrow-mut output) width writing))
+											(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
+											(set width (call c_literal_text (borrow-shared constant_witness_end) (borrow-mut output) width writing))))))))))
 			(if (u32.eqz width) (then (return width)))
 			(return (call c_literal_text (borrow-shared names_end) (borrow-mut output) width writing))))
 
@@ -170,6 +198,7 @@
 					(let-mut names_width 0u32)
 					(let-mut implicit 0u8)
 					(let borrowed (u8.eq mode 2u8))
+					(let writable (bool.and (u8.lt 1u8 mode) (call has_writable_values (borrow-shared statements))))
 					(if
 						(:doc "Measure any checked operands whose original expansions must match between units.")
 						(u8.lt 1u8 mode)
@@ -228,7 +257,7 @@
 						(bool.or (i32.eqz (array.len options))
 							(bool.not (call certify_numbered_includes (borrow-shared program) (borrow-shared options)
 								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards) (borrow-shared names)
-								implicit borrowed)))
+								implicit borrowed writable)))
 						(then (return 0i32)))))
 			(let-mut ends (array.alloc UnitIndex (i32.inc count)))
 			(let measured (call write_partitioned_graph (borrow-shared arena) (borrow-shared files) (borrow-shared bindings)

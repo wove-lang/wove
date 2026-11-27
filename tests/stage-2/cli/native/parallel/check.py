@@ -118,6 +118,10 @@ def main(compiler, manifest):
 			(root / "clang").chmod(0o700)
 			values = {"root": str(root), **system["values"]}
 			groups = data["arguments"] | system["arguments"]
+			# Build any native fixture library before the installed compiler consumes it.
+			for command in case.get("prepare", []):
+				subprocess.run([*clang, *words(command, values, groups)], cwd=root, check=True,
+					timeout=30, capture_output=True)
 			for phase in case["phases"]:
 				check_phase(phase, installed, clang, root, manifest.parent, values, groups)
 			print(case["name"])
