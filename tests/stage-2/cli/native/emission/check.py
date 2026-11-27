@@ -58,6 +58,10 @@ def check_case(bootstrap, native, bundled, fixtures, label, case):
 		for expected in case.get("contains", []):
 			assert expected.encode() in complete, (label, expected)
 
+		# A fixture may forbid runtime work in the retained translation unit.
+		for unexpected in case.get("excludes", []):
+			assert unexpected.encode() not in complete, (label, unexpected)
+
 		# A failed re-emission leaves the successful unit intact.
 		for failure in case.get("failures", []):
 			for target in failure.get("remove", []):
