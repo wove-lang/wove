@@ -460,6 +460,33 @@ The live audit covered both Clangs, Darwin and glibc on arm64 and x86-64, C11, C
 | `glob_b`, `gl_errfunc`, `gl_errblk` | Darwin configures the union while it invokes the error handler. When Blocks are enabled, `glob_b` uses a noescape block and needs a Blocks ABI contract. |
 | `gl_closedir`, `gl_readdir`, `gl_opendir`, `gl_lstat`, `gl_stat` | These fields require checked alternate directory callbacks. Record tags and pointer qualifiers depend on the selected SDK and feature profile. |
 
+## Audited `<grp.h>` members
+
+The audit covered Apple Clang and LLVM Clang, arm64 and x86-64 Darwin
+and glibc, C11, C17, C23, and ten feature profiles. Both installed SDKs
+give `struct group` size 32 and alignment 8. Its native `char *` fields
+`gr_name` and `gr_passwd` are at offsets 0 and 8, its unsigned 32-bit
+`gr_gid` at 16, and its `char **gr_mem` at 24.
+[LLVM header index](https://libc.llvm.org/headers/index.html)
+
+| Member | Availability and contract |
+| --- | --- |
+| `struct group`, `size_t` | `Group` projects `gr_gid` through the actual C record. `Size` is the native `size_t`. The fixture checks all four offsets and reads the projected value from both Wove and C. |
+| `setgrent`, `endgrent` | Both take no arguments and return `void`. Darwin exposes them in all audited profiles. glibc requires X/Open or miscellaneous extensions. |
+| `setgroupent`, `group_from_gid` | Darwin selects each declaration from the live header. `setgroupent` preserves the native result, including the cold and populated cache cases. `group_from_gid` snapshots the name or decimal fallback before another lookup can replace it, and preserves the null result when fallback is disabled. [Darwin lookup implementation](https://github.com/apple-oss-distributions/Libinfo/blob/main/lookup.subproj/libinfo.c) |
+| `NSS_BUFLEN_GROUP`, `initgroups`, `setgroups` | glibc miscellaneous/GNU profiles expose the integer macro and the native operations. `initgroups` receives a checked C string and native `gid_t`. `setgroups` receives the native `size_t` and a checked array of native `gid_t` elements. |
+| `getgrgid`, `getgrnam`, `getgrent`, Darwin `getgruuid`, glibc `fgetgrent` | A nullable native result refers to library-managed storage that later lookups can replace. The record contains the name, password, and null-terminated member table. [Static record contract #636](https://github.com/wove-lang/wove/issues/636) |
+| `getgrgid_r`, `getgrnam_r`, Darwin `getgruuid_r`, glibc `getgrent_r`, `fgetgrent_r`, and `putgrent` | The reentrant calls write a nullable result that aliases the caller's record, with strings and the member table in the caller's bytes. The Darwin probe found a valid table at an unaligned address. `putgrent` consumes a complete borrowed native record. [Caller storage and vector contract #637](https://github.com/wove-lang/wove/issues/637) |
+| `gid_t` | Darwin exposes the typedef. The lone glibc header exposes it in POSIX.1-2001 and later, X/Open, or extension profiles. The enabled extensions use the canonical `Gid` from `<unistd.h>`. [Optional scalar typedefs #638](https://github.com/wove-lang/wove/issues/638) |
+| Darwin `_PATH_GROUP` | The SDK supplies the immutable string literal `"/etc/group"` in extension profiles. [String literal macro contract #639](https://github.com/wove-lang/wove/issues/639) |
+| glibc `getgrouplist` | The native `int *` supplies the array capacity on entry and receives the count on return. [In-out array extent #640](https://github.com/wove-lang/wove/issues/640) |
+| Darwin `setgrfile` | Some profiles declare the function. A reference fails to link against the audited SDK on arm64 and x86-64. |
+
+Darwin's UUID forms use its transitive `uuid_t` type. The glibc stream
+forms use the transitive `FILE` type in the profiles that expose them.
+[Darwin group database reference](https://github.com/apple-oss-distributions/Libinfo/blob/main/lookup.subproj/getgrent.3)
+[glibc group lookup reference](https://sourceware.org/glibc/manual/2.41/html_node/Lookup-Group.html)
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
