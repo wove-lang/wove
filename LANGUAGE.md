@@ -1026,6 +1026,25 @@ with `(c_owned (drop destroy) storage)`, use `(native.alloc Actions)`.
 A successful initializer activates the object. Cleanup destroys active
 objects and releases their storage.
 
+Declare a caller-owned record with a native unsigned 32-bit count and
+a trailing byte array using `(:pragma (c_owned (tail count bytes)))`.
+For example, a type representing glibc's `struct file_handle` names
+`handle_bytes` and `f_handle`. C checks the actual field types and supplies
+the record's size, alignment and field offsets. Use
+`(native.alloc FileHandle capacity)` with an `i64` byte capacity. Zero
+allocates the fixed header. Negative capacities, capacities beyond the
+count field and overflowing storage sizes trap.
+
+A mutable `c_init` loan writes the original capacity into the native
+count field before C runs. Use `(native.tail.report (borrow-shared (local handle)))`
+to copy the returned `u32` count, including a larger size requested by
+a failed initializer. Create a new owner with that capacity before retrying.
+After successful initialization, `(native.tail.load (borrow-shared (local handle)) index)`
+returns a byte at an `i64` index. Both byte reads and ordinary C borrows
+require the reported count to fit the allocated capacity. The byte index
+must also be within the reported length. A C call borrows the original
+allocation, and scope exit or owner replacement releases it.
+
 `(c_snapshot cstr)` copies a returned C string into
 `(optional (owned-array u8))`. Add `(drop free)` to release the original,
 or `(field name)` to copy a bounded inline character array. A null

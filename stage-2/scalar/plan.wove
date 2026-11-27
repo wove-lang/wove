@@ -35,7 +35,7 @@
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../source/c_headers.wove" (only read_c_native_parameter))
 	(use wove-file "../source/c_formals.wove" (only next_c_value_formal))
-	(use wove-file "../source/c_owners.wove" (only is_c_storage_type))
+	(use wove-file "../source/c_owners.wove" (only is_c_storage_type read_c_owner))
 	(use wove-file "../source/c_arguments.wove" (only read_c_view_type c_row_slice_type))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity))
 	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null c_null_argument_kind
@@ -89,7 +89,9 @@
 	(use wove-file "./syntax.wove"
 		(only entry_keyword entry_at entry_form (value array_try_copy_kind) (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch is_worker_submission is_worker_pool_operation (value worker_spawn_join_kind)
 			(value worker_spawn_on_kind) (value worker_try_spawn_kind) (value worker_open_pool_kind) (value worker_try_close_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) (value worker_pop_front_kind) is_worker_queue_access is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_list_kind) (value pending_exact_move) (value fixed_take_request)
-			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor (type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
+			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor
+			(value native_tail_report_kind) (value native_tail_load_kind) (value native_tail_report_borrow_kind)
+			(type ScalarOperator) (type FixedArrayShape) (type EntryRead) (type StatementRead)))
 
 	(struct
 		(:doc `A direct call links the two defining files and declaration rows.
@@ -3718,10 +3720,9 @@
 		(returns EntryRead)
 		(body
 			(if
-				(:doc "A fresh owner names one type and needs an inferred binding or an exact pointer destination.")
+				(:doc "A fresh owner names a type and needs an inferred binding or an exact pointer destination.")
 				(bool.or (bool.not (bool.or (u32.eq (local expected) 42u32) (call is_native_owner (local expected))))
-					(bool.or (i32.ltz (local operand))
-						(i32.lt -1i32 (struct.get (array.load (local nodes) (local operand)) next_sibling))))
+					(i32.ltz (local operand)))
 				(then (return (call entry_at (local node) -1i32 24u32))))
 			(let name (array.load (local nodes) (local operand)))
 			(let binding (call find_binding (borrow-shared (local source)) (borrow-shared (local source))
@@ -3740,16 +3741,35 @@
 				(bool.or (bool.not (call is_native_owner (local type)))
 					(bool.and (call is_native_owner (local expected)) (u32.not-eq (local expected) (local type))))
 				(then (return (call entry_at (local name) -1i32 24u32))))
-			(let storage (call is_c_storage_type (borrow-shared (local source)) (borrow-shared (local nodes))
-				(call native_owner_declaration (local type))))
+			(let contract (call read_c_owner (borrow-shared (local source)) (borrow-shared (local nodes))
+				(array.load (local nodes) (call native_owner_declaration (local type)))))
+			(let storage (struct.get (local contract) storage))
 			(let allocating (u32.eq (local kind) (call native_alloc_kind)))
 			(if
 				(:doc "native.alloc requires caller-owned storage and native.empty requires a pointer handle.")
 				(bool.or (bool.and (local storage) (bool.not (local allocating)))
 					(bool.and (local allocating) (bool.not (local storage))))
 				(then (return (call entry_at (local name) -1i32 24u32))))
+			(let capacity (struct.get (local name) next_sibling))
+			(let has_capacity (i32.not-ltz (local capacity)))
+			(let tail_storage (i32.not-ltz (struct.get (local contract) tail)))
+			(if
+				(:doc "Only byte-tail storage takes exactly one signed capacity after the type.")
+				(bool.or (bool.and (local tail_storage) (bool.not (local has_capacity)))
+					(bool.and (local has_capacity) (bool.not (local tail_storage))))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(if
+				(:doc "The capacity is evaluated once with the exact i64 type before allocation.")
+				(local has_capacity)
+				(then
+					(if
+						(:doc "No operands can follow the byte capacity.")
+						(i32.not-ltz (struct.get (array.load (local nodes) (local capacity)) next_sibling))
+						(then (return (call entry_at (local node) -1i32 24u32))))
+					(array.store (local expressions) (local capacity)
+						(call expression_row 0u32 18u32 -1i32 -1i32 0i32 0i32 (bool false)))))
 			(array.store (local expressions) (local index)
-				(call runtime_expression (local kind) (local type) (local node) -1i32 (local caller) (local view_start)))
+				(call runtime_expression (local kind) (local type) (local node) (local capacity) (local caller) (local view_start)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
 	(fn plan_growth_receiver
@@ -4004,6 +4024,83 @@
 			(array.store (local expressions) (local from) (call expression_row 0u32 (local shared) -1i32 -1i32 0i32 0i32 (bool false)))
 			(return (call entry_at (local node) (local index) 0u32))))
 
+	(fn plan_native_tail_access
+		(:doc "Borrow the original byte-tail owner for a count read or a bounded byte load.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (index i32)
+			(operand i32) (kind u32) (expected u32) (caller ScalarFunction) (statement i32) (view_start i32)
+			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(statements (shared-array ScalarStatement)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let load (u32.eq (local kind) (local native_tail_load_kind)))
+			(let-mut result 11u32)
+			(if (local load) (then (set (local result) 10u32)))
+			(if
+				(:doc "A native count is u32 and a byte load produces u8.")
+				(bool.or (i32.ltz (local operand)) (bool.not (call value_matches_type (local expected) (local result))))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let borrow (array.load (local nodes) (local operand)))
+			(let subscript (struct.get (local borrow) next_sibling))
+			(if
+				(:doc "Only a byte load takes one signed index after the shared borrow.")
+				(bool.or (bool.and (local load) (i32.ltz (local subscript)))
+					(bool.and (bool.not (local load)) (i32.not-ltz (local subscript))))
+				(then (return (call entry_at (local node) -1i32 24u32))))
+			(let named (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local borrow) 35u32 24u32))
+			(if (u32.gtz (struct.get (local named) error)) (then (return (local named))))
+			(let owner (struct.get (local named) operand))
+			(if
+				(:doc "The shared borrow must name exactly one owner before resolving its place.")
+				(bool.or (i32.ltz (local owner))
+					(i32.not-ltz (struct.get (array.load (local nodes) (local owner)) next_sibling)))
+				(then (return (call entry_at (local borrow) -1i32 24u32))))
+			(let reference (array.load (local nodes) (local owner)))
+			(let local_form (call entry_form (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference) 8u32 24u32))
+			(if (u32.gtz (struct.get (local local_form) error)) (then (return (local local_form))))
+			(let resolved (call plan_local (borrow-shared (local source)) (borrow-shared (local nodes)) (local reference)
+				(struct.get (local local_form) operand) (local c_handle_reference) (local owner)
+				(local caller) (local statement) (borrow-shared (local parameters)) (borrow-shared (local records))
+				(borrow-shared (local statements)) (borrow-mut (local expressions))))
+			(if (u32.gtz (struct.get (local resolved) error)) (then (return (call at_owner_use (local resolved) (local borrow)))))
+			(let place (array.load (local expressions) (local owner)))
+			(let type (struct.get (local place) type))
+			(if
+				(:doc "A tail operation needs a live lexical owner with a declared byte tail.")
+				(bool.not (bool.and (u32.eq (struct.get (local place) kind) 6u32)
+					(bool.and (call is_native_owner (local type))
+						(i32.not-ltz (struct.get (call read_c_owner (borrow-shared (local source)) (borrow-shared (local nodes))
+							(array.load (local nodes) (call native_owner_declaration (local type)))) tail)))))
+				(then (return (call entry_at (local borrow) -1i32 24u32))))
+			(if
+				(:doc "A byte load holds the existing shared storage loan while evaluating its index.")
+				(local load)
+				(then
+					(let position (array.load (local nodes) (local subscript)))
+					(if
+						(:doc "A byte load has one index operand.")
+						(i32.not-ltz (struct.get (local position) next_sibling))
+						(then (return (call entry_at (local position) -1i32 24u32))))
+					(let loan (call plan_handle_borrow (borrow-shared (local source)) (borrow-shared (local nodes))
+						(local borrow) (local operand) (local owner) (local caller) (local statement) (local type)
+						(call c_storage_shared_mode) (local view_start) (borrow-shared (local parameters))
+						(borrow-shared (local records)) (borrow-shared (local statements)) (borrow-mut (local expressions))))
+					(if (u32.gtz (struct.get (local loan) error)) (then (return (local loan))))
+					(array.store (local expressions) (local subscript)
+						(call expression_row 0u32 18u32 -1i32 -1i32 0i32 0i32 (bool false))))
+				(else
+					(if
+						(:doc "A count read can use inactive storage, but a previous exclusive loan still excludes it.")
+						(call has_conflicting_loan (borrow-shared (local nodes)) (borrow-shared (local expressions))
+							(borrow-shared (local statements)) (local operand) (local statement)
+							(struct.get (local place) target) (bool true) -1i32 (bool false))
+						(then (return (call entry_at (local borrow) -1i32 24u32))))
+					(array.store (local expressions) (local operand)
+						(call runtime_expression (local native_tail_report_borrow_kind) (local type) (local borrow) (local owner)
+							(local caller) (local view_start)))))
+			(array.store (local expressions) (local index)
+				(call runtime_expression (local kind) (local result) (local node) (local operand) (local caller) (local view_start)))
+			(return (call entry_at (local node) (local index) 0u32))))
+
 	(fn plan_expression
 		(:doc `Check the scalar expression at a source row and keep its actual type.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
@@ -4143,6 +4240,13 @@
 				(then (return (call plan_native_owner_construction (borrow-shared (local source)) (borrow-shared (local nodes))
 					(local node) (local index) (struct.get (local parts) operands) (local tag) (local expected) (local caller) (local view_start)
 					(borrow-shared (local bindings)) (borrow-mut (local expressions))))))
+			(if
+				(:doc "A byte-tail access borrows its owner and returns one copied scalar.")
+				(bool.or (u32.eq (local tag) (local native_tail_report_kind)) (u32.eq (local tag) (local native_tail_load_kind)))
+				(then (return (call plan_native_tail_access (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local node) (local index) (struct.get (local parts) operands) (local tag) (local expected) (local caller)
+					(local statement) (local view_start) (borrow-shared (local parameters)) (borrow-shared (local records))
+					(borrow-shared (local statements)) (borrow-mut (local expressions))))))
 			(if
 				(:doc "The null predicate reads the presence of a native handle or an optional owner.")
 				(u32.eq (local tag) (call owner_is_null_kind))

@@ -55,7 +55,7 @@
 	(use wove-file "./c_snapshots.wove" (only write_optional_unwrap))
 	(use wove-file "./c_arguments.wove" (only write_c_argument_call))
 	(use wove-file "./c_prototype.wove" (only write_c_prototype_check))
-	(use wove-file "./c_formals.wove" (only fixed_c_needs_prototype cross_header_owner_needs_prototype write_fixed_c_checks))
+	(use wove-file "./c_formals.wove" (only fixed_c_needs_prototype native_owner_needs_prototype write_fixed_c_checks))
 	(use wove-file "../scalar/flow.wove" (only after_block is_loop is_loop_exit (value break_statement) (value for_statement) (value for_source_owner) (value for_element_assignment) (type ScalarStatement) (value c_value_expression) (value c_vector_snapshot_expression) (value c_value_assignment)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment) (value owner_assignment) (value owner_field_assignment)))
 	(use wove-file "../scalar/loans.wove" (only is_local_slice_view indexed_growth_receiver (value indirect_local_place) (value inline_owner_argument_guard) (value local_slice_projection) (value scoped_field_loan) (value indexed_record_loan) (type ScalarExpression)))
@@ -63,7 +63,8 @@
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/syntax.wove" (only is_direct_call (value array_try_copy_kind) (value borrowed_record_unwrap_kind) (value fn_ref_kind) (value indirect_call_kind) is_worker_launch is_worker_collect is_worker_pool_operation is_worker_queue_access
 		(value worker_spawn_kind) (value worker_spawn_on_kind) (value worker_try_spawn_kind) (value worker_open_pool_kind)
-		(value worker_try_reserve_kind) (value worker_reserve_wait_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) scalar_operator is_reborrow_keyword is_fixed_access is_fixed_initializer (value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_owner_borrow) (value fixed_owner_store) native_alloc_kind native_empty_kind (type ScalarOperator)))
+		(value worker_try_reserve_kind) (value worker_reserve_wait_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) scalar_operator is_reborrow_keyword is_fixed_access is_fixed_initializer (value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_owner_borrow) (value fixed_owner_store) native_alloc_kind native_empty_kind
+		(value native_tail_report_kind) (value native_tail_load_kind) (value native_tail_report_borrow_kind) (type ScalarOperator)))
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_bit_count_type word_rotates word_moves_right word_mask_type))
 	(use wove-file "./runtime.wove"
 		(only write_runtime_header open_host_entry open_conversion open_word_shift_count open_word_rotate write_word_width open_checked_word_binary open_slice_access open_slice_range open_shared_projection write_slice_length close_runtime_call write_c_number write_site_number
@@ -222,6 +223,11 @@
 		(returns bool)
 		(body
 			(if (u32.eq (local kind) (local array_try_copy_kind)) (then (return (bool true))))
+			(if
+				(:doc "Capture each owner and index before inspecting native byte-tail metadata or bytes.")
+				(bool.or (u32.eq (local kind) (local native_tail_report_borrow_kind))
+					(bool.or (u32.eq (local kind) (local native_tail_report_kind)) (u32.eq (local kind) (local native_tail_load_kind))))
+				(then (return (bool true))))
 			(if
 				(:doc "Optional shared windows and their checks use the captured descriptor.")
 				(bool.or (u32.eq (local kind) (local try_slice_kind))
@@ -947,6 +953,9 @@
 				(borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(return (call c_byte (borrow-mut (local output)) (local slot) 41u8 (local writing)))))
 
+	(let tail_report_call "WVRT_C_TAIL_REPORT(")
+	(let tail_load_call "WVRT_C_TAIL_AT(")
+
 	(fn write_value
 		(:doc `Write a checked value using the temporaries already evaluated for its operands.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (value_index i32) (tree_base i32)
@@ -1025,7 +1034,38 @@
 				(:doc "Allocate inactive, correctly aligned storage for the original native type.")
 				(u32.eq (local kind) (call native_alloc_kind))
 				(then (return (call write_storage_allocation (borrow-shared (local source)) (borrow-shared (local nodes))
-					(local expression) (borrow-mut (local output)) (local offset) (local writing)))))
+					(local expression) (local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(if
+				(:doc "A count read captures the owner even when a sizing call left it inactive.")
+				(u32.eq (local kind) (local native_tail_report_borrow_kind))
+				(then (return (call write_temporary_name (borrow-shared (local source)) (struct.get (local expression) first)
+					(local tree_base) (borrow-mut (local output)) (local offset) (local name_prefix) (local writing)))))
+			(if
+				(:doc "Read the reported count or load a byte through the original captured storage owner.")
+				(bool.or (u32.eq (local kind) (local native_tail_report_kind)) (u32.eq (local kind) (local native_tail_load_kind)))
+				(then
+					(let load (u32.eq (local kind) (local native_tail_load_kind)))
+					(let first (struct.get (local expression) first))
+					(let-mut cursor (local offset))
+					(if
+						(:doc "The load and count operations call their corresponding checked runtime helpers.")
+						(local load)
+						(then (set (local cursor) (call c_literal_text (borrow-shared (local tail_load_call))
+							(borrow-mut (local output)) (local cursor) (local writing))))
+						(else (set (local cursor) (call c_literal_text (borrow-shared (local tail_report_call))
+							(borrow-mut (local output)) (local cursor) (local writing)))))
+					(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local first) (local tree_base)
+						(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+					(if
+						(:doc "Only a byte load passes a captured index.")
+						(local load)
+						(then
+							(let index (struct.get (array.load (local nodes) (local first)) next_sibling))
+							(set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))
+							(set (local cursor) (call write_temporary_name (borrow-shared (local source)) (local index) (local tree_base)
+								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))))
+					(return (call close_runtime_call (borrow-mut (local output)) (local cursor) (struct.get (local expression) target)
+						(struct.get (local expression) start) (struct.get (local expression) end) (local writing)))))
 			(if
 				(:doc "Copy the previously declared static payload into a new byte owner.")
 				(u32.eq (local kind) 60u32)
@@ -1340,7 +1380,7 @@
 													(borrow-mut (local output)) (local cursor) (local writing))))
 												(else (set (local cursor) (call c_literal_text (borrow-shared (local worker_spawn_join_call))
 													(borrow-mut (local output)) (local cursor) (local writing)))))))))
-							(let verified (call cross_header_owner_needs_prototype (borrow-shared (local source)) (borrow-shared (local nodes))
+							(let verified (call native_owner_needs_prototype (borrow-shared (local source)) (borrow-shared (local nodes))
 								(borrow-shared (local parameters)) (local callee)))
 							(if
 								(:doc "A checked direct C invocation must call the function used by the prototype assertion.")
@@ -2466,7 +2506,7 @@
 								(bool.and (struct.get (local function) c_fixed)
 									(call fixed_c_needs_prototype (borrow-shared (local source)) (borrow-shared (local nodes))
 										(struct.get (local function) c_formals)))
-								(call cross_header_owner_needs_prototype (borrow-shared (local source)) (borrow-shared (local nodes))
+								(call native_owner_needs_prototype (borrow-shared (local source)) (borrow-shared (local nodes))
 									(borrow-shared (local parameters)) (local function))))
 						(then (set (local cursor) (call write_c_prototype_check (borrow-shared (local source)) (borrow-shared (local nodes))
 							(borrow-shared (local records)) (borrow-shared (local parameters)) (local function)
