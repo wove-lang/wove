@@ -51,15 +51,18 @@ def read_cases(manifest):
 		# Platform-specific C headers are compiled on the corresponding host.
 		elif kind in {"native", "native-on"} and label is not None:
 			host, status, *flags = ["", *fields] if kind == "native" else fields
-			native = host, flags, [(int(status), [], None, b"", b"")], None
+			native = host, flags, [(int(status), [], None, b"", b"")], None, []
 		# Runtime traps use the same native recipe with exact stderr.
 		elif kind == "native-trap" and label is not None:
 			diagnostic, *flags = fields
-			native = "", flags, [(1, [], None, b"", json.loads(diagnostic).encode("utf-8"))], None
+			native = "", flags, [(1, [], None, b"", json.loads(diagnostic).encode("utf-8"))], None, []
 		# Native ABI rejections are checked by the host compiler before linking.
 		elif kind == "native-reject" and label is not None:
 			diagnostics, *flags = fields
-			native = "", flags, [], json.loads(diagnostics)
+			native = "", flags, [], json.loads(diagnostics), []
+		# Compile extra source inputs before searching the runtime archive.
+		elif kind == "native-source" and native is not None:
+			native[4].append(payload)
 		# Additional vectors may supply a display name independent of the executable.
 		elif kind == "native-argv" and native is not None:
 			status, argv, *display = fields
@@ -86,7 +89,7 @@ def read_cases(manifest):
 
 
 # Compile and run an emitted translation unit with the same compiler settings as the rest of the suite.
-def check_native(probe, label, emitted, fixture_flags, executions, rejection):
+def check_native(probe, label, emitted, fixture_flags, executions, rejection, sources):
 	header, _, source = emitted.partition("\n")
 	count = int(header.split()[1])
 	assert len(source.encode()) == count, (label, header)
@@ -105,8 +108,8 @@ def check_native(probe, label, emitted, fixture_flags, executions, rejection):
 			result = subprocess.run([*command, *fixture_flags, "-fsyntax-only", str(generated)], capture_output=True, text=True, timeout=30)
 			assert result.returncode > 0 and all(text in result.stderr for text in rejection), (label, result)
 			return
-		# Place fixture libraries after the objects that reference them.
-		subprocess.run([*command, str(generated), runtime, *fixture_flags, "-o", str(program)], check=True, timeout=30)
+		# Resolve fixture definitions before searching archives, and keep library flags last.
+		subprocess.run([*command, str(generated), *sources, runtime, *fixture_flags, "-o", str(program)], check=True, timeout=30)
 		# Reuse the compiled fixture for every supplied argument vector.
 		for expected, argv, argv0, stdout, stderr in executions:
 			result = subprocess.run([program if argv0 is None else argv0, *argv],
