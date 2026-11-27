@@ -1018,13 +1018,19 @@ signature and evaluated once from left to right. The C header verifies
 the native signature. A project bridge adds to a bundled header and can
 override an individual name. `(:pragma (bridge_replace))` selects only
 the project declarations. `(:pragma (c_optional))` checks that a selected
-function or object-like macro is available with the target header and build
-settings. Use `(const (:pragma (c_optional)) FEATURE_FLAG i32)` for an
+function, object-like macro, or native record is available with the target
+header and build settings. Use `(const (:pragma (c_optional)) FEATURE_FLAG i32)` for an
 integer constant, or `(let (:pragma (c_optional) (c_macro)) LIMIT f32)`
 for a read-only scalar expression. The selected value keeps its declared
 Wove type and reads the expression from the live C header. Optional macro
 probes use the selected header, its declared native header prerequisites,
-and the effective build flags.
+and the effective build flags. An optional native record uses the same
+marker on the bridge `struct` form, for example
+`(struct (:pragma (c_optional)) Ftw (c-type "struct FTW") (fields (base i32) (level i32)))`.
+The probe requires a complete definition in the selected header or its
+include subtree. It recognizes file-scope `struct` and `union` tags,
+including tags defined inside a record, and follows record typedefs across
+redeclarations. An unavailable definition is reported at the type selector.
 
 A bridge can use a type from a different C header in its private signatures.
 Write `(use c-header "<locale.h>" (only (type Locale)))` inside the

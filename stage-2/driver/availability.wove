@@ -1,7 +1,7 @@
 (module native_c_availability
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Check selected optional C functions and object-like macros before native graph emission.")
+	(:doc "Check selected optional C declarations before native graph emission.")
 
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "./paths.wove" (only directory_width))
@@ -13,6 +13,7 @@
 	(use wove-file "../clang/macros.wove" (only macro_header_presence object_macro_value))
 	(use wove-file "../clang/index.wove" (only clang_declaration clang_matches_declaration (type ClangIndex) (type ClangDeclaration)))
 	(use wove-file "./header_origin.wove" (only declaration_in_earlier_include))
+	(use wove-file "./record_headers.wove" (only lookup_native_record))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes include_position write_includes (type CInclude)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
@@ -23,6 +24,7 @@
 
 	(struct Availability (fields (error u32) (file i32) (start i32) (end i32)))
 	(let function_kind "FunctionDecl")
+	(let optional_record_unavailable 91u32)
 	(let enum_kind "EnumDecl")
 	(let quote_option "-iquote")
 
@@ -64,8 +66,8 @@
 						(then (return (bool true))))))
 			(return (bool false))))
 
-	(fn native_function_available
-		(:doc "Look up the exact original C symbol, including the spelling selected by c-name.")
+	(fn native_declaration_available
+		(:doc "Look up the exact original C symbol or the decoded native record type.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (binding GraphBinding) (index ClangIndex) (boundary i32)
 			(declarations (shared-array ClangDeclaration)) (names (shared-array u8))
 			(ast (shared-array u8)) (nodes (shared-array JsonNode)) (trace (shared-array u8)))
@@ -75,12 +77,25 @@
 			(let base (struct.get (local file) source_start))
 			(let start (i32.add (local base) (struct.get (local binding) native_start)))
 			(let end (i32.add (local base) (struct.get (local binding) native_end)))
+			(if
+				(:doc "Record spellings retain the quoted type operand from the declaring Wove bridge.")
+				(u32.eq (struct.get (local binding) namespace) 1u32)
+				(then
+					(let-mut spelling (array.alloc u8 (i32.sub (local end) (local start))))
+					(let type (call decode_string (borrow-shared (local arena))
+						(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
+						(borrow-mut (local spelling))))
+					(return (bool.and (u32.eqz (struct.get (local type) error))
+						(call lookup_native_record (borrow-shared (local ast)) (borrow-shared (local nodes))
+							(local index) (local boundary) (borrow-shared (local declarations)) (borrow-shared (local names))
+							(borrow-shared (array.range (local spelling) 0i32 (struct.get (local type) written)))
+							(borrow-shared (local trace)))))))
 			(return (call matching_native_function (borrow-shared (local ast)) (borrow-shared (local nodes))
 				(local index) (local boundary) (borrow-shared (local declarations)) (borrow-shared (local names))
 				(borrow-shared (array.range (local arena) (local start) (local end))) (borrow-shared (local trace))))))
 
 	(fn remember_header
-		(:doc "Record each selected function's result before releasing the captured AST.")
+		(:doc "Record each selected declaration's result before releasing the captured AST.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(first i32) (present bool) (index ClangIndex) (boundary i32) (declarations (shared-array ClangDeclaration))
 			(names (shared-array u8)) (ast (shared-array u8)) (nodes (shared-array JsonNode)) (trace (shared-array u8))
@@ -96,13 +111,17 @@
 					(if
 						(:doc "Ordinary bindings and other headers do not depend on this query.")
 						(bool.and (struct.get (local candidate) optional)
-							(bool.and (u32.eqz (struct.get (local candidate) namespace))
+							(bool.and (u32.eq (struct.get (local candidate) namespace) (struct.get (local header) namespace))
 								(call same_header (local header) (local candidate))))
 						(then
 							(let-mut status 71u32)
 							(if
-								(:doc "Only a present header can supply an exact FunctionDecl.")
-								(bool.and (local present) (call native_function_available (borrow-shared (local arena))
+								(:doc "Missing and incomplete records use a type-specific diagnostic.")
+								(u32.eq (struct.get (local candidate) namespace) 1u32)
+								(then (set (local status) (local optional_record_unavailable))))
+							(if
+								(:doc "Only a present header can supply a usable declaration.")
+								(bool.and (local present) (call native_declaration_available (borrow-shared (local arena))
 									(borrow-shared (local files)) (local candidate) (local index) (local boundary)
 									(borrow-shared (local declarations)) (borrow-shared (local names)) (borrow-shared (local ast))
 									(borrow-shared (local nodes)) (borrow-shared (local trace))))
@@ -251,7 +270,7 @@
 			(return 74u32)))
 
 	(fn lookup_header
-		(:doc "Probe macros with the provider's declared prerequisites. Function queries use the emitted include order to recover declaration origins.")
+		(:doc "Probe macros and records with declared prerequisites. Function queries use the emitted include order.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(first i32) (program (shared-array u8)) (options (shared-array u8)) (header (shared-array u8))
 			(directory (shared-array u8)) (results (mut-array u8)))
@@ -259,11 +278,12 @@
 		(body
 			(let selected (array.load (local bindings) (local first)))
 			(let macro (u32.eq (struct.get (local selected) namespace) 2u32))
+			(let function (u32.eqz (struct.get (local selected) namespace)))
 			(let-mut start 0i32)
 			(let-mut limit (array.len (local bindings)))
 			(if
 				(:doc "The graph records the ordered, transitive dependency rows before publishing the selected name.")
-				(local macro)
+				(bool.not (local function))
 				(then
 					(set (local start) (struct.get (local selected) prerequisite_start))
 					(set (local limit) (struct.get (local selected) prerequisite_end))))
@@ -284,7 +304,7 @@
 			(let-mut before (struct.get (local plan) count))
 			(if
 				(:doc "A function's AST marker follows the includes preceding its header in the native unit.")
-				(bool.not (local macro))
+				(local function)
 				(then
 					(set (local before) (call include_position (borrow-shared (local paths)) (borrow-shared (local headers))
 						(local before) (borrow-shared (local header))))
