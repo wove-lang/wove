@@ -18,7 +18,7 @@
 	(use wove-file "../c/arguments.wove"
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
 			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode)
-			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode)))
+			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode) (value c_nullable_sync_callback_mode) is_c_sync_callback_mode))
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (scalar_ref u32) (owner_mode u8) (nullable bool)))
 	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (handle_out bool) (void_pointer bool) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
@@ -246,6 +246,10 @@
 						(:doc "Shared scalar void pointers always borrow a concrete place.")
 						(u32.eq (struct.get formal scalar_ref) 1u32)
 						(then (return (bool false))))
+					(if
+						(:doc "A callback with a separate synchronous pragma can have an absent receiver.")
+						(call is_c_callback_type (borrow-shared source) (borrow-shared nodes) type)
+						(then (return (bool true))))
 					(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) type))
 					(return (bool.or
 						(u32.gtz (call reference_mode (borrow-shared source) (borrow-shared nodes) (struct.get parts head)))
@@ -464,12 +468,14 @@
 						(bool.and (u8.eq mode c_void_pointer_mode)
 							(u8.eq owner_mode c_shared_handle_slot_mode))
 						(then (set bound_mode c_shared_handle_slot_mode)))
+					(let callback (call is_c_callback_type (borrow-shared source) (borrow-shared nodes)
+						(array.load nodes (struct.get formal type_node))))
 					(if
-						(:doc "Remember nullable shared views for string conversion and preserve initialization conflicts on owners.")
+						(:doc "Remember nullable C strings and callbacks while preserving initialization conflicts on owners.")
 						(bool.and (call is_c_nullable_mode mode)
-							(bool.or (call is_c_init_mode owner_mode)
+							(bool.or callback (bool.or (call is_c_init_mode owner_mode)
 								(u32.eq (call c_byte_slice_type (borrow-shared source) (borrow-shared nodes)
-									(array.load nodes (struct.get formal type_node)) (bool false)) 34u32)))
+									(array.load nodes (struct.get formal type_node)) (bool false)) 34u32))))
 						(then
 							(if
 								(:doc "An initializing loan always needs a caller-provided slot.")
@@ -739,6 +745,7 @@
 			(if (u32.gtz (struct.get arguments error)) (then (return arguments)))
 			(let-mut parameter (call next_c_value_formal (borrow-shared source) (borrow-shared nodes) first))
 			(let-mut index 0i32)
+			(let-mut nullable_callbacks 0i32)
 			(let-mut initializers 0i32)
 			(let-mut handle_out (bool false))
 			(let-mut vectors (bool false))
@@ -753,19 +760,30 @@
 					(let slot (array.load contracts index))
 					(let-mut mode (struct.get slot mode))
 					(if
-						(:doc "A nullable checked shared string retains one descriptor slot for a present argument.")
-						(bool.and (struct.get slot nullable) (u8.eq mode (call c_checked_string_mode)))
+						(:doc "Give each nullable conversion its exact native argument mode.")
+						(struct.get slot nullable)
 						(then
-							(set mode c_nullable_string_mode)
-							(array.store contracts index
-								(struct.new CArgument (mode mode) (size (struct.get slot size))
-									(count (struct.get slot count)) (integer (struct.get slot integer))
-									(scalar_ref (struct.get slot scalar_ref)) (owner_mode (struct.get slot owner_mode))
-									(nullable (bool true))))))
+							(if
+								(:doc "A present string keeps its normal backing descriptor.")
+								(u8.eq mode (call c_checked_string_mode))
+								(then (set mode c_nullable_string_mode)))
+							(if
+								(:doc "Count nullable callbacks as native arguments that may need a null constant.")
+								(u8.eq mode c_sync_callback_mode)
+								(then
+									(set mode c_nullable_sync_callback_mode)
+									(set nullable_callbacks (i32.inc nullable_callbacks))))
+							(if
+								(:doc "Keep the original formal and conversion operands.")
+								(u8.not-eq mode (struct.get slot mode))
+								(then (array.store contracts index
+									(struct.new CArgument (mode mode) (size (struct.get slot size)) (count (struct.get slot count))
+										(integer (struct.get slot integer)) (scalar_ref (struct.get slot scalar_ref))
+										(owner_mode (struct.get slot owner_mode)) (nullable (bool true))))))))
 					(if
 						(:doc "A callback formal needs an explicit synchronous contract and a fixed C prototype.")
 						(bool.and (call is_c_callback_type (borrow-shared source) (borrow-shared nodes) type)
-							(bool.or (u8.not-eq mode c_sync_callback_mode)
+							(bool.or (bool.not (call is_c_sync_callback_mode mode))
 								(bool.or (struct.get arguments macro) (i32.not-eqz (struct.get arguments variadic)))))
 						(then (return (call c_argument_error_at type))))
 					(let vector (call is_c_vector_mode mode))
@@ -816,6 +834,6 @@
 					(set index (i32.inc index))))
 			(return (struct.new CArguments (strings (struct.get arguments strings)) (vectors vectors)
 				(extents (struct.get arguments extents))
-				(nulls (i32.add (struct.get nulls nulls) (struct.get arguments nulls)))
+				(nulls (i32.add nullable_callbacks (i32.add (struct.get nulls nulls) (struct.get arguments nulls))))
 				(initializers initializers) (handle_out handle_out) (void_pointer void_pointer) (macro (struct.get arguments macro))
 				(variadic (struct.get arguments variadic)) (start 0i32) (end 0i32) (error 0u32))))))
