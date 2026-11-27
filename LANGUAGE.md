@@ -1277,6 +1277,37 @@ unaligned slots by copying their pointer representation. A read-only
 call such as `putgrent` can borrow the same record after Wove checks all
 declared pointer fields and the table's native alignment.
 
+A C function can receive an original caller-owned record with a bounded
+pointer and count staged in two native fields. Use
+`(c_record_in record data pointer_field count_field)` with a named
+count from `c_bytes` or `c_array`.
+
+```wove
+(fn check_library
+    (:pragma (c_variadic request) (c_bytes message count)
+        (c_record_in request message lv_error_message lv_error_message_size))
+    (c-name "fcntl")
+    (params (fd i32) (const command i32 F_CHECK_LV) (request (mut-ref Check))
+        (message (mut-array u8)) (count Size))
+    (returns i32))
+```
+
+The data and count are Wove-only arguments. The function receives the
+original record pointer, with its two mapped fields set from the
+checked view and count. The count must fit the exact borrowed range.
+The C pointer and count field types must match the view and count
+types, including the element's qualifiers. A mutable byte view maps to
+`void *`, a shared byte view to `const void *`, and `c_array` preserves
+the complete element type. Complete native records can be allocated in
+an array and borrowed directly or by range for this purpose.
+
+The bridge is for operations that use both addresses only until
+returning. Wove checks the record and data loans together with all
+other call arguments. After C returns, Wove restores the two mapped
+fields and preserves other writes to the record, writes through the
+buffer, and the original native status. The declaration returns an
+integer or `void`.
+
 A fixed C argument in `params` supplies a native operand at that position.
 Use `(const command i32 F_SETFL)` for a header constant,
 `(const property (c-type "filesec_property_t") FILESEC_MODE)` for a header

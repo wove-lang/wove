@@ -306,6 +306,23 @@ wvrt_slice wvrt_c_buffered_string_load(wvrt_c_buffered_strings wvrt_strings, int
 #define WVRT_C_FIELD_IS_CSTRS(type, field) \
 	_Generic(&((type *)0)->field, char ***: 1, default: 0)
 
+// Stage exact member types from a checked extent for one native call.
+#define WVRT_C_RECORD_INPUT_BIND(address, pointer, count, pointer_type, count_type, items, length) \
+	__auto_type wvrt_record_input_address = (address); \
+	_Static_assert(_Generic(&wvrt_record_input_address->pointer, pointer_type *: 1, default: 0), \
+		"Wove C record input pointer field type mismatch"); \
+	_Static_assert(_Generic(&wvrt_record_input_address->count, count_type *: 1, default: 0), \
+		"Wove C record input count field type mismatch"); \
+	__auto_type wvrt_record_input_old_pointer = wvrt_record_input_address->pointer; \
+	__auto_type wvrt_record_input_old_count = wvrt_record_input_address->count; \
+	wvrt_record_input_address->pointer = (pointer_type)(items); \
+	wvrt_record_input_address->count = (length)
+
+// End the loan while retaining unrelated native changes to the original record.
+#define WVRT_C_RECORD_INPUT_RESTORE(pointer, count) \
+	wvrt_record_input_address->pointer = wvrt_record_input_old_pointer; \
+	wvrt_record_input_address->count = wvrt_record_input_old_count
+
 // Use the selected C layout to initialize only the native reserved prefix.
 #define WVRT_CSTR_VECTOR_ALLOC(type, offset, reserved, file, start, end) \
 	__extension__ ({ \
