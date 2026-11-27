@@ -380,13 +380,17 @@ on Darwin arm64 and linked on Darwin x86-64 in all three C modes. Both glibc
 targets cross-linked in those modes. The cross-link from macOS supplies
 `-lm` for the integer fixture's floating-point environment calls.
 
+The private `LongDouble` selection shares the native type with `<math.h>`
+without adding that header to float-only builds. Optional macro probes
+can still see an explicitly selected earlier header. [Private intrinsic types #576](https://github.com/wove-lang/wove/issues/576) · [Two-header macro scope #577](https://github.com/wove-lang/wove/issues/577)
+
 | Members | Coverage or outstanding contract |
 | --- | --- |
 | `DECIMAL_DIG`, `FLT_EVAL_METHOD`, `FLT_RADIX`, and `FLT_*`, `DBL_*`, `LDBL_*` precision, decimal digits, exponent limits, and subnormal indicators | The installed fixture compares all 27 integer constant expressions to their native values. This includes the signed minimum exponents. |
 | `FLT_ROUNDS` | The header expands it to `__builtin_flt_rounds()`. The read-only expression retains type `int` and is evaluated on each read. The fixture compares it to a direct C read under each of the four rounding modes, then restores the original environment. |
 | `FLT_EPSILON`, `FLT_MAX`, `FLT_MIN`, `FLT_TRUE_MIN`, `DBL_EPSILON`, `DBL_MAX`, `DBL_MIN`, `DBL_TRUE_MIN` | The expression checks enforce exact C `float` or `double` types. The fixture compares all eight values against the header, including the smallest positive subnormals. |
-| `LDBL_EPSILON`, `LDBL_MAX`, `LDBL_MIN`, `LDBL_TRUE_MIN`, `LDBL_NORM_MAX` | The native alias passed the ABI checks in #574. The audited type has 53 significand bits and occupies 8 bytes on Darwin arm64, 64 bits and 16 bytes on both x86-64 targets, and 113 bits and 16 bytes on glibc arm64. Sharing the math alias currently adds a `<math.h>` include, which exposes its `INFINITY` and `NAN` definitions to float-only C11 and C17 imports. [Native long double #571](https://github.com/wove-lang/wove/issues/571) · [Type-only dependency #576](https://github.com/wove-lang/wove/issues/576) |
-| `FLT_NORM_MAX`, `DBL_NORM_MAX`, `INFINITY`, and `NAN` | The optional read-only bindings use the selected header and feature profile. The Clang 21 headers expose these macros in C23 and report unavailable imports at their original names in C11 and C17. Fixtures verify the normalized bounds, positive infinity, and a quiet NaN. [Optional expressions prerequisite #572](https://github.com/wove-lang/wove/issues/572) |
+| `LDBL_EPSILON`, `LDBL_MAX`, `LDBL_MIN`, `LDBL_TRUE_MIN` | The installed fixture passes all four exact values through `fabsl` and compares the results with the native header. The audited type has 53 significand bits and occupies 8 bytes on Darwin arm64, 64 bits and 16 bytes on both x86-64 targets, and 113 bits and 16 bytes on glibc arm64. [Native long double #571](https://github.com/wove-lang/wove/issues/571) |
+| `FLT_NORM_MAX`, `DBL_NORM_MAX`, `LDBL_NORM_MAX`, `INFINITY`, and `NAN` | The audited Clang 21 profiles expose all five read-only bindings in C23. Float-only imports in C11 and C17 report unavailable macros at the original names. The fixtures verify all three normalized maxima, positive infinity, and a quiet NaN. [Optional expressions #572](https://github.com/wove-lang/wove/issues/572) |
 | `FLT_IS_IEC_60559`, `DBL_IS_IEC_60559`, `LDBL_IS_IEC_60559`, `FLT_SNAN`, `DBL_SNAN`, `LDBL_SNAN`, `__STDC_VERSION_FLOAT_H__`, and decimal floating-point limit macros | Unavailable in the audited headers and feature profiles. |
 
 ## Bundled math coverage
