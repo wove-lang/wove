@@ -403,10 +403,10 @@ $(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SEED)
 $(SEED_UTILITY_C): $(STAGE2)/%.c: tests/stage-2/%.wove $(SEED)
 	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
 
-# Read each sidecar for its own target and create it on the next build if missing.
+# Include the resolved inputs. A missing sidecar forces regeneration, and its timestamp is irrelevant.
 .PHONY: force-seed-deps
 define seed_graph_dependencies
-$(1): $(wildcard $(1).d) $(if $(wildcard $(1).d),,force-seed-deps)
+$(1): $(if $(wildcard $(1).d),,force-seed-deps)
 wove_seed_target := $(1)
 -include $(wildcard $(1).d)
 endef

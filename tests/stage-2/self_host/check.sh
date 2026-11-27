@@ -126,16 +126,27 @@ live_import=stage-2/clang/query.wove
 products="$live $live.c $live.c.d"
 build "$output/$live"
 save_products
-build "$output/$live"
+# The sidecar can be written after the C output without making the fixture stale.
+build -W "$output/$live.c.d" "$output/$live"
 check_unchanged
 sleep 1
 printf '\n' >> "$live_import"
 build "$output/$live"
 test -n "$(find "$output/$live.c" -newer "$work/before/$live.c")"
 
+# Add an embed in a new directory and require it to appear in the discovered inputs.
+new_asset=stage-2/clang/incremental/nested/probe_header.tmpl.h
+mkdir -p "$(dirname "$new_asset")"
+cp "$asset" "$new_asset"
+sleep 1
+sed 's|/clang/templates/|/clang/incremental/nested/|g' stage-2/c/probe.wove > "$work/probe"
+cp "$work/probe" stage-2/c/probe.wove
+build "$output/$live"
+grep -Fq "$new_asset" "$output/$live.c.d"
+
 save_products
 sleep 1
-printf '\n' >> "$asset"
+printf '\n' >> "$new_asset"
 build "$output/$live"
 ! cmp -s "$output/$live.c" "$work/before/$live.c"
 
@@ -150,14 +161,14 @@ grep -q '^tests/support/ast/live.wove error ' "$work/live-failure"
 check_unchanged
 mv "$work/live-import" "$live_import"
 
-mv "$asset" "$work/live-template"
+mv "$new_asset" "$work/live-template"
 if build "$output/$live" > "$work/live-failure" 2>&1; then
 	printf 'live Clang fixture accepted a missing embed\n' >&2
 	exit 1
 fi
 grep -q '^stage-2/c/probe.wove error ' "$work/live-failure"
 check_unchanged
-mv "$work/live-template" "$asset"
+mv "$work/live-template" "$new_asset"
 
 # Add a dependency to an existing import without changing Make's source inventory.
 scanner_unit="$output/stage-2/source_scan.c"
