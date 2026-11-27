@@ -843,6 +843,7 @@ int32_t wvrt_i32_divide_at_span(int32_t wvrt_left, int32_t wvrt_right, bool wvrt
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 uint32_t wvrt_u32_add_wrapping(uint32_t wvrt_left, uint32_t wvrt_right);
 uint32_t wvrt_u32_sub_wrapping(uint32_t wvrt_left, uint32_t wvrt_right);
+uint32_t wvrt_u32_divide(uint32_t wvrt_left, uint32_t wvrt_right, bool wvrt_remainder, wvrt_location wvrt_site);
 int32_t wvrt_u32_shift_count(int32_t wvrt_count, wvrt_location wvrt_site);
 int32_t wvrt_clz(uint64_t wvrt_value, int32_t wvrt_width);
 int32_t wvrt_ctz(uint64_t wvrt_value, int32_t wvrt_width);

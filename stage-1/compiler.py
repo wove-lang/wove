@@ -67,6 +67,8 @@ BINARY_OPS = {
 	"u32.lt": (U32, BOOL, "<"),
 	"u32.not-lt": (U32, BOOL, ">="),
 	"u32.mul": (U32, U32, "*"),
+	"u32.div": (U32, U32, "/"),
+	"u32.rem": (U32, U32, "%"),
 	"u32.and": (U32, U32, "&"),
 	"u32.or": (U32, U32, "|"),
 	"u32.xor": (U32, U32, "^"),
@@ -798,6 +800,12 @@ class FunctionEmitter:
 			# Keep the full unsigned product before reducing it to the low word.
 			if expr.tag == "u32.mul":
 				return self.temporary(U32, f"(uint32_t)((uint64_t){first.c} * {second.c})")
+			# Guard both division operations at the original seed source location.
+			if expr.tag in ("u32.div", "u32.rem"):
+				remainder = "true" if operator == "%" else "false"
+				return self.temporary(
+					result, f"wvrt_u32_divide({first.c}, {second.c}, {remainder}, {self.site(node.line)})"
+				)
 			return self.temporary(result, f"{first.c} {operator} {second.c}")
 
 		shift = U32_SHIFT_OPS.get(expr.tag)

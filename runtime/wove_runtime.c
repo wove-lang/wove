@@ -2550,13 +2550,25 @@ _Noreturn void wvrt_int_arithmetic_trap(int32_t wvrtfile, int32_t wvrtstart, int
 	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "integer arithmetic overflow");
 }
 
+static const char wvrt_division_by_zero[] = "division by zero";
+
 // Report the reason checked division failed at its original operation.
 _Noreturn void wvrt_int_division_trap(bool wvrtzero, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	// Remainder and quotient share the zero-divisor diagnostic.
 	if (wvrtzero) {
-		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "division by zero");
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, wvrt_division_by_zero);
 	}
 	wvrt_int_arithmetic_trap(wvrtfile, wvrtstart, wvrtend);
+}
+
+// Use the native unsigned division guard with the seed's file and line location.
+uint32_t wvrt_u32_divide(uint32_t wvrtleft, uint32_t wvrtright, bool wvrtremainder, wvrt_location wvrtsite) {
+	uint32_t wvrt_result;
+	// For unsigned operands the only failure is a zero divisor.
+	if (!wvrt_int_try_divide(wvrtleft, wvrtright, &wvrt_result, wvrtremainder)) {
+		wvrt_trap(wvrtsite, wvrt_division_by_zero);
+	}
+	return wvrt_result;
 }
 
 // Keep the existing i32 call entry while using the same guarded operation as other widths.

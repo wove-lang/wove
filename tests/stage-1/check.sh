@@ -140,6 +140,10 @@ while read -r mode source expected origin extra <&3 || [ -n "${mode:-}" ]; do
 		shift-trap)
 			check_trap "$location" "$expected" "$program" "shift count out of range"
 			;;
+		# A zero divisor traps before either C operation is evaluated.
+		division-trap)
+			check_trap "$location" "$expected" "$program" "division by zero"
+			;;
 		# Reject unknown modes so every listed fixture is exercised.
 		*)
 			printf 'unknown test mode in %s: %s\n' "$manifest" "$mode" >&2
