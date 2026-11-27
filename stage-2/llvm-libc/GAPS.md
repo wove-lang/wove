@@ -134,6 +134,17 @@ all four functions through C-header selectors, including missing results,
 enumeration resets, and independent worker lookups. The source graph
 resolves the ordinary layout privately through the fix in #663.
 
+## Caller-backed native group records
+
+The bundled reentrant `<grp.h>` functions preserve libc status and lend a
+present result from the caller's record and byte buffer. The loan pins
+both inputs while the caller uses the group fields. The bounded strings
+and the null-terminated member table stay inside the supplied byte extent.
+Darwin can return an unaligned member table. Wove reads its slots without
+requiring native pointer alignment. On glibc the installed fixture reads a
+temporary stream, passes the complete borrowed record to `putgrent`, and
+verifies the GID, name, password, and members after reading it back.
+
 ## Fixed native operands
 
 The eleven existing `fcntl.h` fixed commands use header constants. Both
@@ -472,13 +483,15 @@ give `struct group` size 32 and alignment 8. Its native `char *` fields
 
 | Member | Availability and contract |
 | --- | --- |
-| `struct group`, `size_t` | `Group` projects `gr_gid` through the actual C record. `Size` is the native `size_t`. The fixture checks all four offsets and reads the projected value from both Wove and C. |
+| `struct group`, `size_t` | `Group` preserves the unsigned 32-bit `gr_gid` projection and exposes bounded name, password, and member views on caller-backed results. `Size` is native `size_t`. The fixtures check the native offsets and the projections from Wove and C. |
 | `setgrent`, `endgrent` | Both take no arguments and return `void`. Darwin exposes them in all audited profiles. glibc requires X/Open or miscellaneous extensions. |
 | `setgroupent`, `group_from_gid` | Darwin selects each declaration from the live header. `setgroupent` preserves the native result, including the cold and populated cache cases. `group_from_gid` snapshots the name or decimal fallback before another lookup can replace it, and preserves the null result when fallback is disabled. [Darwin lookup implementation](https://github.com/apple-oss-distributions/Libinfo/blob/main/lookup.subproj/libinfo.c) |
 | `NSS_BUFLEN_GROUP`, `initgroups`, `setgroups` | glibc miscellaneous/GNU profiles expose the integer macro and the native operations. `initgroups` receives a checked C string and native `gid_t`. `setgroups` receives the native `size_t` and a checked array of native `gid_t` elements. |
 | Darwin `getgrgid`, `getgrnam`, `getgrent`, `getgruuid` | Wove preserves lookup failure and copies all fields of a present thread-local record. The UUID argument is a writable view of exactly 16 bytes. The installed fixture keeps results alive across further lookups, enumeration resets, and worker calls. |
 | glibc `getgrgid`, `getgrnam`, `getgrent`, `fgetgrent` | A nullable native result refers to library-managed storage that later lookups can replace. glibc static and stream bindings still need the complete checked snapshot contract. [Static record contract #636](https://github.com/wove-lang/wove/issues/636) |
-| `getgrgid_r`, `getgrnam_r`, Darwin `getgruuid_r`, glibc `getgrent_r`, `fgetgrent_r`, and `putgrent` | The reentrant calls write a nullable result that aliases the caller's record, with strings and the member table in the caller's bytes. The Darwin probe found a valid table at an unaligned address. `putgrent` consumes a complete borrowed native record. [Caller storage and vector contract #637](https://github.com/wove-lang/wove/issues/637) |
+| `getgrgid_r`, `getgrnam_r` | Darwin and glibc expose the reentrant lookups according to the selected header. The installed fixture checks successful lookups with independent buffers, `ERANGE`, and an absent ID. glibc POSIX.1-1992 declares `getgrgid_r` without exposing the public `gid_t` spelling, so an ID call using the Wove native `Gid` binding is unavailable in that profile. Name lookup works with the same record ABI and has a strict-profile fixture. [POSIX.1-1992 ID lookup](https://github.com/wove-lang/wove/issues/665) |
+| Darwin `getgruuid_r` | Darwin extension profiles expose the native UUID lookup. It takes a 16-byte UUID and uses the same checked record and byte storage contract. |
+| glibc `getgrent_r`, `fgetgrent_r`, `putgrent` | glibc GNU profiles expose all three. In the audited default-source profile `fgetgrent_r` is also visible. The reentrant readers lend their caller-backed records. `putgrent` writes the complete checked record to the borrowed native stream. [Caller-backed record support](https://github.com/wove-lang/wove/pull/661) |
 | `gid_t` | Optional `Gid` selects the exact typedef from `<grp.h>`. Darwin exposes it across the audited profiles. glibc exposes it in POSIX.1-2001 and later, X/Open, or extension profiles. ISO and POSIX.1-1992 glibc report the original unavailable selector. The fixture checks conversion of a value above signed 32-bit range. [Optional scalar typedefs](https://github.com/wove-lang/wove/pull/652) |
 | Darwin `_PATH_GROUP` | The optional immutable byte view reads `"/etc/group"` from the SDK string literal in extension profiles. Strict POSIX selection reports the original unavailable selector. The installed fixture checks the exact length and every byte. [Native string macros](https://github.com/wove-lang/wove/pull/655) |
 | glibc `getgrouplist` | Miscellaneous and GNU profiles expose `int (const char *, gid_t, gid_t *, int *)`. The incoming `int` bounds a writable native `Gid` array. Wove preserves the native return value and updates the caller's count for a retry. The fixture checks zero and insufficient capacity, then verifies the count and group IDs from the successful retry. [In-out array counts](https://github.com/wove-lang/wove/pull/654) |
