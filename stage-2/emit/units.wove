@@ -4,13 +4,15 @@
 	(:doc "Partition and emit an already checked graph as numbered C units.")
 
 	(use wove-file "../hashing/base32hex.wove" (only encode_base32hex32))
-	(use wove-file "../c/arguments.wove" (only (value c_storage_init_always_mode) is_c_bytes_mode is_c_storage_mode is_c_value_mode))
+	(use wove-file "../c/arguments.wove" (only (value c_storage_init_always_mode) c_checked_string_mode
+		is_c_bytes_mode is_c_null_mode is_c_storage_mode is_c_value_mode))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/native_owner_types.wove" (only is_native_owner native_owner_type))
+	(use wove-file "../scalar/owners.wove" (only optional_byte_owner_type))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only find_native_definition is_native_integer
-		is_native_record (type ScalarRecord)))
+		is_native_record is_writable_slice (type ScalarRecord)))
 	(use wove-file "../scalar/syntax.wove" (only is_byte_view_type))
 	(use wove-file "../scalar/trees.wove" (only (type ScalarTree)))
 	(use wove-file "../source/graph.wove" (only includes_c_header (type GraphBinding)))
@@ -204,15 +206,51 @@
 				(then (return numbered_preamble_replay)))
 			(return 0u8)))
 
+	(fn numbered_owned_cstr_call
+		(:doc "Admit one checked shared C string and one explicit null into a released nullable text result.")
+		(params (function ScalarFunction) (parameters (shared-array ScalarParameter))) (returns bool)
+		(body
+			(if
+				(:doc "Only a whole-string copy with a named release has this ownership contract.")
+				(bool.or (bool.not (struct.get function c_snapshot))
+					(bool.or (i32.ltz (struct.get function c_snapshot_drop))
+						(bool.or (i32.not-ltz (struct.get function c_snapshot_field))
+							(bool.or (i32.not-ltz (struct.get function c_snapshot_record))
+								(u32.not-eq (struct.get function result) (call optional_byte_owner_type))))))
+				(then (return (bool false))))
+			(if
+				(:doc "The fixed two-argument form has exactly one checked conversion and one null slot.")
+				(bool.or (bool.or (i32.not-eq (struct.get function arity) 2i32)
+						(bool.or (i32.not-eq (struct.get function c_strings) 1i32)
+							(i32.not-eq (struct.get function c_nulls) 1i32)))
+					(bool.or (bool.or (i32.not-eqz (struct.get function c_variadic))
+							(i32.gtz (struct.get function c_extents)))
+						(bool.or (struct.get function c_storage) (call has_c_other_arguments function (bool true)))))
+				(then (return (bool false))))
+			(let first (struct.get function params))
+			(let input (array.load parameters first))
+			(let output (array.load parameters (i32.inc first)))
+			(let input_type (struct.get input type))
+			(let output_type (struct.get output type))
+			(return (bool.and
+				(bool.and (u8.eq (struct.get input c_mode) (call c_checked_string_mode))
+					(bool.and (call is_byte_view_type input_type) (bool.not (call is_writable_slice input_type))))
+				(bool.and (call is_c_null_mode (struct.get output c_mode))
+					(bool.and (call is_byte_view_type output_type) (call is_writable_slice output_type)))))))
+
 	(fn ordinary_bridge_signature
 		(:doc "Admit direct scalar, pointer loan, fixed storage, and bounded byte contracts.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
 			(function ScalarFunction) (parameters (shared-array ScalarParameter)) (borrows bool)) (returns bool)
 		(body
+			(if
+				(:doc "The existing allocating snapshot adapter carries its own arguments and cleanup.")
+				(call numbered_owned_cstr_call function (borrow-shared parameters))
+				(then (return (bool true))))
 			(let result (struct.get function result))
 			(if
 				(:doc "Void and direct scalar results need no ownership adapter.")
-				(bool.or (bool.or (call has_c_other_arguments function)
+				(bool.or (bool.or (call has_c_other_arguments function (bool false))
 					(i32.not-eqz (struct.get function c_variadic)))
 					(bool.and (u32.not-eq result (call void_type)) (bool.not (call direct_scalar_abi result))))
 				(then (return (bool false))))
@@ -285,9 +323,9 @@
 									function (borrow-shared parameters) (u8.eq mode 2u8)))
 								(then (return 0u8)))
 							(if
-								(:doc "Native extent and storage adapters require the effective preamble even without a selected type.")
-								(bool.and (u8.eq mode 1u8) (bool.or (struct.get function c_storage)
-									(i32.gtz (struct.get function c_extents))))
+								(:doc "Checked native adapters require the effective preamble even without a selected type.")
+								(bool.and (u8.eq mode 1u8) (bool.or (struct.get function c_snapshot)
+									(bool.or (struct.get function c_storage) (i32.gtz (struct.get function c_extents)))))
 								(then (set mode numbered_preamble_replay)))))
 					(set index (i32.inc index))))
 			(return mode)))
