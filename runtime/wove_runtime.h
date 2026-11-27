@@ -143,15 +143,6 @@ _Float16 wvrt_f128_to_f16(wvrt_f128 wvrtvalue, int32_t wvrtfile, int32_t wvrtsta
 
 int wvrt_run_host_entry(int argc, char **argv, int32_t (*entry)(wvrt_slice));
 
-// Bootstrap-only file and stream operations implemented outside the shipped runtime.
-int32_t wvrt_bootstrap_canonical_path(wvrt_slice path, wvrt_mut_slice out);
-int32_t wvrt_bootstrap_file(wvrt_slice path, wvrt_mut_slice out);
-bool wvrt_bootstrap_same_file(wvrt_slice left, wvrt_slice right);
-bool wvrt_bootstrap_write(wvrt_slice bytes, bool diagnostic);
-uint8_t wvrt_bootstrap_os(void);
-uint8_t wvrt_bootstrap_arch(void);
-int32_t wvrt_bootstrap_deployment(void);
-
 // Lend the host arguments through the same entry ABI in both compilers.
 #define WVRT_HOST_ENTRY(entry) \
 	int main(int argc, char **argv) { \

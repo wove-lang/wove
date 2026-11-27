@@ -62,6 +62,9 @@ BINARY_OPS = {
 	"i32.not-eq": (I32, BOOL, "!="),
 	"i32.lt": (I32, BOOL, "<"),
 	"i32.not-lt": (I32, BOOL, ">="),
+	"i32.mul": (I32, I32, "*"),
+	"i32.div": (I32, I32, "/"),
+	"i32.rem": (I32, I32, "%"),
 	"u32.eq": (U32, BOOL, "=="),
 	"u32.not-eq": (U32, BOOL, "!="),
 	"u32.lt": (U32, BOOL, "<"),
@@ -106,22 +109,17 @@ class BufferType:
 	element: str | Record | BufferType
 
 
-Type = str | Record | BufferType
+@dataclass(frozen=True)
+class FixedArrayType:
+	element: str
+	count: int
+
+
+Type = str | Record | BufferType | FixedArrayType
 
 
 _BYTE_VIEW = BufferType(SHARED, U8)
-_BYTE_OUTPUT = BufferType(MUT, U8)
 _HOST_ARGV = BufferType(SHARED, _BYTE_VIEW)
-# Only the private bootstrap host ABI bypasses ordinary Wove name lookup.
-BOOTSTRAP_CALLS: dict[str, tuple[tuple[Type, ...], Type]] = {
-	"bootstrap_canonical_path": ((_BYTE_VIEW, _BYTE_OUTPUT), I32),
-	"bootstrap_file": ((_BYTE_VIEW, _BYTE_OUTPUT), I32),
-	"bootstrap_same_file": ((_BYTE_VIEW, _BYTE_VIEW), BOOL),
-	"bootstrap_write": ((_BYTE_VIEW, BOOL), BOOL),
-	"bootstrap_os": ((), U8),
-	"bootstrap_arch": ((), U8),
-	"bootstrap_deployment": ((), I32),
-}
 
 
 @dataclass(frozen=True)
@@ -146,7 +144,7 @@ class ModuleValue:
 class Function:
 	c_name: str
 	params: tuple[tuple[str, Type], ...]
-	result: str | Record
+	result: Type
 	body: Form
 	is_entry: bool = False
 
@@ -167,7 +165,7 @@ class Module:
 
 # Scalars and scalar-only records can be passed without a loan or transfer.
 def copyable(kind: Type) -> bool:
-	return isinstance(kind, Record) or kind in SCALAR_TYPES
+	return isinstance(kind, (Record, FixedArrayType)) or kind in SCALAR_TYPES
 
 
 # Arrays and slices share descriptor layouts while values retain their native types.
@@ -175,6 +173,9 @@ def c_type(kind: Type) -> str:
 	# The descriptor depends on the access mode and carries a typed element count.
 	if isinstance(kind, BufferType):
 		return C_TYPE[kind.access]
+	# Inline arrays are passed by value through their generated C type.
+	if isinstance(kind, FixedArrayType):
+		return f"wv_seed_fixed_{kind.element}_{kind.count}"
 	return kind.c_name if isinstance(kind, Record) else C_TYPE[kind]
 
 
@@ -210,6 +211,23 @@ def read_integer_literal(node: Form) -> Value:
 		raise SourceError(node.line)
 	spelling = f"UINT32_C({number})" if node.tag == U32 else str(number)
 	return Value(node.tag, spelling)
+
+
+# Read an inline integer array shape with an exact nonnegative extent.
+def read_fixed_array_type(node: Node) -> FixedArrayType:
+	element_node, count_node = checked_form(node, "array", 2).operands
+	element = identifier(element_node)
+	# Only supported scalar elements can be copied by the seed's inline array representation.
+	if element not in SCALAR_TYPES:
+		raise SourceError(element_node.line)
+	# The extent is a decimal atom in the fixed array type form.
+	if not isinstance(count_node, Atom) or count_node.quoted or not re.fullmatch(r"[0-9]+", count_node.text):
+		raise SourceError(count_node.line)
+	digits = count_node.text.lstrip("0") or "0"
+	# Keep the extent representable in the runtime's signed length field.
+	if len(digits) > 10 or (count := int(digits)) > SCALAR_LIMITS[I32][1]:
+		raise SourceError(count_node.line)
+	return FixedArrayType(element, count)
 
 
 # Read an immutable scalar or byte table without evaluating runtime expressions.
@@ -299,6 +317,9 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 		# Keep nominal record identity in the signature.
 		if copyable(kind):
 			return kind
+	# An exact inline array shape gives the parameter its own value storage.
+	if isinstance(node, Form) and node.tag == "array":
+		return read_fixed_array_type(node)
 	view = checked_form(node, arity=1)
 	# Slice parameters specify a read or write loan.
 	if view.tag not in (SHARED, MUT):
@@ -344,11 +365,22 @@ def read_function(
 			raise SourceError(param.line)
 		params[field.tag] = parameter_type(field.operands[0], records)
 	result_node, = checked_form(returns_node, "returns", 1).operands
-	result_name = identifier(result_node)
-	result = records.get(result_name, result_name)
-	# A function returns a copyable value or completes without a value.
-	if result != VOID and not copyable(result):
-		raise SourceError(result_node.line)
+	# An owning result transfers the allocation before local owners are released.
+	if isinstance(result_node, Form) and result_node.tag == OWNED:
+		element_node, = checked_form(result_node, OWNED, 1).operands
+		element_name = identifier(element_node)
+		element = records.get(element_name, element_name)
+		# Owned results use the element layouts already supported for native seed arrays.
+		if element != U8 and not isinstance(element, Record):
+			raise SourceError(element_node.line)
+		result = BufferType(OWNED, element)
+	# Scalar results copy by value. Void has no return operand.
+	else:
+		result_name = identifier(result_node)
+		result = records.get(result_name, result_name)
+		# Borrowed results have no seed return representation.
+		if result != VOID and not copyable(result):
+			raise SourceError(result_node.line)
 	entry = entry_module and name == "main"
 	# The application entry implements the shared host argument ABI.
 	if entry and (result != I32 or tuple(params.values()) != (_HOST_ARGV,)):
@@ -455,6 +487,15 @@ class FunctionEmitter:
 		binding = self.binding(node)
 		value = binding.value
 		kind = value.kind
+		# Fixed array parameters are immutable values with inline storage.
+		if isinstance(kind, FixedArrayType):
+			# Only a shared view may refer to the parameter's own storage.
+			if writable:
+				raise SourceError(line)
+			view_type = BufferType(SHARED, kind.element)
+			view = self.temporary(view_type,
+				f"(wvrt_slice){{{value.c}.items, {kind.count}, sizeof({c_type(kind.element)})}}")
+			return binding, view_type, view.c + "."
 		# Only array owners and views carry an element descriptor.
 		if not isinstance(kind, BufferType):
 			raise SourceError(line)
@@ -538,21 +579,11 @@ class FunctionEmitter:
 		if self.find_binding(symbol) is not None:
 			raise SourceError(name.line)
 		callee = self.functions.get(symbol)
-		# The fixed host calls apply only when ordinary Wove lookup has no binding.
-		if callee is None:
-			bootstrap = BOOTSTRAP_CALLS.get(symbol)
-			# Keep arbitrary C functions outside the seed's bootstrap surface.
-			if bootstrap is None:
-				raise SourceError(node.line)
-			parameters, return_type = bootstrap
-			c_name = f"wvrt_{symbol}"
-		else:
-			# Neither representation of the root entry is a callable Wove helper.
-			if callee.is_entry:
-				raise SourceError(node.line)
-			parameters = tuple(kind for _, kind in callee.params)
-			return_type = callee.result
-			c_name = callee.c_name
+		# Calls resolve only ordinary Wove bindings.
+		if callee is None or callee.is_entry:
+			raise SourceError(node.line)
+		parameters = tuple(kind for _, kind in callee.params)
+		return_type = callee.result
 		# Resolve the exact signature before evaluating any argument.
 		if len(args) != len(parameters):
 			raise SourceError(node.line)
@@ -562,7 +593,7 @@ class FunctionEmitter:
 		for argument, kind in zip(args, parameters):
 			value = self.borrow(argument, kind) if isinstance(kind, BufferType) else self.typed(argument, kind)
 			values.append(value.c)
-		expression = f"{c_name}({', '.join(values)})"
+		expression = f"{callee.c_name}({', '.join(values)})"
 		# A void call is a statement and supplies no C value to a consumer.
 		if return_type == VOID:
 			self.emit_line(f"{expression};")
@@ -707,7 +738,6 @@ class FunctionEmitter:
 		# A member access produces a copy of the declared scalar field.
 		if expr.tag == "struct.get":
 			return self.record_field(expr)
-
 		# Allocate one runtime array with the source location for traps.
 		if expr.tag == "array.alloc":
 			element_node, length = form(expr, arity=2).operands
@@ -800,12 +830,21 @@ class FunctionEmitter:
 			# Keep the full unsigned product before reducing it to the low word.
 			if expr.tag == "u32.mul":
 				return self.temporary(U32, f"(uint32_t)((uint64_t){first.c} * {second.c})")
+			# Multiply as unsigned bits so signed overflow has Wove wrapping semantics.
+			if expr.tag == "i32.mul":
+				product = f"(uint32_t)((uint64_t)(uint32_t){first.c} * (uint32_t){second.c})"
+				return self.temporary(I32, f"wvrt_i32_from_wrapped_bits({product})")
 			# Guard both division operations at the original seed source location.
 			if expr.tag in ("u32.div", "u32.rem"):
 				remainder = "true" if operator == "%" else "false"
 				return self.temporary(
 					result, f"wvrt_u32_divide({first.c}, {second.c}, {remainder}, {self.site(node.line)})"
 				)
+			# The runtime handles signed quotient and remainder edge cases.
+			if expr.tag in ("i32.div", "i32.rem"):
+				remainder = "true" if operator == "%" else "false"
+				return self.temporary(I32,
+					f"wvrt_i32_divide_at_span({first.c}, {second.c}, {remainder}, -1, {node.line}, {node.line})")
 			return self.temporary(result, f"{first.c} {operator} {second.c}")
 
 		shift = U32_SHIFT_OPS.get(expr.tag)
@@ -1377,9 +1416,17 @@ def compile_source(source: str, filename: str) -> str:
 		*(function.c_name for module in modules[1:] for function in module.functions.values()),
 		*(value.binding.value.c for value in values),
 	)
+	fixed_arrays = {kind for function in functions for _, kind in function.params
+		if isinstance(kind, FixedArrayType)}
 
 	lines = [f"#include {operand}" for operand in headers]
 	lines.append("")
+	# Give every exact inline shape one ordinary C type before signatures reference it.
+	for kind in sorted(fixed_arrays, key=lambda shape: (shape.element, shape.count)):
+		lines.append(f"typedef struct {{ {c_type(kind.element)} items[{max(1, kind.count)}]; }} {c_type(kind)};")
+	# Separate any generated array types from the record declarations.
+	if fixed_arrays:
+		lines.append("")
 	# Define every native type before functions use it by value.
 	for module in modules:
 		# Each record is emitted only for its defining file.
