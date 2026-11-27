@@ -116,6 +116,30 @@ scanner_unit="$output/stage-2/source_scan.c"
 scanner_deps="$scanner_unit.d"
 scanner_provider='tests/stage-2/new/nested/scanner provider.wove'
 scanner_importer=stage-2/source/expectations.wove
+absolute=$(pwd -P)
+
+# Insert one import into the scanner's already reachable module in the disposable tree.
+add_scanner_import() {
+	sed "/(use wove-file \".\\/scan.wove\"/i\\
+	(use wove-file \"../../$1\" (only))
+" "$scanner_importer" > "$work/scanner-importer"
+	cp "$work/scanner-importer" "$scanner_importer"
+}
+
+# A missing active path must reach the seed and leave both previous products intact.
+check_missing_scanner_import() {
+	# The same sidecar must work with an absolute BUILD_DIR.
+	if build "BUILD_DIR=$absolute/$output" "$absolute/$scanner_unit" > "$work/scanner-failure" 2>&1; then
+		printf 'scanner accepted a missing transitive import\n' >&2
+		exit 1
+	fi
+	grep -q "^$scanner_importer:[0-9]" "$work/scanner-failure"
+	cmp "$scanner_unit" "$work/scanner-before"
+	cmp "$scanner_deps" "$work/scanner-deps-before"
+	test -z "$(find "$scanner_unit" -newer "$work/scanner-before")"
+	test -z "$(find "$scanner_deps" -newer "$work/scanner-deps-before")"
+}
+
 # A build made before dependency files existed can recreate the sidecar.
 mv "$scanner_deps" "$work/old-scanner-deps"
 build "$scanner_unit"
@@ -124,10 +148,7 @@ cmp "$scanner_deps" "$work/old-scanner-deps"
 mkdir -p "$(dirname "$scanner_provider")"
 cp stage-2/c/identifiers.wove "$scanner_provider"
 sleep 1
-sed '/(use wove-file ".\/scan.wove"/i\
-	(use wove-file "../../tests/stage-2/new/nested/scanner provider.wove" (only))
-' "$scanner_importer" > "$work/scanner-importer"
-cp "$work/scanner-importer" "$scanner_importer"
+add_scanner_import "$scanner_provider"
 build "$scanner_unit"
 grep -Fq 'tests/stage-2/new/nested/scanner\ provider.wove' "$scanner_deps"
 
@@ -144,14 +165,17 @@ cp -p "$scanner_unit" "$work/scanner-before"
 cp -p "$scanner_deps" "$work/scanner-deps-before"
 build "$scanner_unit"
 mv "$scanner_provider" "$work/scanner-provider"
-# The same sidecar must diagnose a deletion even with an absolute BUILD_DIR.
-absolute=$(pwd -P)
-if build "BUILD_DIR=$absolute/$output" "$absolute/$scanner_unit" > "$work/scanner-failure" 2>&1; then
-	printf 'scanner accepted a missing transitive import\n' >&2
-	exit 1
-fi
-grep -q "^$scanner_importer:[0-9]" "$work/scanner-failure"
-cmp "$scanner_unit" "$work/scanner-before"
-cmp "$scanner_deps" "$work/scanner-deps-before"
-test -z "$(find "$scanner_unit" -newer "$work/scanner-before")"
-test -z "$(find "$scanner_deps" -newer "$work/scanner-deps-before")"
+check_missing_scanner_import
+
+# Deduplicating the linked provider in C must still track both active import paths.
+scanner_alias=tests/stage-2/new/nested/alias.wove
+mv "$work/scanner-provider" "$scanner_provider"
+ln "$scanner_provider" "$scanner_alias"
+sleep 1
+add_scanner_import "$scanner_alias"
+build "$scanner_unit"
+grep -Fq "$scanner_alias" "$scanner_deps"
+cp -p "$scanner_unit" "$work/scanner-before"
+cp -p "$scanner_deps" "$work/scanner-deps-before"
+mv "$scanner_alias" "$work/scanner-hardlink"
+check_missing_scanner_import

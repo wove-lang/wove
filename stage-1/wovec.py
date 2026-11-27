@@ -12,18 +12,18 @@ from syntax import SourceError
 
 # Quote paths for a Make dependency file without expanding source text as Make syntax.
 def make_word(path: str) -> str:
-	# These separators cannot name a dependency in the supported Make syntax.
-	if any(character in path for character in "\r\n:;|\\"):
+	# Make 3.81 must be able to use the same literal name as a target and a wildcard argument.
+	if any(character in path for character in "\r\n:;|\\*?[]"):
 		raise OSError(f"cannot write Make dependency for {path!r}")
 	quoted = path.replace("$", "$$")
-	# Escape literal whitespace, comments, and glob characters in file names.
-	for character in " #\t*?[]":
+	# Escape literal whitespace and comment markers in file names.
+	for character in " #\t":
 		quoted = quoted.replace(character, "\\" + character)
 	return quoted
 
 
 # Keep missing imports visible despite the build's global .SECONDARY rule.
-def write_make_deps(destination: str, imports: list[str]) -> None:
+def write_make_deps(destination: str, imports: dict[str, None]) -> None:
 	rules = []
 	# Make supplies the target at include time, even when BUILD_DIR changes spelling.
 	for filename in imports:
@@ -40,7 +40,7 @@ def main() -> int:
 	# Make requests a dependency sidecar from the same successful compilation.
 	if len(arguments) == 3 and arguments[0] == "--make-deps":
 		_, destination, filename = arguments
-		imports = []
+		imports = {}
 	# The invocation names the executable root of the source graph.
 	elif len(arguments) == 1:
 		filename, = arguments

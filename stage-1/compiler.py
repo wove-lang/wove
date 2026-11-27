@@ -1335,8 +1335,8 @@ def file_identity(path: Path) -> tuple[int, int]:
 	return status.st_dev, status.st_ino
 
 
-# Visit the active source graph and collect includes at their first use.
-def load_modules(root: Module) -> tuple[list[Module], list[str]]:
+# Visit active imports, collecting native includes and optional Make prerequisites.
+def load_modules(root: Module, *, imports: dict[str, None] | None = None) -> tuple[list[Module], list[str]]:
 	# A file with no uses only needs signature preparation.
 	if not root.uses:
 		prepare_functions(root, entry=True)
@@ -1380,12 +1380,19 @@ def load_modules(root: Module) -> tuple[list[Module], list[str]]:
 				headers.setdefault(key, include)
 				continue
 			requested, only = read_use(use)
+			candidate = path.parent / requested
 			# Resolve from the file containing the use and collapse path aliases.
 			try:
-				target = (path.parent / requested).resolve(strict=True)
+				target = candidate.resolve(strict=True)
 				target_identity = file_identity(target)
 			except (OSError, RuntimeError, ValueError):
 				raise SourceError(use.line) from None
+			# Track the active import and its resolved file before deduplicating modules.
+			if imports is not None:
+				# Use the same checkout-relative spelling as the generated C by default.
+				for dependency in (candidate, target):
+					name = os.path.normpath(dependency) if absolute_paths else os.path.relpath(dependency)
+					imports[name] = None
 			# An edge back into the current path is a cycle.
 			if target_identity in active:
 				raise SourceError(use.line)
@@ -1407,9 +1414,9 @@ def load_modules(root: Module) -> tuple[list[Module], list[str]]:
 
 
 # Emit a complete C translation unit after the source graph succeeds.
-def compile_source(source: str, filename: str, *, imports: list[str] | None = None) -> str:
+def compile_source(source: str, filename: str, *, imports: dict[str, None] | None = None) -> str:
 	root = read_module(source, filename, 0, 0, 0, entry=True)
-	modules, headers = load_modules(root)
+	modules, headers = load_modules(root, imports=imports)
 	functions = [function for module in modules for function in module.functions.values()]
 	values = [value for module in modules for value in module.values.values()]
 	retained = (
@@ -1452,7 +1459,4 @@ def compile_source(source: str, filename: str, *, imports: list[str] | None = No
 				# Reuse the same borrowed host argument vector as the native compiler.
 				if function.is_entry:
 					lines.extend([f"WVRT_HOST_ENTRY({function.c_name})", ""])
-	# Record the same ordered module identities that supplied the emitted C.
-	if imports is not None:
-		imports.extend(module.filename for module in modules[1:])
 	return "\n".join(lines)
