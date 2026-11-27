@@ -69,11 +69,11 @@ Use `(array.alloc T count)` for a local owned array with `u8` or a
 copyable record as its element type. Use `array.len`, `array.load`, and
 `array.store` with exact element types and `i32` indices. A writable
 receiver is required for stores. Transfer a named owner with
-`(move (local name))`.
+`(move name)`.
 
 Pass `(shared-array T)` and `(mut-array T)` parameters using
 `borrow-shared` and `borrow-mut` on an owner or received view. For a
-checked byte subrange, borrow `(array.range (local name) start end)`.
+checked byte subrange, borrow `(array.range name start end)`.
 The `i32` endpoints evaluate once in source order, and equal endpoints
 are valid. Call loans remain active through later arguments and the call.
 Shared reborrows permit reads through the parent. Exclusive reborrows

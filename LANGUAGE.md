@@ -12,12 +12,12 @@ SPDX-License-Identifier: MIT OR Apache-2.0
     (:doc `Show how a program calls a helper and returns an exit status.`)
     (fn twice (params (value i32)) (returns i32)
         (:doc "Double the input with wrapping i32 addition.")
-        (body (return (i32.add (local value) (local value)))))
+        (body (return (i32.add value value))))
 
     (fn main (params (argv (shared-array (shared-array u8)))) (returns i32)
         (:doc "Return 42 when invoked without user arguments. Otherwise return 2.")
         (body
-            (if (i32.gt (array.len (local argv)) 1i32)
+            (if (i32.gt (array.len argv) 1i32)
                 (then (return 2i32)))
             (return (call twice 21i32)))))
 ```
@@ -44,8 +44,8 @@ if `wovec` is outside your PATH.
     (fn main (params (argv (shared-array (shared-array u8)))) (returns i32)
         (:doc "Return success unless puts reports a write failure.")
         (body
-            (let status (call puts (borrow-shared (local text))))
-            (return (if (i32.ltz (local status)) (then 1i32) (else 0i32))))))
+            (let status (call puts (borrow-shared text)))
+            (return (if (i32.ltz status) (then 1i32) (else 0i32))))))
 ```
 
 Save this as `hello.wove`. Use `cc --check` to validate it without writing
@@ -86,7 +86,7 @@ declaration, binding, parameter, field, variant, generic parameter, and
 import names. Fixed words and operators retain their own spellings, such
 as `let-mut` and `u32.add-checked`.
 
-Read a binding with `(local name)`. Lookup starts in the current block,
+A bare identifier reads its binding. Lookup starts in the current block,
 then checks enclosing blocks, parameters, module bindings, and selected
 value imports. A local comes into scope after its initializer. A nested
 block can shadow an outer binding. Two declarations of the same name in
@@ -99,9 +99,9 @@ their body and arm, respectively.
 | --- | --- |
 | Statement | Use declarations, assignments, control flow, or a call returning `void`. A value-returning call needs a value context. Use `(let ignored (call f ...))` to run a call and leave its result unused. |
 | Value | Bind it, pass it as an exact-typed argument, use it as an operand, or return it. A value `if` needs two arms of the same type. |
-| Place | A place denotes existing storage, such as `(local data)`, a field of a place, or an eligible indexed slot. Assignment and borrowing require suitable places. Exclusive borrowing and replacement require writable storage. Move an existing owner through its live place. |
+| Place | A place denotes existing storage, such as `data`, a field of a place, or an eligible indexed slot. Assignment and borrowing require suitable places. Exclusive borrowing and replacement require writable storage. Move an existing owner through its live place. |
 | Binding initializer | Bind a scoped borrow or a result that carries a loan so its lifetime has a name. `array.try-slice` uses a direct `let`. Bind a nullable native record call and its unwrap with immutable `let`. Bind a `worker.spawn` receipt directly to a local. A function can return a compatible view or borrowing result with a `(from parameter)` contract. |
-| String value | Define `(let text "hello")` at module scope and use `(borrow-shared (local text))` for a shared byte-view argument. Literals also appear in string operands such as metadata, paths, and C names. `c_static_cstr` specifically requires a direct literal. Ordinary call arguments, local initializers, and borrow operands do not accept a bare string literal. |
+| String value | Define `(let text "hello")` at module scope and use `(borrow-shared text)` for a shared byte-view argument. Literals also appear in string operands such as metadata, paths, and C names. `c_static_cstr` specifically requires a direct literal. Ordinary call arguments, local initializers, and borrow operands do not accept a bare string literal. |
 
 ### Array layouts
 
@@ -196,7 +196,7 @@ In a compiler checkout, save this as `checks.wove`.
         (params) (returns void)
         (body
             (let data (array.alloc u8 1i32))
-            (let first (array.load (local data) 0i32)))))
+            (let first (array.load data 0i32)))))
 ```
 
 Build the graph probe and test runtime, then discover, emit, and run the tests.
@@ -371,7 +371,7 @@ once from left to right.
 Use `(f32.from-bits word)` and `(f32.to-bits value)` to copy the representation
 between `f32` and `u32`. The matching `f16` and `f64` forms use `u16` and `u64`,
 respectively. These operations retain signed zero and NaN payloads. For example, an STL coordinate read from
-little-endian bytes can widen with `(f64.from-f32 (f32.from-bits (local word)))`.
+little-endian bytes can widen with `(f64.from-f32 (f32.from-bits word))`.
 
 The same `<destination>.from-<source>` syntax handles checked numeric conversions
 involving floats, with integer operands and results through 256 bits where
@@ -391,15 +391,15 @@ represent all signed and unsigned integers of up to 64 bits exactly.
 
 | Form | Meaning |
 | --- | --- |
-| `(local name)` | Read a local, parameter, or visible immutable module binding. |
+| `name` | Read a local, parameter, or visible immutable module binding. |
 | `(call name args...)` | Call a visible function. Arguments evaluate left to right. |
-| `(set (local name) value)` | Replace a mutable local with a value of its exact type. |
+| `(set name value)` | Replace a mutable local with a value of its exact type. |
 | `(set (struct.get place field) value)` | Replace an exact field through a mutable Wove record local or reference, including along a nested field path. |
 | `(struct.new Type (field value) ...)` | Construct a record from typed field values in written order. |
 | `(struct.get value field)` | Read a field with its declared type. |
 | `(array.alloc T count)` | Allocate an owned buffer with an `i32` element count. The layout determines its initial slot state. |
-| `(move (local buffer))` | Transfer ownership of a local buffer or hand a present native owner to a consuming C call. |
-| `(owner.is-null (local file))` | Test whether a native owner holds a missing handle. |
+| `(move buffer)` | Transfer ownership of a local buffer or hand a present native owner to a consuming C call. |
+| `(owner.is-null file)` | Test whether a native owner holds a missing handle. |
 
 A module-level `let` can hold an immutable scalar, a string, an embedded
 file, or an inline table. A quoted string gives a `(shared-array u8)` view
@@ -410,7 +410,7 @@ named Wove record. `array.load` can read the table directly.
 
 Stage 2 evaluates exact `i32` arithmetic in immutable module initializers,
 inline table elements, and fixed-array extents. Expressions can use
-`i32` literals, `(local name)` references to immutable `i32` module bindings
+`i32` literals, `name` references to immutable `i32` module bindings
 (including selected imports), and `i32.add`, `i32.sub`, `i32.mul`,
 `i32.add-checked`, `i32.sub-checked`, `i32.mul-checked`, `i32.inc`,
 `i32.dec`, `i32.div`, and `i32.rem`. Bindings can refer forward to other
@@ -421,7 +421,7 @@ division truncates toward zero. A folded value retains type `i32`.
 ```lisp
 (let BLOCK_SIZE 32768i32)
 (let PAYLOAD_SIZE
-    (i32.add (local BLOCK_SIZE) (i32.div (i32.add (local BLOCK_SIZE) 127i32) 128i32)))
+    (i32.add BLOCK_SIZE (i32.div (i32.add BLOCK_SIZE 127i32) 128i32)))
 ```
 
 ### Function values
@@ -432,11 +432,11 @@ defining function have no effect.
 
 ```lisp
 (fn increment (params (value i32)) (returns i32)
-    (body (return (i32.inc (local value)))))
+    (body (return (i32.inc value))))
 
 (fn apply (params (f (fn-type (params i32) (returns i32))) (value i32))
     (returns i32)
-    (body (return (call (local f) (local value)))))
+    (body (return (call-value f value))))
 
 (fn example (params) (returns i32)
     (body (return (call apply (fn-ref increment) 41i32))))
@@ -445,7 +445,8 @@ defining function have no effect.
 `(fn-ref name)` takes a concrete Wove function visible in the current
 module, including a selected import. Function values are copyable. Bind
 one with `let` or `let-mut`, or pass it to another Wove function with the
-same signature. `(call (local f) args...)` reads the target once, then
+same signature. Use `(call name args...)` for a named function and
+`(call-value f args...)` for a callable binding. A value call reads the target once, then
 evaluates each argument once from left to right. A callable with a
 `void` result uses the standalone call statement.
 
@@ -458,7 +459,7 @@ Use a module type name to reuse the same signature in multiple declarations.
 (type UnaryI32 (fn-type (params i32) (returns i32)))
 
 (fn forward (params (operation UnaryI32) (value i32)) (returns i32)
-    (body (return (call apply (local operation) (local value)))))
+    (body (return (call apply operation value))))
 ```
 
 `UnaryI32` belongs to the module's type namespace. Select it from another
@@ -500,16 +501,16 @@ function at its call site.
 (fn last (generic (const Width i32))
     (params (bytes (array u8 Width)))
     (returns u8)
-    (body (return (array.load (local bytes) (i32.sub (local Width) 1i32)))))
+    (body (return (array.load bytes (i32.sub Width 1i32)))))
 
 (call (specialize last 4i32) (array.new (array u8 4) 1u8 2u8 3u8 4u8))
 ```
 
 A type parameter supplies the exact types in the concrete signature and
 body. An `i32` constant parameter can size an array, supply a nested
-specialization argument, or be read with `local`. A `(const Enabled bool)`
+specialization argument, or be read by name. A `(const Enabled bool)`
 parameter accepts `(bool true)` or `(bool false)`. A function can read it
-with `(local Enabled)` or forward it as an argument to another
+with `Enabled` or forward it as an argument to another
 specialization.
 
 ```lisp
@@ -518,7 +519,7 @@ specialization.
 (struct State (generic (const M Mode)) (fields (cursor i32)))
 
 (fn choose (generic (const M Mode)) (params) (returns Mode)
-    (body (return (local M))))
+    (body (return M)))
 
 (call (specialize choose (enum.new Mode Fast)))
 ```
@@ -526,7 +527,7 @@ specialization.
 An enum constant parameter resolves its declared type in the template's
 defining module. Its argument must name a variant of that exact enum, and
 every variant in the enum must be fieldless. A function can read the value
-with `(local M)` or pass `M` directly to another specialization.
+with `M` or pass `M` directly to another specialization.
 Equal arguments to the same defining declaration share one specialization,
 including when different import aliases name the same enum. Different
 variants distinguish nominal record types even when their fields match.
@@ -540,11 +541,11 @@ function's exact parameter and result types.
 (fn choose (generic (type T) (fn Before))
     (params (left T) (right T)) (returns T)
     (body
-        (return (if (call Before (local right) (local left))
-            (then (local right))
-            (else (local left))))))
+        (return (if (call Before right left)
+            (then right)
+            (else left)))))
 
-(call (specialize choose Row before) (local first) (local second))
+(call (specialize choose Row before) first second)
 ```
 
 An enclosing template can forward `Before` as a bare specialization
@@ -562,8 +563,8 @@ Fields evaluate in the written order and must match their declared types.
 `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
 A `(mut-ref T)` parameter can also borrow a writable place of an exact
-built-in scalar type. In the callee, `(local name)` reads the scalar and
-`(set (local name) value)` updates the caller's storage.
+built-in scalar type. In the callee, `name` reads the scalar and
+`(set name value)` updates the caller's storage.
 
 A function with `(returns void)` can use `(return)` or finish its body.
 A value-returning function must return its declared type on every path.
@@ -579,13 +580,13 @@ A struct can own another struct as a field in a finite by-value layout.
 Ownership propagates through every enclosing struct. Borrow nested fields
 through their original places using a chain of `struct.get` expressions.
 
-Move a whole local record with `(move (local grid))` or an owning field
-with `(move (struct.get (local grid) cells))`. A move can take a nested
+Move a whole local record with `(move grid)` or an owning field
+with `(move (struct.get grid cells))`. A move can take a nested
 struct or a leaf array. Sibling fields stay available. Moving or borrowing
 an entire struct requires all its owning fields to be present.
 
 A mutable local owner or a writable owning field can be replaced with
-`set`, for example `(set (local output) (move (local scratch)))`.
+`set`, for example `(set output (move scratch))`.
 The replacement must be a fresh or explicitly moved owner of the exact
 type. Its expression evaluates once before the previous value is dropped
 and the replacement is installed. A live overlapping borrow prevents
@@ -597,8 +598,8 @@ Use `(optional.none (owned-array u8))` for absence and
 `(optional.some value)` for a fresh or explicitly moved array owner.
 A present empty array is distinct from absence. Forward an optional
 by returning a call or explicitly moving a local optional. Use
-`(owner.is-null (local result))` to check presence and
-`(move (optional.unwrap (local result)))` to extract the original owner.
+`(owner.is-null result)` to check presence and
+`(move (optional.unwrap result))` to extract the original owner.
 Unwrapping an absent value traps. Scope cleanup drops any payload
 that remains owned by the optional.
 
@@ -632,13 +633,13 @@ chosen expression. An arm can produce a fresh owner or move an existing one.
 
 | Iteration | Form |
 | --- | --- |
-| Half-open range | `(for (bind i) (range start end) (body ...))` |
-| Read array elements | `(for (bind item) (borrow-shared (local data)) (body ...))` |
-| Write array elements | `(for (bind item) (borrow-mut (local data)) (body ...))` |
-| Consume owned rows | `(for (bind item) (move (local rows)) (body ...))` |
+| Half-open range | `(for (let i) (range start end) (body ...))` |
+| Read array elements | `(for (let item) (borrow-shared data) (body ...))` |
+| Write array elements | `(for (let item) (borrow-mut data) (body ...))` |
+| Consume owned rows | `(for (let item) (move rows) (body ...))` |
 
 Range bounds have the same type, `i32` or `u64`. They evaluate once, from
-left to right. An array loop can use `(bind index item)` for a zero-based
+left to right. An array loop can use `(let index item)` for a zero-based
 `i32` index relative to its view. Shared iteration copies copyable elements.
 When iterating an array of owned rows with `borrow-shared`, the item is a
 shared view of the current populated row with its exact element type.
@@ -663,12 +664,13 @@ spelling continues to select the declared variant.
 
 A variant can carry one value. Declare it as `(Push i64)`, build it
 with `(enum.new Instruction Push value)`, and match it with
-`(case Push (bind word) statements...)`. The payload must have the
+`(case Push (let word) statements...)`. The payload must have the
 variant's exact declared type. The immutable binding is scoped to that arm.
-A copyable payload is copied into its binding. Use `(bind _)` to discard it.
+A copyable payload is copied into its binding. Use `(let _)` to discard it.
+An arm-leading `(let name value)` is a declaration in the arm body.
 
 An enum with an owning variant is an owner. A statement match can consume
-a fresh enum or an explicit `(move (local name))`. The selected arm owns
+a fresh enum or an explicit `(move name)`. The selected arm owns
 the payload and drops it on exit unless it moves again. A discard or
 wildcard also releases any active owner at arm exit.
 
@@ -691,10 +693,10 @@ expression supplies the result.
 | `(array.len data)` | Count the elements in a live owner, fixed array, or received view as `i32`. |
 | `(array.load data index)` | Read an element by value from a readable receiver. |
 | `(array.store data index value)` | Write an exact element value through a mutable view or into writable array storage. |
-| `(borrow-shared (local data))` | Lend read access to the whole array for a call. |
-| `(borrow-mut (local data))` | Lend exclusive write access to the whole array for a call. |
-| `(borrow-shared (array.range (local data) start end))` | Lend a half-open range of a named owner or view. |
-| `(borrow-mut (array.range (local data) start end))` | Lend a half-open range from a mutable owner or exclusive view. |
+| `(borrow-shared data)` | Lend read access to the whole array for a call. |
+| `(borrow-mut data)` | Lend exclusive write access to the whole array for a call. |
+| `(borrow-shared (array.range data start end))` | Lend a half-open range of a named owner or view. |
+| `(borrow-mut (array.range data start end))` | Lend a half-open range from a mutable owner or exclusive view. |
 
 Indexes and range endpoints are exact `i32` values. The compiler checks
 `0 <= start <= end <= length` for a range. The view counts and indexes
@@ -705,7 +707,7 @@ An ordinary Stage 2 function can receive `(shared-array (shared-array u8))`
 as a read-only view of byte rows. Use `array.len` to count the rows, and
 `array.load` with a checked `i32` index to select a shared byte view.
 Bind the selected row with `let` or lend it to a byte-view parameter with
-`(borrow-shared (array.load (local rows) index))`. A returned row needs a
+`(borrow-shared (array.load rows index))`. A returned row needs a
 `(from rows)` contract naming the outer view it came from. An in-bounds
 row may have zero bytes.
 
@@ -743,12 +745,12 @@ Either declaration order works. An explicitly moved input belongs
 to the array on success and to the rejection variant on failure.
 
 An array of owned rows accepts
-`(array.push (local rows) (move (local row)))`. A successful push
+`(array.push rows (move row))`. A successful push
 transfers the original owner to the vector. Removing a populated
 row transfers it to the result, and removing an unfilled slot traps.
 Truncation drops the owners in the removed suffix immediately.
 
-`(array.push (array.load (local batches) index) (move (local row)))`
+`(array.push (array.load batches index) (move row))`
 appends to a populated batch. An indexed receiver is checked before later
 operands run, and each index evaluates once. The outer slot keeps the row
 owner as its storage grows. Selecting an unfilled slot traps.
@@ -759,17 +761,17 @@ For example, `(array.alloc (owned-array Digest) count)` creates an
 with `array.store` and a row returned by a call or transferred with `move`.
 Bind an allocation before moving it into the slot. Replacing a slot drops
 its previous row. Use
-`(borrow-shared (array.load (local rows) index))` to read a populated row
+`(borrow-shared (array.load rows index))` to read a populated row
 through its exact shared view.
 
 An owned array can store owning Wove structs with no borrowed fields.
 `(array.alloc Entry count)` starts with unfilled slots. Use `array.store`
-or `array.push` with a fresh `Entry` or an explicit `(move (local entry))`.
+or `array.push` with a fresh `Entry` or an explicit `(move entry)`.
 Replacing a populated slot drops its old record. Removing a populated
 slot transfers its record out and shifts later slots. Truncation and
 array cleanup release the owning fields of each remaining populated slot.
 
-Use `(borrow-shared (array.load (local entries) index))` for a
+Use `(borrow-shared (array.load entries index))` for a
 `(shared-ref Entry)` call parameter or `borrow-mut` for a `(mut-ref Entry)`
 parameter when the original array view is writable. Borrowing or removing
 an unfilled slot traps. Indexed loans keep the source array live for the
@@ -800,24 +802,24 @@ A fixed array of copyable elements copies by value.
 - `(array.new (array u8 2) (u8 17) (u8 25))` lists the elements.
 - `(array.repeat (array u8 128) (u8 0))` evaluates one value and fills the array.
 - `(array.load value index)` reads an element.
-- `(array.store (local data) index value)` writes into a mutable local array.
-- `(array.store (struct.get (local state) block) index value)` writes into
+- `(array.store data index value)` writes into a mutable local array.
+- `(array.store (struct.get state block) index value)` writes into
   an inline array field of a writable record.
-- `(array.store (array.load (local grid) row) column value)` updates the
+- `(array.store (array.load grid row) column value)` updates the
   selected row in the original writable grid. In a value expression,
-  `(array.load (local grid) row)` returns a copy when the row is copyable.
+  `(array.load grid row)` returns a copy when the row is copyable.
 
 A fixed array that contains owners is itself an owner, including through
 nested fixed arrays and record fields. Initialize each slot with a fresh
 owner or an explicit `move` in `array.new`. Copying an owning element or
 using `array.repeat` with an owning layout is a compile-time error.
 
-Use `(borrow-shared (array.load (local rows) index))` to lend an owned array
+Use `(borrow-shared (array.load rows index))` to lend an owned array
 element as a view. Use `borrow-mut` for a mutable view. An owning record
 element lends its exact `shared-ref` or `mut-ref` type. Dynamic indices into
 the same fixed array are treated as potentially overlapping for loan checks.
 
-Use `(move (array.load (local rows) index))` to transfer an element from a
+Use `(move (array.load rows index))` to transfer an element from a
 mutable local owner. The slot becomes empty and the array keeps its extent.
 An attempt to borrow or transfer an empty slot traps at the indexed expression.
 `array.store` fills an empty slot or drops a live owner before installing its
@@ -828,7 +830,7 @@ matching `shared-array` or `mut-array` view. Sibling field paths can lend
 independently. A whole-record loan overlaps all of its fields. To borrow a
 range from a fixed array, first bind a view of the whole array.
 
-`(let view (borrow-shared (local data)))` binds a view for the enclosing
+`(let view (borrow-shared data))` binds a view for the enclosing
 block. A shared loan permits source reads. An exclusive loan also excludes
 reads through the source. Mutable views can write their underlying elements.
 Reborrows follow the same rules for their immediate parent view.
@@ -846,7 +848,7 @@ parameter. For example:
   (returns Cursor (from bytes))
   (body
     (return (struct.new Cursor
-      (bytes (borrow-shared (local bytes))) (at 0i32)))))
+      (bytes (borrow-shared bytes)) (at 0i32)))))
 ```
 
 Bind a borrowing call with `let`, or use `let-mut` to update a scoped record's
@@ -882,9 +884,9 @@ offset, an offset past the end, or insufficient remaining elements yields
 absence. A zero extent at the end yields a present empty view.
 
 ```wove
-(let word (array.try-slice (borrow-shared (local data)) (local offset) 4))
-(if (optional.is-none (local word)) (then (return 0u32)))
-(return (u32.from-le-bytes (borrow-shared (optional.unwrap (local word)))))
+(let word (array.try-slice (borrow-shared data) offset 4))
+(if (optional.is-none word) (then (return 0u32)))
+(return (u32.from-le-bytes (borrow-shared (optional.unwrap word))))
 ```
 
 `optional.unwrap` checks presence at its source span and preserves the exact
@@ -894,12 +896,12 @@ the end of its block, including when it is absent. A function with an explicit
 source contract can return the unwrapped view when it borrows that parameter.
 
 Return a fresh owner from a call or transfer an existing owner with
-`(return (move (local buffer)))`. A move ends the original binding's
+`(return (move buffer))`. A move ends the original binding's
 ownership. Completed call borrows allow a move.
 
 A Wove parameter such as `(params (job (owned-array u8)))` takes ownership
 of an array of the exact element type. Pass a fresh owner or move a named
-owner explicitly with `(move (local input))`. The callee owns the incoming
+owner explicitly with `(move input)`. The callee owns the incoming
 array for its function body and releases it at exit unless it transfers
 ownership again.
 
@@ -909,7 +911,7 @@ can name an explicit record specialization. A fixed parameter such as
 `(params (rows (array (owned-array i32) 2)))` keeps its exact element type
 and extent at every level.
 
-Pass a fresh value or transfer a complete owner with `(move (local rows))`.
+Pass a fresh value or transfer a complete owner with `(move rows)`.
 A live overlapping loan prevents the move. For an argument with inline
 owning array slots, Wove checks occupancy before evaluating later
 arguments. This applies to fixed arrays and to fixed arrays nested in
@@ -920,7 +922,7 @@ another ordinary Wove call by explicit move.
 
 ## Joined workers
 
-`(worker.spawn-join widen (move (local input)))` calls the named Wove
+`(worker.spawn-join widen (move input))` calls the named Wove
 function `widen` on a fresh thread and waits for its result. The handler
 takes and returns one owned array or named Wove struct. The job and
 result can have different types. A copyable struct is copied into the
@@ -942,10 +944,10 @@ returns a receipt without waiting. Bind it directly to a local. The caller
 can start other jobs or do work before it joins.
 
 ```lisp
-(let first (worker.spawn widen (move (local first_job))))
-(let second (worker.spawn widen (move (local second_job))))
-(let second_result (worker.join (local second)))
-(let first_result (worker.join (local first)))
+(let first (worker.spawn widen (move first_job)))
+(let second (worker.spawn widen (move second_job)))
+(let second_result (worker.join second))
+(let first_result (worker.join first))
 ```
 
 `worker.join` consumes the receipt and returns the exact array or struct
@@ -966,24 +968,24 @@ move each receipt explicitly.
 
 ```lisp
 (let-mut pending (worker.receipt-queue digest_batch))
-(let receipt (worker.spawn digest_batch (move (local batch))))
-(worker.push (local pending) (move (local receipt)))
-(let results (worker.join-all (local pending)))
+(let receipt (worker.spawn digest_batch (move batch)))
+(worker.push pending (move receipt))
+(let results (worker.join-all pending))
 ```
 
-`(worker.len (local pending))` returns the number of queued receipts as an
+`(worker.len pending)` returns the number of queued receipts as an
 `i32`, including receipts whose workers have finished. An immutable queue
 binding can be read for its length.
 
-`(worker.pop-front (local pending))` removes the oldest receipt from a
+`(worker.pop-front pending)` removes the oldest receipt from a
 mutable queue and directly initializes a new local. The receipt keeps the
 queue's exact result type and can be joined or moved like any other receipt.
 The queue retains its remaining receipts in enqueue order. Removing from an
 empty queue traps at the removal span.
 
 ```lisp
-(let oldest (worker.pop-front (local pending)))
-(let result (worker.join (local oldest)))
+(let oldest (worker.pop-front pending))
+(let result (worker.join oldest))
 ```
 
 `worker.join-all` consumes the queue and returns one owned result per
@@ -1003,7 +1005,7 @@ worker's original submission span.
 
 ## Fallible worker launch
 
-`(worker.try-spawn handler (local pending) Launch job)` evaluates the job
+`(worker.try-spawn handler pending Launch job)` evaluates the job
 once while holding the mutable receipt queue exclusively. The queue must
 accept the handler's exact declared result type. As with `array.try-push`,
 the outcome is a caller-declared enum with one unit variant and one variant
@@ -1013,9 +1015,9 @@ type must be supported as an enum payload.
 ```lisp
 (enum Launch (variants (Started) (Rejected Job)))
 (let-mut pending (worker.receipt-queue render))
-(match (worker.try-spawn render (local pending) Launch (move (local job)))
-  (case Started (return (worker.join-all (local pending))))
-  (case Rejected (bind original) (return (call finish_locally (move (local original))))))
+(match (worker.try-spawn render pending Launch (move job))
+  (case Started (return (worker.join-all pending)))
+  (case Rejected (let original) (return (call finish_locally (move original)))))
 ```
 
 Success appends a receipt and transfers the job to the new worker. If
@@ -1031,18 +1033,18 @@ The pool starts a fixed number of reusable threads. Its capacity counts jobs
 waiting to start and reserved slots together. Running jobs free their waiting
 slots. A failed open produces an empty owner.
 
-`(worker.try-reserve (local pool))` attempts to claim one slot without waiting.
-`(worker.reserve-wait (local pool))` can wait for a queued job to start. It
+`(worker.try-reserve pool)` attempts to claim one slot without waiting.
+`(worker.reserve-wait pool)` can wait for a queued job to start. It
 returns an empty permit when admission is closed or all capacity is held by
 unused permits. Test a pool or permit for an empty owner with `owner.is-null`.
 
 ```lisp
 (let pool (worker.open-pool 4i32 8i32))
-(let permit (worker.reserve-wait (local pool)))
-(if (owner.is-null (local permit))
+(let permit (worker.reserve-wait pool))
+(if (owner.is-null permit)
     (then (return 1i32)))
-(let receipt (worker.spawn-on digest_batch (move (local permit)) (move (local batch))))
-(let results (worker.join (local receipt)))
+(let receipt (worker.spawn-on digest_batch (move permit) (move batch)))
+(let results (worker.join receipt))
 ```
 
 Open, reserve, and submit directly into local bindings. Reserving leaves the
@@ -1057,7 +1059,7 @@ Join a pooled receipt directly or move it into a matching receipt queue. Pooled
 and dedicated receipts can share a queue when their exact result types match.
 Leaving the scope of an unused permit releases its slot.
 
-`(worker.try-close (local pool))` drains accepted jobs and joins the threads.
+`(worker.try-close pool)` drains accepted jobs and joins the threads.
 It returns false while any permit is outstanding and leaves admission open.
 Leaving the scope of the pool closes admission. Existing permits can still
 submit or release their slots, and resolving the last permit then drains
@@ -1124,7 +1126,7 @@ Bridge `const` exposes an integer constant, `let` reads a C value, and
 
 A native record field written `(name (array char 255))` describes the
 header's exact inline plain C `char[255]` member. Use `array.len`,
-`array.load`, and `array.store` directly on `(struct.get (local record) name)`.
+`array.load`, and `array.store` directly on `(struct.get record name)`.
 A store needs a mutable record. Loads and stores check the index and read or
 write `u8` byte representations in the original record. A native build checks
 the field's C element type and extent against the header and includes the
@@ -1150,6 +1152,11 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_callback_sync parameter)` | Lend a Wove callable to a C function for the duration of the call. The C header must match the declared function pointer. |
 | `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
 | `(c_nullable parameter)` | Accept literal `null` in place of a mutable scalar reference or a shared byte view with `c_cstr`. A present string still receives a checked, call-scoped NUL-terminated copy. An empty view supplies an empty C string. |
+
+A bare `null` in an argument slot that accepts C NULL selects the native
+null value. In other expression and place positions, `null` is an ordinary
+binding name. To supply a nullable byte view from a binding named `null`,
+pass `(borrow-shared null)`.
 
 A synchronous file-walk callback declares its native signature in the bridge.
 
@@ -1184,8 +1191,8 @@ native handle parameter. For example, a bridge for `readdir` can declare
 immutable `let`. The option holds the stream's exclusive loan for the
 binding's lexical scope, including when the native call returns NULL.
 
-Use `(optional.is-none (local entry))` to check presence. Bind
-`(optional.unwrap (local entry))` with an immutable `let` to read the
+Use `(optional.is-none entry)` to check presence. Bind
+`(optional.unwrap entry)` with an immutable `let` to read the
 original native record. A missing entry traps at the unwrap span. The
 reference uses the native layout and never releases the record. Once the
 option leaves scope, the stream can be read, rewound, or closed again.
@@ -1219,29 +1226,29 @@ A pointer-backed resource uses a destructor contract.
 ```
 
 A `File` result owns the native handle. Cleanup calls the destructor once
-for each present handle. Test presence with `(owner.is-null (local file))`.
+for each present handle. Test presence with `(owner.is-null file)`.
 If the native destructor accepts exactly `void *`, declare
 `(c_owned (drop destructor void-pointer))`. The owner keeps its defining
 native pointer type. The C header determines the ignored destructor result.
 An ordinary Wove function can declare `(returns File)` after importing
 the native type. Return a fresh handle call or explicitly transfer a
-local with `(return (move (local file)))`. The caller owns the result,
+local with `(return (move file))`. The caller owns the result,
 including the possibility of a null handle. Renamed type imports keep
 the same defining owner type.
 
 An ordinary Wove struct can own a pointer-backed native handle in a field.
 Initialize it with a new handle, an explicit move, or `(native.empty File)`.
-Borrow the original field with `(borrow-shared (struct.get (local row) file))`,
+Borrow the original field with `(borrow-shared (struct.get row file))`,
 or borrow it mutably from a writable place. A native pointer-out initializer
 can populate an empty mutable field. A nonnull result belongs to the struct
 even when the initializer reports failure. Use
-`(move (struct.get (local row) file))` to transfer the field into a local
+`(move (struct.get row file))` to transfer the field into a local
 or directly into a consuming C argument. Test a live field with
-`(owner.is-null (struct.get (local row) file))`. Its sibling fields remain live. Scope cleanup releases each remaining present handle,
+`(owner.is-null (struct.get row file))`. Its sibling fields remain live. Scope cleanup releases each remaining present handle,
 including handles in structs stored in an owned array.
 
 An exact `(shared-ref File)` parameter borrows a present handle. A consuming
-parameter of type `File` takes `(move (local file))` and makes the C callee
+parameter of type `File` takes `(move file)` and makes the C callee
 responsible for cleanup, including when the call reports an error.
 `(let stderr (shared-ref File))` can expose a read-only library-owned handle.
 
@@ -1263,10 +1270,10 @@ allocates the fixed header. Negative capacities, capacities beyond the
 count field and overflowing storage sizes trap.
 
 A mutable `c_init` loan writes the original capacity into the native
-count field before C runs. Use `(native.tail.report (borrow-shared (local handle)))`
+count field before C runs. Use `(native.tail.report (borrow-shared handle))`
 to copy the returned `u32` count, including a larger size requested by
 a failed initializer. Create a new owner with that capacity before retrying.
-After successful initialization, `(native.tail.load (borrow-shared (local handle)) index)`
+After successful initialization, `(native.tail.load (borrow-shared handle) index)`
 returns a byte at an `i64` index. Both byte reads and ordinary C borrows
 require the reported count to fit the allocated capacity. The byte index
 must also be within the reported length. A C call borrows the original
@@ -1276,7 +1283,7 @@ allocation, and scope exit or owner replacement releases it.
 `(optional (owned-array u8))`. Add `(drop free)` to release the original,
 or `(field name)` to copy a bounded inline character array. A null
 result stays absent. After testing presence, use
-`(move (optional.unwrap (local result)))` to extract the byte owner.
+`(move (optional.unwrap result))` to extract the byte owner.
 `(c_snapshot cstrs)` on a read-only native table copies it into an
 `(owned-array (owned-array u8))`.
 
@@ -1294,7 +1301,7 @@ can be empty.
 ```lisp
 (module counter
     (fn Twice (:pragma (c_export)) (params (value i32)) (returns i32)
-        (body (return (i32.mul (local value) 2i32)))))
+        (body (return (i32.mul value 2i32)))))
 ```
 
 ```sh
