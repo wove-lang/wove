@@ -34,6 +34,16 @@ def main():
 		subprocess.run([*check, directory / "unsupported.tsv"], check=True)
 	elif native:
 		subprocess.run([*check, directory / "supported.tsv"], check=True)
+		# Only run mixed fixtures for the floating formats exposed by this target.
+		macros = subprocess.check_output([*clang, "-dM", "-E", "-x", "c", "-"], input=b"").splitlines()
+		if b"#define __FLT16_MANT_DIG__ 11" in macros:
+			subprocess.run([*check, directory / "float-half.tsv"], check=True)
+		if b"#define __LDBL_MANT_DIG__ 64" in macros:
+			subprocess.run([*check, directory / "float-f80.tsv"], check=True)
+		if b"#define __LDBL_MANT_DIG__ 113" in macros or any(
+			line.startswith(b"#define __SIZEOF_FLOAT128__ ") for line in macros
+		):
+			subprocess.run([*check, directory / "float-f128.tsv"], check=True)
 	else:
 		print("C23 _BitInt(256) native execution skipped: selected Clang targets another architecture.")
 
