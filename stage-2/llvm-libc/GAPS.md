@@ -128,8 +128,11 @@ local allocation and initialization rules.
 The bundled Darwin `<grp.h>` bridge uses one record mapping for
 `getgrnam`, `getgrgid`, `getgruuid`, and `getgrent`. Wove copies the
 thread-local return into an owning result before another lookup or
-enumeration reset can affect it. The mapping covers the native GID, name,
-nullable password, and every member string. A relocated compiler exercises
+enumeration reset can affect it. The explicit `(lifetime thread_local)`
+clause promises that the record and every nested pointer stay live during
+the copy, including during native calls on other threads. The mapping
+covers the native GID, name, nullable password, and every member string.
+A relocated compiler exercises
 all four functions through C-header selectors, including missing results,
 enumeration resets, and independent worker lookups. The source graph
 resolves the ordinary layout privately through the fix in #663.
