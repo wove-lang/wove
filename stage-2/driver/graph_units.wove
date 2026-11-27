@@ -8,7 +8,7 @@
 	(use wove-file "./bin/units.wove" (only staged_unit_path (value program_header)))
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "../clang/native_replay.wove" (only (value lvalue_witness_prefix)
-		(value storage_type_witness_prefix) (value storage_drop_witness_prefix) (value bytes_witness_prefix)))
+		(value storage_type_witness_prefix) (value release_witness_prefix) (value call_witness_prefix)))
 	(use wove-file "./diagnostics.wove" (only report_argv (value publish_failure)))
 	(use wove-file "./numbered_headers.wove" (only certify_numbered_includes (value names_begin) (value names_end)
 		(value implicit_runtime) (value implicit_stdint)))
@@ -127,23 +127,33 @@
 			(set width (call write_c_number (borrow-mut output) width declaration writing))
 			(return (call c_literal_text (borrow-shared witness_end_line) (borrow-mut output) width writing))))
 
-	(fn write_bounded_call_witnesses
-		(:doc "Certify each approved byte adapter against Clang's actual fixed C declaration.")
+	(fn write_native_call_witnesses
+		(:doc "Certify each approved byte or snapshot call and any release against Clang's actual C declarations.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
 			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
 		(body
 			(let-mut width offset)
 			(for
-				(:doc "The eligibility pass has already rejected array extents and other unsupported adaptations.")
+				(:doc "The eligibility pass has already checked the exact argument and snapshot contracts.")
 				(let index) (range 0i32 (call checked_function_count (borrow-shared functions)))
 				(body
 					(let function (array.load functions index))
+					(let snapshot (struct.get function c_snapshot))
 					(if
 						(:doc "Use the actual native spelling, including an explicit c-name.")
-						(bool.and (i32.ltz (struct.get function body)) (i32.gtz (struct.get function c_extents)))
-						(then (set width (call write_function_witness (borrow-shared arena)
-							(array.load nodes (struct.get function name)) (borrow-shared bytes_witness_prefix)
-							(struct.get function declaration) (borrow-mut output) width writing))))))
+						(bool.and (i32.ltz (struct.get function body))
+							(bool.or snapshot (i32.gtz (struct.get function c_extents))))
+						(then
+							(let declaration (struct.get function declaration))
+							(set width (call write_function_witness (borrow-shared arena)
+								(array.load nodes (struct.get function name)) (borrow-shared call_witness_prefix)
+								declaration (borrow-mut output) width writing))
+							(if
+								(:doc "The snapshot's named release is checked independently of the allocating callee.")
+								snapshot
+								(then (set width (call write_function_witness (borrow-shared arena)
+									(array.load nodes (struct.get function c_snapshot_drop)) (borrow-shared release_witness_prefix)
+									declaration (borrow-mut output) width writing))))))))
 			(return width)))
 
 	(fn mark_storage_witnesses
@@ -200,14 +210,14 @@
 					(set width (call write_c_number (borrow-mut output) width declaration writing))
 					(set width (call c_literal_text (borrow-shared witness_end_line) (borrow-mut output) width writing))
 					(set width (call write_function_witness (borrow-shared arena)
-						(array.load nodes (struct.get owner drop)) (borrow-shared storage_drop_witness_prefix)
+						(array.load nodes (struct.get owner drop)) (borrow-shared release_witness_prefix)
 						declaration (borrow-mut output) width writing))))
 			(return width)))
 
 	(fn write_native_value_witnesses
 		(:doc "Observe the exact expansions of the checked native operands in each include context.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
-			(storage (shared-array u8)) (functions (shared-array ScalarFunction)) (bounded bool)
+			(storage (shared-array u8)) (functions (shared-array ScalarFunction)) (native_calls bool)
 			(output (mut-array u8)) (writing bool))
 		(returns u32)
 		(body
@@ -261,17 +271,17 @@
 											(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
 											(set width (call c_literal_text (borrow-shared constant_witness_end) (borrow-mut output) width writing))))))))))
 			(if
-				(:doc "Storage and bounded calls need their own witnesses even without checked module values.")
-				(bool.or bounded (i32.gtz (array.len storage)))
+				(:doc "Native calls and storage need their own witnesses even without checked module values.")
+				(bool.or native_calls (i32.gtz (array.len storage)))
 				(then
 					(if (u32.eqz width)
 						(then (set width (call c_literal_text (borrow-shared names_begin) (borrow-mut output) width writing))))
 					(set width (call write_storage_witnesses (borrow-shared arena) (borrow-shared nodes)
 						(borrow-shared storage) (borrow-mut output) width writing))))
 			(if
-				(:doc "A checked byte adapter depends on the same C declaration in both preambles.")
-				bounded
-				(then (set width (call write_bounded_call_witnesses (borrow-shared arena) (borrow-shared nodes)
+				(:doc "Checked calls and their releases depend on consistent C declarations in both preambles.")
+				native_calls
+				(then (set width (call write_native_call_witnesses (borrow-shared arena) (borrow-shared nodes)
 					(borrow-shared functions) (borrow-mut output) width writing))))
 			(if (u32.eqz width) (then (return width)))
 			(return (call c_literal_text (borrow-shared names_end) (borrow-mut output) width writing))))
@@ -329,8 +339,8 @@
 						(call mark_storage_witnesses (borrow-shared arena) (borrow-shared nodes)
 							(borrow-shared bindings) (borrow-shared trees) (borrow-shared parameters) (borrow-mut marked))))
 					(let storage_length (if storage (then (array.len marked)) (else 0i32)))
-					(let bounded (bool.and (u8.lt 1u8 mode)
-						(u32.gtz (call write_bounded_call_witnesses (borrow-shared arena) (borrow-shared nodes)
+					(let native_calls (bool.and (u8.lt 1u8 mode)
+						(u32.gtz (call write_native_call_witnesses (borrow-shared arena) (borrow-shared nodes)
 							(borrow-shared functions) (borrow-mut empty) 0u32 (bool false)))))
 					(if
 						(:doc "Measure any checked operands whose original expansions must match between units.")
@@ -341,7 +351,7 @@
 							(set names_width (call write_native_value_witnesses (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements)
 								(borrow-shared (array.range marked 0i32 storage_length)) (borrow-shared functions)
-								bounded (borrow-mut empty) (bool false)))
+								native_calls (borrow-mut empty) (bool false)))
 							(if
 								(:doc "Both measured fragments must fit, and a borrowed value must have a witness.")
 								(bool.or (u32.gt names_width 2147483647u32)
@@ -381,7 +391,7 @@
 							(let witnesses (call write_native_value_witnesses (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements)
 								(borrow-shared (array.range marked 0i32 storage_length)) (borrow-shared functions)
-								bounded (borrow-mut names) (bool true)))
+								native_calls (borrow-mut names) (bool true)))
 							(if
 								(:doc "Both private probe fragments must match their measured sizes.")
 								(bool.or (u32.not-eq size guard_width) (u32.not-eq witnesses names_width))
@@ -394,7 +404,7 @@
 						(bool.or (i32.eqz (array.len options))
 							(bool.not (call certify_numbered_includes (borrow-shared program) (borrow-shared options)
 								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards) (borrow-shared names)
-								implicit borrowed writable (bool.or writable (bool.or storage bounded)))))
+								implicit borrowed writable (bool.or writable (bool.or storage native_calls)))))
 						(then (return 0i32)))))
 			(let-mut ends (array.alloc UnitIndex (i32.inc count)))
 			(let measured (call write_partitioned_graph (borrow-shared arena) (borrow-shared files) (borrow-shared bindings)
