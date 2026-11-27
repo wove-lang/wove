@@ -12,6 +12,10 @@
 	(let unit_kind "\"TranslationUnitDecl\"")
 	(let typedef_kind "\"TypedefDecl\"")
 	(let record_kind "\"RecordDecl\"")
+	(let object_kind "\"VarDecl\"")
+	(let object_name_key "name")
+	(let thread_storage_key "tls")
+	(let initializer_key "init")
 	(let enum_kind "\"EnumDecl\"")
 	(let function_kind "\"FunctionDecl\"")
 	(let parameter_kind "\"ParmVarDecl\"")
@@ -40,9 +44,70 @@
 				(body (set index (i32.inc index))))
 			(return index)))
 
+	(fn field_equals
+		(:doc "Compare Clang's simple ASCII JSON enum strings including their delimiters.")
+		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (value (shared-array u8)))
+		(returns bool)
+		(body
+			(if (i32.ltz row) (then (return (bool false))))
+			(let item (array.load nodes row))
+			(return (call same_bytes (borrow-shared source) (struct.get item start) (struct.get item end)
+				(borrow-shared value) 0i32 (array.len value)))))
+
+	(fn external_object
+		(:doc "A plain extern declaration owns no storage, initializer, TLS, or attributes in this unit.")
+		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)))
+		(returns bool)
+		(body
+			(let storage (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
+				(borrow-shared storage_key) (borrow-mut scratch)))
+			(let tls (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
+				(borrow-shared thread_storage_key) (borrow-mut scratch)))
+			(let init (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
+				(borrow-shared initializer_key) (borrow-mut scratch)))
+			(return (bool.and (bool.and (i32.ltz tls) (i32.ltz init))
+				(bool.and (call field_equals (borrow-shared source) (borrow-shared nodes) storage (borrow-shared extern_value))
+					(i32.ltz (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) row (borrow-mut scratch))))))))
+
+	(fn names_external_object
+		(:doc "Resolve one bare macro replacement to a definition-free external C object in the audited AST.")
+		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (name (shared-array u8)))
+		(returns bool)
+		(body
+			(if (i32.eqz (array.len nodes)) (then (return (bool false))))
+			(let-mut scratch (array.alloc u8 12i32))
+			(let-mut row (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(while
+				(:doc "Only top-level external declarations can give each translation unit the same live slot.")
+				(i32.not-ltz row)
+				(body
+					(let kind (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
+						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(if
+						(:doc "Types and functions cannot satisfy a borrowed object alias.")
+						(call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared object_kind))
+						(then
+							(let field (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
+								(borrow-shared object_name_key) (borrow-mut scratch)))
+							(if
+								(:doc "Clang quotes the direct identifier in the JSON name field.")
+								(i32.not-ltz field)
+								(then
+									(let span (array.load nodes field))
+									(if
+										(:doc "Match the original native identifier and its external linkage.")
+										(bool.and
+										(call same_bytes (borrow-shared source) (i32.inc (struct.get span start)) (i32.dec (struct.get span end))
+											(borrow-shared name) 0i32 (array.len name))
+										(call external_object (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch)))
+										(then (return (bool true))))))))
+					(set row (struct.get (array.load nodes row) next_sibling))))
+			(return (bool false))))
+
 	(fn harmless_define
-		(:doc "Permit include guards and decimal object macros, rejecting pragmas, undefines, and other replacements.")
-		(params (source (shared-array u8)) (start i32) (end i32)) (returns bool)
+		(:doc "Permit inert definitions and audited single-identifier object aliases.")
+		(params (source (shared-array u8)) (start i32) (end i32)
+			(ast (shared-array u8)) (nodes (shared-array JsonNode))) (returns bool)
 		(body
 			(let word (call skip_horizontal (borrow-shared source) (i32.inc start) end))
 			(let width (array.len define_word))
@@ -66,16 +131,31 @@
 			(if (i32.eq value end) (then (return (bool true))))
 			(if (i32.eq value index) (then (return (bool false))))
 			(set index value)
+			(if
+				(:doc "A decimal replacement cannot refer to file, line, or library state.")
+				(call digit (array.load source value))
+				(then
+					(while
+						(:doc "An inert decimal replacement is one complete digit sequence.")
+						(bool.and (i32.lt index end) (call digit (array.load source index)))
+						(body (set index (i32.inc index))))
+					(return (i32.eq (call skip_horizontal (borrow-shared source) index end) end))))
+			(if
+				(:doc "Only borrowed-object replay can admit an identifier replacement.")
+				(bool.or (i32.eqz (array.len nodes)) (bool.not (call is_c_identifier_start (array.load source value))))
+				(then (return (bool false))))
 			(while
-				(:doc "Only an unadorned sequence of decimal digits can follow the name.")
-				(bool.and (i32.lt index end) (call digit (array.load source index)))
+				(:doc "A direct alias names one C object without invoking or composing another expression.")
+				(bool.and (i32.lt index end) (call is_c_identifier_byte (array.load source index)))
 				(body (set index (i32.inc index))))
-			(return (bool.and (i32.lt value index)
-				(i32.eq (call skip_horizontal (borrow-shared source) index end) end)))))
+			(return (bool.and (i32.eq (call skip_horizontal (borrow-shared source) index end) end)
+				(call names_external_object (borrow-shared ast) (borrow-shared nodes)
+					(borrow-shared (array.range source value index)))))))
 
 	(fn replay_directives_safe
-		(:doc "Check all directives contributed by the selected includes after the compiler's baseline definitions.")
-		(params (source (shared-array u8)) (start i32)) (returns bool)
+		(:doc "Check added directives, with external alias resolution only when the caller supplies a checked AST.")
+		(params (source (shared-array u8)) (start i32)
+			(ast (shared-array u8)) (nodes (shared-array JsonNode))) (returns bool)
 		(body
 			(let length (array.len source))
 			(let-mut index start)
@@ -93,25 +173,18 @@
 						(:doc "Preprocessing directives left visible by Clang can change later generated C.")
 						(bool.and (i32.lt first end) (u8.eq (array.load source first) 35u8))
 						(then
-							(if (bool.not (call harmless_define (borrow-shared source) first end))
+							(if
+								(:doc "A directive that can change the generated context requires serial emission.")
+								(bool.not (call harmless_define (borrow-shared source) first end
+								(borrow-shared ast) (borrow-shared nodes)))
 								(then (return (bool false))))))
 					(set index end)
 					(if (i32.lt index length) (then (set index (i32.inc index))))))
 			(return (bool true))))
 
-	(fn field_equals
-		(:doc "Compare Clang's simple ASCII JSON enum strings including their delimiters.")
-		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (value (shared-array u8)))
-		(returns bool)
-		(body
-			(if (i32.ltz row) (then (return (bool false))))
-			(let item (array.load nodes row))
-			(return (call same_bytes (borrow-shared source) (struct.get item start) (struct.get item end)
-				(borrow-shared value) 0i32 (array.len value)))))
-
 	(fn declaration_only
 		(:doc "Admit C type declarations and ordinary external function prototypes without attributes or bodies.")
-		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)))
+		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)) (borrowed bool))
 		(returns bool)
 		(body
 			(let kind (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
@@ -122,6 +195,10 @@
 					(bool.or (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared record_kind))
 						(call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared enum_kind))))
 				(then (return (bool true))))
+			(if
+				(:doc "An ordinary extern declaration does not instantiate a separate object per numbered unit.")
+				(bool.and borrowed (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared object_kind)))
+				(then (return (call external_object (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch)))))
 			(if (bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared function_kind)))
 				(then (return (bool false))))
 			(let storage (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
@@ -147,7 +224,7 @@
 
 	(fn replay_declarations_safe
 		(:doc "Validate the complete AST and check only the direct declarations of its translation unit.")
-		(params (source (shared-array u8)) (nodes (mut-array JsonNode))) (returns bool)
+		(params (source (shared-array u8)) (nodes (mut-array JsonNode)) (borrowed bool)) (returns bool)
 		(body
 			(let result (call json_parse (borrow-shared source) (borrow-mut nodes)))
 			(if (u32.not-eqz (struct.get result error)) (then (return (bool false))))
@@ -158,10 +235,12 @@
 				(then (return (bool false))))
 			(let-mut row (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
 			(while
-				(:doc "Reject any global object, assembly, function definition, or unrecognized side effect.")
+				(:doc "Reject object definitions, assembly, function bodies, and unrecognized side effects.")
 				(i32.not-ltz row)
 				(body
-					(if (bool.not (call declaration_only (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch)))
+					(if
+						(:doc "Every direct declaration must be safe to include in all numbered units.")
+						(bool.not (call declaration_only (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch) borrowed))
 						(then (return (bool false))))
 					(set row (struct.get (array.load nodes row) next_sibling))))
 			(return (bool true))))

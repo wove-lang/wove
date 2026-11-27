@@ -95,19 +95,28 @@
 		(:doc "Check the serial prefix's preprocessing and declarations together before comparing numbered paths.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
 			(baseline (shared-array u8)) (preprocessed (mut-array u8)) (trace (mut-array u8))
-			(identities (mut-array FileStamp))) (returns i32)
+			(identities (mut-array FileStamp)) (borrowed bool)) (returns i32)
 		(body
 			(let pp (call run_clang_replay (borrow-shared program) (borrow-shared options)
 				(borrow-shared path) (bool true) (borrow-mut preprocessed) (borrow-mut trace)))
 			(let base (array.len baseline))
 			(let length (struct.get pp length))
 			(if
-				(:doc "The selected includes can add only known-safe directives after the observed compiler preface.")
+				(:doc "The selected includes must replay the observed compiler preface.")
 				(bool.or (bool.or (u32.not-eqz (struct.get pp error)) (i32.not-lt base length))
-					(bool.or (bool.not (call same_bytes (borrow-shared baseline) 0i32 base
-							(borrow-shared preprocessed) 0i32 base))
-						(bool.not (call replay_directives_safe (borrow-shared (array.range preprocessed 0i32 length)) base))))
+					(bool.not (call same_bytes (borrow-shared baseline) 0i32 base
+						(borrow-shared preprocessed) 0i32 base)))
 				(then (return -1i32)))
+			(let text (borrow-shared (array.range preprocessed 0i32 length)))
+			(if
+				(:doc "Ordinary replay can reject unfamiliar directives before paying for the AST query.")
+				(bool.not borrowed)
+				(then
+					(let no_ast (array.alloc JsonNode 0i32))
+					(if
+						(:doc "An ordinary plan certifies only the original inert directive grammar.")
+						(bool.not (call replay_directives_safe (borrow-shared text) base
+						(borrow-shared baseline) (borrow-shared no_ast))) (then (return -1i32)))))
 			(if
 				(:doc "The trace must identify every header before the JSON AST pass.")
 				(bool.not (call include_identities (borrow-shared trace) (borrow-mut identities) (bool false)))
@@ -124,10 +133,15 @@
 						(bool.not (call include_identities (borrow-shared ast_trace) (borrow-mut identities) (bool true)))))
 				(then (return -1i32)))
 			(let-mut statements (array.alloc JsonNode statement_capacity))
+			(let declarations_bytes (borrow-shared (array.range ast 0i32 (struct.get declarations length))))
 			(if
-				(:doc "A global object, inline declaration, or function definition requires the serial C unit.")
-				(bool.not (call replay_declarations_safe
-					(borrow-shared (array.range ast 0i32 (struct.get declarations length))) (borrow-mut statements)))
+				(:doc "Header-local state and function definitions require the serial C unit.")
+				(bool.not (call replay_declarations_safe (borrow-shared declarations_bytes) (borrow-mut statements) borrowed))
+				(then (return -1i32)))
+			(if
+				(:doc "A borrowed object's new macro may only name an externally declared live slot.")
+				(bool.and borrowed (bool.not (call replay_directives_safe (borrow-shared text) base
+					(borrow-shared declarations_bytes) (borrow-shared statements))))
 				(then (return -1i32)))
 			(return length)))
 
@@ -201,7 +215,7 @@
 		expansion exposes preprocessing state that produces no source of its own.
 		An uncertain audit leaves the serial path and its diagnostics available.`)
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8))
-			(count i32) (prefix (shared-array u8))) (returns bool)
+			(count i32) (prefix (shared-array u8)) (guards (shared-array u8))) (returns bool)
 		(body
 			(if
 				(:doc "Graphs without selected headers have nothing to replay or query.")
@@ -211,11 +225,12 @@
 				(:doc "A caller must have planned multiple units in a private directory.")
 				(bool.or (i32.not-lt 1i32 count) (i32.eqz (array.len serial_path)))
 				(then (return (bool false))))
-			(let suffix (array.len counter_probe))
-			(let length (array.len prefix))
-			(if (i32.lt (i32.sub 2147483647i32 suffix) length) (then (return (bool false))))
-			(let-mut probe (array.alloc u8 (i32.add length suffix)))
-			(let next (call append_bytes (borrow-shared prefix) (borrow-mut probe) 0i32))
+			(let size (u64.add (u64.from-i32 (array.len guards))
+				(u64.add (u64.from-i32 (array.len prefix)) (u64.from-i32 (array.len counter_probe)))))
+			(if (u64.gt size 2147483647u64) (then (return (bool false))))
+			(let-mut probe (array.alloc u8 (i32.from-u64 size)))
+			(let start (call append_bytes (borrow-shared guards) (borrow-mut probe) 0i32))
+			(let next (call append_bytes (borrow-shared prefix) (borrow-mut probe) start))
 			(let end (call append_bytes (borrow-shared counter_probe) (borrow-mut probe) next))
 			(let-mut baseline (array.alloc u8 capture_capacity))
 			(let-mut trace (array.alloc u8 trace_capacity))
@@ -230,7 +245,7 @@
 			(let-mut identities (array.alloc FileStamp include_limit))
 			(let width (call serial_snapshot (borrow-shared program) (borrow-shared options) (borrow-shared serial_path)
 				(borrow-shared (array.range baseline 0i32 base)) (borrow-mut source) (borrow-mut trace)
-				(borrow-mut identities)))
+				(borrow-mut identities) (i32.gtz (array.len guards))))
 			(let removed (call unlink (borrow-shared serial_path)))
 			(if (bool.or (i32.ltz width) (i32.not-eqz removed)) (then (return (bool false))))
 			(return (call replay_numbered_context (borrow-shared program) (borrow-shared options)
