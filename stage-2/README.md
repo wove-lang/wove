@@ -190,9 +190,11 @@ identity builder supplies the order and delimiters for its components.
 offset and returns true. An out-of-range output span returns false
 and preserves the destination.
 
-The [C name generator](emit/text.wove) takes a `CNameRole`, a checked ID,
-the source name's byte span, and a translation unit prefix. The seed represents
-the role enum with a record and named constructors. The default spelling is
+The [C name generator](emit/text.wove) combines a resolved parent, a role,
+and the original name in `get_name`. The parent supplies the current checked
+word and any assigned collision slot. The word can be a declaration
+fingerprint or an ordinal in the role's scope. The checker retains the
+exact declaration and specialization keys. The default spelling is
 `wg<role><id><suffix>`, where `wg` stands for Wove-generated. The character
 after the prefix identifies the role. The ID uses seven lowercase
 Base32hex digits and starts with `0`, `1`, `2`, or `3` because IDs are 32 bits.
@@ -200,20 +202,30 @@ A suffix uses the validated identifier bytes directly. Graph emission
 reserves a prefix against selected
 native function names, type spellings, and destructors before writing C. It uses the first available prefix from
 `wg`, `wwg`, `wwwg`, and so on, keeping the same roles, IDs, and suffixes.
-Native symbols and the ABI entry `main` retain their original spellings.
+Declared native symbols, public exports, runtime symbols, and the ABI entry
+`main` keep their own spelling paths.
 
-| Tag | Role | ID | Suffix |
-| --- | --- | --- | --- |
-| `f` | Function | Stable declaration hash | Function name |
-| `r` | Record | Stable declaration hash | Record name |
-| `k` | Function-pointer typedef | Interned signature row in the translation unit | Empty |
-| `m` | Record member | Zero-based position in its layout | Empty |
-| `p` | Parameter | Zero-based position in its signature | Parameter name |
-| `l` | Local | Declared name's original file-local tree row | Local name |
-| `t` | Expression temporary | Original expression's file-local tree row | Empty |
-| `j` | Loop break label | Loop statement's original file-local tree row | Empty |
-| `q` | Read-only C type alias | Binding name's tree row in the translation unit | Native name |
-| `b` | C-string call storage | Original call's file-local tree row | `a` for descriptors, `b` for backing storage |
+| Tag | Role | ID | Suffix | Scope and agreement |
+| --- | --- | --- | --- | --- |
+| `f` | Function | Defining declaration fingerprint, including specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
+| `r` | Named struct or enum | Defining declaration fingerprint, including specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
+| `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
+| `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
+| `m` | Record member or enum payload member | Zero-based position in its layout | Empty | Within its C aggregate. Each access uses the same ordinal as the layout declaration. |
+| `p` | Parameter | Zero-based position in its signature | Parameter name | Within its C function or prototype. A body reference uses its checked formal. |
+| `l` | Local | Declared name's original file-local tree row | Local name | Within its C function. Shadowed bindings have distinct rows. |
+| `t` | Expression temporary | Expression's original file-local tree row | Empty | Within its C function. A use and its temporary declaration share the row. |
+| `j` | Loop break label | Loop statement's original file-local tree row | Empty | Within its C function. A break uses the row of its target loop. |
+| `q` | Read-only C type alias | Binding name's flattened graph row | Native name | Where the lvalue contract is emitted, the typedef and its check share the binding row. |
+| `a` | Module backing bytes | Binding name's flattened graph row | Defining name | Private to the C unit that defines the bytes. |
+| `b` | Module value or descriptor | Binding name's flattened graph row | Defining name | The common header, unique definition, and references share the row. |
+| `b` | C-string call storage | Call's original file-local tree row | `a` for descriptors, `b` for backing pointers | Within its C function. Setup, invocation, and cleanup use the same call row. |
+
+The worker adapter prefix uses the exact `f` name. Worker drop callbacks and
+ownership take, drop, slot, and occupancy helpers use the corresponding type
+name. Where the common header exposes a helper, its definition and uses share
+that owner's name. A native callback adapter uses a separate private prefix and
+the checked argument row within its emitted C unit.
 
 For a single module, hash its declared name, the four-byte little-endian
 declaration kind, and the original declaration name using standard
