@@ -10,6 +10,9 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from constant_result import folded_i32_result
+
 
 C_TYPES = {"i32": "int32_t", "u32": "uint32_t", "i64": "int64_t", "u64": "uint64_t"}
 CLEAR_FEATURES = ("-U_GNU_SOURCE", "-U_DARWIN_C_SOURCE", "-U_DEFAULT_SOURCE",
@@ -69,19 +72,9 @@ def check_unavailable(compiler, project, env, native_names, cases):
 			project.name, path.name, result.stderr)
 
 
-# Check the linked fixture's value comparisons without running its executable.
+# Report the manifest member if Clang folds the test to a mismatch.
 def assert_constant_result(clang, runtime, project, standard, flags, selected):
-	source = project / ".wovec-cache/default/out/bin/main.c"
-	result = subprocess.run([clang, f"-std={standard}", *flags, "-I", project, "-I", runtime,
-		"-O2", "-S", "-emit-llvm", source, "-o", "-"],
-		cwd=project, capture_output=True, text=True, timeout=30)
-	assert result.returncode == 0, (project.name, result.stderr)
-	entry = re.search(r"^define [^\n]* @wg[A-Za-z0-9_]*main\([^\n]*\{\n(.*?)^}", result.stdout, re.S | re.M)
-	assert entry, (project.name, result.stdout)
-	body = entry[1].strip().removeprefix("entry:").strip()
-	returned = re.fullmatch(r"ret i32 ([0-9]+)", body)
-	assert returned, (project.name, entry[1])
-	status = int(returned[1])
+	status = folded_i32_result(clang, runtime, project, standard, flags)
 	# A constant failure stores the manifest position in the return value.
 	if 64 <= status < 64 + len(selected):
 		raise AssertionError((project.name, selected[status - 64][0], "value mismatch"))

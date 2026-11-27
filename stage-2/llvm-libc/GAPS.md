@@ -445,6 +445,26 @@ through `wovec bin`.
 | `UCHAR_MIN`, `UINT_MIN`, `ULLONG_MIN`, `ULONG_MIN`, `USHRT_MIN`, and `__STDC_VERSION_LIMITS_H__` | Absent from the audited headers. |
 | `_POSIX_C_SOURCE`, `_POSIX_SOURCE`, `_XOPEN_SOURCE`, `_XOPEN_SOURCE_EXTENDED`, and `_XOPEN_LIM_H` | Feature selectors and an include guard observed during preprocessing. |
 
+## Bundled `<cpio.h>` archive constants
+
+The provider covers all 21 public names listed by LLVM libc. Apple Clang 21
+and LLVM Clang 22 exposed the same 20 C `int` constants and one narrow string
+macro on macOS SDK 27.2 and Debian glibc 2.41, on arm64 and x86-64. All
+21 were visible in C11, C17, and C23 across the ten audited feature
+profiles. The distinct SDK include guards are preprocessing internals.
+[LLVM libc cpio.h checklist](https://libc.llvm.org/headers/cpio.html)
+
+The 20 archive mode constants use `i32`, including the reserved `C_ISCTG`
+value. `MAGIC` is an immutable shared byte view of the header's six bytes,
+with the C terminator excluded. The fixtures compare each integer against
+the selected C header and compare the string's length and all bytes. They
+exercise both the installed provider and an equivalent project bridge
+using the same native header.
+
+The relocated compiler and Clang verified all 21 values for both bridge
+origins across the 240 configurations. Both fixtures also link under 12
+host C mode and feature profile combinations.
+
 ## Bundled message formatting
 
 The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public
