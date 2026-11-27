@@ -66,8 +66,23 @@ The audit covered both Clangs, both SDK architectures, C11, C17, and
 C23. `wait`, `waitpid`, `WNOHANG`, `WUNTRACED`, and the ordinary
 status macros remain available across the audited profiles. Older
 glibc profiles also omit the function-like macro `WIFCONTINUED`.
-`WCOREDUMP`, `WCORE_DUMPED`, `Usage`, `wait3`, and `wait4` remain
-in the source's disabled group and require their own bridge coverage.
+`wait3` and `wait4` use a complete `ResourceUsage` record from
+`<sys/resource.h>` and return the native `pid_t`. They accept a mutable
+integer status loan or explicit null. The installed fixture forks and
+reaps a child for each call, compares the exit status and projected
+usage with C, and verifies that a subsequent wait reports `ECHILD`.
+Both calls are native extensions on Darwin. On glibc, both appear with
+miscellaneous extensions and the older X/Open 500 profile also exposes
+`wait3`. An explicit null usage pointer needs the native record loan
+extension. [Compiler prerequisite #686](https://github.com/wove-lang/wove/issues/686)
+
+The audited Darwin and glibc extension profiles expose `WCOREDUMP`.
+Wove returns the original integer mask, verified as 0 or 128 with
+synthetic statuses. The bridge uses ordinary `c_macro`. Clang reports
+the missing expansion if the C profile hides it. The audited SDKs
+omit the POSIX.1-2024 spelling `WCORE_DUMPED` in every tested profile.
+The archive sketch remains disabled.
+[LLVM libc wait checklist](https://libc.llvm.org/headers/sys/wait.html)
 
 ## Active archive declarations
 
@@ -88,8 +103,9 @@ in the source's disabled group and require their own bridge coverage.
 ### Bridge directives
 
 The corpus carries 537 active `c_*` directives and 24 `cfg` directives.
-The two commented `#[c_macro]` lines in `sys_wait.wove` remain in their
-verbatim disabled text. Counts below cover active declarations.
+The archive supplied two commented `#[c_macro]` lines for the wait
+provider. The current `sys/wait.h.wove` activates `WCOREDUMP` and keeps
+the `WCORE_DUMPED` sketch disabled. Counts below describe the archive.
 
 | Directive and count | Header and affected declarations | Compiler behavior needed |
 | --- | --- | --- |
@@ -733,7 +749,7 @@ interfaces and design constraints.
 | `stdio.h` `vfprintf`, `vprintf`, `vsprintf`, `vsnprintf`, `vfscanf`, `vscanf`, and `vsscanf` | Represent native `va_list` storage and `va_copy` or `va_end` lifetime rules alongside the format contracts. |
 | `stdlib.h` `MB_CUR_MAX` and `strtold` | Read a locale-dependent native `size_t` expression at runtime. For `strtold`, preserve native `long double` and track an optional output pointer aliasing the input string. |
 | `sys/stat.h` timestamp aliases and host extensions | Represent overlapping timestamp aliases and add separate availability, ownership, and record contracts for host extensions. |
-| `sys/wait.h` `WCOREDUMP`, `WCORE_DUMPED`, `Usage`, `wait3`, and `wait4` | Select the optional macros and functions from the target header and check native `struct rusage` output storage. |
+| `sys/wait.h` `WCORE_DUMPED` and nullable usage for `wait3` and `wait4` | The audited headers omit `WCORE_DUMPED`. The wait calls use a live native `struct rusage` loan. Passing null needs the generic mutable native record contract. [Compiler prerequisite #686](https://github.com/wove-lang/wove/issues/686) |
 | `unistd.h` `execl`, `execle`, and `execlp` | Marshal each variable-length text operand to a call-scoped C string and supply a typed terminating null. `execle` also needs the environment vector after that null. The open scalar tail supplies neither pointer contract. |
 | `unistd.h` text and returned-alias families, `optarg`, and `getopt` | Check native character storage, termination and returned aliases. Track the retained or reordered argv vector and the lifetime of its borrowed text. Wove `(returns T (from parameter))` applies to ordinary Wove functions. Native returned aliases also need a bridge lifetime contract. |
 | `unistd.h` selector catalogs, `vfork`, and deprecated or removed APIs listed in the final note | Select host and header feature catalogs. Model the shared-address-space control flow of `vfork` before enabling it or any separately supported extension. |
