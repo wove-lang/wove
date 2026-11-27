@@ -208,6 +208,12 @@ void wvrt_check_c_array(wvrt_slice wvrt_view, size_t wvrt_element_size, int64_t 
 	_Static_assert(_Generic(&(drop), __typeof__((drop)((type)0)) (*)(type): 1, default: 0), \
 		"Wove C pointer typedef destructor does not match its owner type")
 
+// A void-pointer destructor checks the header ABI while the owner keeps its native type.
+#define WVRT_CHECK_C_VOID_POINTER_OWNER(type, drop) \
+	WVRT_CHECK_C_POINTER_TYPEDEF(type); \
+	_Static_assert(_Generic(&(drop), __typeof__((drop)((void *)0)) (*)(void *): 1, default: 0), \
+		"Wove C void pointer destructor does not match its declared signature")
+
 void wvrt_check_c_handle(const volatile void *wvrt_handle, int32_t wvrt_file,
 	int32_t wvrt_start, int32_t wvrt_end);
 void wvrt_check_c_handle_empty(const volatile void *wvrt_handle, int32_t wvrt_file,

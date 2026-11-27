@@ -10,13 +10,15 @@
 	(use wove-file "./module.wove" (only form_parts next_form_metadata source_keyword (type FormParts)))
 	(use wove-file "./types.wove" (only source_builtin_type reference_mode))
 	(use wove-file "./owned.wove" (only is_byte_owner_descriptor))
+	(use wove-file "./c_owners.wove" (only is_native_name))
 	(use wove-file "./c_formals.wove" (only next_c_value_formal))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "../c/arguments.wove"
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
-			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode)))
+			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode)
+			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode)))
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (scalar_ref u32) (owner_mode u8) (nullable bool)))
 	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (handle_out bool) (void_pointer bool) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
@@ -30,6 +32,7 @@
 	(let null_directive "c_null")
 	(let nullable_directive "c_nullable")
 	(let init_directive "c_init")
+	(let owner_out_directive "c_owner_out")
 	(let macro_directive "c_macro")
 	(let variadic_directive "c_variadic")
 	(let open_tail "...")
@@ -188,11 +191,12 @@
 				(call is_c_value_mode (local mode))
 				(then (return (struct.get (local formal) integer))))
 			(if
-				(:doc "A native void pointer borrows a scalar place or an exact-length byte view.")
+				(:doc "A native void pointer borrows a scalar place, exact-length byte view, or shared handle slot.")
 				(u8.eq (local mode) (local c_void_pointer_mode))
 				(then (return (bool.or (u32.gtz (struct.get (local formal) scalar_ref))
-					(u32.gtz (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes))
-						(local type) (bool true)))))))
+					(bool.or (u8.eq (struct.get (local formal) owner_mode) (local c_shared_handle_slot_mode))
+						(u32.gtz (call c_byte_slice_type (borrow-shared (local source)) (borrow-shared (local nodes))
+							(local type) (bool true))))))))
 			(let rows (call c_row_slice_type (borrow-shared (local source)) (borrow-shared (local nodes)) (local type)))
 			(if
 				(:doc "C string vectors borrow the rows through a shared projection.")
@@ -207,7 +211,7 @@
 			(if
 				(:doc "Initialization needs a mutable native owner and excludes nullable formals.")
 				(call is_c_storage_init_mode (local mode))
-				(then (return (bool.and (bool.not (call is_c_value_mode (struct.get (local formal) owner_mode)))
+				(then (return (bool.and (call is_c_init_mode (struct.get (local formal) owner_mode))
 					(bool.not (struct.get (local formal) nullable))))))
 			(if
 				(:doc "Nullable annotations name checked pointer shapes. Mutable scalar pointers can use this contract now.")
@@ -314,8 +318,9 @@
 				(then (return (call checked_c_arguments 0i32 0i32 1i32 (bool false) 0i32))))
 			(if
 				(:doc "The final contract table records vectors, initializers, and void pointers.")
-				(bool.or (u8.eq (local mode) (local c_void_pointer_mode))
-					(bool.or (call is_c_init_mode (local mode)) (call is_c_vector_mode (local mode))))
+				(bool.or (bool.or (u8.eq (local mode) (local c_void_pointer_mode)) (u8.eq (local mode) (local c_shared_handle_slot_mode)))
+					(bool.or (bool.or (call is_c_init_mode (local mode)) (call is_c_vector_mode (local mode)))
+						(u8.eq (local mode) (local c_owner_marker_flag_mode))))
 				(then (return (call checked_c_arguments 0i32 0i32 0i32 (bool false) 0i32))))
 			(return (call checked_c_arguments 1i32 0i32 0i32 (bool false) 0i32))))
 
@@ -430,8 +435,13 @@
 						(bool.and (call is_c_storage_init_mode (local mode)) (call is_c_handle_init_mode (local owner_mode)))
 						(then (set (local bound_mode) (call c_handle_init_mode))))
 					(if
+						(:doc "Use the address of a shared opaque owner slot for const void pointer contracts.")
+						(bool.and (u8.eq (local mode) (local c_void_pointer_mode))
+							(u8.eq (local owner_mode) (local c_shared_handle_slot_mode)))
+						(then (set (local bound_mode) (local c_shared_handle_slot_mode))))
+					(if
 						(:doc "Nullable annotations and initialization cannot name the same native owner.")
-						(bool.and (call is_c_nullable_mode (local mode)) (bool.not (call is_c_value_mode (local owner_mode))))
+						(bool.and (call is_c_nullable_mode (local mode)) (call is_c_init_mode (local owner_mode)))
 						(then
 							(if
 								(:doc "An initializing loan always needs a caller-provided slot.")
@@ -497,6 +507,62 @@
 				(then (return (call c_argument_error_at (local name)))))
 			(return (call checked_c_arguments 0i32 0i32 0i32 (bool false) (local row)))))
 
+	(fn read_c_owner_out
+		(:doc "Bind an opaque pointer-out slot and a Wove-only flag to a native sentinel name.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32)
+			(directive SourceNode) (begin i32) (contracts (mut-array CArgument))) (returns CArguments)
+		(body
+			(if
+				(:doc "Require the output name before reading any operand rows.")
+				(i32.ltz (local begin))
+				(then (return (call c_argument_error_at (local directive)))))
+			(let output_name (array.load (local nodes) (local begin)))
+			(let flag_index (struct.get (local output_name) next_sibling))
+			(if (i32.ltz (local flag_index)) (then (return (call c_argument_error_at (local directive)))))
+			(let flag_name (array.load (local nodes) (local flag_index)))
+			(let marker_index (struct.get (local flag_name) next_sibling))
+			(if (i32.ltz (local marker_index)) (then (return (call c_argument_error_at (local directive)))))
+			(let marker (array.load (local nodes) (local marker_index)))
+			(if
+				(:doc "Accept exactly one native identifier as the final sentinel operand.")
+				(i32.not-ltz (struct.get (local marker) next_sibling))
+				(then (return (call c_argument_error_at (local directive)))))
+			(if
+				(:doc "The C header supplies the sentinel expression.")
+				(bool.not (call is_native_name (borrow-shared (local source)) (local marker)))
+				(then (return (call c_argument_error_at (local marker)))))
+			(let output (call find_named_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local first) (local output_name)))
+			(let output_position (struct.get (local output) position))
+			(if (i32.ltz (local output_position)) (then (return (call c_argument_error_at (local output_name)))))
+			(let owner (array.load (local contracts) (local output_position)))
+			(if
+				(:doc "Only an unambiguous mutable opaque handle has a pointer slot to initialize.")
+				(bool.or (u8.not-eq (struct.get (local owner) owner_mode) (call c_handle_init_mode))
+					(struct.get (local owner) nullable))
+				(then (return (call c_argument_error_at (array.load (local nodes) (struct.get (local output) type_node))))))
+			(let flag (call find_named_c_formal (borrow-shared (local source)) (borrow-shared (local nodes))
+				(local first) (local flag_name)))
+			(let flag_position (struct.get (local flag) position))
+			(if (i32.ltz (local flag_position)) (then (return (call c_argument_error_at (local flag_name)))))
+			(let flag_type (array.load (local nodes) (struct.get (local flag) type_node)))
+			(let flag_parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local flag_type)))
+			(let flag_operand (struct.get (local flag_parts) operands))
+			(if
+				(:doc "The separate result must be an exclusive bool place and cannot accept null.")
+				(bool.or (struct.get (array.load (local contracts) (local flag_position)) nullable)
+					(bool.or (u32.not-eq (call reference_mode (borrow-shared (local source)) (borrow-shared (local nodes))
+						(struct.get (local flag_parts) head)) 2u32)
+						(bool.or (i32.ltz (local flag_operand))
+							(u32.not-eq (call source_builtin_type (borrow-shared (local source))
+								(array.load (local nodes) (local flag_operand))) 12u32))))
+				(then (return (call c_argument_error_at (local flag_type)))))
+			(let checked (call reserve_c_argument (borrow-mut (local contracts)) (local output)
+				(local c_marked_handle_out_mode) (local marker_index) (local flag_position)))
+			(if (u32.gtz (struct.get (local checked) error)) (then (return (local checked))))
+			(return (call reserve_c_argument (borrow-mut (local contracts)) (local flag)
+				(local c_owner_marker_flag_mode) -1i32 (local output_position)))))
+
 	(fn read_c_directive
 		(:doc `Dispatch the recognized argument directives in the checked pragma stream.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32)
@@ -534,6 +600,11 @@
 				(:doc "A variadic boundary changes the C prototype and leaves tail values to C promotions.")
 				(call matches_pragma (borrow-shared (local source)) (local name) (borrow-shared (local variadic_directive)))
 				(then (return (call read_c_variadic (borrow-shared (local source)) (borrow-shared (local nodes)) (local first) (local begin)))))
+			(if
+				(:doc "An opaque sentinel output binds two Wove formals and one native name.")
+				(call matches_pragma (borrow-shared (local source)) (local name) (borrow-shared (local owner_out_directive)))
+				(then (return (call read_c_owner_out (borrow-shared (local source)) (borrow-shared (local nodes))
+					(local first) (local node) (local begin) (borrow-mut (local contracts))))))
 			(let mode (call c_argument_directive (borrow-shared (local source)) (local name)))
 			(if
 				(:doc "Other directives leave these argument contracts untouched.")
@@ -627,7 +698,7 @@
 		Null-only slots suppress string preparation. Native views and shared
 		scalar references need explicit contracts.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function FormParts)
-			(first i32) (contracts (mut-array CArgument)))
+			(first i32) (status u32) (contracts (mut-array CArgument)))
 		(returns CArguments)
 		(body
 			(let nulls (call read_c_argument_pragmas (borrow-shared (local source)) (borrow-shared (local nodes))
@@ -652,7 +723,13 @@
 					(let slot (array.load (local contracts) (local index)))
 					(let mode (struct.get (local slot) mode))
 					(let vector (call is_c_vector_mode (local mode)))
-					(let void_formal (u8.eq (local mode) (local c_void_pointer_mode)))
+					(let marked (u8.eq (local mode) (local c_marked_handle_out_mode)))
+					(let void_formal (bool.or (local marked) (bool.or (u8.eq (local mode) (local c_void_pointer_mode))
+						(u8.eq (local mode) (local c_shared_handle_slot_mode)))))
+					(if
+						(:doc "The sentinel flag accompanies the unmodified native i32 status.")
+						(bool.and (local marked) (u32.not-eq (local status) 5u32))
+						(then (return (call c_argument_error_at (local type)))))
 					(set (local vectors) (bool.or (local vectors) (local vector)))
 					(set (local void_pointer) (bool.or (local void_pointer) (local void_formal)))
 					(if

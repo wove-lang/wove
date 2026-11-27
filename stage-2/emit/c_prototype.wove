@@ -15,7 +15,8 @@
 	(use wove-file "../source/c_formals.wove" (only is_c_fixed_formal c_fixed_formal_at))
 	(use wove-file "./c_formals.wove" (only write_fixed_c_type))
 	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_bytes_mode is_c_null_mode is_c_array_mode is_c_vector_mode
-			is_c_storage_mode c_storage_shared_mode is_c_handle_init_mode (value c_void_pointer_mode)))
+			is_c_storage_mode c_storage_shared_mode is_c_handle_init_mode (value c_void_pointer_mode) (value c_shared_handle_slot_mode)
+			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode)))
 	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/records.wove" (only is_optional_record_borrow optional_record_borrow_reference is_mutable_place_reference (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type))
@@ -78,12 +79,14 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 			(let mode (struct.get (local param) c_mode))
 			(if
 				(:doc "Use the loan's access mode to qualify the void pointer in the exact native signature.")
-				(u8.eq (local mode) (local c_void_pointer_mode))
+				(bool.or (u8.eq (local mode) (local c_marked_handle_out_mode))
+					(bool.or (u8.eq (local mode) (local c_void_pointer_mode)) (u8.eq (local mode) (local c_shared_handle_slot_mode))))
 				(then
 					(if
 						(:doc "The C callee may write through a mutable loan.")
-						(bool.or (u32.eq (struct.get (local param) type) 38u32)
-							(call is_mutable_place_reference (struct.get (local param) type)))
+						(bool.or (u8.eq (local mode) (local c_marked_handle_out_mode))
+							(bool.or (u32.eq (struct.get (local param) type) 38u32)
+								(call is_mutable_place_reference (struct.get (local param) type))))
 						(then (return (call c_literal_text (borrow-shared (local mutable_void_pointer))
 							(borrow-mut (local output)) (local offset) (local writing)))))
 					(return (call c_literal_text (borrow-shared (local shared_void_pointer))
@@ -226,6 +229,7 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 			(let-mut parameter (struct.get (local function) params))
 			(let-mut native_row (struct.get (local function) c_formals))
 			(let tail (struct.get (local function) c_variadic))
+			(let-mut wrote_formal (bool false))
 			(if
 				(:doc "An empty formal list explicitly takes no arguments in every C mode.")
 				(bool.and (i32.ltz (local native_row)) (i32.eqz (local tail)))
@@ -238,24 +242,37 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 				(body
 					(let item (array.load (local nodes) (local native_row)))
 					(let parts (call form_parts (borrow-shared (local source)) (borrow-shared (local nodes)) (local item)))
+					(let fixed (bool.and (struct.get (local function) c_fixed)
+						(call is_c_fixed_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts))))
 					(if
-						(:doc "A hidden operand has its own C type and no Wove parameter row.")
-						(bool.and (struct.get (local function) c_fixed)
-							(call is_c_fixed_formal (borrow-shared (local source)) (borrow-shared (local nodes)) (local parts)))
+						(:doc "The separate Wove flag is absent from the native prototype.")
+						(bool.and (bool.not (local fixed))
+							(u8.eq (struct.get (array.load (local parameters) (local parameter)) c_mode) (local c_owner_marker_flag_mode)))
 						(then
-							(let formal (call c_fixed_formal_at (borrow-shared (local source)) (borrow-shared (local nodes)) (local native_row)))
-							(set (local cursor) (call write_fixed_c_type (borrow-shared (local source)) (borrow-shared (local nodes))
-								(local formal) (borrow-mut (local output)) (local cursor) (local writing))))
+							(set (local parameter) (i32.inc (local parameter))))
 						(else
-							(set (local cursor) (call write_fixed_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes))
-								(borrow-shared (local records)) (array.load (local parameters) (local parameter))
-								(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
-							(set (local parameter) (i32.inc (local parameter)))))
-					(set (local native_row) (struct.get (local item) next_sibling))
-					(if
-						(:doc "An ellipsis follows the last fixed operand even when all formals are fixed.")
-						(bool.or (i32.not-ltz (local native_row)) (i32.not-eqz (local tail)))
-						(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))))))
+							(if
+								(:doc "Separate only types present in the actual C prototype.")
+								(local wrote_formal)
+								(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))))
+							(set (local wrote_formal) (bool true))
+							(if
+								(:doc "A hidden operand has its own C type and no Wove parameter row.")
+								(local fixed)
+								(then
+									(let formal (call c_fixed_formal_at (borrow-shared (local source)) (borrow-shared (local nodes)) (local native_row)))
+									(set (local cursor) (call write_fixed_c_type (borrow-shared (local source)) (borrow-shared (local nodes))
+										(local formal) (borrow-mut (local output)) (local cursor) (local writing))))
+								(else
+									(set (local cursor) (call write_fixed_parameter_type (borrow-shared (local source)) (borrow-shared (local nodes))
+										(borrow-shared (local records)) (array.load (local parameters) (local parameter))
+										(borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))
+									(set (local parameter) (i32.inc (local parameter)))))))
+					(set (local native_row) (struct.get (local item) next_sibling))))
+			(if
+				(:doc "An ellipsis follows the native fixed prefix.")
+				(bool.and (local wrote_formal) (i32.not-eqz (local tail)))
+				(then (set (local cursor) (call c_byte (borrow-mut (local output)) (local cursor) 44u8 (local writing)))))
 			(return (local cursor))))
 
 	(fn write_c_prototype_check
