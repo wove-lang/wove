@@ -365,6 +365,30 @@ on Darwin arm64 and linked on Darwin x86-64. The shared and GNU fixtures
 linked against Debian glibc 2.41 on arm64 and x86-64 with a `libm.so.6`
 dependency. The Linux checks stop at link validation. [Debian glibc packages](https://deb.debian.org/debian/pool/main/g/glibc/)
 
+## Bundled floating-point limits
+
+Both drivers bundle `float.h.wove`. Apple Clang 21 selected its resource
+`float.h` and its two helper headers for the macOS SDK 27.2 and Debian glibc
+2.41 profiles on arm64 and x86-64. The audit found 40 macros in C11 and C17
+and 45 in C23. The default features and the Wove driver's feature defines
+exposed the same members in each mode. [LLVM libc float.h checklist](https://libc.llvm.org/headers/float.html)
+
+The integer fixture builds with `--cflag=-ffp-model=strict` for its runtime
+rounding checks. `FLT_EVAL_METHOD` follows Clang's evaluation method, which
+can be selected with `-ffp-eval-method`. Both fixtures ran under ASan and UBSan
+on Darwin arm64 and linked on Darwin x86-64 in all three C modes. Both glibc
+targets cross-linked in those modes. The cross-link from macOS supplies
+`-lm` for the integer fixture's floating-point environment calls.
+
+| Members | Coverage or outstanding contract |
+| --- | --- |
+| `DECIMAL_DIG`, `FLT_EVAL_METHOD`, `FLT_RADIX`, and `FLT_*`, `DBL_*`, `LDBL_*` precision, decimal digits, exponent limits, and subnormal indicators | The installed fixture compares all 27 integer constant expressions to their native values. This includes the signed minimum exponents. |
+| `FLT_ROUNDS` | The header expands it to `__builtin_flt_rounds()`. The read-only expression retains type `int` and is evaluated on each read. The fixture compares it to a direct C read under each of the four rounding modes, then restores the original environment. |
+| `FLT_EPSILON`, `FLT_MAX`, `FLT_MIN`, `FLT_TRUE_MIN`, `DBL_EPSILON`, `DBL_MAX`, `DBL_MIN`, `DBL_TRUE_MIN` | The expression checks enforce exact C `float` or `double` types. The fixture compares all eight values against the header, including the smallest positive subnormals. |
+| `LDBL_EPSILON`, `LDBL_MAX`, `LDBL_MIN`, `LDBL_TRUE_MIN`, `LDBL_NORM_MAX` | These require a native `long double` alias. The audited type has 53 significand bits and occupies 8 bytes on Darwin arm64, 64 bits and 16 bytes on both x86-64 targets, and 113 bits and 16 bytes on glibc arm64. C still treats Darwin arm64 `long double` and `double` as distinct types. [Native long double prerequisite #571](https://github.com/wove-lang/wove/issues/571) |
+| `FLT_NORM_MAX`, `DBL_NORM_MAX`, `LDBL_NORM_MAX`, `INFINITY`, and `NAN` | Clang 21 exposes these five macros in C23. Their bindings need optional availability checks for read-only expression macros so an import can be checked under the selected C mode. [Optional expressions prerequisite #572](https://github.com/wove-lang/wove/issues/572) |
+| `FLT_IS_IEC_60559`, `DBL_IS_IEC_60559`, `LDBL_IS_IEC_60559`, `FLT_SNAN`, `DBL_SNAN`, `LDBL_SNAN`, `__STDC_VERSION_FLOAT_H__`, and decimal floating-point limit macros | Unavailable in the audited headers and feature profiles. |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
