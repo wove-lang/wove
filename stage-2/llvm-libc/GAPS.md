@@ -411,8 +411,8 @@ glibc profiles and the audited Darwin profiles.
 | Members | Coverage or outstanding contract |
 | --- | --- |
 | Classification flags, severities, and returned status codes | The installed fixture compares all 20 `int` selections to their C header values. Darwin and glibc differ for `MM_APPL` (16, 8), `MM_UTIL` (32, 16), `MM_OPSYS` (64, 32), `MM_RECOVER` (4096, 64), `MM_NRECOV` (8192, 128), `MM_NOCON` (2, 4), and `MM_NOTOK` (3, −1). |
-| `MM_NULLMC`, `MM_NULLSEV`, `MM_NULLLBL`, `MM_NULLTXT`, `MM_NULLACT`, `MM_NULLTAG` | `MM_NULLMC` is native `long` zero and `MM_NULLSEV` is `int` zero. `fmtmsg_text` fixes the label, severity, action, and tag omissions for text-only calls. Selecting any of the four string omissions at an individual call awaits nullable C strings. [Nullable C strings #584](https://github.com/wove-lang/wove/issues/584) |
-| `fmtmsg` | The complete-string and text-only calls print controlled output to stderr and return `MM_OK`. The fixture also checks the no-destination result and `MM_NOMSG` with stderr closed. |
+| `MM_NULLMC`, `MM_NULLSEV`, `MM_NULLLBL`, `MM_NULLTXT`, `MM_NULLACT`, `MM_NULLTAG` | `MM_NULLMC` is native `long` zero and `MM_NULLSEV` is `int` zero. Pass literal `null` for any of the four optional strings. `fmtmsg_text` fixes the label, severity, action, and tag omissions for text-only calls. [Nullable C strings #584](https://github.com/wove-lang/wove/issues/584) |
+| `fmtmsg` | The complete-string and text-only calls print controlled output to stderr and return `MM_OK`. Explicit nulls for label, action, and tag produce the same text-only output and status as the fixed header operands. The fixture also checks the all-null, no-destination call and `MM_NOMSG` with stderr closed. |
 | `addseverity` | The guarded `addseverity_remove` alias passes a fixed null string and exposes the original status. Registration and replacement retain the supplied string in glibc, so they need storage that outlives the call. [glibc implementation](https://codebrowser.dev/glibc/glibc/stdlib/fmtmsg.c.html#303) · [Retained severity storage #585](https://github.com/wove-lang/wove/issues/585) |
 
 ## Bundled math coverage
