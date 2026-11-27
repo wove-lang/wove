@@ -30,11 +30,11 @@
 #define default_selection wv_seed_fn_112
 #define target_os wv_seed_fn_113
 #define target_arch wv_seed_fn_114
-#define inspect_callers wv_seed_fn_1398
-#define run_scalar_graph wv_seed_fn_1423
-#define discover_graph_tests wv_seed_fn_1433
-#define inspect_graph_expectations wv_seed_fn_1410
-#define write_unit_name wv_seed_fn_1476
+#define inspect_callers wv_seed_fn_1404
+#define run_scalar_graph wv_seed_fn_1429
+#define discover_graph_tests wv_seed_fn_1439
+#define inspect_graph_expectations wv_seed_fn_1416
+#define write_unit_name wv_seed_fn_1482
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_1 SourceDiagnostic;
@@ -658,7 +658,9 @@ static int dump_c(wvrt_slice parent, wvrt_slice input, int32_t start, int32_t ca
 	// Check both guards and the unwritten tail before exposing emitted bytes.
 	if (bytes != NULL) {
 		const wvrt_mut_slice output = {bytes + 1, capacity, sizeof(uint8_t)};
-		const EmitResult result = emit_module(input, source.nodes, source.module, source.active, 0, start,
+		const wvrt_mut_slice nodes = {source.storage != NULL ? source.storage->wvrt_items : NULL,
+			source.nodes.wvrt_length, sizeof(SourceNode)};
+		const EmitResult result = emit_module(input, nodes, source.module, source.active, 0, start,
 			(wvrt_mut_slice){NULL, 0, sizeof(EmbedAsset)}, false, output);
 		const int32_t count = result.wv_field_0;
 		if (output_intact(bytes, capacity, count)) {

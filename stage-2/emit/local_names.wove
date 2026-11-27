@@ -1,0 +1,158 @@
+(module c_local_names
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Cache C names on checked defining bindings before emitting function bodies.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/generics.wove" (only hash_generic_word))
+	(use wove-file "../hashing/fnv1a.wove" (only fnv1a_byte))
+	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction)))
+	(use wove-file "../scalar/generics/workspace.wove" (only subtree_limit))
+	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement) (value for_binding) (value for_mut_binding)
+		(value case_payload_binding) (value case_discard_binding)))
+	(use wove-file "../scalar/plan.wove" (only (value owned_parameter_binding)))
+	(use wove-file "../scalar/syntax.wove" (only (value let_binding)))
+	(use wove-file "./names.wove" (only hash_spelling (value local_role)))
+	(use wove-file "./collisions.wove" (only base_candidate bucket link_candidate same_suffix (type Bucket) (type Candidate)))
+
+	(fn is_let_binding
+		(:doc "Identify immutable and mutable local declaration statements.")
+		(params (kind u32)) (returns bool)
+		(body (return (bool.or (u32.eq kind let_binding) (u32.eq kind 16u32)))))
+
+	(fn defines_local_slot
+		(:doc "Include each checked local, pattern, and transferred formal, plus the hidden case discard in the same C namespace.")
+		(params (kind u32)) (returns bool)
+		(body (return (bool.or (call is_let_binding kind)
+			(bool.or (u32.eq kind for_binding) (bool.or (u32.eq kind for_mut_binding)
+				(bool.or (u32.eq kind case_payload_binding) (bool.or (u32.eq kind case_discard_binding)
+					(u32.eq kind owned_parameter_binding)))))))))
+
+	(fn local_candidate
+		(:doc "Retain the defining name row and hash the function-relative lexical scope and declaration before its spelling.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction)
+			(row i32) (statement ScalarStatement) (parent u32)) (returns Candidate)
+		(body
+			(let name (struct.get statement target))
+			(let node (array.load nodes name))
+			(let kind (struct.get statement kind))
+			(if
+				(:doc "A synthetic case discard keeps its existing ordinal unless another complete C spelling conflicts.")
+				(u32.eq kind case_discard_binding)
+				(then (return (call base_candidate node name 0u32
+					(u32.from-i32 (i32.sub name (struct.get function name_base)))))))
+			(let-mut scope (struct.get statement first))
+			(if
+				(:doc "Let statements get their lexical scope from the containing source block.")
+				(call is_let_binding kind)
+				(then (set scope (struct.get (array.load nodes row) parent))))
+			(let declaration (struct.get function declaration))
+			(let scope_key (call hash_generic_word parent (u32.from-i32 (i32.sub scope declaration))))
+			(let binding_key (call hash_generic_word scope_key (u32.from-i32 (i32.sub name declaration))))
+			(return (call base_candidate node name 0u32 (call hash_spelling (borrow-shared source)
+				(struct.get node start) (struct.get node end) binding_key)))))
+
+	(fn local_slot
+		(:doc "Rank equal complete spellings by their exact defining rows within this function.")
+		(params (source (shared-array u8)) (candidates (shared-array Candidate)) (row i32) (head i32)) (returns i32)
+		(body
+			(let name (array.load candidates row))
+			(let-mut cursor head)
+			(let-mut collides (bool false))
+			(let-mut slot 1i32)
+			(while
+				(:doc "A bucket's fingerprint is only a filter. Keep distinct spelling and binding keys separate.")
+				(i32.gtz cursor)
+				(body
+					(let other (array.load candidates (i32.dec cursor)))
+					(if
+						(:doc "Two different defining rows conflict only when their base C names agree.")
+						(bool.and (i32.not-eq (struct.get other name) (struct.get name name))
+							(bool.and (u32.eq (struct.get other fingerprint) (struct.get name fingerprint))
+								(call same_suffix (borrow-shared source) name other)))
+						(then
+							(set collides (bool true))
+							(if (i32.lt (struct.get other name) (struct.get name name))
+								(then (set slot (i32.inc slot))))))
+					(set cursor (struct.get other next))))
+			(if collides (then (return slot)))
+			(return 0i32)))
+
+	(fn assign_function_locals
+		(:doc "Build a scratch index for one concrete function and cache the final name on each defining source atom.")
+		(params (source (shared-array u8)) (nodes (mut-array SourceNode)) (statements (shared-array ScalarStatement))
+			(function ScalarFunction)) (returns void)
+		(body
+			(let first (struct.get function declaration))
+			(let limit (call subtree_limit (borrow-shared nodes) first (struct.get function tree_limit)))
+			(let-mut row first)
+			(let-mut count 0i32)
+			(while
+				(:doc "Only checked defining rows enter the function's local namespace.")
+				(i32.lt row limit)
+				(body
+					(if (call defines_local_slot (struct.get (array.load statements row) kind))
+						(then (set count (i32.inc count))))
+					(set row (i32.inc row))))
+			(if (i32.eqz count) (then (return)))
+			(let-mut width 1i32)
+			(while
+				(:doc "Keep the bucket table a power of two and its size within i32.")
+				(bool.and (i32.lt width count) (i32.lt width 536870912i32))
+				(body (set width (i32.add width width))))
+			(let-mut buckets (array.alloc Bucket width))
+			(let-mut candidates (array.alloc Candidate count))
+			(let parent (call fnv1a_byte (struct.get function identity) local_role))
+			(let-mut index 0i32)
+			(set row first)
+			(while
+				(:doc "Hash one defining binding at a time, including bindings in conditional and loop bodies.")
+				(i32.lt row limit)
+				(body
+					(let statement (array.load statements row))
+					(if
+						(:doc "Register the checked name even when the binding is referenced by several emission paths.")
+						(call defines_local_slot (struct.get statement kind))
+						(then
+							(let candidate (call local_candidate (borrow-shared source) (borrow-shared nodes)
+								function row statement parent))
+							(call link_candidate (borrow-mut buckets) (borrow-mut candidates) index candidate)
+							(set index (i32.inc index))))
+					(set row (i32.inc row))))
+			(set index 0i32)
+			(while
+				(:doc "Each later reference reaches this same cached fingerprint and collision slot.")
+				(i32.lt index count)
+				(body
+					(let candidate (array.load candidates index))
+					(let row (struct.get candidate name))
+					(let identity (struct.get candidate fingerprint))
+					(let head (struct.get (array.load buckets (call bucket identity width)) head))
+					(let slot (call local_slot (borrow-shared source) (borrow-shared candidates) index head))
+					(let name (array.load nodes row))
+					(array.store nodes row (struct.new SourceNode
+						(kind (struct.get name kind)) (start (struct.get name start)) (end (struct.get name end))
+						(parent (struct.get name parent)) (first_child (struct.get name first_child))
+						(next_sibling (struct.get name next_sibling)) (bridge_project (struct.get name bridge_project))
+						(bridge_default (struct.get name bridge_default)) (generic_kind (struct.get name generic_kind))
+						(generic_value (struct.get name generic_value)) (local_identity identity) (local_name_slot slot)))
+					(set index (i32.inc index))))))
+
+	(fn assign_local_c_names
+		(:doc "Resolve local C spellings once per checked function or specialization for both output passes.")
+		(params (source (shared-array u8)) (nodes (mut-array SourceNode)) (functions (shared-array ScalarFunction))
+			(statements (shared-array ScalarStatement))) (returns void)
+		(body
+			(let count (call checked_function_count (borrow-shared functions)))
+			(let-mut index 0i32)
+			(while
+				(:doc "Each selected Wove body forms a separate C namespace.")
+				(i32.lt index count)
+				(body
+					(let function (array.load functions index))
+					(if
+						(:doc "Native signatures have no generated binding declarations.")
+						(i32.not-ltz (struct.get function body))
+						(then (call assign_function_locals (borrow-shared source) (borrow-mut nodes)
+							(borrow-shared statements) function)))
+					(set index (i32.inc index)))))))
