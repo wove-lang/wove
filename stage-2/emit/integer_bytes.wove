@@ -5,7 +5,7 @@
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/numeric_ops.wove" (only integer_byte_width integer_bytes_big_endian))
-	(use wove-file "../source/types.wove" (only is_signed_builtin_integer is_128bit_integer))
+	(use wove-file "../source/types.wove" (only is_signed_builtin_integer is_128bit_integer is_256bit_integer (value i256_type)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only record_index (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type))
@@ -16,12 +16,67 @@
 	(let byte_array_close "}}")
 	(let extract_byte "(uint8_t)((uint64_t)")
 	(let extract_wide_byte "(uint8_t)((wvrt_u128)")
+	(let extract_bitint_byte "(uint8_t)((wvrt_u256)")
 	(let shift_right ">>")
 	(let extract_end "),")
 	(let decode_unsigned "wvrt_int_from_bytes(")
 	(let decode_signed "wvrt_signed_from_bytes(")
 	(let decode_wide_unsigned "wvrt_u128_from_bytes(")
 	(let decode_wide_signed "wvrt_i128_from_bytes(")
+	(let decode_bitint_unsigned "wvrt_u256_from_bytes(")
+	(let decode_bitint_signed "wvrt_i256_from_bytes(")
+
+	(fn open_integer_decoder
+		(:doc "Select the exact unsigned assembly width and whether the result interprets the sign bit.")
+		(params (type u32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "The wide signed decoder interprets the full 256-bit two's complement representation.")
+				(u32.eq (local type) (local i256_type))
+				(then (return (call c_literal_text (borrow-shared (local decode_bitint_signed))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "The wide unsigned decoder keeps every bit.")
+				(call is_256bit_integer (local type))
+				(then (return (call c_literal_text (borrow-shared (local decode_bitint_unsigned))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "A sixteen-byte decode uses the native 128-bit result.")
+				(call is_128bit_integer (local type))
+				(then
+					(if
+						(:doc "Interpret the 128-bit sign before returning a signed result.")
+						(call is_signed_builtin_integer (local type))
+						(then (return (call c_literal_text (borrow-shared (local decode_wide_signed))
+							(borrow-mut (local output)) (local offset) (local writing)))))
+					(return (call c_literal_text (borrow-shared (local decode_wide_unsigned))
+						(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "Interpret the sign of a narrow lane before the final cast.")
+				(call is_signed_builtin_integer (local type))
+				(then (return (call c_literal_text (borrow-shared (local decode_signed))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local decode_unsigned))
+				(borrow-mut (local output)) (local offset) (local writing)))))
+
+	(fn open_byte_extract
+		(:doc "Cast the captured word to an unsigned type wide enough for all its bytes.")
+		(params (width i32) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "The optional type uses an exact unsigned C23 representation.")
+				(i32.eq (local width) 32i32)
+				(then (return (call c_literal_text (borrow-shared (local extract_bitint_byte))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(if
+				(:doc "A sixteen-byte type keeps the upper and lower words.")
+				(i32.eq (local width) 16i32)
+				(then (return (call c_literal_text (borrow-shared (local extract_wide_byte))
+					(borrow-mut (local output)) (local offset) (local writing)))))
+			(return (call c_literal_text (borrow-shared (local extract_byte))
+				(borrow-mut (local output)) (local offset) (local writing)))))
 
 	(fn write_integer_bytes_encode
 		(:doc `Initialize every inline byte from the already evaluated integer temporary.`)
@@ -50,14 +105,7 @@
 				(:doc "Cast to unsigned before shifting, then keep only the selected byte.")
 				(i32.lt (local index) (local count))
 				(body
-					(let-mut cast (local cursor))
-					(if
-						(:doc "Sixteen-byte encoders cast to the full unsigned representation before the shift.")
-						(i32.eq (local count) 16i32)
-						(then (set (local cast) (call c_literal_text (borrow-shared (local extract_wide_byte))
-							(borrow-mut (local output)) (local cursor) (local writing))))
-						(else (set (local cast) (call c_literal_text (borrow-shared (local extract_byte))
-							(borrow-mut (local output)) (local cursor) (local writing)))))
+					(let cast (call open_byte_extract (local count) (borrow-mut (local output)) (local cursor) (local writing)))
 					(let value (call write_temporary_name (borrow-shared (local source)) (struct.get (local row) first)
 						(local tree_base) (borrow-mut (local output)) (local cast) (local name_prefix) (local writing)))
 					(let op (call c_literal_text (borrow-shared (local shift_right))
@@ -82,26 +130,8 @@
 			(let typed (call write_value_type (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (local type) (borrow-mut (local output)) (local cast) (local name_prefix) (local writing)))
 			(let close (call c_byte (borrow-mut (local output)) (local typed) 41u8 (local writing)))
-			(let-mut open (local close))
-			(if
-				(:doc "Full-width decoding preserves all sixteen bytes before converting to the selected signedness.")
-				(call is_128bit_integer (local type))
-				(then
-					(if
-						(:doc "The signed result uses the exact two's complement interpretation.")
-						(call is_signed_builtin_integer (local type))
-						(then (set (local open) (call c_literal_text (borrow-shared (local decode_wide_signed))
-							(borrow-mut (local output)) (local close) (local writing))))
-						(else (set (local open) (call c_literal_text (borrow-shared (local decode_wide_unsigned))
-							(borrow-mut (local output)) (local close) (local writing))))))
-				(else
-					(if
-						(:doc "A signed decoder interprets the bit pattern before the narrowing cast.")
-						(call is_signed_builtin_integer (local type))
-						(then (set (local open) (call c_literal_text (borrow-shared (local decode_signed))
-							(borrow-mut (local output)) (local close) (local writing))))
-						(else (set (local open) (call c_literal_text (borrow-shared (local decode_unsigned))
-							(borrow-mut (local output)) (local close) (local writing)))))))
+			(let open (call open_integer_decoder (local type)
+				(borrow-mut (local output)) (local close) (local writing)))
 			(let value (call write_temporary_name (borrow-shared (local source)) (struct.get (local row) first)
 				(local tree_base) (borrow-mut (local output)) (local open) (local name_prefix) (local writing)))
 			(let comma (call c_byte (borrow-mut (local output)) (local value) 44u8 (local writing)))

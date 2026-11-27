@@ -74,7 +74,7 @@
 	(use wove-file "./integers.wove" (only write_integer_bit_count write_integer_arithmetic write_integer_literal write_16bit_wrapping write_i64_wrapping))
 	(use wove-file "./integer_checks.wove" (only write_integer_check))
 	(use wove-file "../source/integer_checks.wove" (only is_integer_check))
-	(use wove-file "../source/types.wove" (only is_16bit_integer is_64bit_integer is_128bit_integer is_builtin_integer is_signed_builtin_integer (value i64_type) (value i128_type) (value i256_type) (value f128_type) (value worker_receipt_type) (value worker_queue_type) (value worker_pool_type) (value worker_permit_type)))
+	(use wove-file "../source/types.wove" (only is_16bit_integer is_64bit_integer is_128bit_integer is_256bit_integer is_builtin_integer is_signed_builtin_integer (value i64_type) (value i128_type) (value i256_type) (value f128_type) (value worker_receipt_type) (value worker_queue_type) (value worker_pool_type) (value worker_permit_type)))
 	(use wove-file "../source/integer_compare.wove" (only comparison_is_zero comparison_is_negated))
 	(use wove-file "./text.wove" (only c_byte c_span c_literal_text c_text_fragment c_cast c_i32_bias
 			write_temporary_name write_local_name write_local_place write_loop_label open_static_value write_static_bytes))
@@ -1272,10 +1272,12 @@
 					(let operand (struct.get (local expression) first))
 					(let target (struct.get (local expression) type))
 					(let source_type (struct.get (array.load (local expressions) (local operand)) type))
-					(let native (bool.or (bool.or (u32.eq (local target) 61u32) (call is_16bit_integer (local target)))
-						(bool.or (bool.or (call is_64bit_integer (local target)) (call is_64bit_integer (local source_type)))
-							(bool.or (bool.or (call is_native_integer (local target)) (call is_native_integer (local source_type)))
-								(bool.or (call is_128bit_integer (local target)) (call is_128bit_integer (local source_type)))))))
+					(let bit_integer (bool.or (call is_256bit_integer (local target)) (call is_256bit_integer (local source_type))))
+					(let native (bool.or (local bit_integer)
+						(bool.or (bool.or (u32.eq (local target) 61u32) (call is_16bit_integer (local target)))
+							(bool.or (bool.or (call is_64bit_integer (local target)) (call is_64bit_integer (local source_type)))
+								(bool.or (bool.or (call is_native_integer (local target)) (call is_native_integer (local source_type)))
+									(bool.or (call is_128bit_integer (local target)) (call is_128bit_integer (local source_type))))))))
 					(let-mut open (call open_conversion (borrow-mut (local output)) (local offset)
 						(local target) (local native) (local writing)))
 					(if
@@ -2478,12 +2480,11 @@
 					(set (local index) (i32.inc (local index)))))
 			(return (bool false))))
 
-	(let c_bitint_types `#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L || !defined(__BITINT_MAXWIDTH__) || __BITINT_MAXWIDTH__ < 256
+	(let c_bitint_check `#ifndef WVRT_HAS_INT256
 #error "Wove generated C requires C23 _BitInt(256)"
-#endif
-typedef signed _BitInt(256) wvrt_i256;
-typedef unsigned _BitInt(256) wvrt_u256;
+#else
 _Static_assert(sizeof(wvrt_i256) == 32 && sizeof(wvrt_u256) == 32, "Wove requires 32-byte _BitInt(256)");
+#endif
 `)
 
 	(fn write_program_preamble
@@ -2498,9 +2499,13 @@ _Static_assert(sizeof(wvrt_i256) == 32 && sizeof(wvrt_u256) == 32, "Wove require
 			(let count (call checked_function_count (borrow-shared (local functions))))
 			(let has_records (bool.and (i32.gtz (array.len (local records)))
 				(i32.not-eqz (struct.get (array.load (local records) 0i32) name))))
+			(let bit_integer (i32.not-ltz (call target_numeric_site (borrow-shared (local source)) (borrow-shared (local nodes))
+				(borrow-shared (local bindings)) (borrow-shared (local expressions)) (borrow-shared (local statements))
+				(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local records)) (local i256_type))))
 			(if
 				(:doc "Even an unused callable prototype can need a wide runtime typedef.")
-				(bool.or (call uses_runtime (borrow-shared (local expressions)) (borrow-shared (local parameters)) (borrow-shared (local records)))
+				(bool.or (bool.or (local bit_integer)
+						(call uses_runtime (borrow-shared (local expressions)) (borrow-shared (local parameters)) (borrow-shared (local records))))
 					(bool.or (i32.not-ltz (call target_numeric_site (borrow-shared (local source)) (borrow-shared (local nodes))
 						(borrow-shared (local bindings)) (borrow-shared (local expressions)) (borrow-shared (local statements))
 						(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local records))
@@ -2523,12 +2528,9 @@ _Static_assert(sizeof(wvrt_i256) == 32 && sizeof(wvrt_u256) == 32, "Wove require
 						(then (set (local cursor)
 							(call c_text_fragment (borrow-mut (local output)) (local cursor) 0u32 (local writing)))))))
 			(if
-				(:doc "Only a checked 256-bit use adds these C23 declarations to the translation unit.")
-				(i32.not-ltz (call target_numeric_site (borrow-shared (local source)) (borrow-shared (local nodes))
-					(borrow-shared (local bindings)) (borrow-shared (local expressions)) (borrow-shared (local statements))
-					(borrow-shared (local functions)) (borrow-shared (local parameters)) (borrow-shared (local records))
-					(local i256_type)))
-				(then (set (local cursor) (call c_literal_text (borrow-shared (local c_bitint_types))
+				(:doc "Retained C verifies the shared 256-bit ABI only when the checked plan needs it.")
+				(local bit_integer)
+				(then (set (local cursor) (call c_literal_text (borrow-shared (local c_bitint_check))
 					(borrow-mut (local output)) (local cursor) (local writing)))))
 			(set (local cursor) (call write_record_layouts (borrow-shared (local source)) (borrow-shared (local nodes))
 				(borrow-shared (local records)) (borrow-shared (local bindings)) (borrow-mut (local output)) (local cursor) (local name_prefix) (local writing)))

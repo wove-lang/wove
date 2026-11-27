@@ -58,6 +58,13 @@ wvrt_i128 wvrt_i128_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wv
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 #endif
 
+// The compiler probes the target's C23 wide-integer ABI before using these types.
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L && defined(__BITINT_MAXWIDTH__) && __BITINT_MAXWIDTH__ >= 256
+#define WVRT_HAS_INT256 1
+typedef signed _BitInt(256) wvrt_i256;
+typedef unsigned _BitInt(256) wvrt_u256;
+#endif
+
 // Exact native floating representations and checked numerical conversions.
 float wvrt_f32_from_bits(uint32_t wvrtbits);
 uint32_t wvrt_f32_to_bits(float wvrtvalue);
@@ -560,6 +567,34 @@ uint64_t wvrt_int_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 int64_t wvrt_signed_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+const uint8_t *wvrt_integer_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_valid,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+#ifdef WVRT_HAS_INT256
+// Check the view, then assemble its full unsigned representation in the requested order.
+static inline wvrt_u256 wvrt_u256_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	const uint8_t *wvrt_bytes = wvrt_integer_bytes(wvrt_view, wvrt_width, wvrt_width == 32,
+		wvrt_file, wvrt_start, wvrt_end);
+	wvrt_u256 wvrt_bits = 0;
+	// Read unaligned bytes from the most significant end of the encoding.
+	for (int32_t wvrt_index = 0; wvrt_index < wvrt_width; ++wvrt_index) {
+		int32_t wvrt_offset = wvrt_big_endian ? wvrt_index : wvrt_width - 1 - wvrt_index;
+		wvrt_bits = (wvrt_bits << 8) | wvrt_bytes[wvrt_offset];
+	}
+	return wvrt_bits;
+}
+
+// Interpret all 256 bits using only representable signed casts, including the minimum.
+static inline wvrt_i256 wvrt_i256_from_bytes(wvrt_slice wvrt_view, int32_t wvrt_width, bool wvrt_big_endian,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end) {
+	wvrt_u256 wvrt_bits = wvrt_u256_from_bytes(wvrt_view, wvrt_width, wvrt_big_endian, wvrt_file, wvrt_start, wvrt_end);
+	const wvrt_u256 wvrt_maximum = ~(wvrt_u256)0;
+	if (wvrt_bits <= (wvrt_maximum >> 1)) { return (wvrt_i256)wvrt_bits; }
+	return -1 - (wvrt_i256)(wvrt_maximum - wvrt_bits);
+}
+#endif
 
 // Use the target compiler's integer range, including aliases wider than int64_t.
 #define wvrt_int_to_native(type, value, file, start, end) \
