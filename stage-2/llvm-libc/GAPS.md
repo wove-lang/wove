@@ -561,6 +561,27 @@ C11, C17, and C23 profiles with Apple Clang 21 and LLVM Clang 22.
 | `struct tms`, `tms_utime`, `tms_stime`, `tms_cutime`, and `tms_cstime` | The caller owns the complete native record. Each field uses the same native tick type. The fixture seeds four distinct values above 32 bits in C and verifies each Wove projection separately. |
 | `times` | C fills the four CPU time fields through a mutable loan and returns the raw native value. The bundled and project fixtures compare the result with direct C calls, confirm that C overwrote the seeded sentinel in all four fields, and pass the native error sentinel through the same scalar ABI. |
 
+## Bundled `<sys/resource.h>` usage accounting
+
+The macOS 27.2 SDK and Debian glibc 2.41 supply a complete 144-byte,
+eight-byte-aligned `struct rusage` on the audited arm64 and x86-64 targets.
+The two `struct timeval` members are at offsets 0 and 16. In each, seconds
+are signed `long` at offset 0. Microseconds are signed `int` on Darwin
+and signed `long` on glibc, both at offset 8. The Wove view keeps the
+entire C allocation so a later wait bridge can lend the same record.
+[LLVM libc header checklist](https://libc.llvm.org/headers/index.html#all-headers)
+
+| Native members | Coverage or outstanding contract |
+| --- | --- |
+| `getrusage`, `struct rusage`, `struct timeval`, `ru_utime`, `ru_stime`, `tv_sec`, `tv_usec` | The caller lends the entire native record for one call and receives C's original status. The fixture compares valid and invalid statuses against direct C calls, checks each time projection with distinct seeded values, and compares the live values with direct C field reads. The glibc binding uses the header's `__rusage_who_t` to match its GNU enum and standard-profile `int` prototypes. Darwin uses `int`. |
+| `RUSAGE_SELF`, `RUSAGE_CHILDREN`, `RUSAGE_THREAD`, and `RUSAGE_LWP` | The first two are available everywhere in the audited matrix. The thread selector and its alias are available with GNU glibc features, and both use ordinary optional constants. |
+| `ru_maxrss`, `ru_ixrss`, `ru_idrss`, `ru_isrss`, `ru_minflt`, `ru_majflt`, `ru_nswap`, `ru_inblock`, `ru_oublock`, `ru_msgsnd`, `ru_msgrcv`, `ru_nsignals`, `ru_nvcsw`, `ru_nivcsw`, `ru_opaque` | glibc exposes the fourteen signed-long counters in all audited profiles. Darwin's full profile exposes the same names. Its restricted profiles expose the tail as `ru_opaque[14]`. A single public counter view needs native feature-selected record fields. Darwin's internal `ru_first` and `ru_last` macros alias the first and last counters in an internal range. |
+| `getpriority`, `setpriority`, `id_t`, and `PRIO_*` | Deferred to a priority slice. glibc's exact selector changes from `int` to a GNU enum through `__priority_which_t`. Darwin's `PRIO_MIN`, `PRIO_MAX`, and `PRIO_DARWIN_*` are full-profile members. The priority fixture needs to distinguish a valid `-1` result from an error through `errno`. |
+| `getrlimit`, `setrlimit`, `rlim_t`, `struct rlimit`, `RLIMIT_*`, `RLIM_INFINITY`, `RLIM_SAVED_CUR`, and `RLIM_SAVED_MAX` | Deferred to a limits slice. glibc uses `__rlimit_resource_t` to select between the GNU enum and standard `int` prototypes and can redirect ordinary calls under large-file profiles. The native infinity and saved values are `2^63-1` on Darwin and `2^64-1` on glibc. |
+| `rlim64_t`, `struct rlimit64`, `RLIM64_INFINITY`, `getrlimit64`, `setrlimit64`, `prlimit`, and `prlimit64` | The large-file spellings follow the selected glibc header features. The `prlimit` forms each need an independently nullable shared input record and mutable output record. [Shared native reference prerequisite #686](https://github.com/wove-lang/wove/issues/686) |
+| Darwin `RUSAGE_INFO_V0` through `RUSAGE_INFO_V6`, `RUSAGE_INFO_CURRENT`, `RU_PROC_RUNS_RESLIDE`, `rusage_info_t`, and the versioned records including `rusage_info_current` | These are full-profile members for `proc_pid_rusage` from `libproc.h`. Each flavor needs the matching native output record and extent. |
+| Darwin `getiopolicy_np`, `setiopolicy_np`, `IOPOL_*`, `RLIMIT_*_MONITOR`, `RLIMIT_THREAD_CPULIMITS`, `RLIMIT_FOOTPRINT_INTERVAL`, `WAKEMON_*`, `CPUMON_MAKE_FATAL`, `FOOTPRINT_INTERVAL_RESET`, and `struct proc_rlimit_control_wakeupmon` | These names require Darwin's full profile. The audited SDK publishes the monitor data and syscall number. The two I/O policy calls form a separate selector family. |
+
 ## Bundled message formatting
 
 The macOS SDK 27.2 and Debian glibc 2.41 expose `fmtmsg` and 25 public
