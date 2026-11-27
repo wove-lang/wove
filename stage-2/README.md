@@ -208,7 +208,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | Tag | Role | ID | Suffix | Scope and agreement |
 | --- | --- | --- | --- | --- |
 | `f` | Function | Module fingerprint extended by the function role, name, and specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
-| `r` | Named struct or enum | Defining declaration fingerprint, including specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
+| `r` | Named struct or enum | Module fingerprint extended by the layout role, spelling, and any specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
 | `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
 | `m` | Record member or enum payload member | Zero-based position in its layout | Empty | Within its C aggregate. Each access uses the same ordinal as the layout declaration. |
@@ -228,7 +228,7 @@ name. Where the common header exposes a helper, its definition and uses share
 that owner's name. A native callback adapter uses a separate private prefix and
 the checked argument row within its emitted C unit.
 
-Function names use a hierarchy of 32-bit FNV-1a states. Seed a source graph's
+Generated names use a hierarchy of 32-bit FNV-1a states. Seed a source graph's
 path key with the canonical file path and a zero delimiter. Resume that state
 with `m`, the declared module name, and a zero delimiter, and cache the result
 on the canonical tree. A pathless module starts its `m` step from the FNV-1a
@@ -242,12 +242,12 @@ original name and a zero delimiter. A reference through an import alias uses
 the original binding, and inserting another declaration leaves its
 fingerprint unchanged.
 
-Named record and enum fingerprints still use the legacy module key and
-four-byte little-endian declaration kind. The source graph's record module key
-includes the canonical file path and declared module name. Resolved calls
-keep the callee's exact defining row and their own source nodes.
-Specializations compare the defining template and normalized arguments even
-when their fingerprints match.
+A named struct or enum resumes its defining module's key with `r`, its
+original type name, and a zero delimiter. A concrete specialization extends
+the template key with its normalized arguments. Layout references and owner
+helpers share the resolved type. Collision handling compares the exact
+defining declaration and specialization arguments even when fingerprints
+match.
 
 Different readable suffixes can share a fingerprint. When the complete
 generated spelling coincides, functions, types, and module storage use
