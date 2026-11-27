@@ -4,20 +4,80 @@
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
 
+# Compile the audit and numbered files with identical header lookup and C flags.
+def native_command(case, root):
+	compiler = shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang"))
+	flags = shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))
+	search = ["-I", str(root)] if "headers" in case else []
+	return [*compiler, "-std=c11", *flags, "-I", "runtime", *search, *case.get("cflags", [])]
+
+
+# Materialize the project headers beside the emitted C with their original spellings.
+def stage_headers(case, root):
+	for name, fixture in case.get("headers", []):
+		path = root / name
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_bytes(Path(fixture).read_bytes())
+
+
+# Certify the fixture's C prefix only when every output filename sees declaration-only C.
+def audit_headers(probe, case, prefix):
+	with TemporaryDirectory(prefix="unit-headers-", dir=Path(probe).parent) as temporary:
+		root = Path(temporary)
+		stage_headers(case, root)
+		command = native_command(case, root)
+		empty = subprocess.run([*command, "-E", "-dM", "-x", "c", "-"], input=b"",
+			capture_output=True, check=True, timeout=30).stdout.splitlines()
+		parts = {name for layout in case["layouts"] for name in layout["files"]}
+		assert not parts.intersection(name for name, _ in case["headers"]), case["name"]
+		snapshots = set()
+		for name in sorted(parts.difference({"program.h"}) | {"serial.c"}):
+			path = root / name
+			path.write_bytes(prefix)
+			macros = subprocess.run([*command, "-E", "-dM", str(path)],
+				capture_output=True, check=True, timeout=30).stdout.splitlines()
+			# Include guards and numeric context flags cannot inject per-call code or state.
+			if any(not re.fullmatch(rb"#define [A-Za-z_][A-Za-z_0-9]*(?: +[0-9]+)? *", line)
+				for line in set(macros).difference(empty)):
+				return False
+			preprocessed = subprocess.run([*command, "-E", "-P", str(path)],
+				capture_output=True, check=True, timeout=30).stdout
+			# A remaining preprocessing directive can modify a unit or emit linker metadata.
+			if any(line.lstrip().startswith(b"#") for line in preprocessed.splitlines()):
+				return False
+			snapshots.add((frozenset(macros), preprocessed))
+		if len(snapshots) != 1:
+			return False
+		ast = subprocess.run([*command, "-fsyntax-only", "-Xclang", "-ast-dump=json", str(path)],
+			capture_output=True, check=True, timeout=30).stdout
+	# Reject header objects, definitions, internal-linkage declarations, and native adapters.
+	for declaration in json.loads(ast)["inner"]:
+		kind = declaration["kind"]
+		if kind in {"TypedefDecl", "RecordDecl", "EnumDecl"}:
+			continue
+		if (kind != "FunctionDecl" or declaration.get("storageClass", "extern") != "extern"
+			or declaration.get("inline") or any(child["kind"] != "ParmVarDecl" for child in declaration.get("inner", []))):
+			return False
+	return True
+
+
 # Run the same supplied graph with or without the probe's private partition flag.
-def emit(probe, case, requested=None, capacity=None):
+def emit(probe, case, requested=None, capacity=None, prefix=b""):
 	options = ["--emit-graph"]
 	bounds = [str(case["entry"]), str(case["scratch"]), str(case["capacity"] if capacity is None else capacity)]
 	# The two probe commands differ only in how the checked graph is rendered.
 	if requested is not None:
 		options[0] = "--emit-graph-units"
 		bounds.append(str(requested))
+		if prefix:
+			bounds.extend(("--verified-c-prefix", prefix.decode()))
 	files = [str(value) for row in case["files"] for value in row]
 	assets = []
 	# Only emission can see the supplied assets. The later native build uses the emitted bytes.
@@ -70,6 +130,7 @@ def check_native(probe, case, layout, parts):
 		runtime = os.environ["WOVE_TEST_TRACKED_RUNTIME"]
 	with TemporaryDirectory(prefix="units-", dir=Path(probe).parent) as temporary:
 		root = Path(temporary)
+		stage_headers(case, root)
 		# Materialize all emitted files before compiling the individual translation units.
 		for name, data in parts.items():
 			(root / name).write_bytes(data)
@@ -77,7 +138,7 @@ def check_native(probe, case, layout, parts):
 		# Every expected C symbol is defined in its owning object and may be undefined elsewhere.
 		for unit, names in layout["symbols"].items():
 			object_file = (root / unit).with_suffix(".o")
-			subprocess.run([*compiler, "-std=c11", *flags, "-I", "runtime", *case.get("cflags", []), "-c",
+			subprocess.run([*native_command(case, root), "-c",
 				str(root / unit), "-o", str(object_file)], check=True, timeout=30)
 			table = symbols(object_file)
 			assert {name for name, kind in table.items() if kind == "T" and name.startswith("wgf")} == set(names), (unit, table, names)
@@ -97,13 +158,21 @@ def check_native(probe, case, layout, parts):
 # Verify determinism, one-unit compatibility, real linkage, and atomic output on rejection.
 def check_case(probe, case):
 	baseline = None
+	prefix = b""
 	# Rejected graphs exercise the private gate and canary checks without compiling units.
 	if "layouts" in case:
 		baseline = emit(probe, case)
 		assert baseline.returncode == 0 and not baseline.stderr, (case["name"], baseline)
+	if "headers" in case:
+		declared = b"".join(f"#include {operand}\n".encode() for operand in case["includes"])
+		assert baseline.stdout.split(b"\n", 1)[1].startswith(declared), case["name"]
+		verified = audit_headers(probe, case, declared)
+		assert verified == case.get("replicable_headers", True), case["name"]
+		if verified:
+			prefix = declared
 	for layout in case.get("layouts", []):
-		first = emit(probe, case, layout["requested"], layout.get("capacity"))
-		second = emit(probe, case, layout["requested"], layout.get("capacity"))
+		first = emit(probe, case, layout["requested"], layout.get("capacity"), prefix)
+		second = emit(probe, case, layout["requested"], layout.get("capacity"), prefix)
 		assert (first.returncode, first.stderr) == (second.returncode, second.stderr) == (0, b""), (case["name"], first, second)
 		assert first.stdout == second.stdout, (case["name"], layout["requested"])
 		parts = read_parts(first.stdout)
@@ -111,9 +180,16 @@ def check_case(probe, case):
 		# One effective unit must retain every byte of the default serial emission.
 		if len(parts) == 1:
 			assert next(iter(parts.values())) == baseline.stdout.split(b"\n", 1)[1], case["name"]
+		if prefix and len(parts) > 1:
+			for name, body in parts.items():
+				if name.endswith(".c"):
+					assert body.startswith(prefix + b'#include "program.h"\n'), (case["name"], name)
 		check_native(probe, case, layout, parts)
 	for rejected in case.get("rejected", []):
-		result = emit(probe, case, rejected["requested"], rejected.get("capacity"))
+		verified_prefix = prefix if rejected.get("verified") else b""
+		if rejected.get("reverse_prefix"):
+			verified_prefix = b"".join(reversed(prefix.splitlines(keepends=True)))
+		result = emit(probe, case, rejected["requested"], rejected.get("capacity"), verified_prefix)
 		assert result.returncode == 1 and not result.stderr and result.stdout.decode() == rejected["stdout"], (case["name"], result)
 
 
