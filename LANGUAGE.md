@@ -1064,7 +1064,7 @@ Attach native contracts to the relevant declaration with `:pragma`.
 | `(c_variadic first_tail_parameter)` | Declare one typed call shape. Clang applies native promotions to the variadic arguments. |
 | `(c_variadic ...)` | Keep all declared parameters fixed and accept zero or more scalar arguments after them. |
 | `(c_null parameter)` | Require a literal `null` for the named byte-view slot. |
-| `(c_nullable parameter)` | Accept either a mutable scalar reference or literal `null` for the supported slot. |
+| `(c_nullable parameter)` | Accept literal `null` in place of a mutable scalar reference or a shared byte view with `c_cstr`. A present string still receives a checked, call-scoped NUL-terminated copy. An empty view supplies an empty C string. |
 
 A native function can lend a nullable, read-only record from an exclusive
 native handle parameter. For example, a bridge for `readdir` can declare
