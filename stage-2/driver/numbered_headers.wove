@@ -18,6 +18,9 @@
 	(let common_name "program.h")
 	(let common_directive "#include \"program.h\"\n")
 	(let runtime_directive "#include \"wove_runtime.h\"\n")
+	(let stdint_directive "#include <stdint.h>\n")
+	(let implicit_stdint 1u8)
+	(let implicit_runtime 2u8)
 	(let names_begin "enum { wove_borrowed_replay_begin = 0 };\n")
 	(let names_end "enum { wove_borrowed_replay_end = 0 };\n")
 	(let common_probe "/* Numbered program header. */\n")
@@ -310,8 +313,8 @@
 			(return (bool.and (i32.lt next last) (call same_bytes (borrow-shared output) start end
 				(borrow-shared output) next last)))))
 
-	(fn runtime_replay_source
-		(:doc "Place the same native operands on either side of the implicit include, followed by the counter.")
+	(fn implicit_replay_source
+		(:doc "Place any borrowed operands on either side of the implicit include, followed by the counter.")
 		(params (prefix (shared-array u8)) (names (shared-array u8)) (directive (shared-array u8)))
 		(returns (owned-array u8))
 		(body
@@ -327,15 +330,15 @@
 			(let end (call append_bytes (borrow-shared counter_probe) (borrow-mut output) last))
 			(return (move output))))
 
-	(fn certify_runtime_context
-		(:doc "Replay borrowed names with the actual implicit runtime header at serial and numbered include depth.")
+	(fn certify_implicit_context
+		(:doc "Replay the actual implicit header at serial and numbered include depth.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8)) (count i32)
 			(prefix (shared-array u8)) (names (shared-array u8)) (explicit_trace (shared-array u8))
-			(output (mut-array u8)) (trace (mut-array u8)) (identities (mut-array FileStamp)))
+			(directive (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8)) (identities (mut-array FileStamp)))
 		(returns bool)
 		(body
-			(let serial (call runtime_replay_source (borrow-shared prefix) (borrow-shared names)
-				(borrow-shared runtime_directive)))
+			(let serial (call implicit_replay_source (borrow-shared prefix) (borrow-shared names)
+				(borrow-shared directive)))
 			(if
 				(:doc "Never overwrite an existing serial source or run with an exhausted probe.")
 				(bool.or (i32.eqz (array.len serial))
@@ -346,7 +349,7 @@
 			(let removed (call unlink (borrow-shared serial_path)))
 			(let boundary (call trace_length (borrow-shared explicit_trace)))
 			(if
-				(:doc "The runtime probe must extend the already certified explicit include trace.")
+				(:doc "The implicit header must extend the already certified explicit include trace.")
 				(bool.or (i32.not-eqz removed) (bool.or (u32.not-eqz (struct.get result error))
 					(bool.or (i32.ge boundary (call trace_length (borrow-shared trace)))
 						(bool.not (call same_bytes (borrow-shared explicit_trace) 0i32 boundary
@@ -355,14 +358,14 @@
 			(let text (borrow-shared (array.range output 0i32 (struct.get result length))))
 			(if
 				(:doc "The implicit headers may neither change a borrowed operand nor hide an unresolved include.")
-				(bool.or (bool.not (call borrowed_names_preserved (borrow-shared text)))
+				(bool.or (bool.and (i32.gtz (array.len names)) (bool.not (call borrowed_names_preserved (borrow-shared text))))
 					(bool.not (call include_identities (borrow-shared trace) (borrow-mut identities) (bool false))))
 				(then (return (bool false))))
-			(let numbered (call runtime_replay_source (borrow-shared prefix) (borrow-shared names)
+			(let numbered (call implicit_replay_source (borrow-shared prefix) (borrow-shared names)
 				(borrow-shared common_directive)))
 			(if (i32.eqz (array.len numbered)) (then (return (bool false))))
 			(return (call replay_numbered_context (borrow-shared program) (borrow-shared options)
-				(borrow-shared serial_path) count (borrow-shared numbered) (borrow-shared runtime_directive)
+				(borrow-shared serial_path) count (borrow-shared numbered) (borrow-shared directive)
 				(borrow-shared text) (borrow-shared trace) (borrow-mut identities) boundary))))
 
 	(fn certify_numbered_includes
@@ -376,7 +379,7 @@
 		expansion exposes preprocessing state that produces no source of its own.
 		An uncertain audit leaves the serial path and its diagnostics available.`)
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8))
-			(count i32) (prefix (shared-array u8)) (guards (shared-array u8)) (names (shared-array u8))) (returns bool)
+			(count i32) (prefix (shared-array u8)) (guards (shared-array u8)) (names (shared-array u8)) (implicit u8)) (returns bool)
 		(body
 			(if
 				(:doc "Graphs without selected headers have nothing to replay or query.")
@@ -412,14 +415,21 @@
 			(let removed (call unlink (borrow-shared serial_path)))
 			(if (bool.or (i32.ltz width) (i32.not-eqz removed)) (then (return (bool false))))
 			(if
-				(:doc "Borrowed operands require the complete implicit runtime context in addition to the explicit AST proof.")
-				(i32.gtz (array.len names))
+				(:doc "Native layouts and borrowed operands can depend on the implicit preamble context.")
+				(u8.gtz implicit)
 				(then
-					(let-mut runtime_trace (array.alloc u8 trace_capacity))
-					(return (call certify_runtime_context (borrow-shared program) (borrow-shared options)
+					(let-mut implicit_trace (array.alloc u8 trace_capacity))
+					(if
+						(:doc "A fixed-width-only preamble includes stdint directly.")
+						(u8.eq implicit implicit_stdint)
+						(then (return (call certify_implicit_context (borrow-shared program) (borrow-shared options)
+							(borrow-shared serial_path) count (borrow-shared (array.range probe 0i32 next))
+							(borrow-shared names) (borrow-shared trace) (borrow-shared stdint_directive)
+							(borrow-mut source) (borrow-mut implicit_trace) (borrow-mut identities)))))
+					(return (call certify_implicit_context (borrow-shared program) (borrow-shared options)
 						(borrow-shared serial_path) count (borrow-shared (array.range probe 0i32 next))
-						(borrow-shared names) (borrow-shared trace) (borrow-mut source) (borrow-mut runtime_trace)
-						(borrow-mut identities)))))
+						(borrow-shared names) (borrow-shared trace) (borrow-shared runtime_directive)
+						(borrow-mut source) (borrow-mut implicit_trace) (borrow-mut identities)))))
 			(return (call replay_numbered_context (borrow-shared program) (borrow-shared options)
 				(borrow-shared serial_path) count (borrow-shared probe) (borrow-shared common_probe)
 				(borrow-shared (array.range source 0i32 width)) (borrow-shared trace) (borrow-mut identities) -1i32))))
