@@ -454,9 +454,10 @@ The live audit covered both Clangs, Darwin and glibc on arm64 and x86-64, C11, C
 | `GLOB_ABEND`, `GLOB_ALTDIRFUNC`, `GLOB_BRACE`, `GLOB_MAGCHAR`, `GLOB_NOMAGIC`, `GLOB_TILDE` | The native feature profile controls these shared extensions. `GLOB_ALTDIRFUNC` requires a complete alternate directory callback table. |
 | `GLOB_LIMIT`, `GLOB_MAXPATH`, `GLOB_QUOTE` | Exposed by the audited Darwin header. The native SDK supplies the alias and flags. |
 | `GLOB_ONLYDIR`, `GLOB_PERIOD`, `GLOB_TILDE_CHECK`, `glob_pattern_p` | Exposed by selected glibc profiles. The classifier has the exact native `int(const char *, int)` prototype. |
-| `glob_t`, `glob64_t`, `globfree`, `globfree64` | The result owns the path table even on some errors. Darwin `glob_t` occupies 88 bytes with `gl_pathv` at offset 32. Both glibc result types occupy 72 bytes with the table at offset 8. Cleanup and scoped table access await [#624](https://github.com/wove-lang/wove/issues/624). |
-| `glob`, `glob64` | These functions need the native result owner and an optional synchronous `int (*)(const char *, int)` error callback. [Result ownership #624](https://github.com/wove-lang/wove/issues/624) · [Error callback #623](https://github.com/wove-lang/wove/issues/623) |
-| `glob_b`, `gl_errblk` | The Darwin Blocks ABI exposes a noescape error block. The compiler's synchronous C function-pointer contract requires a separate Blocks representation. |
+| `glob_t`, `glob64_t`, `globfree`, `globfree64` | `Glob` and the optional glibc `Glob64` own any paths left after a native call. The view lends the original `gl_pathc` strings past `gl_offs`. Tests use the SDK's actual size, alignment, and pointer table. Darwin `glob_t` occupies 88 bytes with `gl_pathv` at offset 32. Both glibc result types occupy 72 bytes with the table at offset 8. |
+| `glob`, `glob64` | Initialize a fresh owner. The separate append entry points use the same native symbols with a mutable loan of the active owner. The error callback is either a synchronous borrowed path and native `int` or a null pointer. |
+| `gl_flags`, Darwin `gl_matchc` | Reading these native scalar fields requires storage-owner field projections. Darwin `GLOB_LIMIT` uses the SDK default path limit when `gl_matchc` starts at zero. |
+| `glob_b`, `gl_errfunc`, `gl_errblk` | Darwin configures the union while it invokes the error handler. When Blocks are enabled, `glob_b` uses a noescape block and needs a Blocks ABI contract. |
 | `gl_closedir`, `gl_readdir`, `gl_opendir`, `gl_lstat`, `gl_stat` | These fields require checked alternate directory callbacks. Record tags and pointer qualifiers depend on the selected SDK and feature profile. |
 
 ## Bundled math coverage
