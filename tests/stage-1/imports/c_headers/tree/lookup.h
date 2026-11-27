@@ -3,7 +3,7 @@
 
 #include "leaf/value.h"
 
-// The header opened through the symlink also resolves its own project include.
+// The header reached through a parent path also resolves its own relative include.
 #if WOVE_HEADER_LOOKUP_VALUE != 42
 #error "the project header selected the wrong relative include"
 #endif
