@@ -217,8 +217,9 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `t` | Expression temporary | Expression's original file-local tree row | Empty | Within its C function. A use and its temporary declaration share the row. |
 | `j` | Loop break label | Loop statement's original file-local tree row | Empty | Within its C function. A break uses the row of its target loop. |
 | `q` | Read-only C type alias | Binding name's flattened graph row | Native name | Where the lvalue contract is emitted, the typedef and its check share the binding row. |
-| `a` | Module backing bytes | Binding name's flattened graph row | Defining name | Private to the C unit that defines the bytes. |
-| `b` | Module value or descriptor | Binding name's flattened graph row | Defining name | The common header, unique definition, and references share the row. |
+| `d` | Module value or descriptor | Module fingerprint extended by the data role and spelling | Defining name | The common header, unique definition, and references use the same checked binding. |
+| `s` | Module backing bytes | Module fingerprint extended by the backing role and spelling | Defining name | Private to the C unit that defines the bytes. |
+| `a`, `b` | Private bridge string backing and descriptor | Binding name's flattened graph row | Native name | Private to the C unit that defines the string. |
 | `b` | C-string call storage | Call's original file-local tree row | `a` for descriptors, `b` for backing pointers | Within its C function. Setup, invocation, and cleanup use the same call row. |
 
 The worker adapter prefix uses the exact `f` name. Worker drop callbacks and
@@ -235,7 +236,11 @@ seed. A function resumes the module key with `f` and its original name and
 delimiter. Its checked specialization arguments, if any, extend that key in
 normalized form. A parameter resumes the concrete function key with `p`, its
 original name, and a zero delimiter. Its exact checked formal row determines
-each reference's name.
+each reference's name. A module binding resumes its defining module's key
+with `d` for the value or descriptor and `s` for backing bytes, then its
+original name and a zero delimiter. A reference through an import alias uses
+the original binding, and inserting another declaration leaves its
+fingerprint unchanged.
 
 Named record and enum fingerprints still use the legacy module key and
 four-byte little-endian declaration kind. The source graph's record module key
@@ -245,8 +250,9 @@ Specializations compare the defining template and normalized arguments even
 when their fingerprints match.
 
 Different readable suffixes can share a fingerprint. When the complete
-generated spelling coincides, the two roles use `F` and `R` and place a
-second seven-digit Base32hex word after the fingerprint. This word ranks
+generated spelling coincides, functions, types, and module storage use
+`F`, `R`, `D`, or `S` and place a second seven-digit Base32hex word after the
+fingerprint. A binding and its backing bytes share this rank. The word ranks
 the declarations by their canonical paths, original definitions, and
 normalized specialization arguments. Renaming an import or reordering
 the graph file table preserves the assignments.
