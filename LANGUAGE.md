@@ -170,7 +170,8 @@ Use printable ASCII or an escape. The escapes are `\0`, `\a`, `\b`,
 hexadecimal digits. Use `(u8 '\n')` or `(int.convert u8 '\n')` to obtain
 a `u8`.
 
-Double-quoted strings use JSON escapes. A single backtick delimits a raw,
+Double-quoted strings accept JSON escapes and `\0` for one NUL byte.
+Digits after that escape are literal. A single backtick delimits a raw,
 possibly multiline string. Inside a raw string, double a backtick to
 include it. Other characters are literal, and CRLF and CR become LF in
 the decoded value.

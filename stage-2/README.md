@@ -29,8 +29,8 @@ error of kind 3. End of input has kind 0 and both offsets equal to the slice
 length.
 
 A double-quoted string is kind 2. Its raw span includes both quotes and
-preserves the original spelling of JSON short escapes and `\u` escapes with
-four hexadecimal digits. A raw byte below `0x20`, an invalid escape, or a
+preserves the original spelling of JSON escapes and Wove's `\0` escape.
+A raw byte below `0x20`, an invalid escape, or a
 missing quote gives error kind 3. The error starts at the opening quote and
 ends just after the offending byte or at the view end on truncation.
 
