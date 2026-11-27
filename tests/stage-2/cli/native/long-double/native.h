@@ -9,6 +9,10 @@
 
 #define NATIVE_DOUBLE_EXPRESSION ((double)0.5)
 
+typedef struct {
+	long double value;
+} NativeLongBox;
+
 /* Preserve the exact C value through a by-value argument and result. */
 static inline long double native_long_roundtrip(long double value)
 {
