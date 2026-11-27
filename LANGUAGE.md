@@ -635,6 +635,14 @@ Indexes and range endpoints are exact `i32` values. The compiler checks
 elements relative to its own bounds. Equal endpoints give an empty view.
 A call loan lasts through later arguments and the call.
 
+An ordinary Stage 2 function can receive `(shared-array (shared-array u8))`
+as a read-only view of byte rows. Use `array.len` to count the rows, and
+`array.load` with a checked `i32` index to select a shared byte view.
+Bind the selected row with `let` or lend it to a byte-view parameter with
+`(borrow-shared (array.load (local rows) index))`. A returned row needs a
+`(from rows)` contract naming the outer view it came from. An in-bounds
+row may have zero bytes.
+
 Growable arrays can use a named owner, a field of a named place, or an
 indexed owning row as their receiver. Mutation requires writable storage
 with no overlapping live loan.

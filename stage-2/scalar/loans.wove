@@ -12,7 +12,7 @@
 	(use wove-file "./records.wove" (only (type ScalarRecord) place_borrow_kind is_mutable_place_reference
 		is_writable_slice is_native_record record_index record_receiver_type is_typed_slice is_place_reference
 		is_readable_slice is_record_type is_fixed_array is_array_owner encode_place_type place_reference_code
-		array_slot_code slice_element_code typed_slice_type owner_view_type))
+		array_slot_code slice_element_code typed_slice_type owner_view_type shared_byte_rows_type))
 	(use wove-file "./flow.wove" (only (type ScalarStatement) (value fixed_shared_loan) (value fixed_mut_loan)))
 	(use wove-file "./syntax.wove" (only (type EntryRead) entry_at entry_form is_direct_call is_reborrow_keyword (value fixed_subarray_place) (value fixed_owner_take) (value fixed_owner_borrow) (value fixed_owner_store) (value array_try_copy_kind) (value native_tail_load_kind)))
 	(use wove-file "./native_owner_types.wove" (only is_native_owner))
@@ -512,13 +512,36 @@
 				(call paths_overlap (borrow-shared (local nodes)) (borrow-shared (local expressions))
 					(local place) (local base))))))
 
+	(fn shared_byte_row_source
+		(:doc "Find the borrowed row's outer descriptor without confusing a runtime span with a loan identity.")
+		(params (expressions (shared-array ScalarExpression)) (load ScalarExpression))
+		(returns i32)
+		(body
+			(if
+				(:doc "Other loads either copy an element or require an explicit owning-row borrow.")
+				(bool.and (u32.eq (struct.get (local load) kind) 37u32) (u32.eq (struct.get (local load) type) 34u32))
+				(then
+					(let source (struct.get (local load) first))
+					(if
+						(:doc "Only this outer element type stores the shared descriptor itself.")
+						(u32.eq (struct.get (array.load (local expressions) (local source)) type) (call shared_byte_rows_type))
+						(then (return (local source))))))
+			(return -1i32)))
+
 	(fn descriptor_receiver_conflicts
 		(:doc `A captured array descriptor keeps its backing storage lent until access completes.`)
 		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
 			(receiver i32) (target i32) (local_binding bool) (place i32) (exclusive bool))
 		(returns bool)
 		(body
-			(let view (array.load (local expressions) (local receiver)))
+			(let-mut source (local receiver))
+			(let rows (call shared_byte_row_source (borrow-shared (local expressions))
+				(array.load (local expressions) (local receiver))))
+			(if
+				(:doc "Reading a selected row keeps the outer descriptor live through the access.")
+				(i32.not-ltz (local rows))
+				(then (set (local source) (local rows))))
+			(let view (array.load (local expressions) (local source)))
 			(let-mut origin (struct.get (local view) target))
 			(let-mut origin_local (struct.get (local view) borrowed_owner))
 			(let-mut projection (struct.get (local view) projection))
@@ -534,7 +557,7 @@
 						(:doc "A temporary native member view conservatively borrows the complete C record.")
 						(call is_c_inline_projection (local view))
 						(then (set (local projection) -1i32))
-						(else (set (local projection) (local receiver))))))
+						(else (set (local projection) (local source))))))
 			(return (bool.and
 				(bool.and (u32.not-eq (struct.get (local view) kind) 62u32)
 					(call same_binding (local target) (local local_binding) (local origin) (local origin_local)))
@@ -643,6 +666,12 @@
 						(:doc "Read the inherited loan with its original storage and access mode.")
 						(i32.not-ltz (local argument))
 						(then (set (local value) (local argument))))
+					(let rows (call shared_byte_row_source (borrow-shared (local expressions))
+						(array.load (local expressions) (local value))))
+					(if
+						(:doc "A locally bound row borrows its source descriptor for the scope.")
+						(i32.not-ltz (local rows))
+						(then (set (local value) (local rows))))
 					(let origin (array.load (local expressions) (local value)))
 					(let native (bool.and (i32.not-ltz (local argument))
 						(call is_native_owner_write_loan (struct.get (local origin) kind))))
