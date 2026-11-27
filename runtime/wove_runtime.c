@@ -852,6 +852,16 @@ wvrt_array *wvrt_snapshot_borrowed_cstr_at_span(const char *wvrttext,
 	return wvrt_finish_cstr_snapshot(wvrt_result, wvrt_saved_errno, wvrtfile, wvrtstart, wvrtend);
 }
 
+// Copy a native record string or give an absent field empty owned backing.
+wvrt_array *wvrt_snapshot_record_cstr_at_span(const char *wvrttext, bool wvrtrequired,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	// Reject a malformed required field before filling a Wove owner slot.
+	if (wvrttext == NULL && wvrtrequired) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "missing required C record string");
+	}
+	return wvrt_snapshot_borrowed_cstr_at_span(wvrttext != NULL ? wvrttext : "", wvrtfile, wvrtstart, wvrtend);
+}
+
 // Scan only through the first terminator or the declared inline field capacity.
 wvrt_array *wvrt_snapshot_bounded_cstr_at_span(const char *wvrttext, size_t wvrtcapacity,
 	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
@@ -893,12 +903,24 @@ wvrt_array *wvrt_snapshot_chars_at_span(char *wvrttext, void (*wvrtrelease)(char
 	return wvrt_snapshot_cstr(wvrttext, NULL, wvrtrelease, wvrtfile, wvrtstart, wvrtend);
 }
 
+// Darwin may place native group member pointers at byte-aligned addresses.
+static char *wvrt_cstr_table_item(char *const *wvrttable, size_t wvrtindex) {
+	char *wvrt_item;
+	memcpy(&wvrt_item, (const unsigned char *)wvrttable + wvrtindex * sizeof(wvrt_item), sizeof(wvrt_item));
+	return wvrt_item;
+}
+
 // Build an independent row owner for each element of the borrowed, terminated native table.
 wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrttable, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
 	const int wvrt_saved_errno = errno;
 	int32_t wvrt_count = 0;
 	// A missing table represents an empty Wove vector.
-	while (wvrttable != NULL && wvrttable[wvrt_count] != NULL) {
+	while (wvrttable != NULL) {
+		// Check byte addressing before reading the next pointer representation.
+		if ((size_t)wvrt_count > (SIZE_MAX - sizeof(char *)) / sizeof(char *)) {
+			wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "C string snapshot vector is too long");
+		}
+		if (wvrt_cstr_table_item(wvrttable, (size_t)wvrt_count) == NULL) { break; }
 		// Keep row counts representable by Wove's array descriptor.
 		if (wvrt_count == INT32_MAX) {
 			wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "C string snapshot vector is too long");
@@ -909,7 +931,7 @@ wvrt_array *wvrt_snapshot_cstrs_at_span(char *const *wvrttable, int32_t wvrtfile
 	wvrt_array **wvrt_items = wvrt_rows->wvrt_items;
 	// Leave a safely droppable prefix if a row cannot be copied.
 	for (int32_t wvrt_i = 0; wvrt_i < wvrt_count; ++wvrt_i) {
-		wvrt_array *wvrt_row = wvrt_try_copy_cstr(wvrttable[wvrt_i]);
+		wvrt_array *wvrt_row = wvrt_try_copy_cstr(wvrt_cstr_table_item(wvrttable, (size_t)wvrt_i));
 		// Only the Wove prefix is owned and must be released on failure.
 		if (wvrt_row == NULL) {
 			wvrt_array_drop(wvrt_rows);

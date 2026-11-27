@@ -124,6 +124,16 @@ The tested calls use the existing bundled declarations. Caller-owned
 storage contracts such as spawn `Actions` and `Attributes` retain their
 local allocation and initialization rules.
 
+## Borrowed native record snapshots
+
+A project bridge for Darwin `<grp.h>` exercises `getgrnam`, `getgrgid`,
+`getgruuid` and `getgrent` with a shared record mapping. Wove copies the
+thread-local return into an owning result before another lookup or
+enumeration reset can affect the values. The mapping covers `gid_t`,
+the name, the nullable password, and every member string. The libc
+provider inventory is tracked in #514. glibc caller-buffer group lookup
+is tracked in #637.
+
 ## Fixed native operands
 
 The eleven existing `fcntl.h` fixed commands use header constants. Both

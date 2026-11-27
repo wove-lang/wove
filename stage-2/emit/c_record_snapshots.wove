@@ -1,0 +1,174 @@
+(module emit_c_record_snapshots
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Capture one nullable native record result and materialize its checked owned Wove projection.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/c_record_snapshots.wove" (only read_snapshot_schema read_snapshot_field
+		(value snapshot_scalar) (value snapshot_string) (value snapshot_vector) (value snapshot_optional_string)))
+	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
+	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction)))
+	(use wove-file "./owners.wove" (only write_native_type))
+	(use wove-file "./records.wove" (only write_value_type write_member_name))
+	(use wove-file "./text.wove" (only c_byte c_literal_text c_span c_type_text))
+	(use wove-file "./runtime.wove" (only write_c_number close_runtime_call))
+
+	(let record_snapshot_open "__extension__ ({__auto_type wvrt_snapshot=")
+	(let result_name " wvrt_snapshot_out={.wvrt_tag=")
+	(let present_open "};if(wvrt_snapshot!=NULL){wvrt_snapshot_out.wvrt_tag=")
+	(let result_member "wvrt_snapshot_out.wvrt_payload.")
+	(let check_open "_Static_assert(_Generic(&(wvrt_snapshot->")
+	(let scalar_match "*:1,const ")
+	(let string_match "),char **:1,const char **:1")
+	(let vector_match "),char ***:1")
+	(let check_end ",default:0),\"Wove C record snapshot field type mismatch\");")
+	(let member_source "wvrt_snapshot->")
+	(let copy_string "wvrt_snapshot_record_cstr_at_span(")
+	(let string_required ",1")
+	(let string_optional ",0")
+	(let present_test "!=NULL;")
+	(let copy_vector "wvrt_snapshot_cstrs_at_span(")
+	(let scalar_match_end "*:1")
+	(let finish_call ");")
+	(let snapshot_close "}wvrt_snapshot_out;});")
+
+	(fn open_record_snapshot
+		(:doc "Start a single evaluation of the checked native call.")
+		(params (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body (return (call c_literal_text (borrow-shared record_snapshot_open) (borrow-mut output) offset writing))))
+
+	(fn write_record_snapshot_native_type
+		(:doc "Use the exact native pointer representation from the private mapping.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (schema i32)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let map (call read_snapshot_schema (borrow-shared source) (borrow-shared nodes) schema))
+			(let type (call write_native_type (borrow-shared source) (array.load nodes (struct.get map native))
+				(borrow-mut output) offset writing))
+			(return (call c_byte (borrow-mut output) type 42u8 writing))))
+
+	(fn write_record_snapshot_check
+		(:doc "Check the original C field without an array-to-pointer decay or implicit conversion.")
+		(params (source (shared-array u8)) (field SourceNode) (mode u8) (type u32)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared check_open) (borrow-mut output) offset writing))
+			(let-mut cursor (call c_span (borrow-shared source) (struct.get field start) (struct.get field end)
+				(borrow-mut output) open writing))
+			(if
+				(:doc "A plain integer field must match the checked Wove scalar width and signedness.")
+				(u8.eq mode snapshot_scalar)
+				(then
+					(set cursor (call c_byte (borrow-mut output) cursor 41u8 writing))
+					(set cursor (call c_byte (borrow-mut output) cursor 44u8 writing))
+					(set cursor (call c_type_text (borrow-mut output) cursor type writing))
+					(set cursor (call c_literal_text (borrow-shared scalar_match) (borrow-mut output) cursor writing))
+					(set cursor (call c_type_text (borrow-mut output) cursor type writing))
+					(set cursor (call c_literal_text (borrow-shared scalar_match_end) (borrow-mut output) cursor writing)))
+				(else
+					(if
+						(:doc "The native layout contains a pointer field or a pointer to the terminated vector.")
+						(u8.not-eq mode snapshot_vector)
+						(then (set cursor (call c_literal_text (borrow-shared string_match) (borrow-mut output) cursor writing)))
+						(else (set cursor (call c_literal_text (borrow-shared vector_match) (borrow-mut output) cursor writing))))))
+			(return (call c_literal_text (borrow-shared check_end) (borrow-mut output) cursor writing))))
+
+	(fn write_snapshot_destination
+		(:doc "Write the exact enum payload field and any selected nullable-string subfield.")
+		(params (source (shared-array u8)) (present i32) (ordinal i32) (subfield i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared result_member) (borrow-mut output) offset writing))
+			(let payload (call write_member_name (borrow-shared source) present (borrow-mut output) open name_prefix writing))
+			(let dot (call c_byte (borrow-mut output) payload 46u8 writing))
+			(let-mut cursor (call write_member_name (borrow-shared source) ordinal (borrow-mut output) dot name_prefix writing))
+			(if
+				(:doc "A nullable text destination has an explicit presence bit and an ordinary byte owner.")
+				(i32.not-ltz subfield)
+				(then
+					(set cursor (call c_byte (borrow-mut output) cursor 46u8 writing))
+					(set cursor (call write_member_name (borrow-shared source) subfield (borrow-mut output) cursor name_prefix writing))))
+			(return (call c_byte (borrow-mut output) cursor 61u8 writing))))
+
+	(fn write_snapshot_source
+		(:doc "Read a checked field from the one captured native record.")
+		(params (source (shared-array u8)) (field SourceNode) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared member_source) (borrow-mut output) offset writing))
+			(return (call c_span (borrow-shared source) (struct.get field start) (struct.get field end)
+				(borrow-mut output) open writing))))
+
+	(fn close_record_snapshot
+		(:doc "Copy all fields on the calling thread while the checked native result is still valid.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(callee ScalarFunction) (caller ScalarFunction) (site SourceNode)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let present (struct.get callee c_snapshot_field))
+			(let base (struct.get caller source_base))
+			(let schema (call read_snapshot_schema (borrow-shared source) (borrow-shared nodes)
+				(struct.get callee c_snapshot_record)))
+			(let-mut cursor (call c_literal_text (borrow-shared finish_call) (borrow-mut output) offset writing))
+			(set cursor (call write_value_type (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) (struct.get callee result) (borrow-mut output) cursor name_prefix writing))
+			(set cursor (call c_literal_text (borrow-shared result_name) (borrow-mut output) cursor writing))
+			(set cursor (call write_c_number (borrow-mut output) cursor (i32.sub 1i32 present) writing))
+			(set cursor (call c_literal_text (borrow-shared present_open) (borrow-mut output) cursor writing))
+			(set cursor (call write_c_number (borrow-mut output) cursor present writing))
+			(set cursor (call c_byte (borrow-mut output) cursor 59u8 writing))
+			(let-mut row (struct.get schema first))
+			(let-mut ordinal 0i32)
+			(while
+				(:doc "Fill the single present payload in its checked field order.")
+				(i32.not-ltz row)
+				(body
+					(let entry (array.load nodes row))
+					(let field (call read_snapshot_field (borrow-shared source) (borrow-shared nodes) entry))
+					(let native (array.load nodes (struct.get field native)))
+					(let mode (struct.get field mode))
+					(set cursor (call write_record_snapshot_check (borrow-shared source) native mode
+						(struct.get field type) (borrow-mut output) cursor writing))
+					(let optional (u8.eq mode snapshot_optional_string))
+					(let-mut subfield -1i32)
+					(if
+						(:doc "Capture whether the native field exists before writing its owned bytes.")
+						optional
+						(then
+							(set subfield 1i32)
+							(set cursor (call write_snapshot_destination (borrow-shared source) present ordinal 0i32
+								(borrow-mut output) cursor name_prefix writing))
+							(set cursor (call write_snapshot_source (borrow-shared source) native (borrow-mut output) cursor writing))
+							(set cursor (call c_literal_text (borrow-shared present_test) (borrow-mut output) cursor writing))))
+					(set cursor (call write_snapshot_destination (borrow-shared source) present ordinal subfield
+						(borrow-mut output) cursor name_prefix writing))
+					(if
+						(:doc "Use the normal snapshot runtime for required C strings and terminated member vectors.")
+						(bool.or optional (u8.eq mode snapshot_string))
+						(then (set cursor (call c_literal_text (borrow-shared copy_string) (borrow-mut output) cursor writing)))
+						(else
+							(if
+								(:doc "Integer fields are copied by value and need no runtime allocation.")
+								(u8.eq mode snapshot_vector)
+								(then (set cursor (call c_literal_text (borrow-shared copy_vector) (borrow-mut output) cursor writing))))))
+					(set cursor (call write_snapshot_source (borrow-shared source) native (borrow-mut output) cursor writing))
+					(if
+						(:doc "Select the declared null policy for this string projection.")
+						(bool.or optional (u8.eq mode snapshot_string))
+						(then
+							(if
+								(:doc "An optional string represents a null field with empty bytes and an absent bit.")
+								optional
+								(then (set cursor (call c_literal_text (borrow-shared string_optional) (borrow-mut output) cursor writing)))
+								(else (set cursor (call c_literal_text (borrow-shared string_required) (borrow-mut output) cursor writing))))))
+					(if
+						(:doc "All allocations report failure at the original native invocation.")
+						(u8.not-eq mode snapshot_scalar)
+						(then (set cursor (call close_runtime_call (borrow-mut output) cursor
+							(struct.get caller file) (i32.sub (struct.get site start) base)
+							(i32.sub (struct.get site end) base) writing))))
+					(set cursor (call c_byte (borrow-mut output) cursor 59u8 writing))
+					(set row (struct.get entry next_sibling))
+					(set ordinal (i32.inc ordinal))))
+			(return (call c_literal_text (borrow-shared snapshot_close) (borrow-mut output) cursor writing)))))

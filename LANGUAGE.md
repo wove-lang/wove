@@ -1349,6 +1349,40 @@ result stays absent. After testing presence, use
 `(c_snapshot cstrs)` on a read-only native table copies it into an
 `(owned-array (owned-array u8))`.
 
+On Darwin a bridge can copy a nullable, thread-local native record into an
+owned Wove result. Define the field mapping once in the bridge and use it
+from each lookup declaration. A result enum has one unit variant for a
+native null and one variant carrying the exact mapped record.
+
+```wove
+(struct Text (fields (present bool) (bytes (owned-array u8))))
+(struct Group (fields (gid u32) (name (owned-array u8)) (password Text)
+    (members (owned-array (owned-array u8)))))
+(enum GroupResult (variants (Missing) (Found Group)))
+
+(bridge c-header "<grp.h>"
+    (type Gid (c-type "gid_t"))
+    (snapshot Group (c-type "struct group")
+        (fields (gid gr_gid u32) (name gr_name cstr)
+            (password gr_passwd (optional cstr)) (members gr_mem cstrs)))
+    (fn getgrgid (:pragma (c_snapshot record Group))
+        (params (gid Gid)) (returns GroupResult)))
+```
+
+A mapping lists destination fields in declaration order. Each entry names
+the native field and its type or conversion. Integer types check the exact
+native representation. `cstr` copies a required terminated string into an
+owned byte array. `(optional cstr)` uses a two-field Wove struct with a
+presence `bool` followed by owned bytes. A null string has false presence
+and empty backing. `cstrs` copies every string from a null-terminated
+pointer table into an owned array of byte owners. A null table is empty.
+
+The native function runs once and the compiler finishes the copy on the
+calling thread before returning the enum. The bridge declaration requires
+the native result and its fields to remain valid during that copy.
+Later lookups and enumeration resets leave the owned result intact. This
+contract is available for Darwin targets.
+
 ## Shared libraries
 
 Add the source to the selected project's `entry.lib` list and pass it

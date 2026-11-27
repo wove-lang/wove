@@ -415,6 +415,8 @@ void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slo
 
 wvrt_array *wvrt_snapshot_borrowed_cstr_at_span(const char *wvrt_text,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+wvrt_array *wvrt_snapshot_record_cstr_at_span(const char *wvrt_text, bool wvrt_required,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 wvrt_array *wvrt_snapshot_bounded_cstr_at_span(const char *wvrt_text, size_t wvrt_capacity,
 	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
 
