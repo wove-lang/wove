@@ -6,7 +6,9 @@
 	(use wove-file "../c/arguments.wove" (only (value c_adapted_callback_argument)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "./callback_types.wove" (only callback_formal_shape))
-	(use wove-file "../source/scan.wove" (only is_metadata_form (type SourceNode)))
+	(use wove-file "../source/c_owners.wove" (only c_type_word_end))
+	(use wove-file "../source/scan.wove" (only is_metadata_form skip_whitespace (type SourceNode) (type Token)))
+	(use wove-file "../source/strings.wove" (only decode_string))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/generics.wove" (only (value checked_operation_operand)))
 	(use wove-file "../source/types.wove" (only is_builtin_scalar void_type))
@@ -49,7 +51,23 @@
 				(then (return (call entry_at (local name) -1i32 24u32))))
 			(return (call entry_at (local name) (local target) 0u32))))
 
-	(let native_struct_prefix "struct ")
+	(let native_struct_word "struct")
+
+	(fn callback_tag_matches
+		(:doc "Compare exactly two decoded C type tokens while allowing their surrounding whitespace.")
+		(params (spelling (shared-array u8)) (source (shared-array u8)) (tag SourceNode))
+		(returns bool)
+		(body
+			(let first (call skip_whitespace (borrow-shared (local spelling)) 0i32))
+			(let first_end (call c_type_word_end (borrow-shared (local spelling)) (local first)))
+			(let second (call skip_whitespace (borrow-shared (local spelling)) (local first_end)))
+			(let second_end (call c_type_word_end (borrow-shared (local spelling)) (local second)))
+			(return (bool.and
+				(i32.eq (call skip_whitespace (borrow-shared (local spelling)) (local second_end)) (array.len (local spelling)))
+				(bool.and (call same_bytes (borrow-shared (local spelling)) (local first) (local first_end)
+					(borrow-shared (local native_struct_word)) 0i32 (array.len (local native_struct_word)))
+					(call same_bytes (borrow-shared (local spelling)) (local second) (local second_end)
+						(borrow-shared (local source)) (struct.get (local tag) start) (struct.get (local tag) end)))))))
 
 	(fn callback_record_matches
 		(:doc "Check that a scoped Wove reference names the exact C struct in the foreign prototype.")
@@ -66,14 +84,19 @@
 			(if (bool.not (call is_native_record (local layout))) (then (return (bool false))))
 			(let literal (array.load (local nodes) (struct.get (local layout) native)))
 			(let tag (array.load (local nodes) (local tag_row)))
-			(let start (i32.inc (struct.get (local literal) start)))
-			(let boundary (i32.add (local start) (array.len (local native_struct_prefix))))
-			(let end (i32.dec (struct.get (local literal) end)))
-			(return (bool.and (i32.not-lt (local end) (local boundary))
-				(bool.and (call same_bytes (borrow-shared (local source)) (local start) (local boundary)
-					(borrow-shared (local native_struct_prefix)) 0i32 (array.len (local native_struct_prefix)))
-					(call same_bytes (borrow-shared (local source)) (local boundary) (local end)
-						(borrow-shared (local source)) (struct.get (local tag) start) (struct.get (local tag) end)))))))
+			(let start (struct.get (local literal) start))
+			(let end (struct.get (local literal) end))
+			(let-mut decoded (array.alloc u8 (i32.sub (local end) (local start))))
+			(let read (call decode_string (borrow-shared (local source))
+				(struct.new Token (kind 2u32) (start (local start)) (end (local end)) (error 0u32))
+				(borrow-mut (local decoded))))
+			(if
+				(:doc "Compare the same decoded type bytes that will be emitted into C.")
+				(u32.gtz (struct.get (local read) error))
+				(then (return (bool false))))
+			(return (call callback_tag_matches
+				(borrow-shared (array.range (local decoded) 0i32 (struct.get (local read) written)))
+				(borrow-shared (local source)) (local tag)))))
 
 	(fn plan_adapted_callback
 		(:doc "Resolve a direct fn-ref against the checked borrowed receiver signature.")
