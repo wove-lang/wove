@@ -7,10 +7,11 @@
 	(use wove-file "./bin/units.wove" (only staged_unit_path (value program_header)))
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "./diagnostics.wove" (only report_argv (value publish_failure)))
-	(use wove-file "./numbered_headers.wove" (only certify_numbered_includes))
+	(use wove-file "./numbered_headers.wove" (only certify_numbered_includes (value names_begin) (value names_end)))
 	(use wove-file "./output.wove" (only stage_native_unit))
 	(use wove-file "./paths.wove" (only join_file_path))
 	(use wove-file "./publication.wove" (only stage_file))
+	(use wove-file "../emit/c.wove" (only uses_runtime))
 	(use wove-file "../emit/c_values.wove" (only is_borrowed_c_value))
 	(use wove-file "../emit/text.wove" (only c_literal_text c_span))
 	(use wove-file "../emit/graph.wove" (only write_partitioned_graph (type GraphPlan)))
@@ -76,6 +77,35 @@
 							(set width (call c_literal_text (borrow-shared guard_close) (borrow-mut output) width writing))))))
 			(return width)))
 
+	(let witness_type "extern __typeof__(")
+	(let witness_name ") (")
+	(let witness_end ");\n")
+
+	(fn write_borrowed_witnesses
+		(:doc "Redeclare each used operand as the same external object before the implicit runtime header.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
+			(output (mut-array u8)) (writing bool))
+		(returns u32)
+		(body
+			(let-mut width (call c_literal_text (borrow-shared names_begin) (borrow-mut output) 0u32 writing))
+			(for
+				(:doc "Require a real declaration even if the source spelling aliases another C name.")
+				(let row) (borrow-shared statements)
+				(body
+					(if
+						(:doc "Use the same checked native name as the emitted value expression.")
+						(call is_borrowed_c_value row)
+						(then
+							(let name (array.load nodes (struct.get row target)))
+							(let start (struct.get name start))
+							(let end (struct.get name end))
+							(set width (call c_literal_text (borrow-shared witness_type) (borrow-mut output) width writing))
+							(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
+							(set width (call c_literal_text (borrow-shared witness_name) (borrow-mut output) width writing))
+							(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
+							(set width (call c_literal_text (borrow-shared witness_end) (borrow-mut output) width writing))))))
+			(return (call c_literal_text (borrow-shared names_end) (borrow-mut output) width writing))))
+
 	(fn stage_checked_units
 		(:doc "Return the negative unit count on success or use the canonical stage when splitting is unavailable.")
 		(params (staged (shared-array u8)) (probe_options (shared-array u8)) (partition i32) (target_index i32) (human bool)
@@ -119,6 +149,7 @@
 						(struct.get header_plan count) (borrow-mut prefix) (bool true)))
 					(if (u32.not-eq width written) (then (return 0i32)))
 					(let-mut guard_width 0u32)
+					(let-mut names_width 0u32)
 					(if
 						(:doc "Borrowed replay needs a checked original-name guard for each live C pointer.")
 						(u8.eq mode 2u8)
@@ -128,7 +159,17 @@
 							(if
 								(:doc "An empty or oversized guard cannot certify a borrowed value.")
 								(bool.or (u32.eqz guard_width) (u32.gt guard_width 2147483647u32))
-								(then (return 0i32)))))
+								(then (return 0i32)))
+							(if
+								(:doc "This borrowed proof places the compiler's implicit runtime header at both actual depths.")
+								(bool.or (struct.get header_plan runtime)
+									(bool.not (call uses_runtime (borrow-shared expressions)
+										(borrow-shared parameters) (borrow-shared records))))
+								(then (return 0i32)))
+							(set names_width (call write_borrowed_witnesses (borrow-shared arena)
+								(borrow-shared nodes) (borrow-shared statements) (borrow-mut empty) (bool false)))
+							(if (u32.gt names_width 2147483647u32) (then (return 0i32)))))
+					(let-mut names (array.alloc u8 (i32.from-u32 names_width)))
 					(let-mut guards (array.alloc u8 (i32.from-u32 guard_width)))
 					(if
 						(:doc "Materialize the measured prelude without changing the emitted include prefix.")
@@ -136,7 +177,12 @@
 						(then
 							(let size (call write_borrowed_macro_guards (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements) (borrow-mut guards) (bool true)))
-							(if (u32.not-eq size guard_width) (then (return 0i32)))))
+							(let witnesses (call write_borrowed_witnesses (borrow-shared arena)
+								(borrow-shared nodes) (borrow-shared statements) (borrow-mut names) (bool true)))
+							(if
+								(:doc "Both private probe fragments must match their measured sizes.")
+								(bool.or (u32.not-eq size guard_width) (u32.not-eq witnesses names_width))
+								(then (return 0i32)))))
 					(let program (call clang_program))
 					(let options (call numbered_probe_arguments (borrow-shared probe_options) (borrow-shared staged)
 						(u8.gtz (struct.get plan library_os))))
@@ -144,7 +190,7 @@
 						(:doc "Keep the ordinary build and its diagnostics when the native context cannot be certified.")
 						(bool.or (i32.eqz (array.len options))
 							(bool.not (call certify_numbered_includes (borrow-shared program) (borrow-shared options)
-								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards))))
+								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards) (borrow-shared names))))
 						(then (return 0i32)))))
 			(let-mut ends (array.alloc UnitIndex (i32.inc count)))
 			(let measured (call write_partitioned_graph (borrow-shared arena) (borrow-shared files) (borrow-shared bindings)
