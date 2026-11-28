@@ -730,9 +730,9 @@ class FunctionEmitter:
 	def site(self, line: int) -> str:
 		return f"(wvrt_location){{{self.source}, {line}, 1}}"
 
-	# Hold this loan through the remaining argument evaluations and the call.
-	def borrow(self, node: Node, kind: BufferType) -> Value:
-		exclusive = kind.access == MUT
+	# Register a loan for a call argument or infer the type of a local shared range.
+	def borrow(self, node: Node, kind: BufferType | None) -> Value:
+		exclusive = kind is not None and kind.access == MUT
 		tag = "borrow-mut" if exclusive else "borrow-shared"
 		target, = checked_form(node, tag, 1).operands
 		# A byte row can be borrowed directly from either kind of outer view.
@@ -752,15 +752,21 @@ class FunctionEmitter:
 			raise SourceError(target.line)
 		source = target
 		range_bounds = None
-		# A range projects the named source for a byte-array call argument.
+		# A range projects a half-open part of the named source.
 		if isinstance(target, Form) and target.tag == "array.range":
-			# Range projection uses the runtime byte stride.
-			if kind.element != U8:
+			# Direct call ranges use the seed's byte-slice ABI.
+			if kind is not None and kind.element != U8:
 				raise SourceError(node.line)
 			source, start, end = form(target, arity=3).operands
 			range_bounds = (start, end)
 		binding, origin = self.project(source, named=True)
 		origin_kind = origin.kind
+		# A local range retains the element type of its backing descriptor.
+		if kind is None:
+			# Inline arrays first need a view of their full storage.
+			if range_bounds is None or not isinstance(origin_kind, BufferType):
+				raise SourceError(node.line)
+			kind = BufferType(SHARED, origin_kind.element)
 		# The loan and its source must agree on the exact element type.
 		if not isinstance(origin_kind, (BufferType, FixedArrayType)) or origin_kind.element != kind.element:
 			raise SourceError(node.line)
@@ -782,15 +788,27 @@ class FunctionEmitter:
 			self.check_access(binding, exclusive, node.line)
 			fields = origin.c + ("->" if owned else ".")
 
-		# Evaluate both range endpoints before acquiring the new loan.
+		# Keep the backing storage live while evaluating the two endpoints.
 		if range_bounds is not None:
-			start = self.typed(range_bounds[0], I32)
-			end = self.typed(range_bounds[1], I32)
-			helper = "wvrt_mut_slice_range_u8" if exclusive else "wvrt_slice_range_u8"
-			expression = (
-				f"{helper}({fields}wvrt_items, {fields}wvrt_length, "
-				f"{start.c}, {end.c}, {self.site(target.line)})"
-			)
+			checkpoint = len(self.loans)
+			self.loans.append((binding, SHARED))
+			# End the reservation before registering the result's access mode.
+			try:
+				start = self.typed(range_bounds[0], I32)
+				end = self.typed(range_bounds[1], I32)
+			finally:
+				del self.loans[checkpoint:]
+			# The byte helper keeps the seed's path-and-line runtime diagnostic.
+			if kind.element == U8:
+				helper = "wvrt_mut_slice_range_u8" if exclusive else "wvrt_slice_range_u8"
+				expression = (
+					f"{helper}({fields}wvrt_items, {fields}wvrt_length, "
+					f"{start.c}, {end.c}, {self.site(target.line)})"
+				)
+			# The typed helper advances by each element's descriptor stride.
+			else:
+				view = array_view(fields, SHARED)
+				expression = f"wvrt_slice_range_at_span({view}, {start.c}, {end.c}, -1, {target.line}, {target.line})"
 		# A whole-place borrow keeps the original pointer and extent.
 		else:
 			expression = (
@@ -1314,14 +1332,16 @@ class FunctionEmitter:
 			continues = self.statement(node)
 		return continues
 
-	# Enter a scope and drop its locals when the block falls through.
+	# Enter a scope and release local loans and owners when it exits.
 	def block(self, node: Form, test: Node | None = None) -> bool:
 		self.scopes.append({})
+		loan_checkpoint = len(self.loans)
 		# Lower the loop's condition inside the C loop so it runs each iteration.
 		if test is not None:
 			condition = self.typed(test, BOOL)
 			self.emit_line(f"if (!{condition.c}) {{ break; }}")
 		continues = self.statements(node.operands)
+		del self.loans[loan_checkpoint:]
 		# A return has already dropped the locals in this block.
 		if continues:
 			self.cleanup(self.scopes[-1:])
@@ -1454,8 +1474,12 @@ class FunctionEmitter:
 		# Each name can be declared once in the current lexical scope.
 		if symbol in scope:
 			raise SourceError(name.line)
-		value = self.expression(initializer)
-		# A binding needs a value to own or copy.
+		# A bound shared range keeps its loan until this binding's block exits.
+		if statement.tag == "let" and isinstance(initializer, Form) and initializer.tag == "borrow-shared":
+			value = self.borrow(initializer, None)
+		else:
+			value = self.expression(initializer)
+		# A binding needs an ordinary value or a view.
 		if value.kind == VOID:
 			raise SourceError(initializer.line)
 		writable = statement.tag == "let-mut"

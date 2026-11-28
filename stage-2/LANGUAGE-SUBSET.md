@@ -112,6 +112,12 @@ are valid. Call loans remain active through later arguments and the call.
 Shared reborrows permit reads through the parent. Exclusive reborrows
 suspend access through the parent until the call returns.
 
+Use `(let view (borrow-shared (array.range source start end)))` to keep a
+shared range of an owner or received view for the enclosing block. The
+bound view keeps the original element type. Its loan permits reads and
+shared reborrows and prevents writes or moves through the source until
+the binding's block exits.
+
 A `(shared-ref Record)` parameter accepts a shared borrow of an existing
 record or array element. Its fields can be read or borrowed from the
 original storage. An array of owning records starts with empty slots.
