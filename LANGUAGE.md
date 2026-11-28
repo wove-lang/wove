@@ -1211,7 +1211,9 @@ sees matching preprocessing and declaration identities in each unit. The
 prototype check includes pure and const functions, allocation size and
 alignment operands, unused-result diagnostics, and deprecation metadata.
 It preserves Clang's inferred attributes and inheritance from earlier
-declarations. GNU `extern inline` definitions can replay a
+declarations. A checked native release keeps its linked symbol, one-parameter
+prototype, and effective attributes in each unit.
+GNU `extern inline` definitions can replay a
 single direct call with named operand reads, integer or character literals,
 or typed nulls derived from zero. The return can wrap the call in an explicit
 integral cast. The proof also supports bounded conditional expressions
