@@ -188,6 +188,8 @@ Type = str | NamedType | SharedRef | NativeRef | NativeStorage | NativePlaceRef 
 _BYTE_VIEW = BufferType(SHARED, U8)
 _MUT_BYTE_VIEW = BufferType(MUT, U8)
 _OWNED_BYTE_ROW = BufferType(OWNED, U8)
+_C_STRING_ROWS = BufferType(SHARED, _OWNED_BYTE_ROW)
+_OWNED_STRING_ROWS = BufferType(OWNED, _OWNED_BYTE_ROW)
 _HOST_ARGV = BufferType(SHARED, _BYTE_VIEW)
 
 
@@ -202,6 +204,7 @@ class Binding:
 	value: Value
 	writable: bool = False
 	native: bool = False
+	snapshot_vector: bool = False
 
 
 @dataclass
@@ -247,6 +250,7 @@ class NativeFunction:
 	variadic_start: int | None
 	constants: dict[int, str]
 	array_extents: tuple[tuple[int, int | str], ...]
+	vectors: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -749,10 +753,10 @@ class FunctionEmitter:
 		return self.values.get(symbol)
 
 	# Resolve the nearest live binding at the written operand.
-	def binding(self, node: Node) -> Binding:
+	def binding(self, node: Node, *, read: bool = False) -> Binding:
 		binding = self.find_binding(identifier(node))
-		# A move on any incoming path makes this place unavailable.
-		if binding is None or binding in self.moved:
+		# A vector snapshot is a fresh owner on each read and cannot be used as a named place.
+		if binding is None or binding in self.moved or (binding.snapshot_vector and not read):
 			raise SourceError(node.line)
 		return binding
 
@@ -1070,6 +1074,9 @@ class FunctionEmitter:
 			if index not in callee.null_only:
 				view = f"wvrt_share_mut_slice({values[index]})" if mutable else values[index]
 				converted.append((index, mutable, view, sites[index]))
+		# Detached row tables use the same C vector type as the original prototype.
+		for index in callee.vectors:
+			abi[index] = "char *const *"
 		# Clang checks the fixed prefix and applies its native variadic promotions to the actual tail.
 		if callee.variadic_start is not None:
 			abi[callee.variadic_start:] = ["..."]
@@ -1095,6 +1102,12 @@ class FunctionEmitter:
 			for position, (index, mutable, _, _) in enumerate(converted):
 				cast = "(char *)" if mutable else ""
 				actuals[index] = f"{cast}{descriptors}[{position}].wvrt_value"
+		# Each vector keeps its own detached table and terminated copies until the call completes.
+		for index in callee.vectors:
+			name = self.value_slot(_C_STRING_ROWS).c
+			arg_line = sites[index]
+			self.emit_line(f"char *const *{name} = wvrt_cstrs_prepare({values[index]}, -1, {arg_line}, {arg_line});")
+			actuals[index] = name
 		expression = f"{callee.c_name}({', '.join(actuals)})"
 		# Snapshot before dropping scratch because borrowed results can alias an argument.
 		if callee.snapshot is not None:
@@ -1116,6 +1129,9 @@ class FunctionEmitter:
 				if mutable:
 					self.emit_line(f"wvrt_cstr_copy_back({values[index]}, {descriptors}[{position}].wvrt_value);")
 			self.emit_line(f"wvrt_cstr_drop({scratch});")
+		# Drop each detached vector without changing the native call's error state.
+		for index in callee.vectors:
+			self.emit_line(f"wvrt_cstrs_drop({actuals[index]});")
 		return result
 
 	# Keep right-hand evaluation inside its branch while checking it unconditionally.
@@ -1283,8 +1299,13 @@ class FunctionEmitter:
 	def expression(self, node: Node) -> Value:
 		# A bare name reads a scalar or record before the enclosing operation uses it.
 		if isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text):
-			binding = self.binding(node)
+			binding = self.binding(node, read=True)
 			kind = binding.value.kind
+			# Snapshot the current C-owned rows without taking ownership of the original table.
+			if binding.snapshot_vector:
+				symbol = binding.value.c
+				self.emit_line(f"extern char **{symbol};")
+				return self.temporary(kind, f"wvrt_snapshot_cstrs_at_span({symbol}, -1, {node.line}, {node.line})")
 			# Capture header values before another argument or call can change their native storage.
 			if binding.native or isinstance(kind, NativeRef):
 				self.check_access(binding, False, node.line)
@@ -2326,11 +2347,17 @@ class NativeDeclarations:
 			# Byte descriptors need a checked extent or C-string adaptation.
 			elif isinstance(operand, Form) and operand.tag in (SHARED, MUT):
 				element, = checked_form(operand, operand.tag, 1).operands
-				element_kind = identifier(element)
-				# The seed's native views cover bytes and i32 descriptor storage.
-				if element_kind not in (U8, I32):
-					raise SourceError(element.line)
-				kind = BufferType(operand.tag, element_kind)
+				# Only the declared detached vector shape accepts an owned byte row.
+				if operand.tag == SHARED and isinstance(element, Form):
+					if read_owned_element(element, {}) != _OWNED_BYTE_ROW:
+						raise SourceError(element.line)
+					kind = _C_STRING_ROWS
+				else:
+					element_kind = identifier(element)
+					# Native byte and descriptor views keep their original element types.
+					if element_kind not in (U8, I32):
+						raise SourceError(element.line)
+					kind = BufferType(operand.tag, element_kind)
 			else:
 				kind = self.scalar(key, operand)
 			parameters[name] = kind
@@ -2342,6 +2369,7 @@ class NativeDeclarations:
 		extents = {}
 		arrays = {}
 		strings = set()
+		vectors = set()
 		null_only = set()
 		nullable = set()
 		initializers = set()
@@ -2396,6 +2424,14 @@ class NativeDeclarations:
 					raise SourceError(pragma.line)
 				(strings if pragma.tag == "c_cstr" else null_only).update(names)
 				continue
+			# Vector operands detach call-scoped C strings from a shared row view.
+			if pragma.tag == "c_cstrs":
+				names = tuple(map(identifier, pragma.operands))
+				# The original array owns one byte buffer for each row.
+				if not names or any(parameters.get(name) != _C_STRING_ROWS for name in names):
+					raise SourceError(pragma.line)
+				vectors.update(names)
+				continue
 			# A text snapshot returns a nullable byte owner, optionally releasing the native text.
 			if pragma.tag == "c_snapshot":
 				if snapshot is not None or not 1 <= len(pragma.operands) <= 2:
@@ -2411,8 +2447,9 @@ class NativeDeclarations:
 			if pragma.tag == "c_array":
 				buffer, count = form(pragma, arity=2).operands
 				name = identifier(buffer)
-				# A typed array contract needs a unique declared view.
-				if not isinstance(parameters.get(name), BufferType) or name in arrays:
+				# A typed array contract needs a unique non-vector view.
+				view = parameters.get(name)
+				if not isinstance(view, BufferType) or view == _C_STRING_ROWS or name in arrays:
 					raise SourceError(pragma.line)
 				# A small decimal literal can be emitted directly as an element count.
 				if isinstance(count, Atom) and not count.quoted and re.fullmatch(r"[0-9]{1,10}", count.text):
@@ -2441,9 +2478,9 @@ class NativeDeclarations:
 			size = positions[factors[0]] if factors else None
 			extents[buffer] = (positions[buffer], size, positions[count])
 		# A view has exactly one supported representation. Null-only operands still have a string ABI.
-		if not null_only <= strings or strings & extents.keys() or strings & arrays.keys() or extents.keys() & arrays.keys() or any(
-			isinstance(kind, BufferType) and name not in strings and name not in extents and name not in arrays
-			for name, kind in parameters.items()
+		adapted = [*strings, *extents, *arrays, *vectors]
+		if not null_only <= strings or len(adapted) != len(set(adapted)) or any(
+			isinstance(kind, BufferType) and name not in adapted for name, kind in parameters.items()
 		):
 			raise SourceError(node.line)
 		# Hidden constants supply the fixed native call prefix, before any named variadic operand.
@@ -2465,18 +2502,34 @@ class NativeDeclarations:
 		# An initializer's status is the exact i32 result used to activate storage.
 		if initializers and (result != I32 or initializers & nullable):
 			raise SourceError(node.line)
-		return NativeFunction(symbol, tuple(parameters.items()), result, tuple(extents.values()),
-			tuple(positions[name] for name in parameters if name in strings),
-			frozenset(positions[name] for name in null_only), frozenset(positions[name] for name in nullable),
-			frozenset(positions[name] for name in initializers), snapshot, macro, variadic_start,
-			{positions[name]: symbol for name, symbol in constants.items()}, tuple(arrays.values()))
+		return NativeFunction(
+			c_name=symbol, params=tuple(parameters.items()), result=result,
+			byte_extents=tuple(extents.values()),
+			c_strings=tuple(positions[name] for name in parameters if name in strings),
+			null_only=frozenset(positions[name] for name in null_only),
+			nullable=frozenset(positions[name] for name in nullable),
+			initializers=frozenset(positions[name] for name in initializers),
+			snapshot=snapshot, macro=macro, variadic_start=variadic_start,
+			constants={positions[name]: symbol for name, symbol in constants.items()},
+			array_extents=tuple(arrays.values()),
+			vectors=tuple(positions[name] for name in parameters if name in vectors),
+		)
+
 
 	# Bind scalar C values and borrowed handles to the actual header expression.
 	def value(self, key: str, node: Form) -> Binding:
 		operand, = form(node, arity=1).operands
-		# Other value adaptations require their own seed support.
-		if any(pragma.tag != "cfg" for pragma in native_pragmas(node)):
-			raise SourceError(node.line)
+		adaptations = tuple(pragma for pragma in native_pragmas(node) if pragma.tag != "cfg")
+		# Vector globals are immutable expressions that produce fresh byte-row owners.
+		if adaptations:
+			if len(adaptations) != 1 or node.tag != "let":
+				raise SourceError(node.line)
+			mode, = form(adaptations[0], "c_snapshot", 1).operands
+			element, = checked_form(operand, OWNED, 1).operands
+			# A borrowed table is not writable through its snapshot binding.
+			if identifier(mode) != "cstrs" or read_owned_element(element, {}) != _OWNED_BYTE_ROW:
+				raise SourceError(node.line)
+			return Binding(Value(_OWNED_STRING_ROWS, identifier(node.names[0])), native=True, snapshot_vector=True)
 		writable = node.tag == "let-mut"
 		# An immutable handle can be copied without taking ownership of its pointee.
 		if isinstance(operand, Form) and operand.tag == "shared-ref":
