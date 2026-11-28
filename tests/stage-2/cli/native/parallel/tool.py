@@ -5,6 +5,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -19,6 +20,30 @@ def await_marker(path):
 		time.sleep(0.005)
 
 
+# Forward the actual frontend trace while applying the requested stdout control.
+def run_probe(command, action):
+	result = subprocess.run(command, stdout=subprocess.PIPE)
+	if result.returncode:
+		return result.returncode
+	output = result.stdout
+	assert len(output) >= action.get("min_stdout", 0), len(output)
+	if "pad_stdout" in action:
+		width = action["pad_stdout"]
+		assert len(output) <= width, (len(output), width)
+		output = output.ljust(width, b" ")
+	if "shorten_stdout" in action:
+		output = output[:action["shorten_stdout"]]
+	if "replace_stdout" in action:
+		pattern, replacement = action["replace_stdout"]
+		output, count = re.subn(pattern.encode(), replacement.encode(), output)
+		assert count > 0, pattern
+	sys.stdout.buffer.write(output)
+	sys.stdout.buffer.flush()
+	if "truncate_stdout_file" in action:
+		os.ftruncate(sys.stdout.fileno(), action["truncate_stdout_file"])
+	return action.get("exit", 0)
+
+
 # Record original argv and apply an optional fixture action around the real Clang call.
 def main(arguments):
 	fd = os.open(os.environ["WOVE_PARALLEL_LOG"], os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
@@ -31,6 +56,14 @@ def main(arguments):
 		os.environ["PATH"] = os.environ.pop("WOVE_FIXTURE_TOOL_PATH")
 	clang = json.loads(os.environ["WOVE_PARALLEL_CLANG"])
 	actions = json.loads(os.environ["WOVE_PARALLEL_ACTIONS"])
+	if "-o" not in arguments and "-###" not in arguments:
+		source = Path(arguments[-1])
+		for action in actions.get("preflight", []):
+			if action["flag"] not in arguments or ("file" in action and source.name != action["file"]):
+				continue
+			if "source_excludes" in action and action["source_excludes"].encode() in source.read_bytes():
+				continue
+			return run_probe([*clang, *arguments], action)
 	if "-###" in arguments or "-o" not in arguments:
 		os.execvp(clang[0], [*clang, *arguments])
 	output = Path(arguments[arguments.index("-o") + 1])
