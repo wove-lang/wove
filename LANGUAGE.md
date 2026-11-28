@@ -1162,6 +1162,15 @@ include subtree. It recognizes file-scope `struct` and `union` tags,
 including tags defined inside a record, and follows record typedefs across
 redeclarations. An unavailable definition is reported at the type selector.
 
+Numbered native builds reuse checked C declarations when the selected Clang
+sees matching preprocessing and declaration identities in each unit. GNU
+`extern inline` definitions can replay a single returned direct call or a
+bounded conditional expression with checked casts, comparisons, member
+access, dereference, increment and direct calls. The compiler checks the
+resolved calls and operands, and Clang keeps control of inlining and
+external linkage. A declaration or context outside this proof uses the
+ordinary serial C build and its C diagnostics.
+
 A read-only bridge declaration such as
 `(let LIMIT (:pragma (c_macro_lossless)) i64)` reads an object-like C
 integer macro whose native type may vary with the build flags. Clang
