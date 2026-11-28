@@ -1198,9 +1198,11 @@ including tags defined inside a record, and follows record typedefs across
 redeclarations. An unavailable definition is reported at the type selector.
 
 Numbered native builds reuse checked C declarations when the selected Clang
-sees matching preprocessing and declaration identities in each unit. Clang's
-`PureAttr` participates in that identity check, including when inherited from
-an earlier declaration. GNU `extern inline` definitions can replay a
+sees matching preprocessing and declaration identities in each unit. The
+prototype check includes pure and const functions, allocation size and
+alignment operands, unused-result diagnostics, and deprecation metadata.
+It preserves Clang's inferred attributes and inheritance from earlier
+declarations. GNU `extern inline` definitions can replay a
 single direct call with named operand reads, integer or character literals,
 or typed nulls derived from zero. The return can wrap the call in an explicit
 integral cast. The proof also supports bounded conditional expressions

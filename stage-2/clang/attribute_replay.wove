@@ -1,0 +1,362 @@
+(module clang_attribute_replay
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Recover effective prototype attribute operands that Clang omits from its JSON dump.")
+
+	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals
+		(value clang_kind_key) (value clang_name_key)))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+
+	(struct DumpNode (fields (start i32) (end i32) (next i32) (depth i32)))
+	(struct PayloadRead (fields (next i32) (length i32)))
+
+	(let prototype_attributes "\"AllocSizeAttr\"\u0000\"AllocAlignAttr\"\u0000\"WarnUnusedResultAttr\"\u0000\"ConstAttr\"\u0000\"DeprecatedAttr\"\u0000")
+	(let function_kind "\"FunctionDecl\"")
+	(let function_tag "FunctionDecl ")
+	(let root_tag "TranslationUnitDecl ")
+	(let size_tag "AllocSizeAttr")
+	(let align_tag "AllocAlignAttr")
+	(let builtin_tag "BuiltinAttr")
+	(let unused_tag "WarnUnusedResultAttr")
+	(let inherited_key "inherited")
+	(let implicit_key "implicit")
+	(let inherited_word "Inherited ")
+	(let implicit_word "Implicit ")
+	(let nodiscard_word "nodiscard ")
+	(let unused_word "warn_unused_result ")
+	(let true_value "true")
+	(let size_payload 1u8)
+	(let align_payload 2u8)
+	(let unused_payload 3u8)
+	(let builtin_payload 4u8)
+
+	(fn payload_kind
+		(:doc "Classify the exact text tags whose operands require the second Clang observation.")
+		(params (bytes (shared-array u8)) (start i32) (end i32)) (returns u8)
+		(body
+			(if (call same_bytes (borrow-shared bytes) start end (borrow-shared size_tag) 0i32 size_tag.len)
+				(then (return size_payload)))
+			(if (call same_bytes (borrow-shared bytes) start end (borrow-shared align_tag) 0i32 align_tag.len)
+				(then (return align_payload)))
+			(if (call same_bytes (borrow-shared bytes) start end (borrow-shared unused_tag) 0i32 unused_tag.len)
+				(then (return unused_payload)))
+			(if (call same_bytes (borrow-shared bytes) start end (borrow-shared builtin_tag) 0i32 builtin_tag.len)
+				(then (return builtin_payload)))
+			(return 0u8)))
+
+	(fn json_payload_kind
+		(:doc "Use the JSON kind to select the typed text operand, ignoring unrelated children.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)))
+		(returns u8)
+		(body
+			(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if kind.ltz (then (return 0u8)))
+			(let token (nodes.get kind))
+			(return (call payload_kind (borrow-shared ast) (i32:inc token/start) (i32:dec token/end)))))
+
+	(fn next_payload_row
+		(:doc "Advance within one prototype to the next selected effective attribute.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (start i32) (scratch (mut-array u8)))
+		(returns i32)
+		(body
+			(let-mut row start)
+			(while
+				(:doc "Direct attribute siblings preserve redeclaration and operand order.")
+				row.not-ltz
+				(body
+					(if (u8:not-eqz (call json_payload_kind (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-mut scratch))) (then (return row)))
+					(set row (struct:get (nodes.get row) next_sibling))))
+			(return -1i32)))
+
+	(fn needs_prototype_payloads
+		(:doc "Request a second dump only when a prototype has allocation or unused-result operands.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode))) (returns bool)
+		(body
+			(let-mut scratch (array:alloc u8 24i32))
+			(let-mut function (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(while
+				(:doc "Only attributes attached directly to top-level functions affect this proof.")
+				function.not-ltz
+				(body
+					(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
+						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(if
+						(:doc "Inline bodies and typedefs can contain unrelated nested metadata.")
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared function_kind))
+						(then
+							(let first (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) function (borrow-mut scratch)))
+							(let-mut row (call next_payload_row (borrow-shared ast) (borrow-shared nodes) first (borrow-mut scratch)))
+							(while
+								(:doc "Verify builtin IDs alongside new payloads when the supplementary capture is needed.")
+								row.not-ltz
+								(body
+									(if (u8:not-eq (call json_payload_kind (borrow-shared ast) (borrow-shared nodes) row
+										(borrow-mut scratch)) builtin_payload) (then (return (bool true))))
+									(set row (call next_payload_row (borrow-shared ast) (borrow-shared nodes)
+										(struct:get (nodes.get row) next_sibling) (borrow-mut scratch)))))))
+					(set function (struct:get (nodes.get function) next_sibling))))
+			(return (bool false))))
+
+	(fn until_byte
+		(:doc "Find a delimiter with the current text line as an exclusive bound.")
+		(params (bytes (shared-array u8)) (start i32) (end i32) (target u8)) (returns i32)
+		(body
+			(let-mut pos start)
+			(while
+				(:doc "Never cross the current line or token extent.")
+				(bool:and (pos.lt end) (u8:not-eq (bytes.get pos) target))
+				(body (set pos pos.inc)))
+			(return pos)))
+
+	(fn starts_with
+		(:doc "Check a complete Clang text prefix without reading into the next line.")
+		(params (bytes (shared-array u8)) (start i32) (end i32) (prefix (shared-array u8))) (returns bool)
+		(body
+			(return (bool:and (i32:not-lt (end.sub start) prefix.len)
+				(call same_bytes (borrow-shared bytes) start (i32:add start prefix.len)
+					(borrow-shared prefix) 0i32 prefix.len)))))
+
+	(fn read_dump_node
+		(:doc "Read the leading ASCII tree branches without interpreting the node itself.")
+		(params (dump (shared-array u8)) (line i32)) (returns DumpNode)
+		(body
+			(let end (call until_byte (borrow-shared dump) line dump.len 10u8))
+			(let next (if (end.lt dump.len) (then end.inc) (else end)))
+			(let-mut start line)
+			(while
+				(:doc "Every indentation column is two bytes. The final branch ends in a dash.")
+				(i32:lt start end.dec)
+				(body
+					(let a (dump.get start))
+					(let b (dump.get start.inc))
+					(let branch (bool:or (u8:eq a 124u8) (u8:eq a 96u8)))
+					(if
+						(:doc "Return the node start and one-based depth for either tree branch.")
+						(branch.and (u8:eq b 45u8))
+						(then
+							(let depth (i32:inc (i32:div (start.sub line) 2i32)))
+							(return (struct:new DumpNode (start (start.add 2i32)) (end end) (next next) (depth depth)))))
+					(if (bool:not (bool:and (u8:eq b 32u8) (bool:or (u8:eq a 32u8) (u8:eq a 124u8)))) (then (break)))
+					(set start (start.add 2i32))))
+			(return (struct:new DumpNode (start line) (end end) (next next) (depth -1i32)))))
+
+	(fn after_location
+		(:doc "Discard a Clang node's address and angle-delimited source range.")
+		(params (dump (shared-array u8)) (node DumpNode)) (returns i32)
+		(body
+			(let end node/end)
+			(let first (call until_byte (borrow-shared dump) node/start end 60u8))
+			(if (first.eq end) (then (return end)))
+			(let-mut cursor first.inc)
+			(let-mut depth 1i32)
+			(while
+				(:doc "Names such as <scratch space> can appear inside the outer source range.")
+				(bool:and depth.gtz (cursor.lt end))
+				(body
+					(let byte (dump.get cursor))
+					(if (u8:eq byte 60u8) (then (set depth depth.inc)))
+					(if (u8:eq byte 62u8) (then (set depth depth.dec)))
+					(set cursor cursor.inc)))
+			(if
+				(:doc "Effective fields begin after the full range and one separator.")
+				(bool:and depth.eqz (bool:and (cursor.lt end) (u8:eq (dump.get cursor) 32u8)))
+				(then (return cursor.inc)))
+			(return end)))
+
+	(fn text_function
+		(:doc "Find the next direct function in Clang's independently produced tree.")
+		(params (dump (shared-array u8)) (start i32)) (returns DumpNode)
+		(body
+			(let-mut line start)
+			(while
+				(:doc "A nested reference or declaration never advances the top-level function sequence.")
+				(line.lt dump.len)
+				(body
+					(let row (call read_dump_node (borrow-shared dump) line))
+					(if
+						(:doc "An unexpected line cannot establish correspondence between the two dumps.")
+						(bool:or (i32:ltz row/depth) (bool:and (i32:eq row/depth 1i32)
+							(call starts_with (borrow-shared dump) row/start row/end (borrow-shared function_tag))))
+						(then (return row)))
+					(set line row/next)))
+			(return (struct:new DumpNode (start line) (end line) (next line) (depth 0i32)))))
+
+	(fn text_names_function
+		(:doc "Match the last declarator name before the quoted prototype type to the JSON row.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32)
+			(dump (shared-array u8)) (row DumpNode) (scratch (mut-array u8))) (returns bool)
+		(body
+			(if (i32:not-eq row/depth 1i32) (then (return (bool false))))
+			(let first (call after_location (borrow-shared dump) row))
+			(let quote (call until_byte (borrow-shared dump) first row/end 39u8))
+			(if (bool:or (quote.eq row/end) (quote.le first.inc)) (then (return (bool false))))
+			(let end quote.dec)
+			(if (u8:not-eq (dump.get end) 32u8) (then (return (bool false))))
+			(let-mut start end)
+			(while
+				(:doc "The type separator follows the plain C function name.")
+				(bool:and (first.lt start) (u8:not-eq (dump.get start.dec) 32u8))
+				(body (set start start.dec)))
+			(let field (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
+				(borrow-shared clang_name_key) (borrow-mut scratch)))
+			(if field.ltz (then (return (bool false))))
+			(let name (nodes.get field))
+			(return (call same_bytes (borrow-shared dump) start end (borrow-shared ast)
+				(i32:inc name/start) (i32:dec name/end)))))
+
+	(fn decimal_end
+		(:doc "Read one positive decimal builtin ID or one-based allocation argument index.")
+		(params (dump (shared-array u8)) (start i32) (end i32)) (returns i32)
+		(body
+			(if (bool:or (start.ge end) (u8:eq (dump.get start) 48u8)) (then (return start)))
+			(let-mut cursor start)
+			(while
+				(:doc "A numeric operand contains only ASCII decimal digits.")
+				(bool:and (cursor.lt end) (bool:and (u8:not-lt (dump.get cursor) 48u8)
+					(u8:lt (dump.get cursor) 58u8)))
+				(body (set cursor cursor.inc)))
+			(return cursor)))
+
+	(fn payload_valid
+		(:doc "Require the complete supported operand spelling, including an explicit empty warning message.")
+		(params (dump (shared-array u8)) (start i32) (end i32) (kind u8)) (returns bool)
+		(body
+			(if
+				(:doc "The warning distinguishes both C spellings and its complete message.")
+				(kind.eq unused_payload)
+				(then
+					(let quote (if
+						(:doc "Clang prints the normalized spelling before the message.")
+						(call starts_with (borrow-shared dump) start end (borrow-shared nodiscard_word))
+						(then (start.add nodiscard_word.len))
+						(else
+							(if (call starts_with (borrow-shared dump) start end (borrow-shared unused_word))
+								(then (start.add unused_word.len)) (else end)))))
+					(return (bool:and (quote.lt end.dec)
+						(bool:and (u8:eq (dump.get quote) 34u8)
+							(i32:eq (call until_byte (borrow-shared dump) quote.inc end 34u8) end.dec))))))
+			(let first (call decimal_end (borrow-shared dump) start end))
+			(if (first.eq start) (then (return (bool false))))
+			(return (bool:or (first.eq end)
+				(bool:and (kind.eq size_payload)
+					(bool:and (u8:eq (dump.get first) 32u8)
+						(bool:and (i32:lt first.inc end)
+							(i32:eq (call decimal_end (borrow-shared dump) first.inc end) end))))))))
+
+	(fn append_payload
+		(:doc "Require corresponding effective attributes in both dumps and keep the stable text operands.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (attribute i32)
+			(dump (shared-array u8)) (row DumpNode) (kind u8)
+			(output (mut-array u8)) (offset i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(let start (call after_location (borrow-shared dump) row))
+			(let inherited (call starts_with (borrow-shared dump) start row/end (borrow-shared inherited_word)))
+			(let middle (if inherited (then (start.add inherited_word.len)) (else start)))
+			(let implicit (call starts_with (borrow-shared dump) middle row/end (borrow-shared implicit_word)))
+			(let operand (if implicit (then (middle.add implicit_word.len)) (else middle)))
+			(let inherited_field (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) attribute
+				(borrow-shared inherited_key) (borrow-mut scratch)))
+			(let implicit_field (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) attribute
+				(borrow-shared implicit_key) (borrow-mut scratch)))
+			(let json_inherited (call field_equals (borrow-shared ast) (borrow-shared nodes)
+				inherited_field (borrow-shared true_value)))
+			(let json_implicit (call field_equals (borrow-shared ast) (borrow-shared nodes)
+				implicit_field (borrow-shared true_value)))
+			(let inherited_differs (if inherited (then json_inherited.not) (else json_inherited)))
+			(let implicit_differs (if implicit (then json_implicit.not) (else json_implicit)))
+			(let width (i32:sub row/end operand))
+			(if
+				(:doc "An absent, malformed, or differently inherited operand cannot certify a numbered unit.")
+				(bool:or (inherited_differs.or implicit_differs)
+					(bool:or (bool:not (call payload_valid (borrow-shared dump) operand row/end kind))
+						(i32:not-lt width (i32:sub output.len offset))))
+				(then (return -1i32)))
+			(let end (call append_bytes (borrow-shared (dump.range operand row/end)) (borrow-mut output) offset))
+			(output.set end 0u8)
+			(return end.inc)))
+
+	(fn read_function_payloads
+		(:doc "Match each direct text attribute to the next effective JSON attribute of this declaration.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32)
+			(dump (shared-array u8)) (start i32) (output (mut-array u8)) (offset i32)
+			(scratch (mut-array u8))) (returns PayloadRead)
+		(body
+			(let failed (struct:new PayloadRead (next start) (length -1i32)))
+			(let first (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) function (borrow-mut scratch)))
+			(let-mut attribute (call next_payload_row (borrow-shared ast) (borrow-shared nodes) first (borrow-mut scratch)))
+			(let-mut line start)
+			(let-mut length offset)
+			(while
+				(:doc "Stop at the next declaration instead of attributing its operands to this one.")
+				(line.lt dump.len)
+				(body
+					(let row (call read_dump_node (borrow-shared dump) line))
+					(if (i32:ltz row/depth) (then (return failed)))
+					(if (i32:eq row/depth 1i32) (then (break)))
+					(set line row/next)
+					(if
+						(:doc "Nested types, function bodies, and unrelated attributes have separate proofs.")
+						(i32:eq row/depth 2i32)
+						(then
+							(let stop (call until_byte (borrow-shared dump) row/start row/end 32u8))
+							(let kind (call payload_kind (borrow-shared dump) row/start stop))
+							(if
+								(:doc "An extra text operand is as much a mismatch as a missing one.")
+								kind.not-eqz
+								(then
+									(let expected (call json_payload_kind (borrow-shared ast) (borrow-shared nodes)
+										attribute (borrow-mut scratch)))
+									(if (kind.not-eq expected) (then (return failed)))
+									(set length (call append_payload (borrow-shared ast) (borrow-shared nodes) attribute
+										(borrow-shared dump) row kind (borrow-mut output) length (borrow-mut scratch)))
+									(if length.ltz (then (return failed)))
+									(set attribute (call next_payload_row (borrow-shared ast) (borrow-shared nodes)
+										(struct:get (nodes.get attribute) next_sibling) (borrow-mut scratch)))))))))
+			(if attribute.not-ltz (then (return failed)))
+			(return (struct:new PayloadRead (next line) (length length)))))
+
+	(fn append_prototype_payloads
+		(:doc "Walk both top-level function sequences and append the omitted payloads in declaration order.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (dump (shared-array u8))
+			(output (mut-array u8)) (offset i32)) (returns i32)
+		(body
+			(let end (call until_byte (borrow-shared dump) 0i32 dump.len 10u8))
+			(if
+				(:doc "Recognize a complete, unfiltered translation-unit dump.")
+				(bool:not (bool:and (end.lt dump.len) (call starts_with (borrow-shared dump) 0i32 end
+					(borrow-shared root_tag))))
+				(then (return -1i32)))
+			(let-mut scratch (array:alloc u8 24i32))
+			(let-mut function (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(let-mut line end.inc)
+			(let-mut length offset)
+			(while
+				(:doc "Top-level function siblings in both dumps occur in the same order.")
+				(bool:and function.not-ltz length.not-ltz)
+				(body
+					(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
+						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(if
+						(:doc "Match function identity before comparing its direct attribute sequence.")
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared function_kind))
+						(then
+							(let prototype (call text_function (borrow-shared dump) line))
+							(if
+								(:doc "Even same-named redeclarations stay distinct by their position in both dumps.")
+								(bool:not (call text_names_function (borrow-shared ast) (borrow-shared nodes) function
+									(borrow-shared dump) prototype (borrow-mut scratch)))
+								(then (return -1i32)))
+							(let read (call read_function_payloads (borrow-shared ast) (borrow-shared nodes) function
+								(borrow-shared dump) prototype/next (borrow-mut output) length (borrow-mut scratch)))
+							(set line read/next)
+							(set length read/length)))
+					(set function (struct:get (nodes.get function) next_sibling))))
+			(if length.ltz (then (return length)))
+			(let extra (call text_function (borrow-shared dump) line))
+			(if (i32:not-eqz extra/depth) (then (return -1i32)))
+			(return length)))
+)
