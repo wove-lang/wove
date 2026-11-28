@@ -1999,6 +1999,8 @@ class FunctionEmitter:
 		if writable and copyable(value.kind):
 			value = self.temporary(value.kind, value.c)
 		scope[symbol] = Binding(value, writable=writable)
+		# Wove can ignore a local result while retaining its evaluated initializer.
+		self.emit_line(f"(void)({value.c});")
 		return True
 
 	# Emit the function and require a result from each value-returning exit path.
