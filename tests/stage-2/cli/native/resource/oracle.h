@@ -15,10 +15,12 @@
 #if defined(__APPLE__)
 typedef int FixtureWho;
 typedef int FixturePriorityWhich;
+typedef int FixtureLimitKind;
 typedef int FixtureMicros;
 #else
 typedef __rusage_who_t FixtureWho;
 typedef __priority_which_t FixturePriorityWhich;
+typedef __rlimit_resource_t FixtureLimitKind;
 typedef long FixtureMicros;
 #endif
 
@@ -136,6 +138,47 @@ static inline bool fixture_priority_matches(id_t id, int32_t expected)
 	errno = 0;
 	const int actual = getpriority(PRIO_PROCESS, id);
 	return errno == 0 && actual == expected;
+}
+
+
+_Static_assert(sizeof(rlim_t) == 8 && (rlim_t)-1 > (rlim_t)0, "unsigned 64-bit rlim_t");
+_Static_assert(sizeof(struct rlimit) == 16 && _Alignof(struct rlimit) == 8, "rlimit record layout");
+_Static_assert(offsetof(struct rlimit, rlim_cur) == 0 && offsetof(struct rlimit, rlim_max) == 8,
+	"rlimit member offsets");
+_Static_assert(_Generic(((struct rlimit *)0)->rlim_cur, rlim_t: 1, default: 0)
+	&& _Generic(((struct rlimit *)0)->rlim_max, rlim_t: 1, default: 0), "rlimit member types");
+_Static_assert(_Generic(&getrlimit, int (*)(FixtureLimitKind, struct rlimit *): 1, default: 0),
+	"getrlimit prototype");
+_Static_assert(_Generic(&setrlimit, int (*)(FixtureLimitKind, const struct rlimit *): 1, default: 0),
+	"setrlimit prototype");
+
+/* Verify every standard selector against the selected header. */
+static inline bool fixture_limit_selectors(FixtureLimitKind address, FixtureLimitKind core,
+	FixtureLimitKind cpu, FixtureLimitKind data, FixtureLimitKind file_size, FixtureLimitKind files,
+	FixtureLimitKind stack)
+{
+	return address == RLIMIT_AS && core == RLIMIT_CORE && cpu == RLIMIT_CPU && data == RLIMIT_DATA
+		&& file_size == RLIMIT_FSIZE && files == RLIMIT_NOFILE && stack == RLIMIT_STACK;
+}
+
+/* Compare all three exact unsigned sentinels, including the SDK's infinity bit pattern. */
+static inline bool fixture_limit_sentinels(rlim_t infinity, rlim_t saved_current, rlim_t saved_maximum)
+{
+#if defined(__APPLE__)
+	const rlim_t expected = (UINT64_C(1) << 63) - 1;
+#else
+	const rlim_t expected = UINT64_MAX;
+#endif
+	return infinity == RLIM_INFINITY && infinity == expected
+		&& saved_current == RLIM_SAVED_CUR && saved_current == expected
+		&& saved_maximum == RLIM_SAVED_MAX && saved_maximum == expected;
+}
+
+/* Compare both Wove projections with an independent native read of the process limits. */
+static inline bool fixture_limit_matches(FixtureLimitKind resource, rlim_t current, rlim_t maximum)
+{
+	struct rlimit native;
+	return getrlimit(resource, &native) == 0 && native.rlim_cur == current && native.rlim_max == maximum;
 }
 
 #ifdef WOVE_TEST_PRIORITY_SENTINEL
