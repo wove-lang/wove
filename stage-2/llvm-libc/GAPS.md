@@ -827,11 +827,21 @@ arithmetic prototypes and the exact native result layout in 264 profiles.
 | `imaxdiv_t` | Wove exposes `quot` and `rem` as the defining `IntMax` type. Both C fields have native `intmax_t` type. The record is naturally aligned and the two fields have offsets zero and `sizeof(intmax_t)`. The fixture reads both fields and passes the record to C to compare it with a native result. |
 | `imaxdiv` | Uses the exact `imaxdiv_t` by-value result and `intmax_t` operands. Both bridge origins check all operand signs, zero numerator, and representable 64-bit limits. The denominator must be nonzero and the quotient must be representable. [Generic native result support](https://github.com/wove-lang/wove/pull/733) |
 | `strtoimax`, `strtoumax` | The bridge uses checked `c_cstr` input and `c_cstr_offset` to report the byte position before releasing the input. Results reuse the defining `IntMax` and `UIntMax` types from `<stdint.h>`. Both provider origins check no conversion, partial and full consumption, and `ERANGE`. A direct C call checks the binary-prefix behavior selected by each profile. Clang checks the prototypes and selects the glibc `__isoc23_*` redirects in the C23 and earlier GNU profiles. [Generic end-offset support](https://github.com/wove-lang/wove/pull/744) |
-| `wcstoimax`, `wcstoumax` | Clang checked both exact prototypes and their glibc C23 redirects. Wove still needs checked wide-string termination and a checked end position measured in native `wchar_t` elements. |
+| `wcstoimax`, `wcstoumax` | Both calls reuse `WChar` from `<stddef.h>` and `IntMax` or `UIntMax` from `<stdint.h>`. The shared terminated-array contract passes `const wchar_t *` and an optional `wchar_t **`, returning the position in elements before releasing the input. Both provider origins compare no, partial, and full conversions, range errors, null destinations, `errno`, and C23 binary prefixes against the native header. Clang selects the active glibc redirect. [Generic terminated-array support](https://github.com/wove-lang/wove/pull/766) |
 | `PRId`, `PRIi`, `PRIo`, `PRIu`, `PRIx`, `PRIX` | All 84 traditional printing macros use the existing C string constant contract. One native literal expansion backs each immutable byte view. The installed fixtures compare the bytes and length of every exact, least, fast, pointer, and maximum-width selector with the active C header. |
 | `SCNd`, `SCNi`, `SCNo`, `SCNu`, `SCNx` | All 70 traditional scanning macros use the same immutable byte views as the printing formats. The native literal oracle verifies bytes and lengths for every exact, least, fast, pointer, and maximum-width selector. |
 | `PRIb`, `PRIB`, `SCNb` | The 28 binary printing and 14 binary scanning macros use ordinary optional C string constants. Clang determines availability from the header and effective flags. The audited glibc SDK exposes all 42 in C23 and the earlier-mode GNU profiles. They are absent on the audited Darwin SDK and in the other earlier-mode glibc profiles. The shared oracle checks the literal bytes and lengths when the binary formats are available. |
 | `__STDC_VERSION_INTTYPES_H__` | Absent in all audited Darwin and glibc profiles. |
+
+## Bundled `<stddef.h>` wide character type
+
+| Native members | Coverage or outstanding contract |
+| --- | --- |
+| `wchar_t` | The shared `WChar` bridge uses the exact Clang typedef. It occupies four bytes on the audited Darwin and glibc targets. It is `unsigned int` on glibc arm64 and `int` on the other targets. |
+| `size_t`, `ptrdiff_t`, `rsize_t` | These native integer aliases remain in the broader `<stddef.h>` coverage under #318. The audited headers expose `rsize_t` only in an opt-in profile. |
+| `max_align_t` | The audited Darwin headers use `long double`, and glibc headers use a record. Exact layout coverage remains open under #318. |
+| `NULL`, `offsetof`, `nullptr_t`, `unreachable` | These remain in the broader `<stddef.h>` coverage under #318. The audited headers expose `nullptr_t` and `unreachable` in C23. |
+| `__STDC_VERSION_STDDEF_H__` | Absent in the audited profiles. |
 
 ## Bundled math coverage
 
