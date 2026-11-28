@@ -1404,14 +1404,16 @@ class FunctionEmitter:
 			self.loop(statement)
 			return True
 
-		# Assignment updates the named scalar's own C slot.
+		# Assignment replaces the value in the named mutable slot.
 		if statement.tag == "set":
 			target, operand = form(statement, arity=2).operands
 			binding = self.binding(target)
-			# Only writable scalar locals have assignable slots.
-			if not binding.writable or binding.value.kind not in SCALAR_TYPES:
+			kind = binding.value.kind
+			# Scalar and copyable record assignment require no ownership transfer.
+			if not binding.writable or not (kind in SCALAR_TYPES or isinstance(kind, Record) and copyable(kind)):
 				raise SourceError(node.line)
-			value = self.typed(operand, binding.value.kind)
+			self.check_access(binding, True, node.line)
+			value = self.typed(operand, kind)
 			self.emit_line(f"{binding.value.c} = {value.c};")
 			return True
 
