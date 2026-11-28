@@ -343,4 +343,51 @@ static inline int fixture_priority_sentinel(FixturePriorityWhich which, id_t id)
 #define getpriority fixture_priority_sentinel
 #endif
 
+#if defined(WOVE_TEST_PROC_USAGE) && defined(__APPLE__)
+#include <libproc.h>
+
+// Verify the exact storage carrier and record extents used in the installed calls.
+_Static_assert(_Generic(&proc_pid_rusage, int (*)(int, int, rusage_info_t *): 1, default: 0),
+	"proc_pid_rusage prototype");
+_Static_assert(_Generic((rusage_info_t)0, void *: 1, default: 0), "rusage_info_t carrier");
+
+#define WOVE_TEST_RUSAGE_LAYOUT(type, size, last, offset) \
+	_Static_assert(sizeof(type) == size && _Alignof(type) == 8, "native rusage extent"); \
+	_Static_assert(offsetof(type, last) == offset, "native rusage field offset"); \
+	_Static_assert(_Generic(&((type *)0)->ri_uuid, uint8_t (*)[16]: 1, default: 0), "native UUID type")
+WOVE_TEST_RUSAGE_LAYOUT(struct rusage_info_v0, 96, ri_proc_exit_abstime, 88);
+WOVE_TEST_RUSAGE_LAYOUT(struct rusage_info_v1, 144, ri_child_elapsed_abstime, 136);
+WOVE_TEST_RUSAGE_LAYOUT(struct rusage_info_v2, 160, ri_diskio_byteswritten, 152);
+WOVE_TEST_RUSAGE_LAYOUT(struct rusage_info_v3, 232, ri_serviced_system_time, 224);
+WOVE_TEST_RUSAGE_LAYOUT(struct rusage_info_v4, 296, ri_runnable_time, 288);
+WOVE_TEST_RUSAGE_LAYOUT(struct rusage_info_v5, 304, ri_flags, 296);
+#if defined(RUSAGE_INFO_V6)
+WOVE_TEST_RUSAGE_LAYOUT(struct rusage_info_v6, 464, ri_flags, 296);
+
+// Compare the V6 value through the actual native macro.
+static inline bool fixture_proc_usage_v6(int flavor)
+{
+	return flavor == RUSAGE_INFO_V6;
+}
+#endif
+#undef WOVE_TEST_RUSAGE_LAYOUT
+
+// Match the SDK's current typedef to the flavor selected by its native macro.
+#if defined(RUSAGE_INFO_V6) && RUSAGE_INFO_CURRENT == RUSAGE_INFO_V6
+_Static_assert(_Generic((rusage_info_current *)0, struct rusage_info_v6 *: 1, default: 0), "current rusage v6");
+#else
+_Static_assert(RUSAGE_INFO_CURRENT == RUSAGE_INFO_V5, "current rusage flavor");
+_Static_assert(_Generic((rusage_info_current *)0, struct rusage_info_v5 *: 1, default: 0), "current rusage v5");
+#endif
+
+// Compare imported values against the matching native header constants.
+static inline bool fixture_proc_usage_values(int v0, int v1, int v2, int v3, int v4, int v5,
+	int current, int reslide)
+{
+	return v0 == RUSAGE_INFO_V0 && v1 == RUSAGE_INFO_V1 && v2 == RUSAGE_INFO_V2
+		&& v3 == RUSAGE_INFO_V3 && v4 == RUSAGE_INFO_V4 && v5 == RUSAGE_INFO_V5
+		&& current == RUSAGE_INFO_CURRENT && reslide == RU_PROC_RUNS_RESLIDE;
+}
+#endif
+
 #endif

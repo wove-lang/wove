@@ -130,10 +130,11 @@ def main():
 					continue
 				run_fixture = mode[:1] == ["run"]
 				extra_flags = json.loads(mode[1]) if len(mode) > 1 else []
+				selection = mode[2] if len(mode) > 2 else None
 				label = macro if len(required_macros) == 1 else Path(source).stem
 				check_case(installed, clang, runtime, fixtures, project.with_name(f"{project.name}-{label}"),
 					header, standard, [*flags, *extra_flags], source=source, unavailable=None if present else diagnostic,
-					execute=run_fixture, macro=None if run_fixture else required_macros[0])
+					execute=run_fixture, macro=None if run_fixture else required_macros[0], selection=selection)
 	print(f"{fixtures.name}.h: bundled and project values checked in {3 * len(profiles)} host profiles")
 
 
