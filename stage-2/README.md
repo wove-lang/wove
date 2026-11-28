@@ -218,7 +218,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `o` | Erased heap slot destructor | Concrete layout key extended by the slot destructor role | Type name for named layouts, empty for fixed arrays | The slot definition, allocation, replacement, and worker collection share the callback name. |
 | `v` | Fixed array typedef | Structural fingerprint of exact element type and extent | Empty | The common header and every user share the resolved layout and collision rank. |
 | `i` | Fixed-array inline occupancy slot | Structural fixed-array key extended by the slot role | Empty | The slot definition, inline elements, and zero-extent alignment use the same name. |
-| `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
+| `k` | Function-pointer typedef | Exact result followed by the ordered parameter types and a terminator | Empty | The common header and every user share the signature and collision rank. |
 | `m` | Named record field | Concrete layout fingerprint extended by the member role and exact field spelling | Field name | Within its C struct. Definitions, designators, accesses, and cleanup use the same key. |
 | `m` | Enum payload member | Concrete enum fingerprint extended by the member role and exact variant spelling | Variant name | Within its C union. Tags retain their declaration ordinals. |
 | `m` | Empty-record placeholder | Zero | Empty | Within its C struct. |
@@ -248,6 +248,10 @@ separate roles with the same layout suffix and rank. Calls pass the erased
 destructor explicitly when they install it on an array or replace a slot.
 Fixed inline slots continue the structural array key with `i` and use the
 same rank and empty suffix. Occupancy checks use the corresponding type name.
+Callable typedefs hash the result and each parameter as fixed-width words,
+ending with the reserved zero type code. Inferred references and explicit
+signatures share the same type key. Collisions rank by result, then by
+parameter type in order, with shorter equal prefixes first.
 Native callback adapters keep separate keys per actual, including repeated
 calls to the same target. Exact owners and argument rows determine the slot
 for a genuine C spelling collision.
