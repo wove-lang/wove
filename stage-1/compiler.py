@@ -1913,6 +1913,24 @@ class FunctionEmitter:
 			self.emit_return(statement)
 			return False
 
+		# Append a captured byte owner to the mutable array of rows.
+		if statement.tag == "array.push":
+			target, operand = form(statement, arity=2).operands
+			binding = self.binding(target)
+			# The bootstrap driver grows only named arrays of owned byte rows.
+			if not binding.writable or binding.value.kind != BufferType(OWNED, _OWNED_BYTE_ROW):
+				raise SourceError(target.line)
+			self.check_access(binding, True, target.line)
+			checkpoint = len(self.loans)
+			self.loans.append((binding, MUT))
+			# Keep the destination reserved until its replacement row is captured.
+			try:
+				row = self.typed(operand, _OWNED_BYTE_ROW)
+			finally:
+				del self.loans[checkpoint:]
+			self.emit_line(f"wvrt_array_push_at_span({binding.value.c}, &{row.c}, -1, {node.line}, {node.line});")
+			return True
+
 		# Store directly into the backing storage of a mutable owner or view.
 		if statement.tag == "array.store":
 			target, subscript, operand = form(statement, arity=3).operands
