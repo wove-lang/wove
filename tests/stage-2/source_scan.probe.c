@@ -11,60 +11,6 @@
 #include "source_scan.c"
 #undef main
 
-// Match the seed's generated names to the fixture's imported declarations.
-#define source_offset wv_seed_fn_7
-#define source_kind wv_seed_fn_8
-#define scan_token wv_seed_fn_15
-#define admit_source wv_seed_fn_16
-#define source_diagnostic wv_seed_fn_18
-#define source_position wv_seed_fn_19
-#define check_source_form wv_seed_fn_22
-#define build_source_tree wv_seed_fn_27
-#define check_source_metadata wv_seed_fn_54
-#define render_source_tree wv_seed_fn_56
-#define decode_string wv_seed_fn_93
-#define form_parts wv_seed_fn_97
-#define read_module_for_target wv_seed_fn_112
-#define emit_module wv_seed_fn_161
-#define resolve_graph_for_target wv_seed_fn_300
-#define default_selection wv_seed_fn_113
-#define target_os wv_seed_fn_114
-#define target_arch wv_seed_fn_115
-#define inspect_callers wv_seed_fn_1452
-#define run_scalar_graph wv_seed_fn_1477
-#define discover_graph_tests wv_seed_fn_1487
-#define inspect_graph_expectations wv_seed_fn_1464
-#define write_unit_name wv_seed_fn_1532
-
-typedef wv_seed_record_0 Token;
-typedef wv_seed_record_1 SourceDiagnostic;
-typedef wv_seed_record_2 SourcePosition;
-typedef wv_seed_record_3 FormCheck;
-typedef wv_seed_record_4 SourceNode;
-typedef wv_seed_record_5 RenderResult;
-typedef wv_seed_record_11 DecodeResult;
-typedef wv_seed_record_13 FormParts;
-typedef wv_seed_record_14 SelectedDeclaration;
-typedef wv_seed_record_15 ModuleRead;
-typedef wv_seed_record_17 SelectionContext;
-typedef wv_seed_record_19 EmitResult;
-typedef wv_seed_record_95 EmbedAsset;
-typedef wv_seed_record_24 GraphModule;
-typedef wv_seed_record_25 GraphBinding;
-typedef wv_seed_record_28 GraphUse;
-typedef wv_seed_record_29 GraphSelector;
-typedef wv_seed_record_30 GraphResult;
-typedef wv_seed_record_97 CallSite;
-typedef wv_seed_record_40 SuppliedFile;
-typedef wv_seed_record_116 CallerInspection;
-typedef wv_seed_record_121 GraphOutput;
-typedef wv_seed_record_131 UnitIndex;
-typedef wv_seed_record_123 DiscoveredTest;
-typedef wv_seed_record_124 TestDiscovery;
-typedef wv_seed_record_117 ExpectationLink;
-typedef wv_seed_record_118 ExpectationResult;
-typedef wv_seed_record_119 ExpectationQuery;
-
 enum { MODE_NATIVE = 0, MODE_BOOTSTRAP = 1, MODE_TEST = 2, MODE_LIBRARY = 3 };
 
 _Static_assert(_Generic(&wove_fixture_main, int (*)(int, char **): 1, default: 0), "source probe entry type");

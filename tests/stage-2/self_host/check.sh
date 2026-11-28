@@ -74,7 +74,8 @@ cd "$project"
 build all "$numbered"
 test ! -e "$output/stage-2/source_scan"
 # Supply the test-only probe for the later scanner and native fixture checks.
-cp "$source_root/tests/stage-2/source_scan.wove" "$source_root/tests/stage-2/source_scan.probe.c" tests/stage-2/
+cp "$source_root/tests/stage-2/source_scan.wove" "$source_root/tests/stage-2/source_scan.probe.c" \
+	"$source_root/tests/stage-2/emit_source_probe.py" tests/stage-2/
 check_snapshot
 save_products
 build all "$numbered"
@@ -172,7 +173,8 @@ check_unchanged
 mv "$work/live-template" "$new_asset"
 
 # Add a dependency to an existing import without changing Make's source inventory.
-scanner_unit="$output/stage-2/source_scan.c"
+scanner="$output/stage-2/source_scan"
+scanner_unit="$scanner.c"
 scanner_deps="$scanner_unit.d"
 scanner_provider='tests/stage-2/new/nested/scanner provider.wove'
 scanner_importer=stage-2/source/expectations.wove
@@ -208,8 +210,13 @@ cmp "$scanner_deps" "$work/old-scanner-deps"
 mkdir -p "$(dirname "$scanner_provider")"
 cp stage-2/c/identifiers.wove "$scanner_provider"
 sleep 1
+# The inserted declarations must shift a probe call's C name without breaking the executable.
+old_scanner_alias=$(grep '^#define run_scalar_graph ' "$scanner_unit")
 add_scanner_import "$scanner_provider"
-build "$scanner_unit"
+build "$scanner"
+"$scanner"
+new_scanner_alias=$(grep '^#define run_scalar_graph ' "$scanner_unit")
+test "$old_scanner_alias" != "$new_scanner_alias"
 grep -Fq 'tests/stage-2/new/nested/scanner\ provider.wove' "$scanner_deps"
 
 # Editing the discovered provider must regenerate C through the saved dependency.
