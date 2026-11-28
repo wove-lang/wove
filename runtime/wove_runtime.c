@@ -516,6 +516,19 @@ char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrtarguments, size_t wvrtcount) {
 	return wvrt_storage;
 }
 
+// Return the distance into the prepared input, including its terminating byte's position.
+int32_t wvrt_cstr_offset(const wvrt_cstr_argument *wvrtinput, const char *wvrtend) {
+	const uintptr_t wvrt_start = (uintptr_t)wvrtinput->wvrt_value;
+	const uintptr_t wvrt_end = (uintptr_t)wvrtend;
+	// An invalid pointer need not belong to this allocation. Compare addresses without pointer subtraction.
+	if (wvrtend == NULL || wvrt_end < wvrt_start ||
+		wvrt_end - wvrt_start > (uintptr_t)wvrtinput->wvrt_view.wvrt_length) {
+		wvrt_trap_at_span(wvrtinput->wvrt_file, wvrtinput->wvrt_start, wvrtinput->wvrt_end,
+			"C string end pointer outside input");
+	}
+	return (int32_t)(wvrt_end - wvrt_start);
+}
+
 // Restore only the original view bytes and keep the native call's errno.
 void wvrt_cstr_copy_back(wvrt_mut_slice wvrtview, const char *wvrtvalue) {
 	if (wvrtview.wvrt_length == 0) { return; }

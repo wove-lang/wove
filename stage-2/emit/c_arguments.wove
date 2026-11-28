@@ -8,7 +8,7 @@
 	while the scratch is live, copy back mutable views, then release the scratch.`)
 
 	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_array_mode is_c_extent_mode is_c_vector_mode c_null_argument_kind is_c_storage_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_owner_marker_flag_mode) (value c_static_string_mode) (value c_adapted_callback_argument)
-		(value c_nullable_native_reference_mode) (value c_nullable_storage_shared_mode) (value c_macro_integer_argument)))
+		(value c_string_offset_mode) (value c_nullable_native_reference_mode) (value c_nullable_storage_shared_mode) (value c_macro_integer_argument)))
 	(use wove-file "../source/types.wove" (only void_type))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
@@ -25,7 +25,7 @@
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./integers.wove" (only write_c_macro_integer_token))
 	(use wove-file "./runtime.wove" (only write_runtime_site write_c_number write_site_number write_slice_items))
-	(use wove-file "./c_formals.wove" (only native_nullable_needs_prototype fixed_c_needs_prototype native_owner_needs_prototype native_long_double_needs_prototype native_record_result_needs_prototype native_static_strings native_sync_callbacks write_fixed_c_argument))
+	(use wove-file "./c_formals.wove" (only native_nullable_needs_prototype fixed_c_needs_prototype native_owner_needs_prototype native_long_double_needs_prototype native_record_result_needs_prototype native_static_strings native_sync_callbacks native_c_string_offsets write_fixed_c_argument))
 	(use wove-file "./c_record_out.wove" (only open_record_out close_record_out))
 	(use wove-file "./c_record_in.wove" (only open_record_input close_record_input))
 	(use wove-file "./c_snapshots.wove" (only open_c_snapshot close_c_snapshot))
@@ -131,7 +131,6 @@
 				(:doc "Read one prepared native pointer.")
 				(u32.eq fragment 5u32)
 				(then
-					(set cursor (call c_byte (borrow-mut output) cursor 93u8 writing))
 					(set cursor (call c_byte (borrow-mut output) cursor 46u8 writing))
 					(set cursor (call c_byte (borrow-mut output) cursor 119u8 writing))
 					(set cursor (call c_byte (borrow-mut output) cursor 118u8 writing))
@@ -188,8 +187,8 @@
 	(let mut_string_pointer "(char*)")
 	(let copy_back_c_string "wvrt_cstr_copy_back(")
 
-	(fn write_c_string_reference
-		(:doc `Refer to the scratch pointer for a converted argument's position.`)
+	(fn write_c_string_descriptor
+		(:doc "Address one prepared string using its compact descriptor index.")
 		(params (source (shared-array u8)) (index i32) (tree_base i32) (converted i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
@@ -197,9 +196,34 @@
 			(let name (call write_c_string_scratch (borrow-shared source) index tree_base
 				97u8 (borrow-mut output) offset name_prefix writing))
 			(let open (call c_byte (borrow-mut output) name 91u8 writing))
-			(let position (call write_c_number (borrow-mut output) open
-				converted writing))
-			(return (call c_string_text (borrow-mut output) position 5u32 writing))))
+			(let position (call write_c_number (borrow-mut output) open converted writing))
+			(return (call c_byte (borrow-mut output) position 93u8 writing))))
+
+	(fn write_c_string_reference
+		(:doc "Refer to the converted byte address in a prepared string descriptor.")
+		(params (source (shared-array u8)) (index i32) (tree_base i32) (converted i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let descriptor (call write_c_string_descriptor (borrow-shared source) index tree_base
+				converted (borrow-mut output) offset name_prefix writing))
+			(return (call c_string_text (borrow-mut output) descriptor 5u32 writing))))
+
+	(fn write_c_captured_argument
+		(:doc "A string offset passes the temporary char pointer slot instead of the captured Wove place.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (argument i32) (tree_base i32)
+			(mode u8) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(if
+				(:doc "Only C sees the address of the call's end pointer.")
+				(u8.eq mode c_string_offset_mode)
+				(then
+					(let address (call c_byte (borrow-mut output) offset 38u8 writing))
+					(return (call write_c_string_scratch (borrow-shared source) argument tree_base 101u8
+						(borrow-mut output) address name_prefix writing))))
+			(return (call write_temporary_name (borrow-shared nodes) argument
+				(borrow-mut output) offset name_prefix writing))))
 
 	(let static_string_storage "static const unsigned char ")
 	(let static_writable_string_storage "static unsigned char ")
@@ -241,15 +265,14 @@
 			(u32.not-eq (struct.get argument kind) (call c_null_argument_kind))))))
 
 	(fn c_string_actuals
-		(:doc "Count the present converted strings before emitting scratch storage for this call.")
+		(:doc "Count the present converted strings in a prefix of the native call.")
 		(params (nodes (shared-array SourceNode)) (parameters (shared-array ScalarParameter))
-			(expressions (shared-array ScalarExpression)) (first i32) (callee ScalarFunction))
+			(expressions (shared-array ScalarExpression)) (first i32) (start i32) (limit i32))
 		(returns i32)
 		(body
 			(let-mut count 0i32)
 			(let-mut argument first)
-			(let-mut formal (struct.get callee params))
-			(let limit (i32.add formal (struct.get callee arity)))
+			(let-mut formal start)
 			(while
 				(:doc "Present fixed arguments determine the compact descriptor order.")
 				(i32.lt formal limit)
@@ -434,8 +457,9 @@
 						(struct.get callee c_formals)))
 					(bool.or (call native_owner_needs_prototype (borrow-shared source) (borrow-shared nodes)
 							(borrow-shared parameters) callee)
-						(call native_long_double_needs_prototype (borrow-shared records)
-							(borrow-shared parameters) callee)))))
+						(bool.or (call native_c_string_offsets (borrow-shared parameters) callee)
+							(call native_long_double_needs_prototype (borrow-shared records)
+								(borrow-shared parameters) callee))))))
 			(let parenthesized (bool.and (bool.not open)
 				(bool.or (bool.or checked record_snapshot)
 					(call native_record_result_needs_prototype (borrow-shared records) callee))))
@@ -640,8 +664,8 @@
 																				(u32.eq (struct.get actual kind) c_macro_integer_argument)
 																				(then (set cursor (call write_c_macro_integer_token (borrow-shared source)
 																					actual (borrow-mut output) cursor writing)))
-																				(else (set cursor (call write_temporary_name (borrow-shared nodes)
-																					argument (borrow-mut output) cursor name_prefix writing))))))
+																				(else (set cursor (call write_c_captured_argument (borrow-shared source) (borrow-shared nodes)
+																					argument tree_base mode (borrow-mut output) cursor name_prefix writing))))))
 																	(if
 																		(:doc "Pass the checked view's original pointer.")
 																		(bool.or (call is_c_extent_mode mode)
@@ -766,6 +790,63 @@
 					(set formal (i32.inc formal))))
 			(return cursor)))
 
+	(let c_end_pointer_type "char *")
+	(let c_end_pointer_zero "=0;")
+	(let c_offset_call "=wvrt_cstr_offset(&")
+
+	(fn write_c_string_offsets
+		(:doc "Create native end slots, then project their results before releasing the converted inputs.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (parameters (shared-array ScalarParameter))
+			(expressions (shared-array ScalarExpression)) (expression ScalarExpression) (caller ScalarFunction)
+			(callee ScalarFunction) (index i32) (setup bool)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let tree_base (struct.get caller name_base))
+			(let first (struct.get expression first))
+			(let start (struct.get callee params))
+			(let end (i32.add start (struct.get callee arity)))
+			(let-mut cursor offset)
+			(let-mut argument first)
+			(let-mut formal start)
+			(while
+				(:doc "Visit only declared formals and keep each end slot distinct.")
+				(i32.lt formal end)
+				(body
+					(let param (array.load parameters formal))
+					(if
+						(:doc "The native end pointer is initialized to detect a callee that leaves it unwritten.")
+						(u8.eq (struct.get param c_mode) c_string_offset_mode)
+						(then
+							(if
+								(:doc "The setup precedes the native call. Copyout uses the same named slot.")
+								setup
+								(then
+									(set cursor (call c_literal_text (borrow-shared c_end_pointer_type)
+										(borrow-mut output) cursor writing))
+									(set cursor (call write_c_string_scratch (borrow-shared source) argument tree_base 101u8
+										(borrow-mut output) cursor name_prefix writing))
+									(set cursor (call c_literal_text (borrow-shared c_end_pointer_zero)
+										(borrow-mut output) cursor writing)))
+								(else
+									(let input (i32.add start (struct.get param c_count)))
+									(let converted (call c_string_actuals (borrow-shared nodes)
+										(borrow-shared parameters) (borrow-shared expressions) first start input))
+									(set cursor (call c_byte (borrow-mut output) cursor 42u8 writing))
+									(set cursor (call write_temporary_name (borrow-shared nodes) argument
+										(borrow-mut output) cursor name_prefix writing))
+									(set cursor (call c_literal_text (borrow-shared c_offset_call)
+										(borrow-mut output) cursor writing))
+									(set cursor (call write_c_string_descriptor (borrow-shared source) index tree_base
+										converted (borrow-mut output) cursor name_prefix writing))
+									(set cursor (call c_byte (borrow-mut output) cursor 44u8 writing))
+									(set cursor (call write_c_string_scratch (borrow-shared source) argument tree_base 101u8
+										(borrow-mut output) cursor name_prefix writing))
+									(set cursor (call c_string_text (borrow-mut output) cursor 7u32 writing))))))
+					(set argument (struct.get (array.load nodes argument) next_sibling))
+					(set formal (i32.inc formal))))
+			(return cursor)))
+
 	(fn write_c_argument_call
 		(:doc `Check, prepare, invoke, and release in one evaluation step with a saved result.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (parameters (shared-array ScalarParameter))
@@ -789,7 +870,8 @@
 				(i32.gtz (struct.get callee c_strings))
 				(then (set string_count (call c_string_actuals (borrow-shared nodes)
 					(borrow-shared parameters) (borrow-shared expressions)
-					(struct.get expression first) callee))))
+					(struct.get expression first) (struct.get callee params)
+					(i32.add (struct.get callee params) (struct.get callee arity))))))
 			(let strings (i32.gtz string_count))
 			(if
 				(:doc "Only a C-string contract materializes backing storage.")
@@ -806,10 +888,25 @@
 					(borrow-shared nodes) (borrow-shared parameters) (struct.get expression first)
 					caller callee (bool false) (borrow-mut output)
 					cursor name_prefix writing))))
+			(let offsets (call native_c_string_offsets (borrow-shared parameters) callee))
+			(if
+				(:doc "The native call sees fresh pointer-out slots only when the bridge requests offsets.")
+				offsets
+				(then (set cursor (call write_c_string_offsets (borrow-shared source)
+					(borrow-shared nodes) (borrow-shared parameters) (borrow-shared expressions)
+					expression caller callee index (bool true)
+					(borrow-mut output) cursor name_prefix writing))))
 			(set cursor (call write_c_native_invocation (borrow-shared source) (borrow-shared nodes)
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 				expression callee caller index
 				(borrow-mut output) cursor name_prefix writing))
+			(if
+				(:doc "Finish the checked offset projection before any scratch is released.")
+				offsets
+				(then (set cursor (call write_c_string_offsets (borrow-shared source)
+					(borrow-shared nodes) (borrow-shared parameters) (borrow-shared expressions)
+					expression caller callee index (bool false)
+					(borrow-mut output) cursor name_prefix writing))))
 			(if
 				(:doc "Normalize pointer sentinels, activate storage, and release consumed wrappers after C.")
 				(bool.or (struct.get callee c_storage) (struct.get callee c_handle_out))

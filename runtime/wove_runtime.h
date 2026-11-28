@@ -163,6 +163,7 @@ typedef struct {
 } wvrt_cstr_argument;
 
 char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrt_arguments, size_t wvrt_count);
+int32_t wvrt_cstr_offset(const wvrt_cstr_argument *wvrt_input, const char *wvrt_end);
 void wvrt_cstr_copy_back(wvrt_mut_slice wvrt_view, const char *wvrt_value);
 void wvrt_cstr_drop(char *wvrt_storage);
 char *const *wvrt_cstrs_prepare(wvrt_slice wvrt_rows, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
