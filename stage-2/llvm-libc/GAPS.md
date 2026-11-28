@@ -846,9 +846,9 @@ x86_64. Both bridge origins use the same native typedef and macro forms.
 | glibc `max_align_t` | `MaxAlign` uses an optional complete native record view with an empty field list. The C typedef supplies its size and alignment. The installed fixture checks the size of the Wove allocation's emitted type and its address alignment against the C typedef. |
 | Darwin `max_align_t` | The same public `MaxAlign` name uses `c_long_double` to retain the native typedef spelling and exact ABI. The installed fixture passes a value that needs the full target precision through a C return and parameter for both provider origins. [Compiler prerequisite #783](https://github.com/wove-lang/wove/issues/783) |
 | `unreachable()` | The zero-argument void macro is emitted directly. The fixture calls it on a path unreachable for the test executable. The audited C23 headers define it. Clang diagnoses a call in earlier modes without the macro. |
-| `NULL` | The audited headers expand it to `((void*)0)`. Binding the macro needs a native null-value contract for admitted nullable uses. [Compiler prerequisite #784](https://github.com/wove-lang/wove/issues/784) |
-| `nullptr_t` | The C23 headers define it as the type of `nullptr`. Binding it needs a distinct native null type and exact ABI support. [Compiler prerequisite #784](https://github.com/wove-lang/wove/issues/784) |
-| `offsetof` | The function-like macro needs a C type and tied member designator emitted as tokens. The result has native `size_t` type. [Compiler prerequisite #785](https://github.com/wove-lang/wove/issues/785) |
+| `NULL` | The bridge uses `c_null_value` to pass the header's original macro in fixed `c_nullable` slots. The audited C11, C17, and C23 headers expand it to `((void*)0)`. [Compiler support #801](https://github.com/wove-lang/wove/issues/801) |
+| `nullptr_t` | `Nullptr` uses `c_nullptr_t` and `c_optional`. The selected C23 header supplies the exact type of `nullptr`. Earlier audited modes report that the typedef is unavailable. [Compiler support #784](https://github.com/wove-lang/wove/issues/784) |
+| `offsetof` | The macro accepts a native record type and one directly declared field. Clang validates the native designator and exact `size_t` result. Nested fields and array element designators need a general checked member path operand. [Compiler support #785](https://github.com/wove-lang/wove/issues/785) |
 | `__STDC_VERSION_STDDEF_H__` | Absent in the audited profiles. |
 
 ## Bundled math coverage
