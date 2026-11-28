@@ -408,6 +408,15 @@ When compiling the emitted C, Clang checks that the name denotes unqualified
 `long double`, even on a target where `double` has the same size and precision. A bridge-local
 import retains the defining header and its prerequisites.
 
+A C23 bridge can declare `(type NativeNull (:pragma (c_nullptr_t))
+(c-type "native_null_t"))` to use a header's exact null type in native
+signatures. The alias retains its Wove identity and its C typedef spelling.
+Values can pass by value or through the ordinary shared and mutable place
+loans. Native record fields can use the same alias. Compiling the emitted C
+checks the unqualified typedef against the type of C23's `nullptr` and checks
+the selected function's native prototype. Use `c_optional` if the selected
+header exposes the typedef only in C23 mode.
+
 Use width-qualified `add`, `sub`, `mul`, `div`, and unary `neg` for native
 floating arithmetic. The `eq`, `not-eq`, `lt`, `le`, `gt`, and `ge` operators
 take two values of the named width and return `bool`. Eager operands evaluate
