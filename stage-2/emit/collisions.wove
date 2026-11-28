@@ -9,7 +9,7 @@
 	(use wove-file "../source/generics.wove" (only function_generic_list))
 	(use wove-file "../source/module.wove" (only form_parts))
 	(use wove-file "../scalar/function_rows.wove" (only function_with_c_name_slot (type ScalarFunction)))
-	(use wove-file "../scalar/binding_names.wove" (only module_binding_key module_binding_identity (value module_binding_key_kind)))
+	(use wove-file "../scalar/binding_names.wove" (only binding_name_key binding_name_identity (value module_binding_key_kind) (value readonly_binding_key_kind)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only is_fixed_array is_callable_layout callable_layout_shape is_generic_template record_with_c_name_slot scope_at (type ScalarRecord)))
 	(use wove-file "../scalar/callable_types.wove" (only order_callable_signatures))
@@ -25,6 +25,15 @@
 	(let binding_candidate 3u32)
 	(let fixed_candidate 4u32)
 	(let callable_candidate 5u32)
+	(let readonly_candidate 6u32)
+
+	(fn binding_candidate_role
+		(:doc "Use separate collision groups for Wove storage and read-only C type aliases.")
+		(params (kind u32)) (returns u32)
+		(body
+			(if (u32.eq kind module_binding_key_kind) (then (return binding_candidate)))
+			(if (u32.eq kind readonly_binding_key_kind) (then (return readonly_candidate)))
+			(return 0u32)))
 
 	(fn base_candidate
 		(:doc "Retain the fingerprint and source suffix of one generated C name.")
@@ -132,7 +141,8 @@
 								(else
 									(if
 										(:doc "Layout ties compare the complete nominal or structural type key.")
-										(u32.not-eq (struct.get name role) binding_candidate)
+										(bool.and (u32.not-eq (struct.get name role) binding_candidate)
+											(u32.not-eq (struct.get name role) readonly_candidate))
 										(then (set order (call order_type_candidates (borrow-shared arena)
 											(borrow-shared files) (borrow-shared nodes) (borrow-shared records)
 											(borrow-shared bindings) (array.load records (i32.sub other function_count))
@@ -166,10 +176,10 @@
 			(let-mut count binding_start)
 			(let-mut index 0i32)
 			(while
-				(:doc "Count each selected Wove binding once, regardless of its uses or aliases.")
+				(:doc "Count each defining binding once, regardless of its uses or aliases.")
 				(i32.lt index (array.len expressions))
 				(body
-					(if (u32.eq (struct.get (array.load expressions index) kind) module_binding_key_kind)
+					(if (u32.gtz (call binding_candidate_role (struct.get (array.load expressions index) kind)))
 						(then (set count (i32.inc count))))
 					(set index (i32.inc index))))
 			(let-mut width 1i32)
@@ -220,19 +230,24 @@
 			(let-mut binding binding_start)
 			(set index 0i32)
 			(while
-				(:doc "Index each binding's complete descriptor name. With a fixed suffix, each role's FNV-1a continuation is bijective, so the backing name has the same collision group.")
+				(:doc "Index the complete spelling of each Wove storage descriptor or private native typedef.")
 				(i32.lt index (array.len expressions))
 				(body
 					(let key (array.load expressions index))
+					(let role (call binding_candidate_role (struct.get key kind)))
 					(if
-						(:doc "Only reserved defining-name rows describe generated module storage.")
-						(u32.eq (struct.get key kind) module_binding_key_kind)
+						(:doc "Only reserved defining-name rows supply keys for generated bindings.")
+						(u32.gtz role)
 						(then
 							(let name (array.load nodes index))
-							(let identity (call child_identity (borrow-shared arena) (struct.get name start)
-								(struct.get name end) (call module_binding_identity key) module_data_role))
+							(let-mut identity (call binding_name_identity key))
+							(if
+								(:doc "Wove storage derives its descriptor from the cached module key. A native typedef already has a full key.")
+								(u32.eq role binding_candidate)
+								(then (set identity (call child_identity (borrow-shared arena) (struct.get name start)
+									(struct.get name end) identity module_data_role))))
 							(call link_candidate (borrow-mut buckets) (borrow-mut candidates) binding
-								(call base_candidate name index binding_candidate identity))
+								(call base_candidate name index role identity))
 							(set binding (i32.inc binding))))
 					(set index (i32.inc index))))
 			(set index 0i32)
@@ -262,7 +277,7 @@
 												(call function_with_c_name_slot (array.load functions index) rank)))
 										(else
 											(if
-												(:doc "Record type rows precede defining module name rows.")
+														(:doc "Record type rows precede defining binding name rows.")
 												(i32.lt index binding_start)
 												(then
 													(let row (i32.sub index function_count))
@@ -272,6 +287,7 @@
 													(let row (struct.get name name))
 													(let key (array.load expressions row))
 													(array.store expressions row
-														(call module_binding_key (call module_binding_identity key) (struct.get key first) rank))))))))))
+																(call binding_name_key (struct.get key kind) (call binding_name_identity key)
+																	(struct.get key first) rank))))))))))
 					(set index (i32.inc index))))))
 )
