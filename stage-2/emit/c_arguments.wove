@@ -8,7 +8,7 @@
 	while the scratch is live, copy back mutable views, then release the scratch.`)
 
 	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_array_mode is_c_extent_mode is_c_vector_mode c_null_argument_kind is_c_storage_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_owner_marker_flag_mode) (value c_static_string_mode) (value c_adapted_callback_argument)
-		(value c_nullable_native_reference_mode) (value c_nullable_storage_shared_mode)))
+		(value c_nullable_native_reference_mode) (value c_nullable_storage_shared_mode) (value c_macro_integer_argument)))
 	(use wove-file "../source/types.wove" (only void_type))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
@@ -23,6 +23,7 @@
 	(use wove-file "../scalar/function_rows.wove" (only is_record_out_status is_record_input is_record_input_hidden (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./text.wove" (only c_span c_byte c_literal_text c_text_fragment write_callback_adapter_name get_name storage_name_role write_temporary_name write_static_bytes (type CNameParent) (type CNameSpelling)))
 	(use wove-file "./records.wove" (only write_value_type))
+	(use wove-file "./integers.wove" (only write_c_macro_integer_token))
 	(use wove-file "./runtime.wove" (only write_runtime_site write_c_number write_site_number write_slice_items))
 	(use wove-file "./c_formals.wove" (only native_nullable_needs_prototype fixed_c_needs_prototype native_owner_needs_prototype native_long_double_needs_prototype native_static_strings native_sync_callbacks write_fixed_c_argument))
 	(use wove-file "./c_record_out.wove" (only open_record_out close_record_out))
@@ -379,6 +380,27 @@
 	(let record_out_address "&wvrt_record_out")
 	(let discarded_macro_operand "(void)(")
 
+	(let inferred_macro_result "__extension__ __auto_type ")
+	(let macro_result_check_open "_Static_assert(_Generic((")
+	(let macro_result_check_close ":1,default:0),\"Wove C macro result type mismatch\");")
+
+	(fn assert_c_macro_result
+		(:doc "Ask Clang to compare the already captured native result with the exact bridge type.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(result u32) (index i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared macro_result_check_open)
+				(borrow-mut output) offset writing))
+			(let name (call write_temporary_name (borrow-shared nodes) index
+				(borrow-mut output) open name_prefix writing))
+			(let close (call c_byte (borrow-mut output) name 41u8 writing))
+			(let comma (call c_byte (borrow-mut output) close 44u8 writing))
+			(let type (call write_value_type (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) result (borrow-mut output) comma name_prefix writing))
+			(return (call c_literal_text (borrow-shared macro_result_check_close)
+				(borrow-mut output) type writing))))
+
 	(fn write_c_native_invocation
 		(:doc `Invoke the defining C function or macro with previously evaluated operands.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (parameters (shared-array ScalarParameter))
@@ -417,28 +439,44 @@
 			(let parenthesized (bool.and (bool.or checked record_snapshot) (bool.not open)))
 			(let first (struct.get expression first))
 			(let-mut cursor offset)
+			(let-mut literal_macro (bool false))
 			(if
-				(:doc "The macro may ignore any operand, but Wove has already evaluated each one.")
+				(:doc "The macro may ignore an operand even after Wove evaluates it.")
 				macro
 				(then
 					(let-mut argument first)
 					(while
-						(:doc "Keep each capture used independently of how the header expands the macro.")
+						(:doc "Keep ordinary captures used independently of how the header expands the macro.")
 						(i32.not-ltz argument)
 						(body
-							(set cursor (call c_text_fragment (borrow-mut output) cursor 4u32 writing))
-							(set cursor (call write_temporary_name (borrow-shared nodes) argument
-								(borrow-mut output) cursor name_prefix writing))
-							(set cursor (call c_byte (borrow-mut output) cursor 59u8 writing))
+							(let literal (u32.eq (struct.get (array.load expressions argument) kind)
+								c_macro_integer_argument))
+							(set literal_macro (bool.or literal_macro literal))
+							(if
+								(:doc "Only macro literals with possible extent dependencies have a Wove capture.")
+								(bool.or (bool.not literal) (i32.gtz (struct.get callee c_extents)))
+								(then
+									(set cursor (call c_text_fragment (borrow-mut output) cursor 4u32 writing))
+									(set cursor (call write_temporary_name (borrow-shared nodes) argument
+										(borrow-mut output) cursor name_prefix writing))
+									(set cursor (call c_byte (borrow-mut output) cursor 59u8 writing))))
 							(set argument (struct.get (array.load nodes argument) next_sibling))))))
+			(let exact_result (bool.and (bool.and literal_macro macro_value)
+				(bool.not (bool.or snapshot record_snapshot))))
 			(if
 				(:doc "Only an invocation that produces a Wove value initializes a result temporary.")
 				saves_result
 				(then
-					(set cursor (call write_value_type (borrow-shared source) (borrow-shared nodes)
-						(borrow-shared records) result
-						(borrow-mut output) cursor name_prefix writing))
-					(set cursor (call c_byte (borrow-mut output) cursor 32u8 writing))
+					(if
+						(:doc "Infer the type of the actual expansion before any assignment conversion.")
+						exact_result
+						(then (set cursor (call c_literal_text (borrow-shared inferred_macro_result)
+							(borrow-mut output) cursor writing)))
+						(else
+							(set cursor (call write_value_type (borrow-shared source) (borrow-shared nodes)
+								(borrow-shared records) result
+								(borrow-mut output) cursor name_prefix writing))
+							(set cursor (call c_byte (borrow-mut output) cursor 32u8 writing))))
 					(set cursor (call write_temporary_name (borrow-shared nodes) index
 						(borrow-mut output) cursor name_prefix writing))
 					(set cursor (call c_byte (borrow-mut output) cursor 61u8 writing))))
@@ -594,9 +632,14 @@
 																		(u32.eq (struct.get actual kind) c_adapted_callback_argument)
 																		(then (set cursor (call write_callback_adapter_name (borrow-shared nodes) argument
 																			(borrow-mut output) cursor name_prefix writing)))
-																		(else (set cursor (call write_temporary_name (borrow-shared nodes)
-																			argument
-																			(borrow-mut output) cursor name_prefix writing))))
+																		(else
+																			(if
+																				(:doc "A literal formal supplies a single token that C can paste before parsing.")
+																				(u32.eq (struct.get actual kind) c_macro_integer_argument)
+																				(then (set cursor (call write_c_macro_integer_token (borrow-shared source)
+																					actual (borrow-mut output) cursor writing)))
+																				(else (set cursor (call write_temporary_name (borrow-shared nodes)
+																					argument (borrow-mut output) cursor name_prefix writing))))))
 																	(if
 																		(:doc "Pass the checked view's original pointer.")
 																		(bool.or (call is_c_extent_mode mode)
@@ -652,7 +695,13 @@
 						(i32.sub (struct.get site end) base)
 						(borrow-mut output) cursor writing))
 					(return (call c_byte (borrow-mut output) cursor 59u8 writing))))
-			(return (call c_string_text (borrow-mut output) cursor 7u32 writing))))
+			(set cursor (call c_string_text (borrow-mut output) cursor 7u32 writing))
+			(if
+				(:doc "Verify the saved value type without expanding the native macro again.")
+				exact_result
+				(then (return (call assert_c_macro_result (borrow-shared source) (borrow-shared nodes)
+					(borrow-shared records) result index (borrow-mut output) cursor name_prefix writing))))
+			(return cursor)))
 
 	(fn write_c_string_setup
 		(:doc `Prepare one scratch array for all captured C-string arguments.`)

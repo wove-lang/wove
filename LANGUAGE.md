@@ -1192,9 +1192,20 @@ Wove declaration span in a mismatch diagnostic.
 
 Attach native contracts to the relevant declaration with `:pragma`.
 
+Put `(:pragma (c_macro_integer_literal))` on a `c_macro` formal of a
+built-in integer type when the C macro needs to paste or otherwise use
+one preprocessing token. Supply a nonnegative literal of the formal's exact
+Wove type. Wove checks the range and emits one unsuffixed decimal or
+hexadecimal C token. Binary literals become hexadecimal, and Wove type
+suffixes and digit separators are removed. Variables, character literals,
+and evaluated expressions cannot supply this operand. Other formals keep
+their usual capture-once semantics and source order. For a direct value
+result, Clang checks the type of the actual expansion before any
+assignment conversion.
+
 | Directive | Contract |
 | --- | --- |
-| `(c_macro)` | Bind a C macro with an exact signature or value type. Use a void macro call as a statement. Wove evaluates its arguments once in source order before invoking the macro. Put `(:pragma (c_macro_discard))` on a `shared-ref` formal when the header uses that operand only as a discarded expression. Wove checks and captures the borrow, then emits a C cast to `void` for that operand. |
+| `(c_macro)` | Bind a C macro with an exact signature or value type. Use a void macro call as a statement. Wove evaluates its ordinary arguments once in source order before invoking the macro. Put `(:pragma (c_macro_discard))` on a `shared-ref` formal when the header uses that operand only as a discarded expression. Wove checks and captures the borrow, then emits a C cast to `void` for that operand. |
 | `(c_cstr parameter ...)` | Copy byte views into NUL-terminated C strings and reject embedded NUL. Mutable views copy back their original length. |
 | `(c_cstr_raw parameter ...)` | Copy all bytes, including embedded NUL, before adding a terminator. |
 | `(c_static_cstr parameter ...)` | Pass a direct Wove string literal as an immutable, NUL-terminated `const char *` with executable lifetime. The native function may retain it. Embedded NUL bytes, view arguments, and calls in shared-library graphs are rejected. `bin` verifies the linked image. When linking emitted C separately, link the unit into the main executable. |
