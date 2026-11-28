@@ -5,7 +5,7 @@
 
 	(use wove-file "../hashing/base32hex.wove" (only encode_base32hex32))
 	(use wove-file "../c/arguments.wove" (only (value c_storage_init_always_mode) c_checked_string_mode
-		is_c_bytes_mode is_c_null_mode is_c_storage_mode is_c_value_mode (value c_open_variadic_tail)))
+		is_c_array_mode is_c_bytes_mode is_c_null_mode is_c_storage_mode is_c_value_mode (value c_open_variadic_tail)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/native_owner_types.wove" (only is_native_owner native_owner_type))
 	(use wove-file "../scalar/owners.wove" (only optional_byte_owner_type))
@@ -13,7 +13,7 @@
 		(type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
 	(use wove-file "../scalar/records.wove" (only find_native_definition is_native_integer
-		is_native_record is_writable_slice is_place_reference place_reference_target is_record_type record_index
+		is_native_record is_writable_slice slice_element_type is_place_reference place_reference_target is_record_type record_index
 		(type ScalarRecord)))
 	(use wove-file "../scalar/syntax.wove" (only is_byte_view_type))
 	(use wove-file "../scalar/trees.wove" (only (type ScalarTree)))
@@ -24,7 +24,7 @@
 	(use wove-file "./bindings.wove" (only write_module_bindings (value declared_module_bindings) (value linked_module_bindings)))
 	(use wove-file "./c.wove" (only has_c_argument_adapters has_c_other_arguments write_program_preamble write_program_bodies))
 	(use wove-file "./c_values.wove" (only is_c_integer_constant is_c_vector_snapshot is_writable_c_integer))
-	(use wove-file "../source/types.wove" (only is_builtin_scalar void_type))
+	(use wove-file "../source/types.wove" (only is_builtin_integer is_builtin_scalar void_type))
 	(use wove-file "./headers.wove" (only append_includes (type CInclude) (type Includes)))
 	(use wove-file "./library.wove" (only write_library_abi))
 	(use wove-file "./owners.wove" (only is_numbered_storage_owner))
@@ -340,6 +340,53 @@
 					(set index (i32.inc index))))
 			(return (bool.or record (bool.and string (call direct_scalar_abi result))))))
 
+	(fn numbered_literal_array_call
+		(:doc "Admit one writable integer view with a literal element bound and direct scalar operands.")
+		(params (function ScalarFunction) (parameters (shared-array ScalarParameter))
+			(records (shared-array ScalarRecord))) (returns bool)
+		(body
+			(if
+				(:doc "The array is the only adapter and the native result is a scalar value.")
+				(bool.or (bool.or (i32.not-eq (struct.get function c_extents) 1i32)
+						(i32.not-eqz (struct.get function c_variadic)))
+					(bool.or (bool.or (struct.get function c_storage) (call is_record_input function))
+						(bool.or (call has_c_other_arguments function (bool false))
+							(bool.not (call direct_scalar_abi (struct.get function result))))))
+				(then (return (bool false))))
+			(let-mut index (struct.get function params))
+			(let end (i32.add index (struct.get function arity)))
+			(let-mut array_formal (bool false))
+			(while
+				(:doc "Check the array layout and leave the other formals as ordinary C values.")
+				(i32.lt index end)
+				(body
+					(let parameter (array.load parameters index))
+					(let mode (struct.get parameter c_mode))
+					(let type (struct.get parameter type))
+					(if
+						(:doc "Only a fixed literal count can use the numbered native array contract.")
+						(call is_c_array_mode mode)
+						(then
+							(if
+								(:doc "The view must lend its writable storage through the existing checked bound.")
+								(bool.or (bool.not (call is_writable_slice type))
+									(bool.or (i32.not-ltz (struct.get parameter c_count))
+										(i32.not-gtz (struct.get parameter c_size))))
+								(then (return (bool false))))
+							(let element (call slice_element_type (borrow-shared records) type))
+							(if
+								(:doc "The C call receives a pointer to the same checked integer element type.")
+								(bool.not (bool.or (call is_builtin_integer element) (call is_native_integer element)))
+								(then (return (bool false))))
+							(set array_formal (bool true)))
+						(else
+							(if
+								(:doc "Scalar flags and other values must already use the direct native ABI.")
+								(bool.not (bool.and (call is_c_value_mode mode) (call direct_scalar_abi type)))
+								(then (return (bool false))))))
+					(set index (i32.inc index))))
+			(return array_formal)))
+
 	(fn numbered_macro_call
 		(:doc "Check the fixed scalar argument and value result contract for an expression macro.")
 		(params (function ScalarFunction) (parameters (shared-array ScalarParameter))) (returns bool)
@@ -434,6 +481,10 @@
 			(if
 				(:doc "Checked fixed calls reuse the existing string preparation or the original record place.")
 				(call numbered_adapted_fixed_call function (borrow-shared parameters) (borrow-shared records))
+				(then (return (bool true))))
+			(if
+				(:doc "A fixed integer array passes its original pointer after the existing extent check.")
+				(call numbered_literal_array_call function (borrow-shared parameters) (borrow-shared records))
 				(then (return (bool true))))
 			(let result (struct.get function result))
 			(if
