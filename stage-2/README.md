@@ -214,6 +214,8 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `r` | Named struct or enum | Module fingerprint extended by the layout role, spelling, and any specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
 | `x` | Aggregate take helper | Concrete layout key extended by the take role | Type name for named layouts, empty for fixed arrays | Definitions and moves use the exact layout. |
 | `e` | Aggregate drop helper | Concrete layout key extended by the drop role | Type name for named layouts, empty for fixed arrays | Cleanup and runtime macro arguments use the exact layout. |
+| `h` | Heap-owned aggregate slot | Concrete layout key extended by the heap slot role | Type name for named layouts, empty for fixed arrays | Allocation, access, and worker collection use the same slot type. |
+| `o` | Erased heap slot destructor | Concrete layout key extended by the slot destructor role | Type name for named layouts, empty for fixed arrays | The slot definition, allocation, replacement, and worker collection share the callback name. |
 | `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
 | `m` | Named record field | Concrete layout fingerprint extended by the member role and exact field spelling | Field name | Within its C struct. Definitions, designators, accesses, and cleanup use the same key. |
@@ -236,12 +238,13 @@ Aggregate take and drop helpers continue the concrete layout key with their
 own role and use the same suffix and collision rank as the layout. A fixed
 array keeps its interned layout key and empty suffix. Erased worker drop
 wrappers continue the same layout key with `z` and pass their name explicitly
-to the C definition macro. Ownership slots and occupancy helpers use the
-corresponding type name. The common header and every caller use the same
-helper spelling. Native
-callback adapters keep separate keys per actual, including repeated calls to
-the same target. Exact owners and argument rows determine the slot for a
-genuine C spelling collision.
+to the C definition macro. Heap slots and their erased destructors use
+separate roles with the same layout suffix and rank. Calls pass the erased
+destructor explicitly when they install it on an array or replace a slot.
+Fixed inline slots and occupancy helpers use the corresponding type name.
+Native callback adapters keep separate keys per actual, including repeated
+calls to the same target. Exact owners and argument rows determine the slot
+for a genuine C spelling collision.
 
 Generated names use a hierarchy of 32-bit FNV-1a states. Seed a source graph's
 path key with the canonical file path and a zero delimiter. Resume that state
@@ -269,9 +272,8 @@ distinguishes different fields or variants
 even when their fingerprints match.
 
 Different readable suffixes can share a fingerprint. When the complete
-generated spelling coincides, functions, worker adapters, types, and module
-storage use `F`, `W`, `R`, `D`, or `S` and place a second seven-digit Base32hex word after the
-fingerprint. A binding and its backing bytes share this rank. The word ranks
+generated spelling coincides, the role becomes uppercase and a second
+seven-digit Base32hex word follows the fingerprint. A binding and its backing bytes share this rank. The word ranks
 the declarations by their canonical paths, original definitions, and
 normalized specialization arguments. Renaming an import or reordering
 the graph file table preserves the assignments. Within one concrete C

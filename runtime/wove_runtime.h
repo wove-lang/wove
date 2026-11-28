@@ -405,9 +405,9 @@ void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slo
 	int32_t file, int32_t start, int32_t end);
 
 // Wrap an owning aggregate in a slot whose first member tracks initialization.
-#define WVRT_DEFINE_OWNED_SLOT(type, slot, destroy) \
+#define WVRT_DEFINE_OWNED_SLOT(type, slot, drop, destroy) \
 	typedef struct { bool wvrt_live; type wvrt_value; } slot; \
-	static inline __attribute__((unused)) void slot##_drop(void *wvrt_item) { \
+	static inline __attribute__((unused)) void drop(void *wvrt_item) { \
 		slot *wvrt_slot = wvrt_item; \
 		/* The record storage belongs to the slot only while populated. */ \
 		if (wvrt_slot->wvrt_live) { \
@@ -417,8 +417,8 @@ void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slo
 	}
 
 // Use the slot layout and its exact destructor for the owning descriptor.
-#define wvrt_owned_array_new(slot, count, file, start, end) \
-	wvrt_array_new_owned_at_span((count), sizeof(slot), _Alignof(slot), slot##_drop, (file), (start), (end))
+#define wvrt_owned_array_new(slot, drop, count, file, start, end) \
+	wvrt_array_new_owned_at_span((count), sizeof(slot), _Alignof(slot), (drop), (file), (start), (end))
 
 // Lend the inline record only after checking its slot.
 #define wvrt_owned_array_borrow(slot, view, index, file, start, end) \
@@ -435,8 +435,8 @@ void wvrt_array_remove_owned_at_span(wvrt_array *owner, int32_t index, void *slo
 	})
 
 // Pass the captured owner through a populated slot of the same layout.
-#define wvrt_owned_array_store(slot, view, index, value, file, start, end) \
-	wvrt_array_store_owned_at_span((view), (index), &(slot){true, (value)}, slot##_drop, (file), (start), (end))
+#define wvrt_owned_array_store(slot, drop, view, index, value, file, start, end) \
+	wvrt_array_store_owned_at_span((view), (index), &(slot){true, (value)}, (drop), (file), (start), (end))
 #define wvrt_owned_array_push(slot, owner, value, file, start, end) \
 	wvrt_array_push_owned_at_span((owner), &(slot){true, (value)}, (file), (start), (end))
 
@@ -565,9 +565,9 @@ typedef struct WvrtWorkerPool WvrtWorkerPermit;
 	wvrt_worker_join_all_records_at_span((queue), sizeof(type), _Alignof(type), 0, NULL, (file), (start), (end))
 
 // Owning results use the same live slot and destructor as other owning record arrays.
-#define WVRT_WORKER_JOIN_OWNED_RECORDS(slot, queue, file, start, end) \
+#define WVRT_WORKER_JOIN_OWNED_RECORDS(slot, drop, queue, file, start, end) \
 	wvrt_worker_join_all_records_at_span((queue), sizeof(slot), _Alignof(slot), offsetof(slot, wvrt_value), \
-		slot##_drop, (file), (start), (end))
+		(drop), (file), (start), (end))
 
 // The emitter supplies the erased callback name for the boxed layout.
 #define WVRT_WORKER_DROP_CALLBACK(wrapper) void wrapper(void *value)
