@@ -1202,6 +1202,12 @@ the resolved calls and operands, and Clang keeps control of inlining and
 external linkage. A declaration or context outside this proof uses the
 ordinary serial C build and its C diagnostics.
 
+A C `static inline` helper with one integer parameter can also replay a
+single return built from that parameter, integer literals, integral casts,
+bit masks, and shifts. Wove checks the resolved expression in each build
+context and verifies that emitted C uses the helper only as a direct
+callee. Observable function addresses and static state use serial C.
+
 A read-only bridge declaration such as
 `(let LIMIT (:pragma (c_macro_lossless)) i64)` reads an object-like C
 integer macro whose native type may vary with the build flags. Clang

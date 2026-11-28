@@ -10,6 +10,8 @@
 	(let paren_kind "\"ParenExpr\"")
 	(let call_kind "\"CallExpr\"")
 	(let reference_kind "\"DeclRefExpr\"")
+	(let parameter_kind "\"ParmVarDecl\"")
+	(let reference_key "referencedDecl")
 	(let member_kind "\"MemberExpr\"")
 	(let integer_kind "\"IntegerLiteral\"")
 	(let character_kind "\"CharacterLiteral\"")
@@ -37,6 +39,9 @@
 	(let eq_op "\"==\"")
 	(let ne_op "\"!=\"")
 	(let mask_op "\"&\"")
+	(let or_op "\"|\"")
+	(let shift_left_op "\"<<\"")
+	(let shift_right_op "\">>\"")
 	(let assignment_op "\"=\"")
 	(let deref_op "\"*\"")
 	(let inc_op "\"++\"")
@@ -153,13 +158,67 @@
 				(then (return 1i32)))
 			(return -1i32)))
 
+	(fn static_integer_arity
+		(:doc "Admit only integer operations on a helper's parameter and literals.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if (call integer_literal (borrow-shared ast) (borrow-shared nodes) kind) (then (return 0i32)))
+			(if
+				(:doc "A scalar helper cannot read file or process state.")
+				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared reference_kind))
+				(then
+					(let reference (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+						(borrow-shared reference_key) (borrow-mut scratch)))
+					(let declared (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) reference
+						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(if (call field_equals (borrow-shared ast) (borrow-shared nodes) declared (borrow-shared parameter_kind))
+						(then (return 0i32)))
+					(return -1i32)))
+			(if (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared paren_kind))
+				(then (return 1i32)))
+			(if
+				(:doc "The byte-swap grammar only combines bit masks and shifts.")
+				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared binary_kind))
+				(then
+					(let op (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+						(borrow-shared opcode_key) (borrow-mut scratch)))
+					(if
+						(:doc "Clang supplies the exact integer operands and promotions for these operations.")
+						(bool:or
+							(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) op (borrow-shared mask_op))
+								(call field_equals (borrow-shared ast) (borrow-shared nodes) op (borrow-shared or_op)))
+							(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) op (borrow-shared shift_left_op))
+								(call field_equals (borrow-shared ast) (borrow-shared nodes) op (borrow-shared shift_right_op))))
+						(then (return 2i32)))
+					(return -1i32)))
+			(let implicit (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared implicit_cast_kind)))
+			(if
+				(:doc "Only scalar reads and integral conversions can wrap an integer expression.")
+				(implicit.or (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared c_cast_kind)))
+				(then
+					(let cast (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+						(borrow-shared cast_key) (borrow-mut scratch)))
+					(if
+						(:doc "An lvalue read is implicit and its operand must also pass the grammar.")
+						(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared integer_cast))
+							(implicit.and (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared read_cast))))
+						(then (return 1i32)))))
+			(return -1i32)))
+
 	(fn expression_shape
 		(:doc "Require a bounded tree of eligible expressions with each node's expected arity.")
-		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (depth i32)
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (depth i32) (static_integer bool)
 			(scratch (mut-array u8))) (returns bool)
 		(body
 			(if depth.eqz (then (return (bool false))))
-			(let arity (call expression_arity (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(let arity (if
+				(:doc "The static integer subset cannot depend on a named object or callee.")
+				static_integer
+				(then (call static_integer_arity (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+				(else (call expression_arity (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))))
 			(if (arity.eq -1i32) (then (return (bool false))))
 			(let-mut child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-mut scratch)))
 			(let-mut count 0i32)
@@ -170,7 +229,7 @@
 					(if
 						(:doc "Reject an unsupported subtree before visiting its siblings.")
 						(bool:not (call expression_shape (borrow-shared ast) (borrow-shared nodes) child
-							depth.dec (borrow-mut scratch)))
+							depth.dec static_integer (borrow-mut scratch)))
 						(then (return (bool false))))
 					(set count count.inc)
 					(set child (struct:get (nodes.get child) next_sibling))))
@@ -179,6 +238,13 @@
 				(arity.eq variable_arity)
 				(then count.gtz)
 				(else (arity.eq count))))))
+
+	(fn checked_static_integer_expression
+		(:doc "Prove the return is a bounded expression with no state, calls, or addresses.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body (return (call expression_shape (borrow-shared ast) (borrow-shared nodes) row
+			inline_depth (bool true) (borrow-mut scratch)))))
 
 	(fn expression_root
 		(:doc "Unwrap the parentheses of an already validated expression subtree.")
@@ -342,7 +408,7 @@
 			(if
 				(:doc "The complete return expression must fit the replay grammar and depth limit.")
 				(bool:not (call expression_shape (borrow-shared ast) (borrow-shared nodes) row
-					inline_depth (borrow-mut scratch)))
+					inline_depth (bool false) (borrow-mut scratch)))
 				(then (return (bool false))))
 			(let root (call expression_root (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
 			(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) root

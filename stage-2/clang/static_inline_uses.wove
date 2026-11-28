@@ -1,0 +1,124 @@
+(module clang_static_inline_uses
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Check that a copied static helper is used only as a direct callee.")
+
+	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_name_key)))
+	(use wove-file "./native_replay.wove" (only has_kind same_field static_return_expression
+		(value call_kind) (value cast_kind) (value cast_key) (value decay_cast) (value function_kind)
+		(value paren_kind) (value reference_kind)))
+	(use wove-file "../json/reader.wove" (only (type JsonNode) json_parse))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+
+	(let reference_field "\"referencedDecl\"")
+
+	(fn first_operand_parent
+		(:doc "Resolve an expression's enclosing node only when it is the first operand.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let children (struct:get (nodes.get row) parent))
+			(if children.ltz (then (return -1i32)))
+			(let parent (struct:get (nodes.get children) parent))
+			(let first (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) parent (borrow-mut scratch)))
+			(if (first.eq row) (then (return parent)))
+			(return -1i32)))
+
+	(fn parent_past_parentheses
+		(:doc "Skip only parentheses around an already located operand.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let-mut parent (call first_operand_parent (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(while
+				(:doc "Each step goes to the parent expression without changing operand position.")
+				(call has_kind (borrow-shared ast) (borrow-shared nodes) parent
+					(borrow-shared paren_kind) (borrow-mut scratch))
+				(body (set parent (call first_operand_parent (borrow-shared ast) (borrow-shared nodes) parent (borrow-mut scratch)))))
+			(return parent)))
+
+	(fn direct_call_use
+		(:doc "A function may decay to a pointer only in the callee position of a direct call.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(if (bool:not (call has_kind (borrow-shared ast) (borrow-shared nodes) row
+				(borrow-shared reference_kind) (borrow-mut scratch))) (then (return (bool false))))
+			(let cast (call parent_past_parentheses (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(let conversion (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) cast
+				(borrow-shared cast_key) (borrow-mut scratch)))
+			(if
+				(:doc "Explicit address-taking, pointer conversions, and value escapes are outside the safe call form.")
+				(bool:not (bool:and
+					(call has_kind (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared cast_kind) (borrow-mut scratch))
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) conversion (borrow-shared decay_cast))))
+				(then (return (bool false))))
+			(let parent (call parent_past_parentheses (borrow-shared ast) (borrow-shared nodes) cast (borrow-mut scratch)))
+			(return (call has_kind (borrow-shared ast) (borrow-shared nodes) parent (borrow-shared call_kind) (borrow-mut scratch)))))
+
+	(fn static_inline_uses_safe
+		(:doc "Reject non-call references to the admitted static helpers in the full emitted unit.")
+		(params (ast (shared-array u8)) (nodes (mut-array JsonNode))) (returns bool)
+		(body
+			(let parsed (call json_parse (borrow-shared ast) (borrow-mut nodes)))
+			(if (u32:not-eqz parsed/error) (then (return (bool false))))
+			(let-mut scratch (array:alloc u8 24i32))
+			(let first (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(let-mut row first)
+			(let-mut capacity 0i32)
+			(while
+				(:doc "The top-level declaration count bounds the helper name table.")
+				row.not-ltz
+				(body
+					(set capacity capacity.inc)
+					(set row (struct:get (nodes.get row) next_sibling))))
+			(let allocated (array:try-alloc i32 capacity))
+			(if allocated.is-null (then (return (bool false))))
+			(let-mut names (move allocated.unwrap))
+			(let-mut count 0i32)
+			(set row first)
+			(while
+				(:doc "Collect only functions admitted by the header's static-inline rule.")
+				row.not-ltz
+				(body
+					(if
+						(:doc "Several Clang IDs can name one function after redeclaration. Check references by C spelling.")
+						(bool:and (call has_kind (borrow-shared ast) (borrow-shared nodes) row
+								(borrow-shared function_kind) (borrow-mut scratch))
+							(i32:not-ltz (call static_return_expression (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch))))
+						(then
+							(let name (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+								(borrow-shared clang_name_key) (borrow-mut scratch)))
+							(if name.ltz (then (return (bool false))))
+							(names.set count name)
+							(set count count.inc)))
+					(set row (struct:get (nodes.get row) next_sibling))))
+			(if count.eqz (then (return (bool false))))
+			(for
+				(:doc "Filter the flat JSON table by Clang's reference field before examining any declaration.")
+				(let index) (range 0i32 parsed/rows)
+				(body
+					(let entry (nodes.get index))
+					(if
+						(:doc "Only a function reference can observe a helper's local identity.")
+						(bool:and (u32:eq entry/kind 1u32)
+							(bool:and (call same_bytes (borrow-shared ast) entry/key_start entry/key_end
+									(borrow-shared reference_field) 0i32 reference_field.len)
+								(call has_kind (borrow-shared ast) (borrow-shared nodes) index
+									(borrow-shared function_kind) (borrow-mut scratch))))
+						(then
+							(let name (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) index
+								(borrow-shared clang_name_key) (borrow-mut scratch)))
+							(for
+								(:doc "An admitted helper may only be the direct callee. Any other use selects serial C.")
+								(let position) (range 0i32 count)
+								(body
+									(let helper (names.get position))
+									(if
+										(:doc "Resolve the use in this unit without depending on a Clang pointer ID.")
+										(bool:and (call same_field (borrow-shared ast) (borrow-shared nodes) name helper)
+											(bool:not (call direct_call_use (borrow-shared ast) (borrow-shared nodes) entry/parent
+												(borrow-mut scratch))))
+										(then (return (bool false))))))))))
+			(return (bool true))))
+)
