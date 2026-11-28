@@ -65,9 +65,10 @@ Use `(embed "./data.bin")` at module or function scope to read a file at
 compile time as a static `(shared-array u8)`. Relative paths start at the
 module containing the embed.
 
-A named `struct` has scalar fields of the types above. Use `struct.new` to
-supply every field exactly once and `struct.get` to read fields. Records copy
-by value and keep their defining identity, including through import aliases.
+A named `struct` has scalar fields or nested Wove records, including
+records selected through imports. Use `struct.new` to supply every field
+exactly once and `struct.get` to read fields. Records copy by value and keep
+their defining identity, including through import aliases.
 
 ## Control flow and ownership
 
