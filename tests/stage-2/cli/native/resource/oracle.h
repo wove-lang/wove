@@ -4,6 +4,7 @@
 #ifndef WOVE_TEST_RESOURCE_ORACLE_H
 #define WOVE_TEST_RESOURCE_ORACLE_H
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -67,5 +68,35 @@ static inline FixtureWho fixture_optional_usage_scope(void)
 	return TEST_MEMBER;
 }
 #endif
+
+
+/* Seed distinct signed-long counters when the native header exposes them. */
+static inline void fixture_seed_counters(struct rusage *value)
+{
+#if defined(__linux__) || (defined(__APPLE__) && __DARWIN_C_LEVEL >= __DARWIN_C_FULL)
+	value->ru_maxrss = LONG_MAX - 0;
+	value->ru_ixrss = LONG_MAX - 1;
+	value->ru_idrss = LONG_MAX - 2;
+	value->ru_isrss = LONG_MAX - 3;
+	value->ru_minflt = LONG_MAX - 4;
+	value->ru_majflt = LONG_MAX - 5;
+	value->ru_nswap = LONG_MAX - 6;
+	value->ru_inblock = LONG_MAX - 7;
+	value->ru_oublock = LONG_MAX - 8;
+	value->ru_msgsnd = LONG_MAX - 9;
+	value->ru_msgrcv = LONG_MAX - 10;
+	value->ru_nsignals = LONG_MAX - 11;
+	value->ru_nvcsw = LONG_MAX - 12;
+	value->ru_nivcsw = LONG_MAX - 13;
+#else
+	(void)value;
+#endif
+}
+
+/* Use the exact native value as the oracle for each Wove field. */
+static inline bool fixture_counter_value(int32_t index, long value)
+{
+	return value == LONG_MAX - index;
+}
 
 #endif
