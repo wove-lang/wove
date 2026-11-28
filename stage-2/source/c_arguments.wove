@@ -6,11 +6,12 @@
 	Resolve directives against the checked formal parameters. Store one
 	native argument contract per formal and retain the original span of a bad contract.`)
 
-	(use wove-file "./scan.wove" (only (type SourceNode)))
+	(use wove-file "./scan.wove" (only (type SourceNode) (type Token)))
+	(use wove-file "./strings.wove" (only decode_string))
 	(use wove-file "./module.wove" (only form_parts next_form_metadata source_keyword (type FormParts)))
 	(use wove-file "./types.wove" (only source_builtin_type reference_mode))
 	(use wove-file "./owned.wove" (only is_byte_owner_descriptor))
-	(use wove-file "./c_owners.wove" (only is_native_name))
+	(use wove-file "./c_owners.wove" (only is_native_name is_c_pointer_spelling read_c_type_form))
 	(use wove-file "./c_markers.wove" (only matches_pragma (value macro_directive)))
 	(use wove-file "./c_formals.wove" (only next_c_value_formal))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -18,7 +19,7 @@
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "../c/arguments.wove"
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
-			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode) (value c_storage_init_always_mode) (value c_nullable_native_reference_mode)
+			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode) (value c_record_storage_mode) (value c_storage_init_always_mode) (value c_nullable_native_reference_mode)
 			c_storage_shared_mode (value c_nullable_storage_shared_mode)
 			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_string_offset_mode) (value c_terminated_array_mode) (value c_terminated_array_offset_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode) (value c_nullable_sync_callback_mode) is_c_sync_callback_mode))
 
@@ -30,6 +31,7 @@
 
 	(let array_directive "c_array")
 	(let void_pointer_directive "c_void_ptr")
+	(let record_storage_directive "c_record_storage")
 	(let vector_directive "c_cstrs")
 	(let static_string_directive "c_static_cstr")
 	(let callback_directive "c_callback_sync")
@@ -234,6 +236,14 @@
 						(u32:gtz (call c_byte_slice_type (borrow-shared source) (borrow-shared nodes)
 							type (bool true))))))))
 			(if
+				(:doc "An explicit storage pointer lends only a mutable complete native record.")
+				(u8:eq mode c_record_storage_mode)
+				(then
+					(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) type))
+					(return (bool:and formal/record_reference
+						(u32:eq (call reference_mode (borrow-shared source) (borrow-shared nodes)
+							parts/head) 2u32)))))
+			(if
 				(:doc "Only a written callback signature can use the synchronous callback contract.")
 				(mode.eq c_sync_callback_mode)
 				(then (return (call is_c_callback_type (borrow-shared source) (borrow-shared nodes) type))))
@@ -373,10 +383,11 @@
 				(call accepts_c_null mode)
 				(then (return (call checked_c_arguments 0i32 0i32 1i32 (bool false) 0i32))))
 			(if
-				(:doc "The final contract table records vectors, initializers, and void pointers.")
+				(:doc "These contracts carry no counted conversion or extent check.")
 				(bool:or (bool:or (mode.eq c_void_pointer_mode) (mode.eq c_shared_handle_slot_mode))
-					(bool:or (bool:or (call is_c_init_mode mode) (call is_c_vector_mode mode))
-						(bool:or (mode.eq c_owner_marker_flag_mode) (mode.eq c_string_offset_mode))))
+					(bool:or (mode.eq c_record_storage_mode)
+						(bool:or (bool:or (call is_c_init_mode mode) (call is_c_vector_mode mode))
+							(bool:or (mode.eq c_owner_marker_flag_mode) (mode.eq c_string_offset_mode)))))
 				(then (return (call checked_c_arguments 0i32 0i32 0i32 (bool false) 0i32))))
 			(return (call checked_c_arguments 1i32 0i32 0i32 (bool false) 0i32))))
 
@@ -684,6 +695,51 @@
 			(return (call reserve_c_argument (borrow-mut contracts) output
 				mode -1i32 input/position))))
 
+	(fn read_c_record_storage
+		(:doc "Bind an exclusive complete-record formal and its explicit C storage pointer spelling.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32)
+			(directive SourceNode) (begin i32) (contracts (mut-array CArgument)))
+		(returns CArguments)
+		(body
+			(if
+				(:doc "The directive requires both the formal name and the native type.")
+				(i32:ltz begin)
+				(then (return (call c_argument_error_at directive))))
+			(let name (nodes.get begin))
+			(let spelling name/next_sibling)
+			(if
+				(:doc "The native type must be the only operand following the formal.")
+				(i32:ltz spelling)
+				(then (return (call c_argument_error_at directive))))
+			(let type (nodes.get spelling))
+			(if
+				(:doc "Reject any additional operand at the directive.")
+				(i32:not-ltz type/next_sibling)
+				(then (return (call c_argument_error_at directive))))
+			(let formal (call find_c_formal (borrow-shared source) (borrow-shared nodes)
+				first name c_record_storage_mode (borrow-shared contracts)))
+			(if
+				(:doc "An invalid loan points to the formal name or its defining type.")
+				(i32:ltz formal/position)
+				(then (return (call c_argument_error formal/start formal/end))))
+			(let native (call read_c_type_form (borrow-shared source) (borrow-shared nodes) type))
+			(if
+				(:doc "Keep the c-type reader's original failure location.")
+				(u32:gtz native/error)
+				(then (return (call c_argument_error native/start native/end))))
+			(let literal (nodes.get native/native))
+			(let-mut text (array:alloc u8 (i32:sub literal/end literal/start)))
+			(let decoded (call decode_string (borrow-shared source)
+				(struct:new Token (kind 2u32) (start literal/start) (end literal/end) (error 0u32))
+				(borrow-mut text)))
+			(if
+				(:doc "The carrier type spells at least one pointer star after the native type name.")
+				(bool:or (u32:gtz decoded/error)
+					(bool:not (call is_c_pointer_spelling (borrow-shared (text.range 0i32 decoded/written)))))
+				(then (return (call c_argument_error_at literal))))
+			(return (call reserve_c_argument (borrow-mut contracts) formal
+				c_record_storage_mode native/native -1i32))))
+
 	(fn read_c_directive
 		(:doc `Dispatch the recognized argument directives in the checked pragma stream.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32)
@@ -736,6 +792,11 @@
 				(call matches_pragma (borrow-shared source) name (borrow-shared terminated_array_offset_directive))
 				(then (return (call read_c_end_offset (borrow-shared source) (borrow-shared nodes)
 					first node begin c_terminated_array_offset_mode (borrow-mut contracts)))))
+			(if
+				(:doc "An explicit record storage pointer carries a native type operand.")
+				(call matches_pragma (borrow-shared source) name (borrow-shared record_storage_directive))
+				(then (return (call read_c_record_storage (borrow-shared source) (borrow-shared nodes)
+					first node begin (borrow-mut contracts)))))
 			(let mode (call c_argument_directive (borrow-shared source) name))
 			(if
 				(:doc "Other directives leave these argument contracts untouched.")
@@ -929,19 +990,20 @@
 					(let marked (mode.eq c_marked_handle_out_mode))
 					(let void_formal (marked.or (bool:or (mode.eq c_void_pointer_mode)
 						(mode.eq c_shared_handle_slot_mode))))
+					(let checked_pointer (void_formal.or (mode.eq c_record_storage_mode)))
 					(if
 						(:doc "The sentinel flag accompanies the unmodified native i32 status.")
 						(marked.and (status.not-eq 5u32))
 						(then (return (call c_argument_error_at type))))
 					(set vectors (vectors.or vector))
-					(set void_pointer (void_pointer.or void_formal))
+					(set void_pointer (void_pointer.or checked_pointer))
 					(if
 						(:doc "Checked native pointer contracts require a matching C function prototype.")
-						(bool:and (bool:or (void_formal.or retained) (vector.or
+						(bool:and (bool:or (checked_pointer.or retained) (vector.or
 								(bool:or (call accepts_c_null mode) (call is_c_init_mode mode))))
 							(arguments/macro.or
 								(arguments/variadic.gtz.or
-									(bool:and (typed_nullable.or (void_formal.or retained))
+									(bool:and (typed_nullable.or (checked_pointer.or retained))
 										arguments/variadic.ltz))))
 						(then (return (call c_argument_error_at type))))
 					(if

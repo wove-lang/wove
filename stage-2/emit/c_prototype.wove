@@ -12,12 +12,13 @@
 	(use wove-file "../scalar/callback_types.wove" (only is_adapted_callback))
 	(use wove-file "./c_callbacks.wove" (only write_callback_pointer_type))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "./owners.wove" (only write_native_type))
 	(use wove-file "./runtime.wove" (only write_c_number write_site_number))
 	(use wove-file "../source/module.wove" (only form_parts))
 	(use wove-file "../source/c_formals.wove" (only is_c_fixed_formal c_fixed_formal_at))
-	(use wove-file "./c_formals.wove" (only write_fixed_c_type native_exact_scalar_prototype native_record_result_needs_prototype))
+	(use wove-file "./c_formals.wove" (only write_fixed_c_type native_uses_argument_mode native_exact_scalar_prototype native_record_result_needs_prototype))
 	(use wove-file "../c/arguments.wove" (only (value c_static_string_mode) (value c_string_offset_mode) (value c_terminated_array_mode) (value c_terminated_array_offset_mode) is_c_string_mode is_c_bytes_mode is_c_null_mode is_c_array_mode is_c_vector_mode
-			is_c_storage_mode is_c_storage_shared_mode is_c_handle_init_mode (value c_void_pointer_mode) (value c_shared_handle_slot_mode)
+			is_c_storage_mode is_c_storage_shared_mode is_c_handle_init_mode (value c_void_pointer_mode) (value c_shared_handle_slot_mode) (value c_record_storage_mode)
 			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_native_reference_mode)))
 	(use wove-file "../scalar/function_rows.wove" (only is_record_out_status is_record_input_hidden (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./c_record_snapshots.wove" (only write_record_snapshot_native_type))
@@ -44,6 +45,7 @@
 	(let record_scratch_type "char*")
 	(let record_result_check_open "):1,default:0),\"Wove C native record result prototype does not match its declared signature at file ")
 	(let borrow_check_open "):1,default:0),\"Wove C borrowed record prototype does not match its declared signature at file ")
+	(let record_storage_check_open "):1,default:0),\"Wove C record storage pointer prototype does not match its declared signature at file ")
 	(let void_pointer_check_open "):1,default:0),\"Wove C void pointer prototype does not match its declared signature at file ")
 	(let callback_check_open "):1,default:0),\"Wove C synchronous callback prototype does not match its declared signature at file ")
 	(let static_string_check_open "):1,default:0),\"Wove C retained-string prototype does not match its declared signature at file ")
@@ -93,6 +95,11 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 		(returns u32)
 		(body
 			(let mode param/c_mode)
+			(if
+				(:doc "The record loan uses the exact explicit storage pointer in the header.")
+				(u8:eq mode c_record_storage_mode)
+				(then (return (call write_native_type (borrow-shared source) (nodes.get param/c_size)
+					(borrow-mut output) offset writing))))
 			(if
 				(:doc "An end-position formal uses a temporary pointer-out slot in the native ABI.")
 				(mode.eq c_string_offset_mode)
@@ -413,6 +420,67 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 
 	(let record_result_complete_close ") > 0,\"Wove C record result requires a complete type\");\n")
 
+	(fn write_native_prototype_return
+		(:doc "Write the native result before any Wove-side result adaptation.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(function ScalarFunction) (name SourceNode) (output (mut-array u8))
+			(cursor u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut result function/result)
+			(if
+				(:doc "The caller-backed view captures the native i32 return as a separate Wove status.")
+				function/return_scratch.not-ltz
+				(then (set result 5u32)))
+			(if
+				(:doc "The native pointer can refer to writable storage while Wove exposes only a shared borrow.")
+				(call is_optional_record_borrow result)
+				(then (set result (call optional_record_borrow_reference result (bool true)))))
+			(if
+				(:doc "A snapshot's Wove owner type differs from the native return type.")
+				function/c_snapshot
+				(then
+					(if
+						(:doc "A record projection verifies the native pointer type declared in its mapping.")
+						function/c_snapshot_record.not-ltz
+						(then (return (call write_record_snapshot_native_type (borrow-shared source)
+							(borrow-shared nodes) function/c_snapshot_record
+							(borrow-mut output) cursor writing))))
+					(return (call write_snapshot_prototype_result (borrow-shared source)
+						(borrow-shared nodes) name function/c_formals
+						(borrow-mut output) cursor writing))))
+			(return (call write_value_type (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) result (borrow-mut output) cursor name_prefix writing))))
+
+	(let empty_prototype_match "(*)(void):0,")
+	(let nonempty_prototype_close "default:1),\"Wove C record storage pointer requires a nonempty native prototype at file ")
+
+	(fn write_nonempty_prototype_check
+		(:doc "Reject a C declaration without parameter types. Before C23, its type can match both the record signature and a prototype with no parameters.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(function ScalarFunction) (name SourceNode) (output (mut-array u8))
+			(offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_literal_text (borrow-shared check_open) (borrow-mut output) offset writing))
+			(let symbol (call c_symbol_text (borrow-shared source) name (borrow-mut output) open writing))
+			(let-mut cursor (call c_literal_text (borrow-shared after_name) (borrow-mut output) symbol writing))
+			(set cursor (call write_native_prototype_return (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) function name (borrow-mut output) cursor name_prefix writing))
+			(set cursor (call c_literal_text (borrow-shared empty_prototype_match) (borrow-mut output) cursor writing))
+			(if
+				(:doc "Reject an unprototyped declaration with either borrowed result qualification.")
+				(call is_optional_record_borrow function/result)
+				(then
+					(set cursor (call write_value_type (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) function/result (borrow-mut output) cursor name_prefix writing))
+					(set cursor (call c_literal_text (borrow-shared empty_prototype_match)
+						(borrow-mut output) cursor writing))))
+			(set cursor (call c_literal_text (borrow-shared nonempty_prototype_close)
+				(borrow-mut output) cursor writing))
+			(return (call write_prototype_site (nodes.get function/declaration) function
+				(borrow-mut output) cursor writing))))
+
 	(fn write_c_prototype_check
 		(:doc `Require the header to match the complete fixed signature or the variadic prefix and ellipsis.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
@@ -440,35 +508,18 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 						(borrow-shared records) function/result (borrow-mut output) open name_prefix writing))
 					(set cursor (call c_literal_text (borrow-shared record_result_complete_close)
 						(borrow-mut output) type writing))))
+			(let record_storage (call native_uses_argument_mode (borrow-shared parameters) function c_record_storage_mode))
+			(if
+				(:doc "Compatibility with the full signature alone admits old C declarations with unspecified parameters.")
+				record_storage
+				(then (set cursor (call write_nonempty_prototype_check (borrow-shared source) (borrow-shared nodes)
+					(borrow-shared records) function name (borrow-mut output) cursor name_prefix writing))))
 			(set cursor (call c_literal_text (borrow-shared check_open) (borrow-mut output) cursor writing))
 			(set cursor (call c_symbol_text (borrow-shared source) name
 				(borrow-mut output) cursor writing))
 			(set cursor (call c_literal_text (borrow-shared after_name) (borrow-mut output) cursor writing))
-			(let-mut result function/result)
-			(if
-				(:doc "The caller-backed view captures the native i32 return as a separate Wove status.")
-				function/return_scratch.not-ltz
-				(then (set result 5u32)))
-			(if
-				(:doc "The native pointer can refer to writable storage while Wove exposes only a shared borrow.")
-				(call is_optional_record_borrow result)
-				(then (set result (call optional_record_borrow_reference result (bool true)))))
-			(if
-				(:doc "A snapshot's Wove owner type differs from the native return type.")
-				function/c_snapshot
-				(then
-					(if
-						(:doc "A record projection verifies the native pointer type declared in its mapping.")
-						function/c_snapshot_record.not-ltz
-						(then (set cursor (call write_record_snapshot_native_type (borrow-shared source)
-							(borrow-shared nodes) function/c_snapshot_record
-							(borrow-mut output) cursor writing)))
-						(else (set cursor (call write_snapshot_prototype_result (borrow-shared source)
-							(borrow-shared nodes) name function/c_formals
-							(borrow-mut output) cursor writing)))))
-				(else (set cursor (call write_value_type (borrow-shared source) (borrow-shared nodes)
-					(borrow-shared records) result
-					(borrow-mut output) cursor name_prefix writing))))
+			(set cursor (call write_native_prototype_return (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) function name (borrow-mut output) cursor name_prefix writing))
 			(set cursor (call c_literal_text (borrow-shared before_formals) (borrow-mut output) cursor writing))
 			(set cursor (call write_c_prototype_formals
 				(borrow-shared source) (borrow-shared nodes) (borrow-shared records)
@@ -495,6 +546,13 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 				tail.eqz
 				(then
 					(let site (nodes.get function/declaration))
+					(if
+						(:doc "Identify a mismatch involving a complete record's explicit carrier pointer.")
+						record_storage
+						(then
+							(let open (call c_literal_text (borrow-shared record_storage_check_open)
+								(borrow-mut output) cursor writing))
+							(return (call write_prototype_site site function (borrow-mut output) open writing))))
 					(if
 						(:doc "Require the exact prototype for a call holding terminated native elements.")
 						(call native_terminated_arrays (borrow-shared parameters) function)
