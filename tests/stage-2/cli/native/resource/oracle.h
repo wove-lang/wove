@@ -380,6 +380,12 @@ _Static_assert(RUSAGE_INFO_CURRENT == RUSAGE_INFO_V5, "current rusage flavor");
 _Static_assert(_Generic((rusage_info_current *)0, struct rusage_info_v5 *: 1, default: 0), "current rusage v5");
 #endif
 
+// Read a UUID byte from the original native record with the C field type.
+static inline uint8_t fixture_proc_uuid_last(const struct rusage_info_v0 *record)
+{
+	return record->ri_uuid[15];
+}
+
 // Compare imported values against the matching native header constants.
 static inline bool fixture_proc_usage_values(int v0, int v1, int v2, int v3, int v4, int v5,
 	int current, int reslide)
