@@ -41,7 +41,7 @@
 	(use wove-file "../emit/names.wove" (only module_identity function_identity parameter_identity))
 	(use wove-file "./binding_names.wove" (only module_binding_key))
 	(use wove-file "../hashing/fnv1a.wove" (only (value fnv1a_seed)))
-	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null c_null_argument_kind
+	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null accepts_c_null_value c_null_argument_kind
 		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode c_handle_mut_mode is_c_exclusive_owner_mode
 		is_c_storage_mode is_c_storage_init_mode is_c_handle_init_mode is_c_consuming_mode (value c_open_variadic_tail) (value c_shared_handle_slot_mode)
 		(value c_static_string_mode) (value c_static_string_argument) (value c_macro_integer_argument)))
@@ -80,7 +80,7 @@
 	(use wove-file "./constants.wove" (only constant_operation register_standalone_constants fold_i32 constant_check))
 	(use wove-file "./fixed.wove" (only plan_fixed_slice_loan plan_fixed_initializer seed_fixed_initializer finish_heap_fixed_access finish_owned_fixed_access finish_fixed_access))
 	(use wove-file "./flow.wove" (only block_statement pending_statement statement_exit_state moved_owner after_block is_loop is_loop_exit is_c_value_binding is_iteration_binding is_writable_local (type ScalarStatement)
-			(value c_writable_binding) (value c_value_expression) (value c_lossless_macro_binding) (value c_lossless_value_expression) (value c_value_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
+			(value c_writable_binding) (value c_value_expression) (value c_lossless_macro_binding) (value c_null_value_binding) (value c_lossless_value_expression) (value c_value_snapshot_expression) (value c_value_assignment) (value c_handle_reference)
 			(value fixed_shared_loan) (value fixed_mut_loan) (value field_assignment) (value parameter_assignment) (value owner_assignment) (value owner_field_assignment) (value case_payload_binding)
 			(value next_path) (value break_path) (value continue_path) (value break_statement) (value for_statement) (value for_source_owner) (value for_mut_binding) (value for_element_assignment)))
 	(use wove-file "./conditional.wove" (only plan_conditional finish_conditional_value conditional_transfer_reaches is_pending_value
@@ -1303,6 +1303,10 @@
 						(i32:ltz module_binding)
 						(then (return (call entry_at name -1i32 34u32))))
 					(let declaration (statements.get module_binding))
+					(if
+						(:doc "A native null constant can only enter a call through a nullable formal.")
+						(u32:eq (declaration.get kind) c_null_value_binding)
+						(then (return (call entry_at node -1i32 24u32))))
 					(let actual (declaration.get type))
 					(if
 						(:doc "Native byte strings use static views. Other native values keep their C expression.")
@@ -1988,6 +1992,36 @@
 					(i32:sub start base) (i32:sub end base) (bool false)))
 			(return (call entry_at argument index 0u32))))
 
+	(fn find_c_null_operand
+		(:doc "Resolve a selected null constant while respecting lexical and generic bindings.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
+			(index i32) (statement i32) (name SourceNode) (parameters (shared-array ScalarParameter))
+			(statements (shared-array ScalarStatement)) (expressions (shared-array ScalarExpression)))
+		(returns i32)
+		(body
+			(if
+				(:doc "Only a bare unannotated name can select a null constant directly.")
+				(bool:or (u32:not-eq (name.get kind) 1u32) (u8:not-eqz (name.get generic_kind)))
+				(then (return -1i32)))
+			(let root (statements.get (caller.get tree_base)))
+			(let defining (call find_module_binding (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared statements) (root.get first) name))
+			(if
+				(:doc "The original bridge declaration supplies the native name and the null contract.")
+				(bool:or (i32:ltz defining)
+					(u32:not-eq (struct:get (statements.get defining) kind) c_null_value_binding))
+				(then (return -1i32)))
+			(if
+				(:doc "Case payloads, locals, and parameters take precedence over an imported name.")
+				(bool:or (i32:not-ltz (call find_match_binding (borrow-shared source) (borrow-shared nodes)
+					(borrow-shared statements) (borrow-shared expressions) index statement name))
+					(bool:or (i32:not-ltz (call find_local (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared statements) (caller.get first_statement) statement name))
+						(i32:not-ltz (call find_function_parameter (borrow-shared source) (borrow-shared nodes)
+							caller (borrow-shared parameters) name))))
+				(then (return -1i32)))
+			(return (struct:get (statements.get defining) target))))
+
 	(fn plan_call
 		(:doc `Resolve the callee and seed each argument from its formal type.
 
@@ -2133,10 +2167,17 @@
 						(then (set returned_scratch argument)))
 					(let operand (nodes.get argument))
 					(let mode (param.get c_mode))
-					(let null (bool:and (call accepts_c_null mode)
+					(let-mut native_null -1i32)
+					(if
+						(:doc "Only a fixed c_nullable formal accepts a selected C null constant.")
+						(call accepts_c_null_value mode)
+						(then (set native_null (call find_c_null_operand (borrow-shared source) (borrow-shared nodes)
+							caller argument statement operand (borrow-shared parameters)
+							(borrow-shared statements) (borrow-shared expressions)))))
+					(let null (bool:or (i32:not-ltz native_null) (bool:and (call accepts_c_null mode)
 						(bool:and (u32:eq (operand.get kind) 1u32)
 							(call same_bytes (borrow-shared source) (operand.get start) (operand.get end)
-								(borrow-shared null_literal) 0i32 null_literal.len))))
+								(borrow-shared null_literal) 0i32 null_literal.len)))))
 					(if
 						(:doc "A null-only slot cannot take caller-owned storage.")
 						(bool:and (call is_c_null_mode mode) (bool:not null))
@@ -2168,7 +2209,7 @@
 												(then (return checked))))
 										(else
 											(expressions.set argument
-												(call expression_row (call c_null_argument_kind) 0u32 -1i32 -1i32 0i32 0i32 (bool false))))))
+												(call expression_row (call c_null_argument_kind) 0u32 native_null -1i32 0i32 0i32 (bool false))))))
 								(else
 									(let-mut argument_type (param.get type))
 									(let-mut native_formal -1i32)

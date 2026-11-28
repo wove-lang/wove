@@ -1,0 +1,227 @@
+(module driver_null_calls
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Verify each emitted native null operand before publishing C or starting a binary build.")
+
+	(use wove-file "../clang/nulls.wove" (only expected_null_witnesses observe_null_witnesses unverified_null_witness))
+	(use wove-file "../clang/query.wove" (only (type QuerySite)))
+	(use wove-file "../clang/run.wove" (only run_clang_null_ast))
+	(use wove-file "../io/temporary.wove" (only create_temporary_directory))
+	(use wove-file "../json/reader.wove" (only json_parse (type JsonNode)))
+	(use wove-file "../source/paths.wove" (only (type SuppliedFile)))
+	(use wove-file "../scalar/trees.wove" (only source_span_owner))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use wove-file "./arguments.wove" (only write_plain_argument))
+	(use wove-file "./bin/debug.wove" (only stage_debug_source))
+	(use wove-file "./bin/staged.wove" (only numbered_probe_arguments))
+	(use wove-file "./bin/units.wove" (only staged_unit_path))
+	(use wove-file "./clang.wove" (only clang_program))
+	(use wove-file "./files.wove" (only file_stamp read_source_file))
+	(use wove-file "./null_values.wove" (only (value invalid_null_value)))
+	(use wove-file "./output.wove" (only (value native_runtime_header)))
+	(use wove-file "./paths.wove" (only directory_width))
+	(use wove-file "./publication.wove" (only stage_file))
+	(use c-header "<unistd.h>" (only unlink rmdir))
+
+	(struct NullSiteCheck (fields (site QuerySite) (error u32)))
+	(let proof_directory "/wove-null.XXXXXX")
+	(let proof_file "/main.c")
+	(let runtime_header_file "/wove_runtime.h")
+	(let quote_option "-iquote")
+
+	(fn null_check
+		(:doc "Translate a checked operand row to the file-local diagnostic span.")
+		(params (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode))
+			(row i32) (error u32)) (returns NullSiteCheck)
+		(body
+			(if
+				(:doc "Setup and cleanup failures may occur outside any specific operand.")
+				(i32:ltz row)
+				(then (return (struct:new NullSiteCheck
+					(site (struct:new QuerySite (file 0i32) (start 0i32) (end 0i32))) (error error)))))
+			(let node (nodes.get row))
+			(let start (node.get start))
+			(let file (call source_span_owner (borrow-shared files) start 0i32))
+			(let base (struct:get (files.get file) source_start))
+			(return (struct:new NullSiteCheck (site (struct:new QuerySite (file file)
+				(start (i32:sub start base)) (end (i32:sub (node.get end) base)))) (error error)))))
+
+	(fn check_null_ast
+		(:doc "Capture one Clang AST for all of this unit's original macro expansions.")
+		(params (options (shared-array u8)) (path (shared-array u8)) (first i32)
+			(files (shared-array SuppliedFile)) (nodes (shared-array SourceNode)) (claims (mut-array u8)))
+		(returns NullSiteCheck)
+		(body
+			(let program (call clang_program))
+			(let-mut width 1048576i32)
+			(while
+				(:doc "Retry only insufficient capture or parse storage.")
+				(i32:lt width 134217728i32)
+				(body
+					(let-mut capture (array:alloc u8 width))
+					(let-mut trace (array:alloc u8 1048576i32))
+					(let result (call run_clang_null_ast (borrow-shared program) (borrow-shared options)
+						(borrow-shared path) (borrow-mut capture) (borrow-mut trace)))
+					(let error (result.get error))
+					(if
+						(:doc "A full stdout capture can be retried without treating it as a proof result.")
+						(u32:eq error 5u32)
+						(then
+							(set width (i32:add width width))
+							(continue)))
+					(if
+						(:doc "Preserve the frontend failure and associate it with the first affected operand.")
+						(u32:gtz error)
+						(then
+							(let status (if (u32:eq error 4u32) (then 72u32) (else 75u32)))
+							(return (call null_check (borrow-shared files) (borrow-shared nodes) first status))))
+					(let-mut ast_nodes (array:alloc JsonNode (i32:div width 16i32)))
+					(let ast (borrow-shared (capture.range 0i32 (result.get length))))
+					(let parsed (call json_parse (borrow-shared ast) (borrow-mut ast_nodes)))
+					(let syntax (parsed.get error))
+					(if
+						(:doc "Exhausted row storage is retryable. Malformed AST output is a failed proof.")
+						(u32:eq syntax 11u32)
+						(then
+							(set width (i32:add width width))
+							(continue)))
+					(if (u32:gtz syntax) (then (return (call null_check (borrow-shared files) (borrow-shared nodes) first 73u32))))
+					(call observe_null_witnesses (borrow-shared ast) (borrow-shared ast_nodes)
+						(parsed.get rows) (borrow-mut claims))
+					(let failed (call unverified_null_witness (borrow-shared claims)))
+					(let status (if (i32:ltz failed) (then 0u32) (else invalid_null_value)))
+					(return (call null_check (borrow-shared files) (borrow-shared nodes) failed status))))
+			(return (call null_check (borrow-shared files) (borrow-shared nodes) first 74u32))))
+
+	(fn check_null_source
+		(:doc "Skip unaffected units and require each emitted operand's witness in affected units.")
+		(params (options (shared-array u8)) (path (shared-array u8)) (source (shared-array u8))
+			(files (shared-array SuppliedFile)) (nodes (shared-array SourceNode)))
+		(returns NullSiteCheck)
+		(body
+			(let-mut claims (array:alloc u8 nodes.len))
+			(let first (call expected_null_witnesses (borrow-shared source) (borrow-mut claims)))
+			(if (i32:ltz first) (then (return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 0u32))))
+			(return (call check_null_ast (borrow-shared options) (borrow-shared path) first
+				(borrow-shared files) (borrow-shared nodes) (borrow-mut claims)))))
+
+	(fn check_staged_null_source
+		(:doc "Stage the fully emitted serial unit at its native source path for the duration of the proof.")
+		(params (options (shared-array u8)) (path (shared-array u8)) (debug_source (shared-array u8))
+			(source (shared-array u8))
+			(files (shared-array SuppliedFile)) (nodes (shared-array SourceNode)))
+		(returns NullSiteCheck)
+		(body
+			(let saved (if
+				(:doc "Use the debug translation unit's logical filename and line directive when present.")
+				(i32:gtz debug_source.len)
+				(then (call stage_debug_source (borrow-shared path) (borrow-shared debug_source) (borrow-shared source)))
+				(else (call stage_file (borrow-shared path) (borrow-shared source)))))
+			(if
+				(:doc "Private staging must finish before the frontend sees the unit.")
+				(bool:not saved)
+				(then (return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 75u32))))
+			(let checked (call check_null_source (borrow-shared options) (borrow-shared path)
+				(borrow-shared source) (borrow-shared files) (borrow-shared nodes)))
+			(let status (call unlink (borrow-shared path)))
+			(if
+				(:doc "A failed cleanup prevents later publication into the same private path.")
+				(bool:and (u32:eqz (checked.get error)) (i32:not-eqz status))
+				(then (return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 75u32))))
+			(return checked)))
+
+	(fn retained_null_options
+		(:doc "Let a private check-only unit find the entry's private header directory as a final quote fallback.")
+		(params (options (shared-array u8)) (canonical (shared-array u8)))
+		(returns (owned-array u8))
+		(body
+			(let folder (call directory_width (borrow-shared canonical)))
+			(let extra (i32:add folder (i32:add 2i32 quote_option.len)))
+			(let size options.len)
+			(if
+				(:doc "Available option storage must hold both complete packed arguments.")
+				(bool:or (i32:eqz folder) (i32:lt (i32:sub 2147483647i32 extra) size))
+				(then (return (array:alloc u8 0i32))))
+			(let-mut extended (array:alloc u8 (i32:add size extra)))
+			(let start (call append_bytes (borrow-shared options) (borrow-mut extended) 0i32))
+			(let path (call write_plain_argument (borrow-shared quote_option) (borrow-mut extended) start))
+			(let end (call write_plain_argument (borrow-shared (canonical.range 0i32 folder))
+				(borrow-mut extended) path))
+			(if (i32:ltz end) (then (return (array:alloc u8 0i32))))
+			(return (move extended))))
+
+	(fn proof_path
+		(:doc "Append a fixed private filename to a directory created by the driver.")
+		(params (directory (shared-array u8)) (suffix (shared-array u8))) (returns (owned-array u8))
+		(body
+			(let-mut path (array:alloc u8 (i32:add directory.len suffix.len)))
+			(let next (call append_bytes (borrow-shared directory) (borrow-mut path) 0i32))
+			(let end (call append_bytes (borrow-shared suffix) (borrow-mut path) next))
+			(return (move path))))
+
+	(fn check_serial_nulls
+		(:doc "Prove calls against the compiler's native source path, staging a private runtime header for retained C.")
+		(params (options (shared-array u8)) (staged (shared-array u8)) (canonical (shared-array u8))
+			(debug_source (shared-array u8)) (source (shared-array u8)) (files (shared-array SuppliedFile)) (nodes (shared-array SourceNode)))
+		(returns NullSiteCheck)
+		(body
+			(if
+				(:doc "The native build owns an existing stage and its real runtime header.")
+				(i32:gtz staged.len)
+				(then (return (call check_staged_null_source (borrow-shared options) (borrow-shared staged)
+					(borrow-shared debug_source) (borrow-shared source) (borrow-shared files) (borrow-shared nodes)))))
+			(let packed (call retained_null_options (borrow-shared options) (borrow-shared canonical)))
+			(let directory (call create_temporary_directory (borrow-shared proof_directory)))
+			(if
+				(:doc "Do not let a bad temporary path or option block start Clang.")
+				(i32:eqz directory.len)
+				(then (return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 75u32))))
+			(let path (call proof_path (borrow-shared directory) (borrow-shared proof_file)))
+			(let header (call proof_path (borrow-shared directory) (borrow-shared runtime_header_file)))
+			(let checked (if (bool:and (i32:gtz packed.len)
+				(call stage_file (borrow-shared header) (borrow-shared native_runtime_header)))
+				(then (call check_staged_null_source (borrow-shared packed) (borrow-shared path)
+					(borrow-shared debug_source) (borrow-shared source) (borrow-shared files) (borrow-shared nodes)))
+				(else (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 75u32))))
+			(let removed_header (call unlink (borrow-shared header)))
+			(let removed_directory (call rmdir (borrow-shared directory)))
+			(if
+				(:doc "Remove all temporary C inputs before returning success.")
+				(bool:and (u32:eqz (checked.get error))
+					(bool:or (i32:not-eqz removed_header) (i32:not-eqz removed_directory)))
+				(then (return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 75u32))))
+			(return checked)))
+
+	(fn check_numbered_nulls
+		(:doc "Verify each affected numbered body using the exact private file and frontend argument order.")
+		(params (options (shared-array u8)) (staged (shared-array u8)) (count i32) (library bool)
+			(files (shared-array SuppliedFile)) (nodes (shared-array SourceNode)))
+		(returns NullSiteCheck)
+		(body
+			(let packed (call numbered_probe_arguments (borrow-shared options) (borrow-shared staged) library))
+			(if
+				(:doc "An unavailable numbered option block cannot prove a native call.")
+				(i32:eqz packed.len)
+				(then (return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 75u32))))
+			(for
+				(:doc "A body without selected null operands does not require a separate Clang capture.")
+				(let ordinal) (range 0i32 count)
+				(body
+					(let path (call staged_unit_path (borrow-shared staged) ordinal))
+					(let stamp (call file_stamp (borrow-shared path)))
+					(let width (stamp.get length))
+					(if
+						(:doc "Only the complete private body can supply its witness set.")
+						(i32:ltz width)
+						(then (return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 75u32))))
+					(let-mut source (array:alloc u8 width))
+					(if
+						(:doc "An unreadable or changed private source cannot supply the expected witness set.")
+						(bool:not (call read_source_file (borrow-shared path) stamp (borrow-mut source)))
+						(then (return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 75u32))))
+					(let checked (call check_null_source (borrow-shared packed) (borrow-shared path)
+						(borrow-shared source) (borrow-shared files) (borrow-shared nodes)))
+					(if (u32:gtz (checked.get error)) (then (return checked)))))
+			(return (call null_check (borrow-shared files) (borrow-shared nodes) -1i32 0u32))))
+)

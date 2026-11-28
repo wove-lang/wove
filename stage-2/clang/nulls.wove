@@ -1,0 +1,145 @@
+(module clang_null_operands
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Match each emitted null operand with its direct Clang pointer conversion.")
+
+	(use wove-file "../c/arguments.wove" (only (value null_witness_type_prefix)))
+	(use wove-file "../json/reader.wove" (only (type JsonNode)))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
+	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_kind_key)))
+
+	(let compound_literal "\"CompoundLiteralExpr\"")
+	(let type_key "type")
+	(let qualified_type_key "qualType")
+	(let cast_key "castKind")
+	(let implicit_cast "\"ImplicitCastExpr\"")
+	(let null_cast "\"NullToPointer\"")
+	(let c_suffix " *[1]")
+	(let expected_null 1u8)
+	(let verified_null 2u8)
+	(let rejected_null 3u8)
+
+	(fn null_witness_row
+		(:doc "Parse the exact generated pointer-array type and recover its source operand row.")
+		(params (source (shared-array u8)) (start i32) (end i32)) (returns i32)
+		(body
+			(let digit (i32:add start null_witness_type_prefix.len))
+			(let last (i32:sub end c_suffix.len))
+			(if
+				(:doc "Other C declarations and other array types cannot certify a null operand.")
+				(bool:or (bool:or (i32:le last digit) (i32:lt source.len end))
+					(bool:not (bool:and
+						(call same_bytes (borrow-shared source) start digit
+							(borrow-shared null_witness_type_prefix) 0i32 null_witness_type_prefix.len)
+						(call same_bytes (borrow-shared source) last end (borrow-shared c_suffix) 0i32 c_suffix.len))))
+				(then (return -1i32)))
+			(let parsed (call read_decimal_digits (borrow-shared source) digit last 214748364u32 7u32))
+			(if (i32:ltz (parsed.get digits)) (then (return -1i32)))
+			(return (i32:from-u32 (parsed.get magnitude)))))
+
+	(fn expected_null_witnesses
+		(:doc "Record the operands actually emitted into this unit, including the numbered partition.")
+		(params (source (shared-array u8)) (claims (mut-array u8))) (returns i32)
+		(body
+			(let width null_witness_type_prefix.len)
+			(let limit (i32:sub source.len width))
+			(let-mut index 0i32)
+			(let-mut first -1i32)
+			(while
+				(:doc "A generated witness type fits its decimal row and fixed array suffix on one line.")
+				(i32:lt index limit)
+				(body
+					(let digit (i32:add index width))
+					(if
+						(:doc "Only the private witness prefix introduces one row in the claim table.")
+						(call same_bytes (borrow-shared source) index digit
+							(borrow-shared null_witness_type_prefix) 0i32 width)
+						(then
+							(let-mut end digit)
+							(while
+								(:doc "The decimal row ends before the first space in the type suffix.")
+								(bool:and (i32:lt end source.len)
+									(bool:and (u8:not-lt (source.get end) 48u8)
+										(u8:not-lt 57u8 (source.get end))))
+								(body (set end (i32:inc end))))
+							(let last (i32:add end c_suffix.len))
+							(let row (call null_witness_row (borrow-shared source) index last))
+							(if
+								(:doc "The driver supplies only rows in the original checked Wove plan.")
+								(bool:and (i32:not-ltz row) (i32:lt row claims.len))
+								(then
+									(claims.set row expected_null)
+									(if (i32:ltz first) (then (set first row)))))
+							(set index (i32:dec end))))
+					(set index (i32:inc index))))
+			(return first)))
+
+	(fn direct_null_initializer
+		(:doc "Check the only element's implicit cast. A nested cast cannot satisfy the witness.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (compound i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let initializer (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes)
+				compound (borrow-mut scratch)))
+			(let expression (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes)
+				initializer (borrow-mut scratch)))
+			(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes)
+				expression (borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(let cast (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes)
+				expression (borrow-shared cast_key) (borrow-mut scratch)))
+			(return (bool:and
+				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared implicit_cast))
+				(call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared null_cast))))))
+
+	(fn observe_null_witnesses
+		(:doc "Mark successful conversions and leave any absent witness pending for rejection.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (count i32) (claims (mut-array u8))) (returns void)
+		(body
+			(let-mut scratch (array:alloc u8 qualified_type_key.len))
+			(for
+				(:doc "Clang visits the real expanded compound literal once for each generated operand.")
+				(let node) (range 0i32 count)
+				(body
+					(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes)
+						node (borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(if
+						(:doc "Only the generated array compound literal carries a checked operand.")
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared compound_literal))
+						(then
+							(let type (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes)
+								node (borrow-shared type_key) (borrow-mut scratch)))
+							(let qualified (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes)
+								type (borrow-shared qualified_type_key) (borrow-mut scratch)))
+							(if
+								(:doc "The exact spelling is an ASCII C type enclosed in JSON quotes.")
+								(i32:not-ltz qualified)
+								(then
+									(let field (nodes.get qualified))
+									(let operand (call null_witness_row (borrow-shared ast)
+										(i32:inc (field.get start)) (i32:dec (field.get end))))
+									(if
+										(:doc "Do not accept an unrequested, repeated, or nested proof.")
+										(bool:and (i32:not-ltz operand) (i32:lt operand claims.len))
+										(then
+											(let good (bool:and (u8:eq (claims.get operand) expected_null)
+												(call direct_null_initializer (borrow-shared ast) (borrow-shared nodes)
+													node (borrow-mut scratch))))
+											(let state (if good (then verified_null) (else rejected_null)))
+											(claims.set operand state)))))))))))
+
+	(fn unverified_null_witness
+		(:doc "Find the first expected operand that never received a direct null conversion.")
+		(params (claims (shared-array u8))) (returns i32)
+		(body
+			(for
+				(:doc "Use original operand row order for a reproducible source diagnostic.")
+				(let row) (range 0i32 claims.len)
+				(body
+					(let value (claims.get row))
+					(if
+						(:doc "A missing or invalid witness identifies its original operand.")
+						(bool:or (u8:eq value expected_null) (u8:eq value rejected_null))
+						(then (return row)))))
+			(return -1i32)))
+)

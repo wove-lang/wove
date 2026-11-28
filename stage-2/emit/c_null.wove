@@ -1,0 +1,131 @@
+(module emit_c_null
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Share one native macro expansion between the call and its unevaluated null pointer witness.")
+
+	(use wove-file "../c/arguments.wove" (only c_null_argument_kind (value null_witness_type_prefix)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "./runtime.wove" (only write_c_number))
+	(use wove-file "./text.wove" (only c_byte c_literal_text c_span))
+
+	(let null_call_name "wvpr_null_call_")
+	(let null_argument_name "wvpr_null_arg_")
+	(let define_null_call "\n#define ")
+	(let wrapped_call " (")
+	(let witness_open "(void)sizeof((")
+	(let witness_type " *[1]){(")
+	(let witness_close ")}),")
+	(let wrapped_end "))\n")
+	(let parameter_phase 0u8)
+	(let witness_phase 1u8)
+	(let invocation_phase 2u8)
+
+	(fn named_null_argument
+		(:doc "Identify an imported native null operand by its original name row.")
+		(params (value ScalarExpression)) (returns bool)
+		(body (return (bool:and (u32:eq (value.get kind) (call c_null_argument_kind))
+			(i32:not-ltz (value.get target))))))
+
+	(fn call_has_named_null
+		(:doc "Leave the C expression unchanged when all operands have ordinary lowering.")
+		(params (nodes (shared-array SourceNode)) (expressions (shared-array ScalarExpression))
+			(first i32)) (returns bool)
+		(body
+			(let-mut operand first)
+			(while
+				(:doc "The argument list keeps its original source order.")
+				(i32:not-ltz operand)
+				(body
+					(if (call named_null_argument (expressions.get operand)) (then (return (bool true))))
+					(set operand (struct:get (nodes.get operand) next_sibling))))
+			(return (bool false))))
+
+	(fn write_null_parameter
+		(:doc "Use the original operand row as a private macro parameter suffix.")
+		(params (operand i32) (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let start (call c_literal_text (borrow-shared null_argument_name) (borrow-mut output) offset writing))
+			(return (call write_c_number (borrow-mut output) start operand writing))))
+
+	(fn write_null_witness
+		(:doc "Observe the direct conversion inside sizeof without asking C to evaluate the initializer.")
+		(params (operand i32) (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let start (call c_literal_text (borrow-shared witness_open) (borrow-mut output) offset writing))
+			(let tag (call c_literal_text (borrow-shared null_witness_type_prefix) (borrow-mut output) start writing))
+			(let name (call write_c_number (borrow-mut output) tag operand writing))
+			(let type (call c_literal_text (borrow-shared witness_type) (borrow-mut output) name writing))
+			(let value (call write_null_parameter operand (borrow-mut output) type writing))
+			(return (call c_literal_text (borrow-shared witness_close) (borrow-mut output) value writing))))
+
+	(fn write_null_operands
+		(:doc "Emit matching macro parameters, pointer witnesses, or original C operands in call order.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode))
+			(expressions (shared-array ScalarExpression)) (first i32) (phase u8)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let-mut width offset)
+			(let-mut previous (bool false))
+			(let-mut operand first)
+			(while
+				(:doc "Only selected foreign null constants enter the generated macro.")
+				(i32:not-ltz operand)
+				(body
+					(let value (expressions.get operand))
+					(if
+						(:doc "Witnesses are comma expressions before the original call. The other phases are argument lists.")
+						(call named_null_argument value)
+						(then
+							(if
+								(:doc "Append one witness with its trailing comma.")
+								(u8:eq phase witness_phase)
+								(then (set width (call write_null_witness operand (borrow-mut output) width writing)))
+								(else
+									(if previous (then (set width (call c_byte (borrow-mut output) width 44u8 writing))))
+									(if
+										(:doc "Only the real macro invocation spells the selected native name.")
+										(u8:eq phase invocation_phase)
+										(then
+											(let name (nodes.get (value.get target)))
+											(set width (call c_span (borrow-shared arena) (name.get start)
+												(name.get end) (borrow-mut output) width writing)))
+										(else (set width (call write_null_parameter operand (borrow-mut output) width writing))))
+									(set previous (bool true))))))
+					(set operand (struct:get (nodes.get operand) next_sibling))))
+			(return width)))
+
+	(fn write_null_call_name
+		(:doc "Name the wrapper by its checked call row so multiple calls stay independent.")
+		(params (index i32) (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let start (call c_literal_text (borrow-shared null_call_name) (borrow-mut output) offset writing))
+			(let name (call write_c_number (borrow-mut output) start index writing))
+			(return (call c_byte (borrow-mut output) name 40u8 writing))))
+
+	(fn open_null_call
+		(:doc "Start the wrapper definition and place its unevaluated observations before the call.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode))
+			(expressions (shared-array ScalarExpression)) (first i32) (index i32)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let start (call c_literal_text (borrow-shared define_null_call) (borrow-mut output) offset writing))
+			(let name (call write_null_call_name index (borrow-mut output) start writing))
+			(let params (call write_null_operands (borrow-shared arena) (borrow-shared nodes)
+				(borrow-shared expressions) first parameter_phase (borrow-mut output) name writing))
+			(let end (call c_byte (borrow-mut output) params 41u8 writing))
+			(let body (call c_literal_text (borrow-shared wrapped_call) (borrow-mut output) end writing))
+			(return (call write_null_operands (borrow-shared arena) (borrow-shared nodes)
+				(borrow-shared expressions) first witness_phase (borrow-mut output) body writing))))
+
+	(fn finish_null_call
+		(:doc "Invoke the wrapper with the original names. The outer emitter closes its argument list.")
+		(params (arena (shared-array u8)) (nodes (shared-array SourceNode))
+			(expressions (shared-array ScalarExpression)) (first i32) (index i32)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let start (call c_literal_text (borrow-shared wrapped_end) (borrow-mut output) offset writing))
+			(let name (call write_null_call_name index (borrow-mut output) start writing))
+			(return (call write_null_operands (borrow-shared arena) (borrow-shared nodes)
+				(borrow-shared expressions) first invocation_phase (borrow-mut output) name writing))))
+)

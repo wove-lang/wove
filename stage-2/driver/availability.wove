@@ -4,6 +4,7 @@
 	(:doc "Check selected C declarations that need a header probe before native graph emission.")
 
 	(use wove-file "./clang.wove" (only clang_program))
+	(use wove-file "./null_values.wove" (only null_probe_context (value invalid_null_value)))
 	(use wove-file "./paths.wove" (only directory_width))
 	(use wove-file "./arguments.wove" (only write_plain_argument))
 	(use wove-file "../c/headers.wove" (only c_header_form))
@@ -200,10 +201,15 @@
 		(returns bool)
 		(body (return (bool:or (binding.get optional) (binding.get value_lossless)))))
 
+	(fn needs_header_check
+		(:doc "A null operand requires its checked macro definition and conversion even without c_optional.")
+		(params (binding GraphBinding)) (returns bool)
+		(body (return (bool:or (call needs_availability binding) (binding.get null_value)))))
+
 	(fn remember_macros
 		(:doc "Resolve each selected macro that needs availability checking by its C spelling against the final macro definitions.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
-			(first i32) (present bool) (capture (shared-array u8)) (results (mut-array u8)))
+			(first i32) (present bool) (capture (shared-array u8)) (null_only bool) (results (mut-array u8)))
 		(returns void)
 		(body
 			(let header (bindings.get first))
@@ -215,7 +221,8 @@
 					(let candidate (bindings.get row))
 					(if
 						(:doc "Keep function observations in their own capture.")
-						(bool:and (call needs_availability candidate)
+						(bool:and (bool:or (bool:and (bool:not null_only) (call needs_availability candidate))
+							(bool:and (i32:eq row first) (candidate.get null_value)))
 							(bool:and (u32:eq (candidate.get namespace) 2u32)
 								(call same_header header candidate)))
 						(then
@@ -226,6 +233,8 @@
 							(let value (call object_macro_value (borrow-shared capture)
 								(borrow-shared (arena.range start end))))
 							(let-mut status 76u8)
+							(if (candidate.get null_value)
+								(then (set status (u8:from-u32 invalid_null_value))))
 							(if
 								(:doc "The expression macro diagnostic covers scalar expressions and string literals.")
 								(candidate.get value_macro)
@@ -244,11 +253,10 @@
 	(fn lookup_header_macros
 		(:doc "Capture macro definitions using the same frontend settings as the native unit.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
-			(first i32) (program (shared-array u8)) (options (shared-array u8)) (header (shared-array u8))
-			(directory (shared-array u8)) (prefix (shared-array u8)) (results (mut-array u8)))
+			(first i32) (program (shared-array u8)) (options (shared-array u8)) (source (shared-array u8))
+			(directory (shared-array u8)) (null_only bool) (results (mut-array u8)))
 		(returns u32)
 		(body
-			(let source (call render_frontend_header_source (borrow-shared prefix) (borrow-shared header)))
 			(if
 				(:doc "Source generation must succeed before launching the frontend.")
 				(i32:eqz source.len)
@@ -276,7 +284,7 @@
 								(then (return 73u32)))
 							(call remember_macros (borrow-shared arena) (borrow-shared files)
 								(borrow-shared bindings) first (i32:eq present 1i32)
-								(borrow-shared (capture.range 0i32 length)) (borrow-mut results))
+								(borrow-shared (capture.range 0i32 length)) null_only (borrow-mut results))
 							(return 0u32)))
 					(if
 						(:doc "A frontend failure differs from a successful capture of an absent macro.")
@@ -288,6 +296,35 @@
 						(then (return 75u32)))
 					(set width (i32:add width width))))
 			(return 74u32)))
+
+	(fn check_final_null_macro
+		(:doc "Check a selected null macro again in the include order used by the native unit.")
+		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
+			(first i32) (program (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8))
+			(results (mut-array u8)))
+		(returns u32)
+		(body
+			(let stop bindings.len)
+			(let capacity (call include_capacity (borrow-shared bindings) 0i32 stop))
+			(if (i32:ltz (capacity.get bytes)) (then (return 75u32)))
+			(let-mut paths (array:alloc u8 (capacity.get bytes)))
+			(let-mut headers (array:alloc CInclude (capacity.get rows)))
+			(let plan (call prepare_includes (borrow-shared arena) (borrow-shared files)
+				(borrow-shared bindings) 0i32 stop (borrow-mut paths) (borrow-mut headers)))
+			(if (u32:gtz (plan.get error)) (then (return 75u32)))
+			(let-mut empty (array:alloc u8 0i32))
+			(let count (plan.get count))
+			(let width (call write_includes (borrow-shared paths) (borrow-shared headers)
+				count (borrow-mut empty) (bool false)))
+			(if (u32:lt 2147483647u32 width) (then (return 75u32)))
+			(let-mut includes (array:alloc u8 (i32:from-u32 width)))
+			(let end (call write_includes (borrow-shared paths) (borrow-shared headers)
+				count (borrow-mut includes) (bool true)))
+			(let source (call null_probe_context (borrow-shared (includes.range 0i32 (i32:from-u32 end)))))
+			(return (call lookup_header_macros (borrow-shared arena) (borrow-shared files)
+				(borrow-shared bindings) first (borrow-shared program)
+				(borrow-shared options) (borrow-shared source) (borrow-shared directory)
+				(bool true) (borrow-mut results)))))
 
 	(fn lookup_header
 		(:doc "Probe macros and records with declared prerequisites. Function queries use the emitted include order.")
@@ -342,10 +379,21 @@
 			(if
 				(:doc "Read object-like definitions after the selected header and its prerequisites have been processed.")
 				macro
-				(then (return (call lookup_header_macros (borrow-shared arena) (borrow-shared files)
-					(borrow-shared bindings) first (borrow-shared program)
-					(borrow-shared options) (borrow-shared header) (borrow-shared directory)
-					(borrow-shared (prefix.range 0i32 (i32:from-u32 end))) (borrow-mut results)))))
+				(then
+					(let source (call render_frontend_header_source
+						(borrow-shared (prefix.range 0i32 (i32:from-u32 end))) (borrow-shared header)))
+					(let null_value (selected.get null_value))
+					(let result (call lookup_header_macros (borrow-shared arena) (borrow-shared files)
+						(borrow-shared bindings) first (borrow-shared program)
+						(borrow-shared options) (borrow-shared source) (borrow-shared directory)
+						null_value (borrow-mut results)))
+					(if
+						(:doc "A null macro must be present at its provider before checking the full include order.")
+						(bool:and null_value (bool:and (u32:eqz result) (u8:eq (results.get first) 1u8)))
+						(then (return (call check_final_null_macro (borrow-shared arena) (borrow-shared files)
+							(borrow-shared bindings) first (borrow-shared program) (borrow-shared options)
+							(borrow-shared directory) (borrow-mut results)))))
+					(return result)))
 			(return (call lookup_header_ast (borrow-shared arena) (borrow-shared files)
 				(borrow-shared bindings) first (borrow-shared program)
 				(borrow-shared options) (borrow-shared header) (borrow-shared directory)
@@ -495,7 +543,7 @@
 					(let binding (bindings.get row))
 					(if
 						(:doc "Only a selected member with an availability contract triggers a query.")
-						(call needs_availability binding)
+						(call needs_header_check binding)
 						(then
 							(let-mut status (call cached_status (borrow-shared results) row))
 							(if
@@ -540,7 +588,7 @@
 				(body
 					(if
 						(:doc "Once a selection requires availability checking, verify the rest of the published prefix in order.")
-						(call needs_availability (bindings.get row))
+						(call needs_header_check (bindings.get row))
 						(then (return (call verify_bindings (borrow-shared arena) (borrow-shared files)
 							(borrow-shared bindings) row (borrow-shared canonical)
 							(borrow-shared options) (borrow-shared directory)))))

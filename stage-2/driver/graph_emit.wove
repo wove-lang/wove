@@ -12,6 +12,8 @@
 	(use wove-file "./protection.wove" (only (type BuildProtection)))
 	(use wove-file "./availability.wove" (only check_optional_c_members))
 	(use wove-file "./numeric_target.wove" (only check_numeric_targets))
+	(use wove-file "./null_calls.wove" (only check_serial_nulls check_numbered_nulls))
+	(use wove-file "../emit/c_null.wove" (only named_null_argument))
 	(use wove-file "./paths.wove" (only directory_width))
 	(use wove-file "../scalar/generics/workspace.wove" (only graph_function_workspace can_grow_function_workspace (value function_workspace_full)))
 	(use wove-file "../emit/graph.wove" (only check_graph_plan bind_entry_assets write_graph_c (type GraphPlan)))
@@ -79,9 +81,20 @@
 		(body (return (call publish_input (borrow-shared path) (borrow-shared destination)
 			(borrow-shared staged) target_index (borrow-shared output) human))))
 
+	(fn has_named_null_uses
+		(:doc "Only a checked native null operand requires generating C and rechecking its use.")
+		(params (expressions (shared-array ScalarExpression))) (returns bool)
+		(body
+			(for
+				(:doc "The checked plan records native null operands at their original source rows.")
+				(let expression) (borrow-shared expressions)
+				(body
+					(if (call named_null_argument expression) (then (return (bool true))))))
+			(return (bool false))))
+
 	(fn finish_entry
 		(:doc "Bind the loaded asset bytes, size the unit using the checked plan, and publish only complete C.")
-		(params (path (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8))
+		(params (path (shared-array u8)) (canonical (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8)) (debug_source (shared-array u8))
 			(probe_options (shared-array u8)) (target_index i32) (check_only bool) (partition i32)
 			(arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(trees (shared-array ScalarTree)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
@@ -96,20 +109,22 @@
 				(u32:gtz (embedded.get error))
 				(then (return (call entry_failure (embedded.get file)
 					(embedded.get start) (embedded.get end) (embedded.get error) (bool false)))))
+			(let verify_null (call has_named_null_uses (borrow-shared expressions)))
+			(let skip_c (bool:and check_only (bool:not verify_null)))
 			(let-mut empty (array:alloc u8 0i32))
 			(let measured (call write_graph_c (borrow-shared arena) (borrow-shared files)
 				(borrow-shared bindings) (borrow-shared trees) (borrow-shared nodes)
 				(borrow-shared functions) (borrow-shared parameters) (borrow-shared statements)
 				(borrow-shared records) (borrow-shared expressions) 0i32 plan
-				(borrow-shared tests) (bool false) check_only (bool true) -1i32 (borrow-mut empty)))
+				(borrow-shared tests) (bool false) skip_c (bool true) -1i32 (borrow-mut empty)))
 			(if
 				(:doc "Report an invalid include or an oversized unit before allocating output.")
 				(u32:gtz (measured.get error))
 				(then (return (call entry_failure (measured.get file)
 					(measured.get start) (measured.get end) (measured.get error) (bool false)))))
 			(if
-				(:doc "The checked plan, assets, and header declarations complete a check-only run.")
-				check_only
+				(:doc "A check-only run without selected null operands is complete after semantic checking.")
+				skip_c
 				(then (return (call entry_status 0i32))))
 			(let size (measured.get count))
 			(let-mut prefix 0i32)
@@ -138,7 +153,7 @@
 					(written.get start) (written.get end) (written.get error) (bool false)))))
 			(if
 				(:doc "The native link consumes a checked header and symbol list staged with the same C unit.")
-				(bool:and (u8:not-eqz (plan.get library_os))
+				(bool:and (bool:and (bool:not check_only) (u8:not-eqz (plan.get library_os)))
 					(bool:not (call stage_library_abi (borrow-shared staged) (borrow-shared arena)
 						(borrow-shared nodes) (borrow-shared functions) (borrow-shared parameters)
 						(plan.get library_os))))
@@ -146,13 +161,35 @@
 			(let-mut split 0i32)
 			(if
 				(:doc "The private serial pathname must still be vacant while the opt-in audit observes it.")
-				(i32:lt 1i32 partition)
+				(bool:and (bool:not check_only) (i32:lt 1i32 partition))
 				(then
 					(set split (call stage_checked_units (borrow-shared staged) (borrow-shared probe_options) partition target_index human
 						(borrow-shared arena) (borrow-shared files) (borrow-shared bindings) (borrow-shared trees)
 						(borrow-shared nodes) (borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
 						(borrow-shared statements) (borrow-shared expressions) (borrow-shared tests) plan))
 					(if (i32:gtz split) (then (return (call entry_status split))))))
+			(if
+				(:doc "Verify the native expansion in the unit that will be handed to the frontend.")
+				verify_null
+				(then
+					(let checked (if
+						(:doc "A numbered plan supplies its own translation-unit context for each call.")
+						(i32:ltz split)
+						(then (call check_numbered_nulls (borrow-shared probe_options) (borrow-shared staged)
+							(i32:sub 0i32 split) (u8:not-eqz (plan.get library_os))
+							(borrow-shared files) (borrow-shared nodes)))
+						(else (call check_serial_nulls (borrow-shared probe_options) (borrow-shared staged)
+							(borrow-shared canonical) (borrow-shared debug_source)
+							(borrow-shared (output.range 0i32 (i32:add prefix (written.get count))))
+							(borrow-shared files) (borrow-shared nodes)))))
+					(if
+						(:doc "Keep a non-null expansion at the exact original Wove operand.")
+						(u32:gtz (checked.get error))
+						(then
+							(let site (checked.get site))
+							(return (call entry_failure (site.get file) (site.get start)
+								(site.get end) (checked.get error) (bool false)))))))
+			(if check_only (then (return (call entry_status 0i32))))
 			(let published (call publish_entry (borrow-shared path) (borrow-shared destination)
 				(borrow-shared staged) target_index
 				(borrow-shared (output.range 0i32 (i32:add prefix (written.get count)))) human))
@@ -198,7 +235,7 @@
 		(:expect
 			(tests "stage-2/cli/native/emission/check.py" "stage-2/cli/native/discovery/check.py")
 			(issues "gh:wove-lang/wove:354"))
-		(params (path (shared-array u8)) (canonical (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8))
+		(params (path (shared-array u8)) (canonical (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8)) (debug_source (shared-array u8))
 			(probe_options (shared-array u8)) (probe_libraries (shared-array u8))
 			(protection BuildProtection) (target_index i32) (check_only bool) (partition i32) (arena (shared-array u8)) (files (shared-array SuppliedFile))
 			(modules (shared-array GraphModule)) (bindings (shared-array GraphBinding)) (resolved GraphResult) (human bool))
@@ -225,7 +262,7 @@
 				(i32:lt -1i32 rows)
 				(body
 					(let result (call emit_entry_workspace (borrow-shared path) (borrow-shared canonical)
-						(borrow-shared destination) (borrow-shared staged) (borrow-shared probe_options)
+						(borrow-shared destination) (borrow-shared staged) (borrow-shared debug_source) (borrow-shared probe_options)
 						(borrow-shared probe_libraries)
 						protection target_index check_only partition (borrow-shared arena) (borrow-shared files) (borrow-shared modules)
 						(borrow-shared bindings) resolved human (borrow-mut trees) rows signatures))
@@ -244,7 +281,7 @@
 
 	(fn emit_entry_workspace
 		(:doc "Check and emit the disk graph with one private workspace allocation.")
-		(params (path (shared-array u8)) (canonical (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8))
+		(params (path (shared-array u8)) (canonical (shared-array u8)) (destination (shared-array u8)) (staged (shared-array u8)) (debug_source (shared-array u8))
 			(probe_options (shared-array u8)) (probe_libraries (shared-array u8))
 			(protection BuildProtection) (target_index i32) (check_only bool) (partition i32) (arena (shared-array u8)) (files (shared-array SuppliedFile))
 			(modules (shared-array GraphModule)) (resolved_bindings (shared-array GraphBinding)) (resolved GraphResult) (human bool)
@@ -300,8 +337,8 @@
 			(if
 				(:doc "An entry without embeds already has a complete arena.")
 				(i32:eqz count)
-				(then (return (call finish_entry (borrow-shared path) (borrow-shared destination)
-					(borrow-shared staged) (borrow-shared probe_options) target_index check_only partition (borrow-shared arena) (borrow-shared files)
+				(then (return (call finish_entry (borrow-shared path) (borrow-shared canonical) (borrow-shared destination)
+					(borrow-shared staged) (borrow-shared debug_source) (borrow-shared probe_options) target_index check_only partition (borrow-shared arena) (borrow-shared files)
 					(borrow-shared bindings) (borrow-shared trees) (borrow-shared nodes) (borrow-shared functions)
 					(borrow-shared parameters) (borrow-shared records) (borrow-shared statements)
 					(borrow-mut expressions) (borrow-shared tests) plan (borrow-shared requests) human))))
@@ -324,8 +361,8 @@
 				(:doc "A file that changes during the read cannot reach publication.")
 				(u32:gtz (loaded.get error))
 				(then (return (call asset_failure (borrow-shared files) loaded))))
-			(return (call finish_entry (borrow-shared path) (borrow-shared destination)
-				(borrow-shared staged) (borrow-shared probe_options) target_index check_only partition (borrow-shared extended) (borrow-shared files)
+			(return (call finish_entry (borrow-shared path) (borrow-shared canonical) (borrow-shared destination)
+				(borrow-shared staged) (borrow-shared debug_source) (borrow-shared probe_options) target_index check_only partition (borrow-shared extended) (borrow-shared files)
 				(borrow-shared bindings) (borrow-shared trees) (borrow-shared nodes) (borrow-shared functions)
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements)
 				(borrow-mut expressions) (borrow-shared tests) plan (borrow-shared requests) human))))
