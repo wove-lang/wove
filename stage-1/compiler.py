@@ -109,6 +109,7 @@ SHIFT_OPS = {"shl": "<<", "shr": ">>"}
 class RecordField:
 	kind: str | NativeType | Record
 	c_name: str
+	line: int = 0
 
 
 # Record equality follows the defining declaration, including across file scopes.
@@ -183,7 +184,7 @@ class Module:
 	syntax: Form | None = None
 
 
-# Scalars and scalar-only records can be passed without a loan or transfer.
+# Scalars and records of copyable fields can be passed without a loan or transfer.
 def copyable(kind: Type) -> bool:
 	return isinstance(kind, (Record, FixedArrayType, NativeType)) or kind in SCALAR_TYPES
 
@@ -380,7 +381,7 @@ def module_value_definition(declaration: ModuleValue) -> list[str]:
 	return static_byte_view(value.c, initializer)
 
 
-# Collect scalar fields in declaration order for the record's native layout.
+# Record the field type names until the defining module has bound its imports.
 def read_record(node: Form, index: int) -> tuple[str, Record]:
 	fields_node, = form(node, "struct", 1).operands
 	name_node, = node.names
@@ -389,7 +390,7 @@ def read_record(node: Form, index: int) -> tuple[str, Record]:
 	if name in C_TYPE:
 		raise SourceError(name_node.line)
 	fields = {}
-	# Only scalar fields participate in the seed's copyable record layout.
+	# Retain the declaration order and source line of each field.
 	for field_index, field_node in enumerate(checked_form(fields_node, "fields").operands):
 		field = checked_form(field_node, arity=1)
 		kind_node, = field.operands
@@ -397,17 +398,14 @@ def read_record(node: Form, index: int) -> tuple[str, Record]:
 		# A field name is an ordinary identifier and selects exactly one member.
 		if not IDENTIFIER.fullmatch(field.tag) or field.tag in fields:
 			raise SourceError(field.line)
-		# Owning and borrowed fields require record lifetime rules beyond the seed.
-		if kind not in SCALAR_TYPES:
-			raise SourceError(kind_node.line)
-		fields[field.tag] = RecordField(kind, f"wv_field_{field_index}")
+		fields[field.tag] = RecordField(kind, f"wv_field_{field_index}", kind_node.line)
 	return name, Record(f"wv_seed_record_{index}", fields)
 
 
 # Give each named record a distinct C type with its fields in declaration order.
 def record_definition(record: Record) -> list[str]:
 	fields = [
-		f"    {C_TYPE[field.kind]} {field.c_name};"
+		f"    {c_type(field.kind)} {field.c_name};"
 		for field in record.fields.values()
 	]
 	# C11 needs at least one member even when the Wove record has no fields.
@@ -779,7 +777,7 @@ class FunctionEmitter:
 		values = ", ".join(initializers.values()) or "0"
 		return self.temporary(record, f"({record.c_name}){{{values}}}")
 
-	# Read a scalar member from an evaluated record value.
+	# Read a member by value from an evaluated record.
 	def record_field(self, node: Form) -> Value:
 		target, name = form(node, arity=2).operands
 		value = self.expression(target)
@@ -788,7 +786,7 @@ class FunctionEmitter:
 		if not isinstance(record, Record):
 			raise SourceError(target.line)
 		field = record.fields.get(identifier(name))
-		# The declared type determines both the field's presence and scalar type.
+		# The member retains its declared scalar or record type.
 		if field is None:
 			raise SourceError(name.line)
 		return self.temporary(field.kind, f"{value.c}.{field.c_name}")
@@ -1403,7 +1401,7 @@ def read_module(
 			# Collect imports for the dependency walk.
 			if node.tag == "use":
 				uses.append(node)
-			# Local record layouts contain only scalars, so imports cannot affect them.
+			# Collect nominal record names before resolving any field type.
 			elif node.tag == "struct":
 				name, record = read_record(node, record_index + len(records))
 				# A file has one declaration per record name.
@@ -1431,10 +1429,22 @@ def read_module(
 			values=values, syntax=module)
 
 
-# Resolve signatures in the file's complete type namespace before binding callers.
+# Resolve record fields and signatures in the defining module's complete type namespace.
 def prepare_functions(module: Module, *, entry: bool) -> None:
-	# Report any invalid signature in its own defining file.
+	# Report errors at the original field or signature in this file.
 	with source_file(module.filename):
+		# A field can refer to a local or selectively imported Wove record.
+		for record in module.records.values():
+			# Keep every resolved field in its original layout slot.
+			for name, member in record.fields.items():
+				# Built-in scalar fields already carry their resolved type.
+				if member.kind in SCALAR_TYPES:
+					continue
+				kind = module.type_bindings.get(member.kind)
+				# Ownership and other field forms remain outside the seed's record subset.
+				if not isinstance(kind, Record):
+					raise SourceError(member.line)
+				record.fields[name] = RecordField(kind, member.c_name, member.line)
 		# Number only local definitions, in their original declaration order.
 		for index, (name, node) in enumerate(module.function_declarations.items(), module.function_index):
 			module.functions[name] = read_function(name, node, index, module.type_bindings, entry_module=entry)
@@ -1759,6 +1769,36 @@ def load_modules(
 	return list(modules.values()), list(headers.values())
 
 
+# Emit each Wove record after the records that it contains by value.
+def ordered_records(modules: list[Module]) -> Iterator[Record]:
+	sources = {record: module.filename for module in modules for record in module.records.values()}
+	active = set()
+	emitted = set()
+
+	# Follow only named record fields. Scalar members are already defined.
+	def visit(record: Record) -> Iterator[Record]:
+		active.add(record)
+		# A C field by value needs the complete type before the containing definition.
+		for member in record.fields.values():
+			dependency = member.kind
+			# Only Wove definitions in the source graph participate in layout ordering.
+			if not isinstance(dependency, Record) or dependency not in sources or dependency in emitted:
+				continue
+			# A recursive value layout cannot be emitted as a complete C type.
+			if dependency in active:
+				raise SourceError(member.line, sources[record])
+			yield from visit(dependency)
+		active.remove(record)
+		emitted.add(record)
+		yield record
+
+	# Preserve declaration order where no field dependency requires an earlier definition.
+	for record in sources:
+		# Imported layouts can already be present through a containing record.
+		if record not in emitted:
+			yield from visit(record)
+
+
 # Emit a complete C translation unit after the source graph succeeds.
 def compile_source(
 	source: str, filename: str, *, imports: dict[str, None] | None = None, bridge_files: tuple[str, ...] = ()
@@ -1797,11 +1837,9 @@ def compile_source(
 	# Separate any generated array types from the record declarations.
 	if fixed_arrays:
 		lines.append("")
-	# Define every native type before functions use it by value.
-	for module in modules:
-		# Each record is emitted only for its defining file.
-		for record in module.records.values():
-			lines.extend(record_definition(record))
+	# Define nested layouts before emitting any functions that use them by value.
+	for record in ordered_records(modules):
+		lines.extend(record_definition(record))
 	# Emit each module binding once, ahead of every function body.
 	for value in values:
 		lines.extend(module_value_definition(value))
