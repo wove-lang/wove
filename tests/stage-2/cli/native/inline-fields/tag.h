@@ -25,10 +25,11 @@ static inline int exchange_tag(TestTag *tag)
 {
 	unsigned char *name = (unsigned char *)tag->name;
 	if (tag->before != UINT32_C(0x12345678) || tag->after != UINT32_C(0xcafefeed) ||
-		name[0] != 0xff || name[16] != 0x80) {
+		name[0] != 0xff || name[8] != 0 || name[9] != 0xf1 || name[16] != 0x80) {
 		return -1;
 	}
 	name[0] = 0xe3;
+	name[9] = 0;
 	name[16] = 0xa5;
 	return 0;
 }
