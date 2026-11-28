@@ -27,6 +27,19 @@ def check_arguments(actual, expected, values, groups):
 	assert len(actual) == len(pattern) and all(re.fullmatch(p, a) for p, a in zip(pattern, actual)), (actual, pattern)
 
 
+# Expand a fixture marker with repeated bytes while leaving ordinary copies unchanged.
+def copy_fixture(source, destination, replacements):
+	if not replacements:
+		shutil.copyfile(source, destination)
+		return
+	content = source.read_bytes()
+	for marker, value, count in replacements:
+		token = marker.encode()
+		assert content.count(token) == 1, (source, marker)
+		content = content.replace(token, value.encode() * count)
+	destination.write_bytes(content)
+
+
 # Require the expected preflight, compile actions, and single ordered link.
 def check_calls(log, phase, values, groups):
 	calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -114,7 +127,7 @@ def main(compiler, manifest):
 			for path, fixture in (data["files"] | case.get("files", {})).items():
 				dest = root / path
 				dest.parent.mkdir(parents=True, exist_ok=True)
-				shutil.copyfile(manifest.parent / fixture, dest)
+				copy_fixture(manifest.parent / fixture, dest, case.get("replacements", {}).get(path, []))
 			(root / "clang").chmod(0o700)
 			values = {"root": str(root), **system["values"]}
 			groups = data["arguments"] | system["arguments"]

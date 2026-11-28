@@ -4,6 +4,10 @@
 #ifndef WOVE_PARALLEL_NATIVE_OWNER_CONSUME_H
 #define WOVE_PARALLEL_NATIVE_OWNER_CONSUME_H
 
+#if defined(WOVE_AST_GROWTH)
+#include "ast-growth.h"
+#endif
+
 typedef struct fixture_resource *fixture_resource_handle;
 
 fixture_resource_handle fixture_open_resource(int status);
