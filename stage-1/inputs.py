@@ -9,6 +9,16 @@ from pathlib import Path
 from syntax import Atom, Form, SourceError, parse
 
 
+COMPILER_ENTRY = "stage-2/wovec.wove"
+BUNDLED_SOURCE = "stage-2/driver/bundled.wove"
+
+
+# Derive the compiler's native provider files from its existing embedded inventory.
+def bundled_provider_inputs(root):
+	sources, assets, _ = collect_inputs(root, [BUNDLED_SOURCE])
+	return sources, [asset for asset in assets if Path(asset).suffix == ".wove"]
+
+
 # Follow the repository's declared imports and embeds in first-encounter order.
 def collect_inputs(root, entries, *, embedded_providers=False, allow_missing_imports=False):
 	sources = {}

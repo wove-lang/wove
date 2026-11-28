@@ -79,7 +79,7 @@ SEED_UTILITY_PROGRAMS := $(HASHING_PROGRAMS) $(JSON_PROGRAMS) $(CLI_PROGRAMS) $(
 SEED_UTILITY_C := $(addsuffix .c,$(SEED_UTILITY_PROGRAMS) $(CONFIG_PROGRAM) $(COMMAND_PROGRAM))
 NATIVE_FIXTURE_C := $(addsuffix .c,$(TEST_RUNNER) $(AST_LIVE) $(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE))
 SEED_TARGET := stage-1/target.py tools/run-build-clang.sh
-SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py stage-1/make_deps.py $(SEED_TARGET)
+SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py stage-1/bridge_types.py stage-1/inputs.py stage-1/make_deps.py $(SEED_TARGET)
 SEED_COMPILER = WOVE_BUILD_CLANG="$(CLANG) -std=c11 $(CFLAGS)" $(PYTHON) stage-1/wovec.py
 SEED_EMIT := stage-1/emit.py
 SEED_EMIT_SOURCES := $(SEED_EMIT) stage-1/inputs.py stage-1/syntax.py stage-1/make_deps.py
@@ -516,6 +516,7 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	$(SEED_COMPILER) "$<" > "$@"
 
 # The seed reports Wove imports. Keep the project C include inputs explicit.
+$(STAGE1)/bridge_types/use.c: $(OWNERSHIP_TESTS)/bridge_types/local.h
 C_HEADER_PROJECT_HEADERS := $(addprefix $(OWNERSHIP_TESTS)/imports/c_headers/,project.h link lookup.h tree/lookup.h tree/leaf/value.h)
 $(STAGE1)/imports.c_headers.c: $(C_HEADER_PROJECT_HEADERS)
 

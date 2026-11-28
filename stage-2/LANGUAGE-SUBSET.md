@@ -115,6 +115,11 @@ quoted paths use Clang's include search.
 The generated C begins with `wove_runtime.h`. Other headers appear once in
 first-use order through the depth-first Wove import walk. For an existing
 project header, the seed deduplicates by resolved containing directory and
-filename and keeps the first include spelling. C-header selections add
-no Wove names. Bridge bodies, other foreign providers, and their selections
-stay opaque to the Python seed.
+filename and keeps the first include spelling.
+
+An explicit `(type Name)` selection from a C bridge binds a typedef or record
+to the C spelling in its `c-type` field. A selected C record can be passed
+by value, initialized as a C aggregate, and read through scalar fields or
+native named fields from the same bridge. `int.convert` uses Clang's native type to check the
+range of a conversion involving a C integer typedef. C bridge functions,
+values, and other foreign providers stay opaque to the Python seed.
