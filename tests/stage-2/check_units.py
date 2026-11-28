@@ -147,7 +147,7 @@ def check_native(certifier, probe, case, layout, parts, prefix):
 			# Numbered adapters and erased drop callbacks each have one definition owner.
 			if "workers" in layout:
 				workers = {name for name, kind in table.items()
-					if kind == "T" and (generated_symbol(name, "w") or name.startswith("wvrt_worker_drop_"))}
+					if kind == "T" and (generated_symbol(name, "w") or generated_symbol(name, "z"))}
 				assert workers == set(layout["workers"].get(unit, [])), (unit, workers)
 			for dependency in layout.get("imports", {}).get(unit, []):
 				assert table.get(dependency) == "U", (unit, dependency, table)
