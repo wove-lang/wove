@@ -814,6 +814,22 @@ width family is present and the selector diagnostic when it is absent.
 Both bridge origins exercise zero and the largest accepted operand for
 every constructor, including decimal, hexadecimal, and binary spellings.
 
+## Bundled `<inttypes.h>` maximum-width operations
+
+All six functions in the [LLVM libc inttypes catalog](https://libc.llvm.org/headers/inttypes.html)
+are declared in the audited macOS SDK 27.2 and Debian glibc 2.41 headers
+under C11, C17, and C23 on arm64 and x86-64. Clang checked both
+arithmetic prototypes and the exact native result layout in 264 profiles.
+
+| Native members | Coverage or outstanding contract |
+| --- | --- |
+| `imaxabs` | The argument and result reuse the exact `intmax_t` identity from `<stdint.h>`. The installed fixture checks zero, both signs, and both largest representable magnitudes. The native contract requires a representable magnitude. |
+| `imaxdiv_t` | Wove exposes `quot` and `rem` as the defining `IntMax` type. Both C fields have native `intmax_t` type. The record is naturally aligned and the two fields have offsets zero and `sizeof(intmax_t)`. The fixture reads both fields and passes the record to C to compare it with a native result. |
+| `imaxdiv` | The native function returns `imaxdiv_t` by value. Stage 2 rejects a complete native record as a direct result, including an equivalent user bridge that returns a plain C record. [Compiler prerequisite #731](https://github.com/wove-lang/wove/issues/731) |
+| `strtoimax`, `strtoumax`, `wcstoimax`, `wcstoumax` | Separate conversion slices cover narrow and wide text, native end pointers into the input, and range handling. |
+| `PRI*` and `SCN*` | All profiles expose 84 traditional printing and 70 scanning macros. Glibc exposes another 28 binary printing macros in the `PRIb` and `PRIB` families and 14 `SCNb` macros in C23 and in the earlier-mode GNU profiles. Darwin omits the binary families on the audited SDK. Format macro values and availability need member-level fixtures. |
+| `__STDC_VERSION_INTTYPES_H__` | Absent in all audited Darwin and glibc profiles. |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
