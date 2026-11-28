@@ -122,14 +122,18 @@ def main():
 			for case_origin, native, macro, source, diagnostic, *mode in optional_cases:
 				if case_origin != origin:
 					continue
-				present = macro.encode() in macro_inventory(clang, standard, native, tuple(flags))
-				# A positive-only fixture runs when its native profile marker is present.
+				required_macros = macro.split()
+				inventory = macro_inventory(clang, standard, native, tuple(flags))
+				present = all(name.encode() in inventory for name in required_macros)
+				# A positive-only fixture runs when all of its native macros are present.
 				if not present and diagnostic == "-":
 					continue
-				run_fixture = mode == ["run"]
-				check_case(installed, clang, runtime, fixtures, project.with_name(f"{project.name}-{macro}"),
-					header, standard, flags, source=source, unavailable=None if present else diagnostic,
-					execute=run_fixture, macro=None if run_fixture else macro)
+				run_fixture = mode[:1] == ["run"]
+				extra_flags = json.loads(mode[1]) if len(mode) > 1 else []
+				label = macro if len(required_macros) == 1 else Path(source).stem
+				check_case(installed, clang, runtime, fixtures, project.with_name(f"{project.name}-{label}"),
+					header, standard, [*flags, *extra_flags], source=source, unavailable=None if present else diagnostic,
+					execute=run_fixture, macro=None if run_fixture else required_macros[0])
 	print(f"{fixtures.name}.h: bundled and project values checked in {3 * len(profiles)} host profiles")
 
 
