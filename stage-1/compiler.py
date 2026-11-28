@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 
 from bridge_types import (
-	C_READONLY_BYTES, NativeType, c_bridges, declarations, native_pragmas, read_native_function, read_native_type,
+	C_READONLY_BYTES, C_WRITABLE_BYTES, NativeType, c_bridges, declarations, native_pragmas, read_native_function, read_native_type,
 )
 from syntax import IDENTIFIER, WORD, Atom, Form, Node, SourceError, form, identifier, parse
 from target import compiler_target
@@ -232,11 +232,14 @@ class NativeFunction:
 	c_name: str
 	params: tuple[tuple[str, Type], ...]
 	result: Type
-	byte_extents: tuple[tuple[int, int, int], ...]
+	byte_extents: tuple[tuple[int, int | None, int], ...]
 	c_strings: tuple[int, ...]
 	null_only: frozenset[int]
 	snapshot: NativeStringResult | None
 	macro: bool
+	variadic_start: int | None
+	constants: dict[int, str]
+	array_extents: tuple[tuple[int, int | str], ...]
 
 
 @dataclass(frozen=True)
@@ -945,13 +948,25 @@ class FunctionEmitter:
 			raise SourceError(node.line)
 		parameters = tuple(kind for _, kind in callee.params)
 		native = callee if isinstance(callee, NativeFunction) else None
-		# Resolve the exact signature before evaluating any argument.
-		if len(args) != len(parameters):
+		constants = native.constants if native is not None else {}
+		# Hidden header constants occupy a C formal without consuming a Wove operand.
+		if len(args) != len(parameters) - len(constants):
 			raise SourceError(node.line)
 		checkpoint = len(self.loans)
 		values = []
+		sites = []
+		arguments = iter(args)
 		# Each argument may acquire a loan that constrains later arguments.
-		for index, (argument, kind) in enumerate(zip(args, parameters)):
+		for index, kind in enumerate(parameters):
+			# Let Clang type-check header constants using the original declaration.
+			if index in constants:
+				value = Value(kind, constants[index])
+				self.check_native_value(value)
+				values.append(value.c)
+				sites.append(node.line)
+				continue
+			argument = next(arguments)
+			sites.append(argument.line)
 			# Do not lend caller storage to a formal that admits only the literal null.
 			if native is not None and index in native.null_only:
 				if identifier(argument) != "null":
@@ -970,7 +985,7 @@ class FunctionEmitter:
 			values.append(value.c)
 		# Apply C adaptations only after evaluating the original source arguments.
 		if native is not None:
-			result = self.native_call(native, parameters, args, values, node.line)
+			result = self.native_call(native, parameters, sites, values, node.line)
 		else:
 			result = self.call_result(callee.result, f"{callee.c_name}({', '.join(values)})")
 		del self.loans[checkpoint:]
@@ -985,7 +1000,7 @@ class FunctionEmitter:
 		return self.temporary(kind, expression)
 
 	# Check bridge extents, prepare temporary strings, invoke, and release the scratch.
-	def native_call(self, callee: NativeFunction, parameters: tuple[Type, ...], args: list[Node],
+	def native_call(self, callee: NativeFunction, parameters: tuple[Type, ...], sites: list[int],
 		values: list[str], line: int) -> Value:
 		# A function-like macro consumes captured scalar arguments without a function address.
 		if callee.macro:
@@ -997,9 +1012,22 @@ class FunctionEmitter:
 		abi = [c_type(kind) for kind in parameters]
 		# Verify every byte view against its captured operands before entering C.
 		for buffer, size, count in callee.byte_extents:
-			self.emit_line(f"wvrt_check_c_bytes_native({values[buffer]}, {values[size]}, {values[count]}, {site});")
+			mutable = parameters[buffer] == _MUT_BYTE_VIEW
+			view = f"wvrt_share_mut_slice({values[buffer]})" if mutable else values[buffer]
+			width = "1" if size is None else values[size]
+			self.emit_line(f"wvrt_check_c_bytes_native({view}, {width}, {values[count]}, {site});")
 			actuals[buffer] = f"{values[buffer]}.wvrt_items"
-			abi[buffer] = C_READONLY_BYTES
+			abi[buffer] = C_WRITABLE_BYTES if mutable else C_READONLY_BYTES
+		# A native array uses the element type declared by its checked view.
+		for buffer, count in callee.array_extents:
+			kind = parameters[buffer]
+			mutable = kind.access == MUT
+			view = f"wvrt_share_mut_slice({values[buffer]})" if mutable else values[buffer]
+			length = values[count] if isinstance(count, int) else count
+			element = c_type(kind.element)
+			self.emit_line(f"wvrt_check_c_array_native({view}, sizeof({element}), {length}, {site});")
+			actuals[buffer] = f"{values[buffer]}.wvrt_items"
+			abi[buffer] = f"{element} *" if mutable else f"const {element} *"
 		converted = []
 		# Every converted string uses a byte view and its own source location.
 		for index in callee.c_strings:
@@ -1008,7 +1036,10 @@ class FunctionEmitter:
 			# A null-only string formal needs no descriptor or temporary backing storage.
 			if index not in callee.null_only:
 				view = f"wvrt_share_mut_slice({values[index]})" if mutable else values[index]
-				converted.append((index, mutable, view, args[index].line))
+				converted.append((index, mutable, view, sites[index]))
+		# Clang checks the fixed prefix and applies its native variadic promotions to the actual tail.
+		if callee.variadic_start is not None:
+			abi[callee.variadic_start:] = ["..."]
 		formals = ", ".join(abi) or "void"
 		result_types = (c_type(callee.result),)
 		# A borrowed snapshot can copy const C storage. An allocating snapshot owns mutable text.
@@ -2226,7 +2257,7 @@ class NativeDeclarations:
 
 	# Resolve the C signature and adapt only the contracts admitted by the seed.
 	def function(self, key: str, node: Form) -> NativeFunction:
-		symbol, operands, result_node = read_native_function(node)
+		symbol, operands, constants, result_node = read_native_function(node)
 		parameters = {}
 		# Keep named formal order and distinguish borrowed handles from byte descriptors.
 		for name, operand in operands.items():
@@ -2236,19 +2267,26 @@ class NativeDeclarations:
 			# Byte descriptors need a checked extent or C-string adaptation.
 			elif isinstance(operand, Form) and operand.tag in (SHARED, MUT):
 				element, = checked_form(operand, operand.tag, 1).operands
-				# Other element types have no byte-view C representation in this subset.
-				if identifier(element) != U8:
+				element_kind = identifier(element)
+				# The seed's native views cover bytes and i32 descriptor storage.
+				if element_kind not in (U8, I32):
 					raise SourceError(element.line)
-				kind = BufferType(operand.tag, U8)
+				kind = BufferType(operand.tag, element_kind)
 			else:
 				kind = self.scalar(key, operand)
 			parameters[name] = kind
 		positions = {name: index for index, name in enumerate(parameters)}
+		# A hidden constant carries an integer rather than a loan or aggregate.
+		if any(parameters[name] not in SCALAR_LIMITS and not isinstance(parameters[name], NativeType)
+			for name in constants):
+			raise SourceError(node.line)
 		extents = {}
+		arrays = {}
 		strings = set()
 		null_only = set()
 		snapshot = None
 		macro = False
+		variadic_start = None
 		# Recover adaptation contracts using the names in the original signature.
 		for pragma in native_pragmas(node):
 			# Selection was applied before the declaration was resolved.
@@ -2258,6 +2296,18 @@ class NativeDeclarations:
 			if pragma.tag == "c_macro":
 				form(pragma, arity=0)
 				macro = True
+				continue
+			# A named variadic tail keeps fixed arity and names its first promoted argument.
+			if pragma.tag == "c_variadic":
+				first, = form(pragma, arity=1).operands
+				position = positions.get(identifier(first))
+				# C requires a fixed prefix, and this slice admits scalar tail operands.
+				if variadic_start is not None or not position or any(
+					kind not in SCALAR_TYPES and not isinstance(kind, NativeType)
+					for kind in tuple(parameters.values())[position:]
+				):
+					raise SourceError(pragma.line)
+				variadic_start = position
 				continue
 			# A nullable handle can also receive an ordinary borrowed value.
 			if pragma.tag == "c_nullable":
@@ -2285,22 +2335,50 @@ class NativeDeclarations:
 				release = identifier(form(drop[0], "drop", 1).operands[0]) if drop else None
 				snapshot = NativeStringResult(release)
 				continue
-			buffer, size, count = map(identifier, form(pragma, "c_bytes", 3).operands)
-			# Check that the extent guards a byte view and uses two captured integer operands.
-			if parameters.get(buffer) != _BYTE_VIEW or buffer in extents or any(
+			# Element extents use a captured integer or a checked literal count.
+			if pragma.tag == "c_array":
+				buffer, count = form(pragma, arity=2).operands
+				name = identifier(buffer)
+				# A typed array contract needs a unique declared view.
+				if not isinstance(parameters.get(name), BufferType) or name in arrays:
+					raise SourceError(pragma.line)
+				# A small decimal literal can be emitted directly as an element count.
+				if isinstance(count, Atom) and not count.quoted and re.fullmatch(r"[0-9]{1,10}", count.text):
+					width = int(count.text)
+					if width > SCALAR_LIMITS[I32][1]:
+						raise SourceError(count.line)
+					length = str(width)
+				else:
+					count_name = identifier(count)
+					count_kind = parameters.get(count_name)
+					if count_kind not in SCALAR_LIMITS and not isinstance(count_kind, NativeType):
+						raise SourceError(count.line)
+					length = positions[count_name]
+				arrays[name] = (positions[name], length)
+				continue
+			# Byte extents use either one count or a size and count product.
+			if pragma.tag != "c_bytes" or len(pragma.operands) not in (2, 3):
+				raise SourceError(pragma.line)
+			buffer, *factors, count = map(identifier, pragma.operands)
+			# The guarded view and all factors retain their exact captured types.
+			if parameters.get(buffer) not in (_BYTE_VIEW, _MUT_BYTE_VIEW) or buffer in extents or any(
 				parameters.get(name) not in SCALAR_LIMITS and not isinstance(parameters.get(name), NativeType)
-				for name in (size, count)
+				for name in (*factors, count)
 			):
 				raise SourceError(pragma.line)
-			extents[buffer] = (positions[buffer], positions[size], positions[count])
+			size = positions[factors[0]] if factors else None
+			extents[buffer] = (positions[buffer], size, positions[count])
 		# A view has exactly one supported representation. Null-only operands still have a string ABI.
-		if not null_only <= strings or strings & extents.keys() or any(
-			kind in (_BYTE_VIEW, _MUT_BYTE_VIEW) and name not in strings and name not in extents
+		if not null_only <= strings or strings & extents.keys() or strings & arrays.keys() or extents.keys() & arrays.keys() or any(
+			isinstance(kind, BufferType) and name not in strings and name not in extents and name not in arrays
 			for name, kind in parameters.items()
 		):
 			raise SourceError(node.line)
+		# Hidden constants supply the fixed native call prefix, before any named variadic operand.
+		if variadic_start is not None and any(positions[name] >= variadic_start for name in constants):
+			raise SourceError(node.line)
 		# Macros in this subset operate on scalar captures without per-call adapters.
-		if macro and (snapshot or any(isinstance(kind, (BufferType, NativeRef, NativePlaceRef))
+		if macro and (snapshot or variadic_start is not None or any(isinstance(kind, (BufferType, NativeRef, NativePlaceRef))
 			for kind in parameters.values())):
 			raise SourceError(node.line)
 		# Copy and optionally release native strings using the runtime's nullable byte owner ABI.
@@ -2314,7 +2392,8 @@ class NativeDeclarations:
 			result = VOID if identifier(result_node) == VOID else self.scalar(key, result_node)
 		return NativeFunction(symbol, tuple(parameters.items()), result, tuple(extents.values()),
 			tuple(positions[name] for name in parameters if name in strings),
-			frozenset(positions[name] for name in null_only), snapshot, macro)
+			frozenset(positions[name] for name in null_only), snapshot, macro, variadic_start,
+			{positions[name]: symbol for name, symbol in constants.items()}, tuple(arrays.values()))
 
 	# Bind scalar C values and borrowed handles to the actual header expression.
 	def value(self, key: str, node: Form) -> Binding:

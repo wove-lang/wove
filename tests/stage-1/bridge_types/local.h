@@ -5,6 +5,7 @@
 #ifndef WOVE_SEED_LOCAL_TYPES_H
 #define WOVE_SEED_LOCAL_TYPES_H
 
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -26,6 +27,33 @@ static inline int32_t seed_stat(int32_t device, struct seed_stat *info) {
 }
 
 typedef size_t seed_count_t;
+#define SEED_READ_MODE 97
+
+// Pass a hidden fixed command before the promoted signed tail value.
+static inline int32_t seed_control(int32_t descriptor, int32_t command, ...) {
+	va_list arguments;
+	va_start(arguments, command);
+	const int tail = va_arg(arguments, int);
+	va_end(arguments);
+	return command == SEED_READ_MODE ? descriptor + tail : -1;
+}
+
+// Populate two native descriptor elements through the checked typed view.
+static inline int32_t seed_pair(int32_t output[2]) {
+	output[0] = 34;
+	output[1] = 8;
+	return 0;
+}
+
+// Write only the requested prefix of the caller's byte view.
+static inline int32_t seed_capture(unsigned char *output, seed_count_t count) {
+	// Keep the final checked byte distinct from the untouched suffix.
+	for (seed_count_t i = 0; i < count; ++i) {
+		output[i] = 19;
+	}
+	return 0;
+}
+
 struct seed_stream {
 	int32_t sum;
 };

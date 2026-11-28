@@ -13,13 +13,19 @@ from syntax import IDENTIFIER, Atom, Form, Node, SourceError, form, identifier
 
 
 C_TYPE_SPELLING = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?: +[A-Za-z_][A-Za-z0-9_]*)*(?: *\*)*")
-# The native byte-view contract admits const byte pointers with either volatile qualification.
-C_READONLY_BYTES = (
-	"union __attribute__((__transparent_union__)) {"
+# Match the byte pointer qualifications accepted by native C bridge arguments.
+_C_READONLY_MEMBERS = (
 	"const void *p0; const char *p1; const signed char *p2; const unsigned char *p3; "
 	"const volatile void *p4; const volatile char *p5; "
-	"const volatile signed char *p6; const volatile unsigned char *p7;}"
+	"const volatile signed char *p6; const volatile unsigned char *p7;"
 )
+_C_WRITABLE_MEMBERS = (
+	"void *p8; char *p9; signed char *p10; unsigned char *p11; "
+	"volatile void *p12; volatile char *p13; volatile signed char *p14; volatile unsigned char *p15;"
+)
+_C_BYTE_UNION = "union __attribute__((__transparent_union__))"
+C_READONLY_BYTES = f"{_C_BYTE_UNION} {{{_C_READONLY_MEMBERS}}}"
+C_WRITABLE_BYTES = f"{_C_BYTE_UNION} {{{_C_WRITABLE_MEMBERS}{_C_READONLY_MEMBERS}}}"
 
 
 @dataclass(eq=False, frozen=True)
@@ -89,7 +95,7 @@ def native_pragmas(node: Form) -> Iterator[Form]:
 
 
 # Read a fixed C function's signature and original symbol before resolving its types.
-def read_native_function(node: Form) -> tuple[str, dict[str, Node], Node]:
+def read_native_function(node: Form) -> tuple[str, dict[str, Node], dict[str, str], Node]:
 	fields = {}
 	# A fixed signature has one parameter list, one result, and an optional C name.
 	for operand in node.operands:
@@ -102,13 +108,22 @@ def read_native_function(node: Form) -> tuple[str, dict[str, Node], Node]:
 	if "params" not in fields or "returns" not in fields:
 		raise SourceError(node.line)
 	parameters = {}
-	# Retain parameter names so extent pragmas can select exact operands.
+	constants = {}
+	# Retain native formal order, including hidden header constants.
 	for operand in fields["params"].operands:
-		param = form(operand, arity=1)
-		# A fixed operand must be a distinct named parameter.
-		if not IDENTIFIER.fullmatch(param.tag) or param.tag in parameters:
+		param = form(operand)
+		# A fixed constant is part of the native signature but has no Wove argument.
+		if param.tag == "const":
+			name_node, kind, symbol = form(param, arity=3).operands
+			name = identifier(name_node)
+			constants[name] = identifier(symbol)
+		else:
+			kind, = form(param, arity=1).operands
+			name = param.tag
+		# Extent and variadic pragmas identify distinct named formals.
+		if not IDENTIFIER.fullmatch(name) or name in parameters:
 			raise SourceError(param.line)
-		parameters[param.tag] = param.operands[0]
+		parameters[name] = kind
 	result, = form(fields["returns"], arity=1).operands
 	symbol = identifier(node.names[0])
 	# A declaration may introduce a Wove alias for a differently named C function.
@@ -118,4 +133,4 @@ def read_native_function(node: Form) -> tuple[str, dict[str, Node], Node]:
 		if not isinstance(spelling, Atom) or not spelling.quoted or not IDENTIFIER.fullmatch(spelling.text):
 			raise SourceError(spelling.line)
 		symbol = spelling.text
-	return symbol, parameters, result
+	return symbol, parameters, constants, result
