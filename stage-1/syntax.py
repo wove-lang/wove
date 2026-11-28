@@ -46,6 +46,7 @@ TOKEN = re.compile(
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 QUALIFIED_PART = r"[A-Za-z_][A-Za-z0-9_-]*"
+PATH_RECEIVER_HEAD = re.compile(rf"{IDENTIFIER.pattern}(?:/{IDENTIFIER.pattern})+\.{QUALIFIED_PART}")
 TAG = re.compile(":?" + WORD.pattern + "|" + QUALIFIED_PART + ":" + QUALIFIED_PART)
 NUL_OR_ESCAPED_BACKSLASH = re.compile(r"\\\\|\\0")
 
@@ -159,7 +160,11 @@ def read_form(children: list[Node], line: int, parents: list[tuple[int, list[Nod
 	if not children:
 		raise SourceError(line)
 	head, *children = children
-	tag = identifier(head, TAG)
+	# A projected call head is an executable form, never a name or metadata payload.
+	if isinstance(head, Atom) and "/" in head.text and in_function_body(parents):
+		tag = identifier(head, PATH_RECEIVER_HEAD)
+	else:
+		tag = identifier(head, TAG)
 	# The old attachment forms are reserved so they fail at their old spelling.
 	if tag in ("with-meta", "meta"):
 		raise SourceError(head.line)

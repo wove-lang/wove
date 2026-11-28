@@ -788,31 +788,41 @@ class FunctionEmitter:
 
 	# Normalize field paths and type-directed receivers to their canonical forms.
 	def access_form(self, node: Node) -> Node:
-		# Only an unquoted atom with complete identifier segments is a field path.
-		if isinstance(node, Atom) and not node.quoted and "/" in node.text:
-			root, *fields = node.text.split("/")
-			# A mixed or malformed path keeps its spelling for ordinary rejection.
-			if not IDENTIFIER.fullmatch(root) or not all(IDENTIFIER.fullmatch(field) for field in fields):
-				return node
-			projection: Node = Atom(root, node.line)
-			# Each segment projects a field of the preceding value or place.
-			for field in fields:
-				projection = Form("struct:get", (projection, Atom(field, node.line)), node.line, tag_line=node.line)
-			return projection
-
-		spelling = node.text if isinstance(node, Atom) else node.tag
-		name, separator, operation = spelling.partition(".")
-		# Receiver names are bare identifiers and operations follow qualified-name syntax.
-		if not separator or not IDENTIFIER.fullmatch(name) or not RECEIVER_OPERATION.fullmatch(operation):
+		is_atom = isinstance(node, Atom)
+		# Quoted text keeps its spelling even when it looks like a path or operation.
+		if is_atom and node.quoted:
 			return node
+		spelling = node.text if is_atom else node.tag
+		name, separator, operation = spelling.partition(".")
+		# Canonical forms and ordinary atoms need no projection.
+		if not separator and (not is_atom or "/" not in name):
+			return node
+		root, *fields = name.split("/")
+		# All receivers start at a bare binding and project only complete identifiers.
+		if not IDENTIFIER.fullmatch(root) or not all(IDENTIFIER.fullmatch(field) for field in fields):
+			return node
+		# Leave ordinary words, qualified heads, and multiple dot operations alone.
+		if separator and not RECEIVER_OPERATION.fullmatch(operation):
+			return node
+
+		line = node.line if is_atom else node.tag_line
+		receiver: Node = ReceiverAtom(root, line) if separator else Atom(root, line)
+		# Each segment projects a field of the preceding value or place.
+		for field in fields:
+			receiver = Form("struct:get", (receiver, Atom(field, line)), line, tag_line=line)
+		# A plain field path has no operation suffix.
+		if not separator:
+			return receiver
+
 		# A bare receiver atom has no written operands after its receiver.
-		if isinstance(node, Atom):
-			# Quoted text keeps its spelling even when it looks like an operation.
-			if node.quoted:
-				return node
-			node = Form(spelling, (), node.line, tag_line=node.line)
-		receiver = ReceiverAtom(name, node.tag_line)
-		kind = self.binding(receiver, read=True).value.kind
+		if is_atom:
+			node = Form(spelling, (), line, tag_line=line)
+		# A path starts from a named place. Looking up its declared member type has no effects.
+		if fields:
+			_, value = self.project(receiver, named=True)
+			kind = value.kind
+		else:
+			kind = self.binding(receiver, read=True).value.kind
 		# Once the family is known, the canonical handler checks the operation and its operands.
 		if isinstance(kind, (BufferType, FixedArrayType)):
 			family = "array"
