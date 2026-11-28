@@ -802,13 +802,15 @@ lists the wider header surface.
 | `PTRDIFF_MIN`, `PTRDIFF_MAX`, `SIZE_MAX`, `SIG_ATOMIC_MIN`, and `SIG_ATOMIC_MAX` | The differences use native `long`, the size limit uses `unsigned long`, and the signal atomic limits use `int`. The C header exposes the expressions without a separate header dependency. |
 | `WCHAR_MIN` and `WCHAR_MAX` | The expressions are `unsigned int` on arm64 glibc and `int` on x86-64 glibc and both Darwin targets. The fixture checks the zero or negative minimum and the matching maximum. |
 | `WINT_MIN` and `WINT_MAX` | Both glibc targets expose `unsigned int`. Both Darwin targets expose `int`. The fixture verifies the exact native type and the full range. |
-| C23 width macros | Cover their integer values and SDK availability separately. |
+| C23 width macros | All 33 use native `int` and `c_optional`, so Clang resolves availability under the effective C flags. On the audited glibc SDK, C23 exposes all widths. C11 and C17 expose them with GNU extensions or `_ISOC23_SOURCE`, `_ISOC2X_SOURCE`, or `__STDC_WANT_IEC_60559_BFP_EXT__`. Both glibc targets report 64 for signed and unsigned fast-16 and fast-32. The audited Darwin SDK exposes none of the widths. |
+| `__STDC_VERSION_STDINT_H__` | Absent from the audited Darwin and glibc SDKs, including their C23 profiles. |
 | `INTN_C`, `UINTN_C`, `INTMAX_C`, and `UINTMAX_C` | The function-like constructors need a checked operand passed as an unsuffixed C integer token to support suffix pasting. [Compiler prerequisite #718](https://github.com/wove-lang/wove/issues/718) |
 
 The installed fixture uses both the bundled and project-authored declarations.
 It passes every boundary value through a parameter of the corresponding
 native type. A C oracle checks the header's expression types and compares
-the values.
+the values. The width fixture checks every imported value when the audited
+width family is present and the selector diagnostic when it is absent.
 
 ## Bundled math coverage
 

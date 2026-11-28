@@ -143,6 +143,90 @@ FIXTURE_LIMIT(WINT_MIN, fixture_wint_limit_t, (-2147483647 - 1));
 FIXTURE_LIMIT(WINT_MAX, fixture_wint_limit_t, 2147483647);
 #endif
 
+// The audited profiles expose the complete width family together.
+#if defined(INT8_WIDTH)
+#include <limits.h>
+
+FIXTURE_LIMIT(INT8_WIDTH, int, 8);
+FIXTURE_LIMIT(UINT8_WIDTH, int, 8);
+FIXTURE_LIMIT(INT16_WIDTH, int, 16);
+FIXTURE_LIMIT(UINT16_WIDTH, int, 16);
+FIXTURE_LIMIT(INT32_WIDTH, int, 32);
+FIXTURE_LIMIT(UINT32_WIDTH, int, 32);
+FIXTURE_LIMIT(INT64_WIDTH, int, 64);
+FIXTURE_LIMIT(UINT64_WIDTH, int, 64);
+
+FIXTURE_LIMIT(INT_LEAST8_WIDTH, int, 8);
+FIXTURE_LIMIT(UINT_LEAST8_WIDTH, int, 8);
+FIXTURE_LIMIT(INT_LEAST16_WIDTH, int, 16);
+FIXTURE_LIMIT(UINT_LEAST16_WIDTH, int, 16);
+FIXTURE_LIMIT(INT_LEAST32_WIDTH, int, 32);
+FIXTURE_LIMIT(UINT_LEAST32_WIDTH, int, 32);
+FIXTURE_LIMIT(INT_LEAST64_WIDTH, int, 64);
+FIXTURE_LIMIT(UINT_LEAST64_WIDTH, int, 64);
+
+FIXTURE_LIMIT(INT_FAST8_WIDTH, int, 8);
+FIXTURE_LIMIT(UINT_FAST8_WIDTH, int, 8);
+FIXTURE_LIMIT(INT_FAST16_WIDTH, int, (int)(sizeof(int_fast16_t) * CHAR_BIT));
+FIXTURE_LIMIT(UINT_FAST16_WIDTH, int, (int)(sizeof(uint_fast16_t) * CHAR_BIT));
+FIXTURE_LIMIT(INT_FAST32_WIDTH, int, (int)(sizeof(int_fast32_t) * CHAR_BIT));
+FIXTURE_LIMIT(UINT_FAST32_WIDTH, int, (int)(sizeof(uint_fast32_t) * CHAR_BIT));
+FIXTURE_LIMIT(INT_FAST64_WIDTH, int, 64);
+FIXTURE_LIMIT(UINT_FAST64_WIDTH, int, 64);
+
+FIXTURE_LIMIT(INTPTR_WIDTH, int, 64);
+FIXTURE_LIMIT(UINTPTR_WIDTH, int, 64);
+FIXTURE_LIMIT(INTMAX_WIDTH, int, 64);
+FIXTURE_LIMIT(UINTMAX_WIDTH, int, 64);
+
+FIXTURE_LIMIT(PTRDIFF_WIDTH, int, 64);
+FIXTURE_LIMIT(SIG_ATOMIC_WIDTH, int, 32);
+FIXTURE_LIMIT(SIZE_WIDTH, int, 64);
+FIXTURE_LIMIT(WCHAR_WIDTH, int, 32);
+FIXTURE_LIMIT(WINT_WIDTH, int, 32);
+
+// Compare the exact-width macros in signed and unsigned pairs.
+static inline bool fixture_widths_exact(int signed8, int unsigned8, int signed16, int unsigned16,
+		int signed32, int unsigned32, int signed64, int unsigned64) {
+	return signed8 == INT8_WIDTH && unsigned8 == UINT8_WIDTH &&
+		signed16 == INT16_WIDTH && unsigned16 == UINT16_WIDTH &&
+		signed32 == INT32_WIDTH && unsigned32 == UINT32_WIDTH &&
+		signed64 == INT64_WIDTH && unsigned64 == UINT64_WIDTH;
+}
+
+// Compare the least-width macros in signed and unsigned pairs.
+static inline bool fixture_widths_least(int signed8, int unsigned8, int signed16, int unsigned16,
+		int signed32, int unsigned32, int signed64, int unsigned64) {
+	return signed8 == INT_LEAST8_WIDTH && unsigned8 == UINT_LEAST8_WIDTH &&
+		signed16 == INT_LEAST16_WIDTH && unsigned16 == UINT_LEAST16_WIDTH &&
+		signed32 == INT_LEAST32_WIDTH && unsigned32 == UINT_LEAST32_WIDTH &&
+		signed64 == INT_LEAST64_WIDTH && unsigned64 == UINT_LEAST64_WIDTH;
+}
+
+// Compare the fast-width macros, including the native fast-16 and fast-32 widths.
+static inline bool fixture_widths_fast(int signed8, int unsigned8, int signed16, int unsigned16,
+		int signed32, int unsigned32, int signed64, int unsigned64) {
+	return signed8 == INT_FAST8_WIDTH && unsigned8 == UINT_FAST8_WIDTH &&
+		signed16 == INT_FAST16_WIDTH && unsigned16 == UINT_FAST16_WIDTH &&
+		signed32 == INT_FAST32_WIDTH && unsigned32 == UINT_FAST32_WIDTH &&
+		signed64 == INT_FAST64_WIDTH && unsigned64 == UINT_FAST64_WIDTH;
+}
+
+// Compare the pointer and maximum integer widths.
+static inline bool fixture_widths_pointer_maximum(int intptr, int uintptr, int intmax, int uintmax) {
+	return intptr == INTPTR_WIDTH && uintptr == UINTPTR_WIDTH &&
+		intmax == INTMAX_WIDTH && uintmax == UINTMAX_WIDTH;
+}
+
+// Compare the traditional limits' corresponding widths.
+static inline bool fixture_widths_traditional(int ptrdiff, int sig_atomic, int size, int wchar,
+		int wint) {
+	return ptrdiff == PTRDIFF_WIDTH && sig_atomic == SIG_ATOMIC_WIDTH &&
+		size == SIZE_WIDTH && wchar == WCHAR_WIDTH &&
+		wint == WINT_WIDTH;
+}
+#endif
+
 #undef FIXTURE_LIMIT
 #undef FIXTURE_TYPE
 
