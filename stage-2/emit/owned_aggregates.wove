@@ -21,7 +21,8 @@
 	(use wove-file "./members.wove" (only write_member named_member (type CMember)))
 	(use wove-file "./records.wove" (only write_record_name))
 	(use wove-file "./runtime.wove" (only open_array_drop write_c_number))
-	(use wove-file "./names.wove" (only (value owner_take_role) (value owner_drop_role)))
+	(use wove-file "./names.wove" (only (value owner_take_role) (value owner_drop_role)
+		(value heap_slot_role) (value heap_slot_drop_role)))
 	(use wove-file "./text.wove" (only c_byte c_literal_text write_local_name get_name
 		(type CNameParent) (type CNameRole) (type CNameSpelling)))
 
@@ -43,17 +44,15 @@
 	(let c_drop_end ");")
 	(struct OwnedMember (fields (type u32) (field i32)))
 
-	(fn write_owner_helper_name
-		(:doc `Continue the checked layout identity with its ownership operation.
+	(fn write_layout_role_name
+		(:doc `Continue the checked layout identity with a private ownership role.
 
-		Each operation uses a reversible FNV-1a byte step. With the same
+		Each role uses a reversible FNV-1a byte step. With the same
 		suffix, its spelling collisions have the same exact layout ranks.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
-			(take bool) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(tag u8) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
-			(let-mut tag owner_drop_role)
-			(if take (then (set tag owner_take_role)))
 			(let parent (struct.new CNameParent
 				(identity (call fnv1a_byte (struct.get layout identity) tag))
 				(slot (struct.get layout c_name_slot))))
@@ -68,6 +67,17 @@
 			(return (call get_name parent role
 				(struct.new CNameSpelling (start (struct.get name start)) (end (struct.get name end)) (trailing 0u8))
 				(borrow-shared source) (borrow-mut output) offset name_prefix writing))))
+
+	(fn write_owner_helper_name
+		(:doc "Select the take or drop role for a concrete aggregate.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(take bool) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut tag owner_drop_role)
+			(if take (then (set tag owner_take_role)))
+			(return (call write_layout_role_name (borrow-shared source) (borrow-shared nodes) layout tag
+				(borrow-mut output) offset name_prefix writing))))
 
 	(fn open_owner_helper
 		(:doc "Open a helper call or definition with its operation and exact type.")
@@ -344,19 +354,8 @@
 			(return (call c_literal_text (borrow-shared c_owner_close)
 				(borrow-mut output) cursor writing))))
 
-	(let slot_prefix "wvrt_slot_")
 	(let slot_definition "WVRT_DEFINE_OWNED_SLOT(")
 	(let slot_definition_end ")\n")
-
-	(fn write_slot_name
-		(:doc "Name the slot for the exact checked aggregate it contains.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
-			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
-		(body
-			(let prefix (call c_literal_text (borrow-shared slot_prefix) (borrow-mut output) offset writing))
-			(return (call write_record_name (borrow-shared source) (borrow-shared nodes) layout
-				(borrow-mut output) prefix name_prefix writing))))
 
 	(fn open_owned_slot_call
 		(:doc "Supply the matching slot type as the first argument to a runtime macro.")
@@ -365,12 +364,24 @@
 		(returns u32)
 		(body
 			(let open (call c_literal_text (borrow-shared macro) (borrow-mut output) offset writing))
-			(let slot (call write_slot_name (borrow-shared source) (borrow-shared nodes) layout
+			(let slot (call write_layout_role_name (borrow-shared source) (borrow-shared nodes) layout heap_slot_role
 				(borrow-mut output) open name_prefix writing))
 			(return (call c_byte (borrow-mut output) slot 44u8 writing))))
 
+	(fn open_owned_slot_drop_call
+		(:doc "Supply the slot layout and the erased destructor to an allocating or replacing macro.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
+			(macro (shared-array u8)) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let next (call open_owned_slot_call (borrow-shared source) (borrow-shared nodes)
+				layout (borrow-shared macro) (borrow-mut output) offset name_prefix writing))
+			(let drop (call write_layout_role_name (borrow-shared source) (borrow-shared nodes) layout heap_slot_drop_role
+				(borrow-mut output) next name_prefix writing))
+			(return (call c_byte (borrow-mut output) drop 44u8 writing))))
+
 	(fn write_slot_definition
-		(:doc "Define the inline slot and attach the record's nominal destructor.")
+		(:doc "Define the heap slot and its erased destructor using the exact aggregate drop target.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (layout ScalarRecord)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
@@ -379,11 +390,14 @@
 			(let record (call write_record_name (borrow-shared source) (borrow-shared nodes) layout
 				(borrow-mut output) open name_prefix writing))
 			(let before_slot (call c_byte (borrow-mut output) record 44u8 writing))
-			(let slot (call write_slot_name (borrow-shared source) (borrow-shared nodes) layout
+			(let slot (call write_layout_role_name (borrow-shared source) (borrow-shared nodes) layout heap_slot_role
 				(borrow-mut output) before_slot name_prefix writing))
 			(let before_drop (call c_byte (borrow-mut output) slot 44u8 writing))
+			(let erased_drop (call write_layout_role_name (borrow-shared source) (borrow-shared nodes) layout heap_slot_drop_role
+				(borrow-mut output) before_drop name_prefix writing))
+			(let before_destroy (call c_byte (borrow-mut output) erased_drop 44u8 writing))
 			(let drop (call write_owner_helper_name (borrow-shared source) (borrow-shared nodes) layout
-				(bool false) (borrow-mut output) before_drop name_prefix writing))
+				(bool false) (borrow-mut output) before_destroy name_prefix writing))
 			(return (call c_literal_text (borrow-shared slot_definition_end) (borrow-mut output) drop writing))))
 
 	(fn slot_operation_element
