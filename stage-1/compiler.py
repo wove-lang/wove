@@ -937,6 +937,38 @@ class FunctionEmitter:
 		self.emit_line("}")
 		return result
 
+	# Evaluate one selected arm and keep its copyable value after the branch.
+	def conditional_value(self, node: Form) -> Value:
+		test, on_true, on_false = form(node, arity=3).operands
+		then_operand, = checked_form(on_true, "then", 1).operands
+		else_operand, = checked_form(on_false, "else", 1).operands
+		condition = self.typed(test, BOOL)
+		incoming = self.moved.copy()
+		declaration = len(self.lines)
+		indent = "    " * len(self.scopes)
+		self.emit_line(f"if ({condition.c}) {{")
+		self.scopes.append({})
+		first = self.expression(then_operand)
+		# The seed driver uses value conditionals with copyable results.
+		if not copyable(first.kind):
+			raise SourceError(then_operand.line)
+		result = self.value_slot(first.kind)
+		self.emit_line(f"{result.c} = {first.c};")
+		self.scopes.pop()
+		then_moved = self.moved
+		self.moved = incoming
+		self.emit_line("} else {")
+		self.scopes.append({})
+		second = self.typed(else_operand, result.kind)
+		self.emit_line(f"{result.c} = {second.c};")
+		self.scopes.pop()
+		self.emit_line("}")
+		# Either arm can consume an outer owner while producing a copyable result.
+		self.moved |= then_moved
+		# The result type is known only after lowering the first arm.
+		self.lines.insert(declaration, f"{indent}{c_type(result.kind)} {result.c};")
+		return result
+
 	# Evaluate field expressions in source order and assemble the named value.
 	def make_record(self, node: Form) -> Value:
 		# The constructor needs a type name before its field initializers.
@@ -1074,6 +1106,10 @@ class FunctionEmitter:
 		# Binary boolean expressions guard every operation in the right operand.
 		if expr.tag in ("bool.and", "bool.or"):
 			return self.short_circuit(expr)
+
+		# An expression branch writes one result without evaluating the other arm.
+		if expr.tag == "if":
+			return self.conditional_value(expr)
 
 		# Negation requires a boolean and keeps its type.
 		if expr.tag == "bool.not":
