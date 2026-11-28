@@ -14,11 +14,13 @@
 	(let call_witness_prefix "wove_native_call_probe_")
 	(let fixed_call_witness_prefix "wove_native_fixed_call_probe_")
 	(let borrowed_cstr_witness_prefix "wove_native_borrowed_cstr_probe_")
+	(let mutable_cstr_witness_prefix "wove_native_mutable_cstr_probe_")
 	(let variadic_call_witness_prefix "wove_native_variadic_call_probe_")
 	(let plain_function_witness 0u8)
 	(let fixed_function_witness 1u8)
 	(let variadic_function_witness 2u8)
 	(let borrowed_cstr_function_witness 3u8)
+	(let mutable_cstr_function_witness 4u8)
 	(let id_key "id")
 	(let name_key "name")
 	(let type_key "type")
@@ -319,31 +321,64 @@
 					(set child (struct.get (array.load nodes child) next_sibling))))
 			(return (bool true))))
 
-	(fn borrowed_cstr_result
-		(:doc "Resolve the native result to a pointer to plain or const char before copying C storage.")
-		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (prototype i32)
+	(fn snapshot_function_witness
+		(:doc "Both snapshot witnesses require an actual native character pointer result.")
+		(params (mode u8)) (returns bool)
+		(body (return (bool.or (u8.eq mode borrowed_cstr_function_witness) (u8.eq mode mutable_cstr_function_witness)))))
+
+	(fn peel_type_aliases
+		(:doc "Skip Clang's typedef wrappers while retaining any qualifiers on the underlying type.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (type i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let-mut row type)
+			(while
+				(:doc "Each wrapper must describe a single underlying type.")
+				(bool.or (call has_kind (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared elaborated_kind) (borrow-mut scratch))
+					(call has_kind (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared typedef_type_kind) (borrow-mut scratch)))
+				(body (set row (call single_inner (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))))
+			(return row)))
+
+	(fn cstr_pointer_matches
+		(:doc "Resolve a native character pointer and require a writable pointee for the scratch parameter.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (type i32) (writable bool)
 			(scratch (mut-array u8))) (returns bool)
 		(body
-			(let-mut result (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes)
-				prototype (borrow-mut scratch)))
-			(while
-				(:doc "Clang puts the return type first, with any typedef wrappers still attached.")
-				(bool.or (call has_kind (borrow-shared ast) (borrow-shared nodes) result
-						(borrow-shared elaborated_kind) (borrow-mut scratch))
-					(call has_kind (borrow-shared ast) (borrow-shared nodes) result
-						(borrow-shared typedef_type_kind) (borrow-mut scratch)))
-				(body (set result (call single_inner (borrow-shared ast) (borrow-shared nodes) result (borrow-mut scratch)))))
+			(let pointer (call peel_type_aliases (borrow-shared ast) (borrow-shared nodes) type (borrow-mut scratch)))
 			(if
-				(:doc "The immediate copy requires an actual C pointer result.")
-				(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) result
+				(:doc "The argument or result must have an actual native pointer type.")
+				(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) pointer
 					(borrow-shared pointer_kind) (borrow-mut scratch)))
 				(then (return (bool false))))
-			(let pointee (call single_inner (borrow-shared ast) (borrow-shared nodes) result (borrow-mut scratch)))
+			(let pointee (call peel_type_aliases (borrow-shared ast) (borrow-shared nodes)
+				(call single_inner (borrow-shared ast) (borrow-shared nodes) pointer (borrow-mut scratch))
+				(borrow-mut scratch)))
 			(let spelling (call type_spelling (borrow-shared ast) (borrow-shared nodes) pointee (bool true)
 				(borrow-mut scratch)))
 			(return (bool.or
 				(call field_equals (borrow-shared ast) (borrow-shared nodes) spelling (borrow-shared plain_char))
-				(call field_equals (borrow-shared ast) (borrow-shared nodes) spelling (borrow-shared const_char))))))
+				(bool.and (bool.not writable)
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) spelling (borrow-shared const_char)))))))
+
+	(fn snapshot_prototype_matches
+		(:doc "Check the text result and, for copyback, the single mutable C string parameter.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (prototype i32) (mode u8)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let result (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) prototype (borrow-mut scratch)))
+			(if
+				(:doc "Clang lists the return type before the parameter types.")
+				(bool.not (call cstr_pointer_matches (borrow-shared ast) (borrow-shared nodes) result (bool false)
+					(borrow-mut scratch)))
+				(then (return (bool false))))
+			(if (u8.not-eq mode mutable_cstr_function_witness) (then (return (bool true))))
+			(let parameter (struct.get (array.load nodes result) next_sibling))
+			(return (bool.and (i32.not-ltz parameter)
+				(bool.and (i32.ltz (struct.get (array.load nodes parameter) next_sibling))
+					(call cstr_pointer_matches (borrow-shared ast) (borrow-shared nodes) parameter (bool true)
+						(borrow-mut scratch)))))))
 
 	(fn witness_direct_function
 		(:doc "Resolve a body-free external function with the witness's fixed or variadic C prototype.")
@@ -384,10 +419,10 @@
 						(else (i32.ltz variadic)))))
 				(then (return -1i32)))
 			(if
-				(:doc "A borrowed snapshot also requires a native pointer to a C string.")
-				(bool.and (u8.eq mode borrowed_cstr_function_witness)
-					(bool.not (call borrowed_cstr_result (borrow-shared ast) (borrow-shared nodes)
-						prototype (borrow-mut scratch))))
+				(:doc "A borrowed snapshot checks its result pointer and any mutable scratch parameter.")
+				(bool.and (call snapshot_function_witness mode)
+					(bool.not (call snapshot_prototype_matches (borrow-shared ast) (borrow-shared nodes)
+						prototype mode (borrow-mut scratch))))
 				(then (return -1i32)))
 			(return function)))
 
@@ -425,14 +460,17 @@
 						(borrow-shared nodes) row (borrow-shared fixed_call_witness_prefix) (borrow-mut scratch)))))
 					(let borrowed (bool.and fixed_calls (i32.not-ltz (call witness_name (borrow-shared ast)
 						(borrow-shared nodes) row (borrow-shared borrowed_cstr_witness_prefix) (borrow-mut scratch)))))
+					(let mutable (bool.and fixed_calls (i32.not-ltz (call witness_name (borrow-shared ast)
+						(borrow-shared nodes) row (borrow-shared mutable_cstr_witness_prefix) (borrow-mut scratch)))))
 					(let variadic (bool.and variadic_calls (i32.not-ltz (call witness_name (borrow-shared ast)
 						(borrow-shared nodes) row (borrow-shared variadic_call_witness_prefix) (borrow-mut scratch)))))
 					(if
 						(:doc "Only a proven witness may exempt its exact function declaration.")
-						(bool.or getter (bool.or (bool.or adapted borrowed) variadic))
+						(bool.or getter (bool.or (bool.or adapted (bool.or borrowed mutable)) variadic))
 						(then
 							(let-mut mode fixed_function_witness)
 							(if borrowed (then (set mode borrowed_cstr_function_witness)))
+							(if mutable (then (set mode mutable_cstr_function_witness)))
 							(if variadic (then (set mode variadic_function_witness)))
 							(let function (if
 								(:doc "Getter and function-call witnesses enforce distinct native expression shapes.")
@@ -443,7 +481,7 @@
 							(if (i32.ltz function) (then (return (bool false))))
 							(array.store approved function 1u8)
 							(set getters (bool.or getters getter))
-							(set fixed (bool.or fixed (bool.or adapted borrowed)))
+							(set fixed (bool.or fixed (bool.or adapted (bool.or borrowed mutable))))
 							(set variadics (bool.or variadics variadic))))
 					(set row (struct.get (array.load nodes row) next_sibling))))
 			(return (bool.and (bool.or (bool.not writable) getters)
@@ -552,6 +590,8 @@
 						(borrow-shared fixed_call_witness_prefix) (borrow-mut scratch)))
 					(let borrowed_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
 						(borrow-shared borrowed_cstr_witness_prefix) (borrow-mut scratch)))
+					(let mutable_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared mutable_cstr_witness_prefix) (borrow-mut scratch)))
 					(let variadic_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
 						(borrow-shared variadic_call_witness_prefix) (borrow-mut scratch)))
 					(let getter (i32.not-ltz getter_name))
@@ -568,6 +608,10 @@
 						(:doc "A borrowed snapshot has a fixed prototype and a checked C string result.")
 						(i32.not-ltz borrowed_name)
 						(then (set name borrowed_name) (set mode borrowed_cstr_function_witness)))
+					(if
+						(:doc "A copyback snapshot also checks the writable parameter of the fixed C prototype.")
+						(i32.not-ltz mutable_name)
+						(then (set name mutable_name) (set mode mutable_cstr_function_witness)))
 					(if
 						(:doc "A named C tail has its own variadic address witness.")
 						(i32.not-ltz variadic_name)
@@ -599,7 +643,7 @@
 							(set length (call append_field (borrow-shared ast) (borrow-shared nodes) pointer (borrow-mut output) length))
 							(if
 								(:doc "All adapted fixed calls depend on the same resolved declaration metadata.")
-								(bool.or (u8.eq mode fixed_function_witness) (u8.eq mode borrowed_cstr_function_witness))
+								(bool.or (u8.eq mode fixed_function_witness) (call snapshot_function_witness mode))
 								(then (set length (call append_fixed_attributes (borrow-shared ast) (borrow-shared nodes)
 									function (borrow-mut output) length (borrow-mut scratch)))))))
 					(if (i32.ltz length) (then (return -1i32)))
