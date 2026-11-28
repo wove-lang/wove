@@ -11,7 +11,7 @@ typedef struct {
 int fixture_init(fixture_storage *storage, int value);
 int fixture_read(const fixture_storage *storage);
 int fixture_increment(fixture_storage *storage);
-int fixture_destroy(fixture_storage *storage);
+int fixture_destroy(fixture_storage *storage) __attribute__((nothrow, nonnull(1)));
 int fixture_other_destroy(fixture_storage *storage);
 int fixture_current(void);
 int fixture_drops(void);
