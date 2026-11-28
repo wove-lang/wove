@@ -134,13 +134,21 @@ def check_tool_calls(root, options):
 			assert re.fullmatch(pattern, actual), (actual, pattern)
 
 
+# Count the retained C patterns using common or host-specific expectations.
+def check_c_patterns(label, generated, patterns):
+	# Each host-specific expectation covers the active test platform.
+	for pattern, expected in patterns.items():
+		count = expected[sys.platform] if isinstance(expected, dict) else expected
+		actual = len(re.findall(pattern, generated))
+		assert actual == count, (label, pattern, actual, count)
+
+
 # Check retained C and executable publication.
-def check_binary(root, options, target, retained, result, patterns, previous, existing_c):
+def check_binary(label, root, options, target, retained, result, patterns, previous, existing_c):
 	check_c_artifacts(root, retained, existing_c)
 	generated = (root / retained).read_text()
 	# Apply the same retained-C pattern checks used by cc fixtures.
-	for pattern, count in patterns.items():
-		assert len(re.findall(pattern, generated)) == count, pattern
+	check_c_patterns(label, generated, patterns)
 	# Additional outputs use manifest-supplied path and regex assertions.
 	for path, checks in options.get("files", {}).items():
 		content = (root / path).read_text()
@@ -266,7 +274,7 @@ def check_case(compiler, clang, runtime, fixtures, row):
 			return
 		# Bin runs the published program only after a successful compilation.
 		if bin_command and (result.returncode == 0 or (tool and "arguments" in tool)):
-			check_binary(root, tool or {}, target, retained, result, patterns, previous, existing_c)
+			check_binary(label, root, tool or {}, target, retained, result, patterns, previous, existing_c)
 			if run_expected is not None:
 				run_program(root, root / target, label, fixtures, run_expected)
 			# Existing publication regressions separately exercise the preserved old target.
@@ -280,8 +288,7 @@ def check_case(compiler, clang, runtime, fixtures, row):
 		if retained != "-":
 			generated = (root / retained).read_text()
 			# The case can count defining symbols without pinning installation-dependent hashes.
-			for pattern, count in patterns.items():
-				assert len(re.findall(pattern, generated)) == count, (label, pattern)
+			check_c_patterns(label, generated, patterns)
 			# Legacy cc execution cases link retained C after verifying the compiler phase.
 			if run_expected is not None:
 				program = root / "result"
