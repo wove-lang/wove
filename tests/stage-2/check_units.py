@@ -157,9 +157,9 @@ def symbols(path):
 	return symbols
 
 
-# Recognize a generated role with any reserved prefix and with or without a collision slot.
+# Recognize an ordinal-based generated role with any reserved prefix.
 def generated_symbol(name, role):
-	return re.match(rf"w+g[{role}{role.upper()}][0-3][0-9a-v]{{6}}", name) is not None
+	return re.fullmatch(rf"w+g[{role}{role.upper()}][0-9A-Za-z]+(?:_[0-9A-Za-z_]*)?", name) is not None
 
 
 # Independently compile each part, verify its symbols, then link and run all objects together.

@@ -8,40 +8,40 @@
 #include <string.h>
 
 typedef struct {
-	uint32_t wgm08h454tkind;
-	int32_t wgm2l3oejpstart;
-	_Bool wgm0p53of8ready;
-	uint8_t wgm0s9i5chflag;
-} wgr1fpbp46Token;
+	uint32_t wgm0_kind;
+	int32_t wgm0_start;
+	_Bool wgm0_ready;
+	uint8_t wgm0_flag;
+} wgr0_Token;
 
 #undef main
 int wove_emitted_main(int argc, char **argv);
-wgr1fpbp46Token wgf0o0aumnreplace_token(wvrt_mut_slice view, int32_t index, wgr1fpbp46Token value);
+wgr0_Token wgf2_replace_token(wvrt_mut_slice view, int32_t index, wgr0_Token value);
 
 // Print every field of a copy or backing record without truncating its scalar values.
-static void print_token(wgr1fpbp46Token value) {
-	printf(" %" PRIu32 " %" PRId32 " %d %u", value.wgm08h454tkind, value.wgm2l3oejpstart,
-		value.wgm0p53of8ready, (unsigned)value.wgm0s9i5chflag);
+static void print_token(wgr0_Token value) {
+	printf(" %" PRIu32 " %" PRId32 " %d %u", value.wgm0_kind, value.wgm0_start,
+		value.wgm0_ready, (unsigned)value.wgm0_flag);
 }
 
 // Give the emitted program the caller's original two-record buffer.
 int main(int argc, char **argv) {
-	wgr1fpbp46Token data[] = {
+	wgr0_Token data[] = {
 		{UINT32_C(2147483648), INT32_MAX, false, UINT8_C(17)},
 		{UINT32_C(23), -7, false, UINT8_C(4)},
 	};
 	const wvrt_mut_slice full = {data, 2, sizeof *data};
-	const wgr1fpbp46Token replacement = {UINT32_MAX, INT32_MIN, true, UINT8_MAX};
+	const wgr0_Token replacement = {UINT32_MAX, INT32_MIN, true, UINT8_MAX};
 
 	// An invalid store must trap before touching inaccessible backing storage.
 	if (argc == 2) {
 		const wvrt_mut_slice inaccessible = {NULL, full.wvrt_length, sizeof *data};
-		if (strcmp(argv[1], "negative") == 0) { (void)wgf0o0aumnreplace_token(inaccessible, -1, replacement); }
-		if (strcmp(argv[1], "end") == 0) { (void)wgf0o0aumnreplace_token(inaccessible, full.wvrt_length, replacement); }
+		if (strcmp(argv[1], "negative") == 0) { (void)wgf2_replace_token(inaccessible, -1, replacement); }
+		if (strcmp(argv[1], "end") == 0) { (void)wgf2_replace_token(inaccessible, full.wvrt_length, replacement); }
 		return 2;
 	}
 
-	const wgr1fpbp46Token observed = wgf0o0aumnreplace_token(full, 1, replacement);
+	const wgr0_Token observed = wgf2_replace_token(full, 1, replacement);
 	printf("%d", wove_emitted_main(argc, argv));
 	print_token(observed);
 	print_token(data[0]);

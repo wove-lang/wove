@@ -1,0 +1,123 @@
+(module base62
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Encode compiler ordinals and digest bytes using 0–9, a–z, then A–Z.")
+
+	(let alphabet "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	(let digest_base62_width 43i32)
+
+	(fn base62_width
+		(:doc "Count significant digits, including one digit for zero.")
+		(params (value u32)) (returns i32)
+		(body
+			(let-mut quotient value)
+			(let-mut width 1i32)
+			(while
+				(:doc "Each division removes one non-final digit.")
+				(u32:not-lt quotient 62u32)
+				(body
+					(set quotient (u32:div quotient 62u32))
+					(set width (i32:inc width))))
+			(return width)))
+
+	(fn write_base62_digits
+		(:doc "Fill a checked, sufficiently wide output span, padding on the left when needed.")
+		(params (value u32) (output (mut-array u8)) (start i32) (end i32)) (returns void)
+		(body
+			(let-mut quotient value)
+			(let-mut cursor end)
+			(while
+				(:doc "Write the least significant remaining digit near the right edge.")
+				(i32:lt start cursor)
+				(body
+					(set cursor (i32:dec cursor))
+					(array:set output cursor (array:get alphabet (i32:from-u32 (u32:rem quotient 62u32))))
+					(set quotient (u32:div quotient 62u32))))))
+
+	(fn encode_base62_padded
+		(:doc "Encode at a specified width and keep the destination intact if the range or value does not fit.")
+		(params (value u32) (output (mut-array u8)) (start i32) (width i32)) (returns bool)
+		(body
+			(if
+				(:doc "Check the complete output span and the required digits before writing.")
+				(bool:or (i32:ltz start)
+					(bool:or (i32:lt (i32:sub (array:len output) start) width)
+						(i32:lt width (call base62_width value))))
+				(then (return (bool false))))
+			(call write_base62_digits value (borrow-mut output) start (i32:add start width))
+			(return (bool true))))
+
+	(fn uppercase_digit
+		(:doc "Identify digits that require escaping in a filesystem component.")
+		(params (byte u8)) (returns bool)
+		(body (return (bool:and (u8:not-lt byte 65u8) (u8:lt byte 91u8)))))
+
+	(fn write_base62_filename
+		(:doc "Append padded Base62 with uppercase digits escaped as underscore and lowercase.")
+		(params (value u32) (output (mut-array u8)) (start i32) (width i32)) (returns i32)
+		(body
+			(if (i32:ltz start) (then (return -1i32)))
+			(if (i32:lt width (call base62_width value)) (then (return -1i32)))
+			(let available (i32:sub (array:len output) start))
+			(if (i32:lt available width) (then (return -1i32)))
+			(let-mut digits (array:alloc u8 width))
+			(call write_base62_digits value (borrow-mut digits) 0i32 width)
+			(let-mut needed width)
+			(for
+				(:doc "Measure the full component before modifying the destination.")
+				(let index) (range 0i32 width)
+				(body
+					(if (call uppercase_digit (array:get digits index))
+						(then
+							(if (i32:eq needed available) (then (return -1i32)))
+							(set needed (i32:inc needed))))))
+			(let-mut cursor start)
+			(for
+				(:doc "Escape case while leaving ordinary lowercase digits readable.")
+				(let index) (range 0i32 width)
+				(body
+					(let-mut digit (array:get digits index))
+					(if
+						(:doc "The underscore keeps uppercase and lowercase digits distinct on disk.")
+						(call uppercase_digit digit)
+						(then
+							(array:set output cursor 95u8)
+							(set cursor (i32:inc cursor))
+							(set digit (u8:from-u32 (u32:add (u32:from-u8 digit) 32u32)))))
+					(array:set output cursor digit)
+					(set cursor (i32:inc cursor))))
+			(return cursor)))
+
+	(fn digest_base62
+		(:doc "Write a 256-bit digest as 43 padded Base62 digits in big-endian order.")
+		(params (words (array u32 8))) (returns (owned-array u8))
+		(body
+			(let-mut output (array:alloc u8 digest_base62_width))
+			(let-mut input 0i32)
+			(while
+				(:doc "Fold each input byte into the numeric Base62 digits from left to right.")
+				(i32:lt input 32i32)
+				(body
+					(let word (array:get words (i32:div input 4i32)))
+					(let shift (i32:mul (i32:sub 3i32 (i32:rem input 4i32)) 8i32))
+					(let-mut carry (u32:and (u32:shr word shift) 255u32))
+					(let-mut cursor digest_base62_width)
+					(while
+						(:doc "Multiply the digest prefix by 256 and add the new byte, carrying from right to left.")
+						(i32:gtz cursor)
+						(body
+							(set cursor (i32:dec cursor))
+							(let value (u32:add (u32:shl (u32:from-u8 (array:get output cursor)) 8i32) carry))
+							(array:set output cursor (u8:from-u32 (u32:rem value 62u32)))
+							(set carry (u32:div value 62u32))))
+					(set input (i32:inc input))))
+			(let-mut cursor 0i32)
+			(while
+				(:doc "Translate numeric digits only after the last carry has propagated.")
+				(i32:lt cursor digest_base62_width)
+				(body
+					(let digit (array:get output cursor))
+					(array:set output cursor (array:get alphabet (i32:from-u8 digit)))
+					(set cursor (i32:inc cursor))))
+			(return (move output))))
+)
