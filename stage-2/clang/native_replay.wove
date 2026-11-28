@@ -29,6 +29,7 @@
 	(let mutable_cstr_function_witness 4u8)
 	(let typed_function_witness 5u8)
 	(let owner_function_witness 6u8)
+	(let gnu_inline_replay 7u8)
 	(let id_key "id")
 	(let name_key "name")
 	(let type_key "type")
@@ -37,6 +38,8 @@
 	(let mangled_key "mangledName")
 	(let storage_key "storageClass")
 	(let inline_key "inline")
+	(let thread_storage_key "tls")
+	(let initializer_key "init")
 	(let previous_key "previousDecl")
 	(let implicit_key "isImplicit")
 	(let true_value "true")
@@ -59,6 +62,10 @@
 	(let function_kind "\"FunctionDecl\"")
 	(let function_prototype_kind "\"FunctionProtoType\"")
 	(let parameter_kind "\"ParmVarDecl\"")
+	(let object_kind "\"VarDecl\"")
+	(let compound_kind "\"CompoundStmt\"")
+	(let return_kind "\"ReturnStmt\"")
+	(let gnu_inline_kind "\"GNUInlineAttr\"")
 	(let nothrow_kind "\"NoThrowAttr\"")
 	(let nonnull_kind "\"NonNullAttr\"")
 	(let format_kind "\"FormatAttr\"")
@@ -70,6 +77,8 @@
 	(let const_kind "\"ConstAttr\"")
 	(let extern_storage "\"extern\"")
 	(let decay_cast "\"FunctionToPointerDecay\"")
+	(let array_decay_cast "\"ArrayToPointerDecay\"")
+	(let read_cast "\"LValueToRValue\"")
 	(let address_opcode "\"&\"")
 	(let dereference_opcode "\"*\"")
 	(let void_prototype "(void)\"")
@@ -241,6 +250,21 @@
 					(bool:or (i32:ltz storage) (call field_equals (borrow-shared ast) (borrow-shared nodes)
 						storage (borrow-shared extern_storage))))))))
 
+	(fn external_object
+		(:doc "Certify an extern object declaration with no initializer, TLS, or attributes.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let storage (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared storage_key) (borrow-mut scratch)))
+			(let tls (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared thread_storage_key) (borrow-mut scratch)))
+			(let init (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared initializer_key) (borrow-mut scratch)))
+			(return (bool:and (bool:and (i32:ltz tls) (i32:ltz init))
+				(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) storage (borrow-shared extern_storage))
+					(i32:ltz (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-mut scratch))))))))
+
 	(fn accepts_getter
 		(:doc "Require a body-free external void-parameter prototype with recognized non-linkage attributes.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
@@ -270,29 +294,30 @@
 					(set child (struct:get (nodes.get child) next_sibling))))
 			(return (bool true))))
 
-	(fn referenced_function
-		(:doc "Resolve the reference against the direct linked C declaration it names.")
-		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (reference i32)
+	(fn referenced_declaration
+		(:doc "Resolve a reference against the direct declarations in the given AST scope.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (scope i32) (reference i32)
 			(scratch (mut-array u8))) (returns i32)
 		(body
 			(let identity (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) reference (borrow-shared id_key) (borrow-mut scratch)))
 			(if (i32:ltz identity) (then (return -1i32)))
-			(let-mut row (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(let-mut row (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) scope (borrow-mut scratch)))
 			(while
 				(:doc "Compare pointer IDs only within this single Clang AST.")
 				(i32:not-ltz row)
 				(body
 					(let candidate (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-shared id_key) (borrow-mut scratch)))
-					(if
-						(:doc "The matching declaration must be the checked external function.")
-						(call same_field (borrow-shared ast) (borrow-shared nodes) identity candidate)
-						(then
-							(if
-								(:doc "A matching local or indirect reference does not provide an external symbol.")
-								(call is_linked_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch))
-								(then (return row)))
-							(return -1i32)))
+					(if (call same_field (borrow-shared ast) (borrow-shared nodes) identity candidate) (then (return row)))
 					(set row (struct:get (nodes.get row) next_sibling))))
+			(return -1i32)))
+
+	(fn referenced_function
+		(:doc "Resolve a reference to an externally linked function declaration.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (reference i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let row (call referenced_declaration (borrow-shared ast) (borrow-shared nodes) 0i32 reference (borrow-mut scratch)))
+			(if (call is_linked_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)) (then (return row)))
 			(return -1i32)))
 
 	(fn witness_getter
@@ -310,12 +335,13 @@
 			(return -1i32)))
 
 	(fn function_declaration_mode
-		(:doc "Classify a body-free declaration and record the proof needed by its ordinary attributes.")
+		(:doc "Classify a prototype or an independently checked GNU inline forwarding definition.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32)
 			(mode u8) (scratch (mut-array u8))) (returns u8)
 		(body
-			(let plain (u8:eq mode plain_function_witness))
-			(let-mut declaration plain_declaration)
+			(let gnu (u8:eq mode gnu_inline_replay))
+			(let plain (bool:or gnu (u8:eq mode plain_function_witness)))
+			(let-mut declaration (if gnu (then attributed_declaration) (else plain_declaration)))
 			(let-mut child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) function (borrow-mut scratch)))
 			(while
 				(:doc "A declaration can carry parameters and only explicitly checked metadata.")
@@ -355,16 +381,95 @@
 					(let witnessed_availability (bool:and availability (bool:or (u8:eq mode fixed_function_witness)
 						(bool:or owner (bool:or (u8:eq mode variadic_function_witness) (u8:eq mode typed_function_witness))))))
 					(let owner_attribute (bool:and owner (bool:or restrict builtin)))
+					(let forwarding_node (bool:and gnu
+						(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared compound_kind))
+							(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared gnu_inline_kind)))))
 					(let attribute (bool:or (bool:or nothrow ordinary_attribute) (bool:and (bool:not plain)
 						(bool:or (bool:or witnessed_availability owner_attribute)
 							(bool:or nonnull asm_label)))))
 					(if
 						(:doc "Reject bodies and attributes outside the audited declaration contract.")
-						(bool:not (bool:or attribute (call field_equals (borrow-shared ast)
+						(bool:not (bool:or (bool:or attribute forwarding_node) (call field_equals (borrow-shared ast)
 							(borrow-shared nodes) kind (borrow-shared parameter_kind))))
 						(then (return 0u8)))
 					(set child (struct:get (nodes.get child) next_sibling))))
 			(return declaration)))
+
+	(fn gnu_forwarding_call
+		(:doc "Find the sole returned call in an explicitly GNU extern-inline definition.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let storage (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
+				(borrow-shared storage_key) (borrow-mut scratch)))
+			(let inline (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
+				(borrow-shared inline_key) (borrow-mut scratch)))
+			(if
+				(:doc "Require the GNU external inline form before inspecting its body.")
+				(bool:not (bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) storage (borrow-shared extern_storage))
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) inline (borrow-shared true_value))))
+				(then (return -1i32)))
+			(let-mut gnu (bool false))
+			(let-mut result -1i32)
+			(let-mut child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) function (borrow-mut scratch)))
+			(while
+				(:doc "Find one GNU inline attribute and one body with exactly one return statement.")
+				(i32:not-ltz child)
+				(body
+					(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) child
+						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(if
+						(:doc "The attribute makes this definition available for inlining without defining its external symbol.")
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared gnu_inline_kind))
+						(then
+							(if gnu (then (return -1i32)))
+							(set gnu (bool true))))
+					(if
+						(:doc "A forwarder creates no locals and executes only the returned call.")
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared compound_kind))
+						(then
+							(if (i32:not-ltz result) (then (return -1i32)))
+							(let returned (call single_inner (borrow-shared ast) (borrow-shared nodes) child (borrow-mut scratch)))
+							(if (bool:not (call has_kind (borrow-shared ast) (borrow-shared nodes) returned
+								(borrow-shared return_kind) (borrow-mut scratch))) (then (return -1i32)))
+							(set result (call single_inner (borrow-shared ast) (borrow-shared nodes) returned (borrow-mut scratch)))
+							(if (bool:not (call has_kind (borrow-shared ast) (borrow-shared nodes) result
+								(borrow-shared call_kind) (borrow-mut scratch))) (then (return -1i32)))))
+					(set child (struct:get (nodes.get child) next_sibling))))
+			(if gnu (then (return result)))
+			(return -1i32)))
+
+	(fn ordinary_function_mode
+		(:doc "Audit the linkage and declaration shape before requesting native identity comparisons.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns u8)
+		(body
+			(let inline (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared inline_key) (borrow-mut scratch)))
+			(if
+				(:doc "Only the checked GNU forwarding form can carry a body into numbered output.")
+				(i32:not-ltz inline)
+				(then
+					(if (i32:ltz (call gnu_forwarding_call (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+						(then (return 0u8)))
+					(return (call function_declaration_mode (borrow-shared ast) (borrow-shared nodes)
+						row gnu_inline_replay (borrow-mut scratch)))))
+			(let storage (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared storage_key) (borrow-mut scratch)))
+			(if
+				(:doc "A prototype may use implicit or explicit external linkage.")
+				(bool:and (i32:not-ltz storage)
+					(bool:not (call field_equals (borrow-shared ast) (borrow-shared nodes) storage
+						(borrow-shared extern_storage))))
+				(then (return 0u8)))
+			(let mode (call function_declaration_mode (borrow-shared ast) (borrow-shared nodes)
+				row plain_function_witness (borrow-mut scratch)))
+			(if
+				(:doc "An attributed prototype must carry the resolved symbol needed by the identity pass.")
+				(bool:and (u8:lt plain_declaration mode)
+					(bool:not (call is_linked_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch))))
+				(then (return 0u8)))
+			(return mode)))
 
 	(fn snapshot_function_witness
 		(:doc "Both snapshot witnesses require an actual native character pointer result.")
@@ -688,38 +793,139 @@
 				(bool:and (i32:not-ltz child) (i32:not-ltz length))
 				(body
 					(if
-						(:doc "The function prototype already identifies its parameters.")
-						(bool:not (call has_kind (borrow-shared ast) (borrow-shared nodes) child
-							(borrow-shared parameter_kind) (borrow-mut scratch)))
+						(:doc "Parameters and an admitted forwarding body have their own identity fields.")
+						(bool:not (bool:or (call has_kind (borrow-shared ast) (borrow-shared nodes) child
+								(borrow-shared parameter_kind) (borrow-mut scratch))
+							(call has_kind (borrow-shared ast) (borrow-shared nodes) child
+								(borrow-shared compound_kind) (borrow-mut scratch))))
 						(then (set length (call append_attribute (borrow-shared ast) (borrow-shared nodes)
 							child (borrow-mut output) length))))
 					(set child (struct:get (nodes.get child) next_sibling))))
 			(return length)))
 
+	(fn append_declaration
+		(:doc "Record a declared name and type, including its native symbol for a linked declaration.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (linked bool)
+			(output (mut-array u8)) (offset i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(let name (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared name_key) (borrow-mut scratch)))
+			(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool false) (borrow-mut scratch)))
+			(let-mut first (call append_field (borrow-shared ast) (borrow-shared nodes) name (borrow-mut output) offset))
+			(if
+				(:doc "A linked declaration must expose a complete name for the object-file symbol.")
+				linked
+				(then
+					(let symbol (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+						(borrow-shared mangled_key) (borrow-mut scratch)))
+					(set first (call append_field (borrow-shared ast) (borrow-shared nodes) symbol (borrow-mut output) first))))
+			(return (call append_field (borrow-shared ast) (borrow-shared nodes) type (borrow-mut output) first))))
+
+	(fn cast_reference
+		(:doc "Resolve the single direct declaration reference inside an implicit forwarding cast.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(if (bool:not (call has_kind (borrow-shared ast) (borrow-shared nodes) row (borrow-shared cast_kind) (borrow-mut scratch)))
+				(then (return -1i32)))
+			(let operand (call single_inner (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(if (bool:not (call has_kind (borrow-shared ast) (borrow-shared nodes) operand
+				(borrow-shared reference_kind) (borrow-mut scratch))) (then (return -1i32)))
+			(return (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) operand
+				(borrow-shared reference_key) (borrow-mut scratch)))))
+
+	(fn append_forwarded_argument
+		(:doc "Certify a read of the wrapper's parameter or an external object, and record its identity.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32) (row i32)
+			(output (mut-array u8)) (offset i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(let cast (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared cast_key) (borrow-mut scratch)))
+			(if
+				(:doc "Reading a declaration or decaying its array reference needs no new state.")
+				(bool:not (bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared read_cast))
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared array_decay_cast))))
+				(then (return -1i32)))
+			(let reference (call cast_reference (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) reference
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(let parameter (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared parameter_kind)))
+			(let scope (if parameter (then function) (else 0i32)))
+			(let declared (call referenced_declaration (borrow-shared ast) (borrow-shared nodes) scope reference (borrow-mut scratch)))
+			(let actual_kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) declared
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if
+				(:doc "Resolve the actual declaration, excluding local variables, TLS, and external object definitions.")
+				(bool:not (bool:and (call same_field (borrow-shared ast) (borrow-shared nodes) kind actual_kind)
+					(bool:or parameter (bool:and
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared object_kind))
+						(call external_object (borrow-shared ast) (borrow-shared nodes) declared (borrow-mut scratch))))))
+				(then (return -1i32)))
+			(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool false) (borrow-mut scratch)))
+			(let first (call append_field (borrow-shared ast) (borrow-shared nodes) kind (borrow-mut output) offset))
+			(let next (call append_field (borrow-shared ast) (borrow-shared nodes) cast (borrow-mut output) first))
+			(let last (call append_field (borrow-shared ast) (borrow-shared nodes) type (borrow-mut output) next))
+			(return (call append_declaration (borrow-shared ast) (borrow-shared nodes) declared (bool:not parameter)
+				(borrow-mut output) last (borrow-mut scratch)))))
+
+	(fn append_forwarding_body
+		(:doc "Compare the sole call's linked target and the exact ordered operand reads in each context.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32) (call_row i32)
+			(output (mut-array u8)) (offset i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(let callee (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) call_row (borrow-mut scratch)))
+			(let cast (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) callee
+				(borrow-shared cast_key) (borrow-mut scratch)))
+			(let reference (call cast_reference (borrow-shared ast) (borrow-shared nodes) callee (borrow-mut scratch)))
+			(let target (call referenced_function (borrow-shared ast) (borrow-shared nodes) reference (borrow-mut scratch)))
+			(let implicit (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) target
+				(borrow-shared implicit_key) (borrow-mut scratch)))
+			(if
+				(:doc "Only a direct call to a declared, body-free external function has the required symbol proof.")
+				(bool:or (bool:or (i32:ltz target) (i32:not-ltz implicit))
+					(bool:or (bool:not (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared decay_cast)))
+						(u8:eqz (call function_declaration_mode (borrow-shared ast) (borrow-shared nodes)
+							target plain_function_witness (borrow-mut scratch)))))
+				(then (return -1i32)))
+			(let start (call append_identity_span (borrow-shared call_kind) 0i32 call_kind.len (borrow-mut output) offset))
+			(let-mut length (call append_declaration (borrow-shared ast) (borrow-shared nodes) target (bool true)
+				(borrow-mut output) start (borrow-mut scratch)))
+			(set length (call append_call_attributes (borrow-shared ast) (borrow-shared nodes) target
+				(borrow-mut output) length (borrow-mut scratch)))
+			(let-mut argument (struct:get (nodes.get callee) next_sibling))
+			(while
+				(:doc "Keep each resolved read in its original call argument position.")
+				(bool:and (i32:not-ltz argument) (i32:not-ltz length))
+				(body
+					(set length (call append_forwarded_argument (borrow-shared ast) (borrow-shared nodes) function argument
+						(borrow-mut output) length (borrow-mut scratch)))
+					(set argument (struct:get (nodes.get argument) next_sibling))))
+			(return length)))
+
 	(fn append_attributed_declaration
-		(:doc "Compare ordinary attributed prototypes and their resolved link symbols without requiring an address witness.")
+		(:doc "Compare attributed declarations, their linked symbols, and any admitted forwarding body.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
 			(output (mut-array u8)) (offset i32) (scratch (mut-array u8))) (returns i32)
 		(body
 			(if
-				(:doc "Only body-free, linked prototypes with supported ordinary attributes are admitted here.")
+				(:doc "A declaration that passed the ordinary audit must preserve its complete identity.")
 				(bool:not (bool:and
 					(call has_kind (borrow-shared ast) (borrow-shared nodes) row
 						(borrow-shared function_kind) (borrow-mut scratch))
-					(bool:and (u8:lt plain_declaration (call function_declaration_mode (borrow-shared ast) (borrow-shared nodes)
-							row plain_function_witness (borrow-mut scratch)))
-						(call is_linked_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))))
+					(u8:lt plain_declaration (call ordinary_function_mode (borrow-shared ast) (borrow-shared nodes)
+						row (borrow-mut scratch)))))
 				(then (return offset)))
-			(let name (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
-				(borrow-shared name_key) (borrow-mut scratch)))
-			(let symbol (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
-				(borrow-shared mangled_key) (borrow-mut scratch)))
-			(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool false) (borrow-mut scratch)))
-			(let first (call append_field (borrow-shared ast) (borrow-shared nodes) name (borrow-mut output) offset))
-			(let next (call append_field (borrow-shared ast) (borrow-shared nodes) symbol (borrow-mut output) first))
-			(let end (call append_field (borrow-shared ast) (borrow-shared nodes) type (borrow-mut output) next))
-			(return (call append_call_attributes (borrow-shared ast) (borrow-shared nodes) row
-				(borrow-mut output) end (borrow-mut scratch)))))
+			(let declaration (call append_declaration (borrow-shared ast) (borrow-shared nodes) row (bool true)
+				(borrow-mut output) offset (borrow-mut scratch)))
+			(let attributes (call append_call_attributes (borrow-shared ast) (borrow-shared nodes) row
+				(borrow-mut output) declaration (borrow-mut scratch)))
+			(let forwarded (call gnu_forwarding_call (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(if
+				(:doc "An admitted inline definition additionally certifies its direct call and reads.")
+				(i32:not-ltz forwarded)
+				(then (return (call append_forwarding_body (borrow-shared ast) (borrow-shared nodes) row forwarded
+					(borrow-mut output) attributes (borrow-mut scratch)))))
+			(return attributes)))
 
 	(fn write_native_identities
 		(:doc "Write stable declaration attributes and resolved witness names, link symbols, and types.")
