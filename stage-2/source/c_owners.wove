@@ -11,12 +11,25 @@
 	(use wove-file "./scan.wove" (only skip_whitespace (type SourceNode) (type Token)))
 	(use wove-file "./module.wove" (only form_parts next_form_metadata next_form_operand source_keyword validate_form_metadata (type FormParts)))
 	(use wove-file "./strings.wove" (only decode_string))
-	(use wove-file "./c_markers.wove" (only read_c_long_double))
+	(use wove-file "./c_markers.wove" (only read_c_long_double read_c_nullptr_type (type CMarker)))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte is_c_identifier))
 
 	(struct COwnerRead (fields (native i32) (drop i32) (storage bool) (tail i32) (count i32)
-		(vector i32) (vector_count i32) (vector_offset i32) (long_double_typedef bool)
+		(vector i32) (vector_count i32) (vector_offset i32) (exact_typedef u32)
 		(start i32) (end i32) (error u32)))
+
+	(let c_exact_long_double 1u32)
+	(let c_exact_nullptr 2u32)
+
+	(fn exact_type_error
+		(:doc "Keep a malformed exact-type marker at its original source span.")
+		(params (marker CMarker))
+		(returns COwnerRead)
+		(body
+			(return (struct:new COwnerRead (native -1i32) (drop -1i32) (storage (bool false))
+				(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
+				(exact_typedef 0u32) (start (marker.get start)) (end (marker.get end))
+				(error (marker.get error))))))
 
 	(let storage_flag "storage")
 	(let drop_void_pointer "void-pointer")
@@ -95,7 +108,7 @@
 		(params (native i32) (drop i32) (storage bool) (site SourceNode) (error u32))
 		(returns COwnerRead)
 		(body (return (struct:new COwnerRead (native native) (drop drop) (storage storage)
-			(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (long_double_typedef (bool false))
+			(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (exact_typedef 0u32)
 			(start (site.get start)) (end (site.get end)) (error error)))))
 
 	(fn owner_keyword
@@ -186,7 +199,7 @@
 						(borrow-shared source) (skip.get start) (skip.get end)))
 				(then (return (call owner_read -1i32 -1i32 (bool false) skip 23u32))))
 			(return (struct:new COwnerRead (native -1i32) (drop destructor) (storage (bool true))
-				(tail -1i32) (count -1i32) (vector data) (vector_count count) (vector_offset offset) (long_double_typedef (bool false))
+				(tail -1i32) (count -1i32) (vector data) (vector_count count) (vector_offset offset) (exact_typedef 0u32)
 				(start (clause.get start)) (end (clause.get end)) (error 0u32)))))
 
 	(fn read_owner_drop
@@ -222,7 +235,7 @@
 							(bool:not (call is_native_name (borrow-shared source) tail_name)))
 						(then (return (call owner_read -1i32 -1i32 (bool false) tail_name 23u32))))
 					(return (struct:new COwnerRead (native -1i32) (drop -1i32) (storage (bool true))
-						(tail tail) (count count) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (long_double_typedef (bool false))
+						(tail tail) (count count) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (exact_typedef 0u32)
 						(start (drop.get start)) (end (drop.get end)) (error 0u32)))))
 			(if
 				(:doc "The contract starts with a single destructor clause.")
@@ -325,7 +338,7 @@
 									(set index (directive.get next_sibling))))))
 					(set metadata (call next_form_metadata (borrow-shared source) (borrow-shared nodes) parts entry))))
 			(return (struct:new COwnerRead (native -1i32) (drop drop) (storage storage)
-				(tail tail) (count count) (vector vector) (vector_count vector_count) (vector_offset vector_offset) (long_double_typedef (bool false))
+				(tail tail) (count count) (vector vector) (vector_count vector_count) (vector_offset vector_offset) (exact_typedef 0u32)
 				(start (site.get start)) (end (site.get end)) (error 0u32)))))
 
 	(fn read_c_type_form
@@ -347,7 +360,7 @@
 				(:doc "Selection belongs to the enclosing declaration. Keep the directive's own span.")
 				(u32:gtz (choice.get error))
 				(then (return (struct:new COwnerRead (native -1i32) (drop -1i32) (storage (bool false))
-					(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (long_double_typedef (bool false))
+					(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (exact_typedef 0u32)
 					(start (choice.get start)) (end (choice.get end))
 					(error (choice.get error))))))
 			(let value (nodes.get literal))
@@ -387,10 +400,19 @@
 			(if
 				(:doc "Keep an invalid floating typedef directive at its original span.")
 				(u32:gtz (floating.get error))
-				(then (return (struct:new COwnerRead (native -1i32) (drop -1i32) (storage (bool false))
-					(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
-					(long_double_typedef (bool false)) (start (floating.get start))
-					(end (floating.get end)) (error (floating.get error))))))
+				(then (return (call exact_type_error floating))))
+			(let null_type (call read_c_nullptr_type (borrow-shared source) (borrow-shared nodes) parts))
+			(if
+				(:doc "Keep an invalid null typedef directive at its original span.")
+				(u32:gtz (null_type.get error))
+				(then (return (call exact_type_error null_type))))
+			(if
+				(:doc "A native typedef can assert only one exact C type.")
+				(bool:and (floating.get present) (null_type.get present))
+				(then (return (call owner_read -1i32 -1i32 (bool false) name 23u32))))
+			(let-mut exact 0u32)
+			(if (floating.get present) (then (set exact c_exact_long_double)))
+			(if (null_type.get present) (then (set exact c_exact_nullptr)))
 			(let drop (call owner_destructor (borrow-shared source) (borrow-shared nodes) parts name))
 			(if (u32:gtz (drop.get error)) (then (return drop)))
 			(let native (call read_c_type_literal (borrow-shared source) (borrow-shared nodes) name (parts.get operands)))
@@ -399,7 +421,7 @@
 				(drop (drop.get drop)) (storage (drop.get storage))
 				(tail (drop.get tail)) (count (drop.get count))
 				(vector (drop.get vector)) (vector_count (drop.get vector_count))
-				(vector_offset (drop.get vector_offset)) (long_double_typedef (floating.get present))
+				(vector_offset (drop.get vector_offset)) (exact_typedef exact)
 				(start (node.get start)) (end (node.get end)) (error 0u32)))))
 
 	(fn is_c_storage_type
@@ -508,14 +530,22 @@
 			(return (bool:and (u32:eqz (value.get error))
 				(call is_long_double_spelling (borrow-shared (decoded.range 0i32 (value.get written))))))))
 
-	(fn c_type_is_long_double
-		(:doc "Classify both the intrinsic spelling and the checked header-defined alias as floating values.")
+	(fn c_type_exact
+		(:doc "Classify declared exact typedefs and the intrinsic long double spelling.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (read COwnerRead))
-		(returns bool)
+		(returns u32)
 		(body
+			(let exact (read.get exact_typedef))
+			(if
+				(:doc "An explicit exact-type contract supplies the category.")
+				(u32:gtz exact)
+				(then (return exact)))
 			(let literal (nodes.get (read.get native)))
-			(return (bool:or (read.get long_double_typedef)
-				(call is_c_long_double (borrow-shared source) (literal.get start) (literal.get end))))))
+			(if
+				(:doc "The intrinsic floating spelling already identifies its exact type.")
+				(call is_c_long_double (borrow-shared source) (literal.get start) (literal.get end))
+				(then (return c_exact_long_double)))
+			(return 0u32)))
 
 	(fn is_typedef_identifier
 		(:doc "Allow one ordinary C identifier with surrounding horizontal whitespace.")
@@ -546,8 +576,8 @@
 			(let length (value.get written))
 			(let owned (i32:lt -1i32 (read.get drop)))
 			(if
-				(:doc "A floating typedef represents an unowned value named by one C identifier.")
-				(bool:and (read.get long_double_typedef)
+				(:doc "An exact typedef represents an unowned value named by one C identifier.")
+				(bool:and (u32:gtz (read.get exact_typedef))
 					(bool:or (bool:or owned (read.get storage))
 						(bool:not (call is_typedef_identifier (borrow-shared (decoded.range 0i32 length))))))
 				(then (return (call owner_read -1i32 -1i32 (bool false) literal 23u32))))
