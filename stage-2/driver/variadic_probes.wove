@@ -3,12 +3,14 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc "Observe Clang's actual promotions on the fully declared named arguments of a native C call.")
 
-	(use wove-file "../clang/variadic_replay.wove" (only (value promoted_call_prefix) (value promoted_argument_prefix)))
+	(use wove-file "../clang/variadic_replay.wove" (only (value promoted_call_prefix) (value promoted_argument_prefix)
+		(value promoted_command_prefix)))
 	(use wove-file "../emit/c_arguments.wove" (only c_symbol_text))
+	(use wove-file "../emit/c_formals.wove" (only write_fixed_c_argument))
 	(use wove-file "../emit/c_prototype.wove" (only write_fixed_parameter_type))
 	(use wove-file "../emit/runtime.wove" (only write_c_number))
 	(use wove-file "../emit/text.wove" (only c_literal_text c_byte))
-	(use wove-file "../emit/units.wove" (only numbered_named_variadic_prefix))
+	(use wove-file "../emit/units.wove" (only numbered_named_variadic_call (type NumberedVariadicCall)))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "../scalar/records.wove" (only (type ScalarRecord)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
@@ -17,6 +19,8 @@
 	(let call_start "__typeof__((")
 	(let arguments_open ")(")
 	(let call_end ")) *);\n")
+	(let command_value_open "enum { ")
+	(let command_value_end " };\n")
 
 	(fn write_promoted_argument
 		(:doc "Name the captured argument inside the private prototype scope.")
@@ -26,26 +30,37 @@
 			(return (call write_c_number (borrow-mut output) prefix index writing))))
 
 	(fn write_promoted_call
-		(:doc "Call the parenthesized native symbol with the same scalar lvalues and converted pointer types as lowering.")
+		(:doc "Use the original command expression and the same captured argument types as native lowering.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (function ScalarFunction)
-			(prefix i32) (index i32) (parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
+			(shape NumberedVariadicCall) (index i32) (parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
 			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
 		(body
+			(let command (struct.get shape command))
+			(let operand (struct.get shape operand))
 			(let-mut width (call c_literal_text (borrow-shared prototype) (borrow-mut output) offset writing))
 			(set width (call c_literal_text (borrow-shared promoted_call_prefix) (borrow-mut output) width writing))
-			(set width (call write_c_number (borrow-mut output) width prefix writing))
+			(set width (call write_c_number (borrow-mut output) width (struct.get shape prefix) writing))
 			(set width (call c_byte (borrow-mut output) width 95u8 writing))
 			(set width (call write_c_number (borrow-mut output) width index writing))
+			(if
+				(:doc "Keep the hidden command's position in native argument order.")
+				(i32.not-ltz command)
+				(then
+					(set width (call c_byte (borrow-mut output) width 95u8 writing))
+					(set width (call write_c_number (borrow-mut output) width command writing))))
 			(set width (call c_byte (borrow-mut output) width 40u8 writing))
-			(let first (struct.get function params))
-			(let arity (struct.get function arity))
+			(let-mut parameter (struct.get function params))
+			(let arity (i32.add (struct.get function arity)
+				(if (i32.not-ltz command) (then 1i32) (else 0i32))))
 			(for
 				(:doc "Reuse the existing converted-string and scalar type spellings for the real captured operands.")
 				(let formal) (range 0i32 arity)
 				(body
+					(if (i32.eq formal command) (then (continue)))
 					(set width (call write_fixed_parameter_type (borrow-shared arena) (borrow-shared nodes)
-						(borrow-shared records) (array.load parameters (i32.add first formal))
+						(borrow-shared records) (array.load parameters parameter)
 						(borrow-mut output) width 0i32 writing))
+					(set parameter (i32.inc parameter))
 					(set width (call c_byte (borrow-mut output) width 32u8 writing))
 					(set width (call write_promoted_argument formal (borrow-mut output) width writing))
 					(set width (call c_byte (borrow-mut output) width 44u8 writing))))
@@ -58,8 +73,25 @@
 				(let formal) (range 0i32 arity)
 				(body
 					(if (i32.gtz formal) (then (set width (call c_byte (borrow-mut output) width 44u8 writing))))
-					(set width (call write_promoted_argument formal (borrow-mut output) width writing))))
-			(return (call c_literal_text (borrow-shared call_end) (borrow-mut output) width writing))))
+					(if
+						(:doc "Write the actual cast and header operand without introducing a synthetic capture.")
+						(i32.eq formal command)
+						(then (set width (call write_fixed_c_argument (borrow-shared arena) (borrow-shared nodes)
+							operand (borrow-mut output) width writing)))
+						(else (set width (call write_promoted_argument formal (borrow-mut output) width writing))))))
+			(set width (call c_literal_text (borrow-shared call_end) (borrow-mut output) width writing))
+			(if
+				(:doc "Make Clang fold the exact same command in this context and expose its value in the AST.")
+				(i32.not-ltz command)
+				(then
+					(set width (call c_literal_text (borrow-shared command_value_open) (borrow-mut output) width writing))
+					(set width (call c_literal_text (borrow-shared promoted_command_prefix) (borrow-mut output) width writing))
+					(set width (call write_c_number (borrow-mut output) width index writing))
+					(set width (call c_byte (borrow-mut output) width 61u8 writing))
+					(set width (call write_fixed_c_argument (borrow-shared arena) (borrow-shared nodes)
+						operand (borrow-mut output) width writing))
+					(set width (call c_literal_text (borrow-shared command_value_end) (borrow-mut output) width writing))))
+			(return width)))
 
 	(fn write_variadic_probes
 		(:doc "Append observations for named native tails to the final, typed preamble probe.")
@@ -74,12 +106,13 @@
 				(body
 					(let function (array.load functions index))
 					(if (i32.not-ltz (struct.get function body)) (then (continue)))
-					(let prefix (call numbered_named_variadic_prefix (borrow-shared nodes) function (borrow-shared parameters)))
+					(let shape (call numbered_named_variadic_call (borrow-shared arena) (borrow-shared nodes)
+						function (borrow-shared parameters)))
 					(if
 						(:doc "The selected C prototype's fixed arity is part of the private witness identity.")
-						(i32.gtz prefix)
+						(i32.gtz (struct.get shape prefix))
 						(then (set width (call write_promoted_call (borrow-shared arena) (borrow-shared nodes) function
-							prefix index (borrow-shared parameters) (borrow-shared records)
+							shape index (borrow-shared parameters) (borrow-shared records)
 							(borrow-mut output) width writing))))))
 			(return width)))
 )
