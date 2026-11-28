@@ -808,6 +808,12 @@ class FunctionEmitter:
 			return node
 
 		line = node.line if is_atom else node.tag_line
+		# A bare type qualifier uses the canonical constructor's type namespace.
+		if not fields and operations == ["new"]:
+			# A constructor with no written initializers can also be a bare atom.
+			if is_atom:
+				node = Form(spelling, (), line, tag_line=line)
+			return replace(node, tag="struct:new", operands=(Atom(root, line), *node.operands))
 		receiver: Node = ReceiverAtom(root, line) if operations else Atom(root, line)
 		# Each segment projects a field of the preceding value or place.
 		for field in fields:
