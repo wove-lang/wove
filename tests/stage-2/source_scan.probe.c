@@ -12,29 +12,29 @@
 #undef main
 
 // Match the seed's generated names to the fixture's imported declarations.
-#define source_offset wv_seed_fn_6
-#define source_kind wv_seed_fn_7
-#define scan_token wv_seed_fn_14
-#define admit_source wv_seed_fn_15
-#define source_diagnostic wv_seed_fn_17
-#define source_position wv_seed_fn_18
-#define check_source_form wv_seed_fn_21
-#define build_source_tree wv_seed_fn_26
-#define check_source_metadata wv_seed_fn_53
-#define render_source_tree wv_seed_fn_55
-#define decode_string wv_seed_fn_92
-#define form_parts wv_seed_fn_96
-#define read_module_for_target wv_seed_fn_111
-#define emit_module wv_seed_fn_160
-#define resolve_graph_for_target wv_seed_fn_299
-#define default_selection wv_seed_fn_112
-#define target_os wv_seed_fn_113
-#define target_arch wv_seed_fn_114
-#define inspect_callers wv_seed_fn_1404
-#define run_scalar_graph wv_seed_fn_1429
-#define discover_graph_tests wv_seed_fn_1439
-#define inspect_graph_expectations wv_seed_fn_1416
-#define write_unit_name wv_seed_fn_1482
+#define source_offset wv_seed_fn_7
+#define source_kind wv_seed_fn_8
+#define scan_token wv_seed_fn_15
+#define admit_source wv_seed_fn_16
+#define source_diagnostic wv_seed_fn_18
+#define source_position wv_seed_fn_19
+#define check_source_form wv_seed_fn_22
+#define build_source_tree wv_seed_fn_27
+#define check_source_metadata wv_seed_fn_54
+#define render_source_tree wv_seed_fn_56
+#define decode_string wv_seed_fn_93
+#define form_parts wv_seed_fn_97
+#define read_module_for_target wv_seed_fn_112
+#define emit_module wv_seed_fn_161
+#define resolve_graph_for_target wv_seed_fn_300
+#define default_selection wv_seed_fn_113
+#define target_os wv_seed_fn_114
+#define target_arch wv_seed_fn_115
+#define inspect_callers wv_seed_fn_1408
+#define run_scalar_graph wv_seed_fn_1433
+#define discover_graph_tests wv_seed_fn_1443
+#define inspect_graph_expectations wv_seed_fn_1420
+#define write_unit_name wv_seed_fn_1486
 
 typedef wv_seed_record_0 Token;
 typedef wv_seed_record_1 SourceDiagnostic;
@@ -1345,10 +1345,10 @@ static int probe_command(int argc, char **argv) {
 // Exercise complete inputs and checked views into a larger buffer.
 int main(int argc, char **argv) {
 	if (argc > 1) { return probe_command(argc, argv); }
-	const int decimal_status = wove_fixture_main(argc, argv);
-	// The seed-built entry checks both decimal passes before the source fixtures.
-	if (decimal_status != 0) {
-		fprintf(stderr, "decimal emission fixture check %d failed\n", decimal_status);
+	const int fixture_status = wove_fixture_main(argc, argv);
+	// The seed-built entry checks decimal emission and C-name collisions before the scanner fixtures.
+	if (fixture_status != 0) {
+		fprintf(stderr, "seed emission fixture check %d failed\n", fixture_status);
 		return EXIT_FAILURE;
 	}
 	// Each complete input supplies its own logical byte length.

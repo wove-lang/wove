@@ -215,9 +215,9 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `m` | Enum payload member | Concrete enum fingerprint extended by the member role and exact variant spelling | Variant name | Within its C union. Tags retain their declaration ordinals. |
 | `m` | Empty-record placeholder | Zero | Empty | Within its C struct. |
 | `p` | Parameter | Concrete function fingerprint extended by the parameter role and spelling | Parameter name | Within its C definition. A body reference uses its checked formal. |
-| `l` | Local | Declared name's original file-local tree row | Local name | Within its C function. Shadowed bindings have distinct rows. |
-| `t` | Expression temporary | Expression's original file-local tree row | Empty | Within its C function. A use and its temporary declaration share the row. |
-| `j` | Loop break label | Loop statement's original file-local tree row | Empty | Within its C function. A break uses the row of its target loop. |
+| `l` | Local | Concrete function fingerprint extended by the local role, function-relative lexical scope, defining row, and spelling | Local name | Within its C function. Shadowed bindings retain distinct keys. |
+| `t` | Expression temporary | Concrete function fingerprint extended by the temporary role and function-relative capture row | Empty | Within its C function. The declaration and all uses share the checked capture row. |
+| `j` | Loop break label | Concrete function fingerprint extended by the label role and function-relative loop row | Empty | Within its C function. A break uses the checked row of its target loop. |
 | `q` | Read-only C type alias | Binding name's flattened graph row | Native name | Where the lvalue contract is emitted, the typedef and its check share the binding row. |
 | `d` | Module value or descriptor | Module fingerprint extended by the data role and spelling | Defining name | The common header, unique definition, and references use the same checked binding. |
 | `s` | Module backing bytes | Module fingerprint extended by the backing role and spelling | Defining name | Private to the C unit that defines the bytes. |
@@ -261,7 +261,11 @@ generated spelling coincides, functions, types, and module storage use
 fingerprint. A binding and its backing bytes share this rank. The word ranks
 the declarations by their canonical paths, original definitions, and
 normalized specialization arguments. Renaming an import or reordering
-the graph file table preserves the assignments.
+the graph file table preserves the assignments. Within one concrete C
+function, locals, temporaries, and loop labels use `L`, `T`, or `J` for
+collisions and rank the full defining rows. Role-specific collision ranks
+and fingerprints are prepared with the checked local names before either
+C output pass.
 
 The result gives the written count and a view-relative span. Successful
 emission spans the module. A failure preserves the destination bytes and

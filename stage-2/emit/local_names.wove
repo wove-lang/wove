@@ -1,19 +1,28 @@
 (module c_local_names
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Cache C names on checked defining bindings before emitting function bodies.")
+	(:doc "Prepare each checked function’s binding, temporary and loop-label names before C emission.")
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/generics.wove" (only hash_generic_word))
 	(use wove-file "../hashing/fnv1a.wove" (only fnv1a_byte))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction)))
 	(use wove-file "../scalar/generics/workspace.wove" (only subtree_limit))
-	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement) (value for_binding) (value for_mut_binding)
+	(use wove-file "../scalar/flow.wove" (only is_loop (type ScalarStatement) (value for_binding) (value for_mut_binding)
 		(value case_payload_binding) (value case_discard_binding)))
 	(use wove-file "../scalar/plan.wove" (only (value owned_parameter_binding)))
 	(use wove-file "../scalar/syntax.wove" (only (value let_binding)))
-	(use wove-file "./names.wove" (only hash_spelling (value local_role)))
+	(use wove-file "./names.wove" (only hash_spelling (value local_role) (value temporary_role) (value loop_label_role)))
 	(use wove-file "./collisions.wove" (only base_candidate bucket link_candidate same_suffix (type Bucket) (type Candidate)))
+
+	(let temporary_candidate 1u32)
+	(let label_candidate 2u32)
+
+	(fn defines_break_label
+		(:doc "A checked loop has a C label when at least one written break targets it.")
+		(params (statement ScalarStatement)) (returns bool)
+		(body (return (bool.and (call is_loop (struct.get statement kind))
+			(i32.not-ltz (struct.get statement target))))))
 
 	(fn is_let_binding
 		(:doc "Identify immutable and mutable local declaration statements.")
@@ -68,8 +77,9 @@
 					(if
 						(:doc "Two different defining rows conflict only when their base C names agree.")
 						(bool.and (i32.not-eq (struct.get other name) (struct.get name name))
-							(bool.and (u32.eq (struct.get other fingerprint) (struct.get name fingerprint))
-								(call same_suffix (borrow-shared source) name other)))
+							(bool.and (u32.eq (struct.get other role) (struct.get name role))
+								(bool.and (u32.eq (struct.get other fingerprint) (struct.get name fingerprint))
+									(call same_suffix (borrow-shared source) name other))))
 						(then
 							(set collides (bool true))
 							(if (i32.lt (struct.get other name) (struct.get name name))
@@ -78,23 +88,67 @@
 			(if collides (then (return slot)))
 			(return 0i32)))
 
+	(fn unnamed_candidate
+		(:doc "Retain the exact defining row and hash its function-relative index without a spelling suffix.")
+		(params (parent u32) (first i32) (row i32) (role u32)) (returns Candidate)
+		(body (return (struct.new Candidate (role role) (name row) (start 0i32) (end 0i32) (next 0i32)
+			(fingerprint (call hash_generic_word parent (u32.from-i32 (i32.sub row first))))))))
+
+	(fn with_cached_name
+		(:doc "Attach one resolved spelling while preserving the other roles and the checked source row.")
+		(params (node SourceNode) (candidate Candidate) (slot i32)) (returns SourceNode)
+		(body
+			(let identity (struct.get candidate fingerprint))
+			(let role (struct.get candidate role))
+			(let-mut temporary_identity (struct.get node temporary_identity))
+			(let-mut temporary_slot (struct.get node temporary_slot))
+			(let-mut label_identity (struct.get node label_identity))
+			(let-mut label_slot (struct.get node label_slot))
+			(let-mut local_identity (struct.get node local_identity))
+			(let-mut local_slot (struct.get node local_name_slot))
+			(if
+				(:doc "A named binding uses the same source atom as every reference.")
+				(u32.eqz role)
+				(then
+					(set local_identity identity)
+					(set local_slot slot))
+				(else
+					(if
+						(:doc "A capture and a label may share a source row in distinct C namespaces.")
+						(u32.eq role temporary_candidate)
+						(then
+							(set temporary_identity identity)
+							(set temporary_slot slot))
+						(else
+							(set label_identity identity)
+							(set label_slot slot)))))
+			(return (struct.new SourceNode
+				(kind (struct.get node kind)) (start (struct.get node start)) (end (struct.get node end))
+				(parent (struct.get node parent)) (first_child (struct.get node first_child))
+				(next_sibling (struct.get node next_sibling)) (bridge_project (struct.get node bridge_project))
+				(bridge_default (struct.get node bridge_default)) (generic_kind (struct.get node generic_kind))
+				(generic_value (struct.get node generic_value)) (local_identity local_identity) (local_name_slot local_slot)
+				(temporary_identity temporary_identity) (temporary_slot temporary_slot)
+				(label_identity label_identity) (label_slot label_slot)))))
+
 	(fn assign_function_locals
-		(:doc "Build a scratch index for one concrete function and cache the final name on each defining source atom.")
+		(:doc "Index one concrete function's names together and cache them before either C emission pass.")
 		(params (source (shared-array u8)) (nodes (mut-array SourceNode)) (statements (shared-array ScalarStatement))
 			(function ScalarFunction)) (returns void)
 		(body
 			(let first (struct.get function declaration))
+			(let body_start (struct.get function body))
 			(let limit (call subtree_limit (borrow-shared nodes) first (struct.get function tree_limit)))
 			(let-mut row first)
-			(let-mut count 0i32)
+			(let-mut count (i32.sub limit body_start))
 			(while
-				(:doc "Only checked defining rows enter the function's local namespace.")
+				(:doc "Count binding and label keys alongside the body rows reserved for temporaries.")
 				(i32.lt row limit)
 				(body
-					(if (call defines_local_slot (struct.get (array.load statements row) kind))
-						(then (set count (i32.inc count))))
+					(let statement (array.load statements row))
+					(if (call defines_local_slot (struct.get statement kind)) (then (set count (i32.inc count))))
+					(if (call defines_break_label statement) (then (set count (i32.inc count))))
 					(set row (i32.inc row))))
-			(if (i32.eqz count) (then (return)))
 			(let-mut width 1i32)
 			(while
 				(:doc "Keep the bucket table a power of two and its size within i32.")
@@ -102,26 +156,43 @@
 				(body (set width (i32.add width width))))
 			(let-mut buckets (array.alloc Bucket width))
 			(let-mut candidates (array.alloc Candidate count))
-			(let parent (call fnv1a_byte (struct.get function identity) local_role))
+			(let function_key (struct.get function identity))
+			(let local_parent (call fnv1a_byte function_key local_role))
+			(let temporary_parent (call fnv1a_byte function_key temporary_role))
+			(let label_parent (call fnv1a_byte function_key loop_label_role))
 			(let-mut index 0i32)
 			(set row first)
 			(while
-				(:doc "Hash one defining binding at a time, including bindings in conditional and loop bodies.")
+				(:doc "Reuse the binding scan for unnamed rows. Lowering can need a form, block, or atom as a capture anchor.")
 				(i32.lt row limit)
 				(body
 					(let statement (array.load statements row))
 					(if
-						(:doc "Register the checked name even when the binding is referenced by several emission paths.")
+						(:doc "Register the checked binding even when several emission paths reference it.")
 						(call defines_local_slot (struct.get statement kind))
 						(then
 							(let candidate (call local_candidate (borrow-shared source) (borrow-shared nodes)
-								function row statement parent))
+								function row statement local_parent))
 							(call link_candidate (borrow-mut buckets) (borrow-mut candidates) index candidate)
+							(set index (i32.inc index))))
+					(if
+						(:doc "The concrete declaration's relative rows survive cloning and graph packing.")
+						(i32.not-lt row body_start)
+						(then
+							(call link_candidate (borrow-mut buckets) (borrow-mut candidates) index
+								(call unnamed_candidate temporary_parent first row temporary_candidate))
+							(set index (i32.inc index))))
+					(if
+						(:doc "Only loops with a break enter the label namespace.")
+						(call defines_break_label statement)
+						(then
+							(call link_candidate (borrow-mut buckets) (borrow-mut candidates) index
+								(call unnamed_candidate label_parent first row label_candidate))
 							(set index (i32.inc index))))
 					(set row (i32.inc row))))
 			(set index 0i32)
 			(while
-				(:doc "Each later reference reaches this same cached fingerprint and collision slot.")
+				(:doc "Write the resolved spelling back to its defining name, capture anchor, or loop statement.")
 				(i32.lt index count)
 				(body
 					(let candidate (array.load candidates index))
@@ -129,13 +200,7 @@
 					(let identity (struct.get candidate fingerprint))
 					(let head (struct.get (array.load buckets (call bucket identity width)) head))
 					(let slot (call local_slot (borrow-shared source) (borrow-shared candidates) index head))
-					(let name (array.load nodes row))
-					(array.store nodes row (struct.new SourceNode
-						(kind (struct.get name kind)) (start (struct.get name start)) (end (struct.get name end))
-						(parent (struct.get name parent)) (first_child (struct.get name first_child))
-						(next_sibling (struct.get name next_sibling)) (bridge_project (struct.get name bridge_project))
-						(bridge_default (struct.get name bridge_default)) (generic_kind (struct.get name generic_kind))
-						(generic_value (struct.get name generic_value)) (local_identity identity) (local_name_slot slot)))
+					(array.store nodes row (call with_cached_name (array.load nodes row) candidate slot))
 					(set index (i32.inc index))))))
 
 	(fn assign_local_c_names
