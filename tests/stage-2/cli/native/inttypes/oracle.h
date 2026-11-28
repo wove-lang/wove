@@ -24,4 +24,17 @@ static inline bool fixture_division_fields(const imaxdiv_t *observed)
 	return observed->quot == native.quot && observed->rem == native.rem;
 }
 
+// Compare the active C dialect's treatment of an auto-base binary prefix.
+static inline bool fixture_binary_prefix(intmax_t signed_value, int32_t signed_end,
+	uintmax_t unsigned_value, int32_t unsigned_end)
+{
+	const char text[] = "0b101!";
+	char *signed_stop;
+	char *unsigned_stop;
+	const intmax_t native_signed = strtoimax(text, &signed_stop, 0);
+	const uintmax_t native_unsigned = strtoumax(text, &unsigned_stop, 0);
+	return signed_value == native_signed && signed_end == signed_stop - text &&
+		unsigned_value == native_unsigned && unsigned_end == unsigned_stop - text;
+}
+
 #endif
