@@ -25,7 +25,8 @@
 	(use wove-file "./native_owner_types.wove" (only (value buffered_record_base) (value optional_buffered_record_base) (value optional_reference_base) (value optional_array_base) native_owner_type is_native_owner))
 	(use wove-file "../source/owned.wove" (only owned_element_node is_byte_owner_descriptor optional_type_operand))
 	(use wove-file "../text/decimal.wove" (only read_decimal_digits))
-	(use wove-file "../emit/names.wove" (only record_identity))
+	(use wove-file "../emit/names.wove" (only record_identity (value fixed_array_role)))
+	(use wove-file "../hashing/fnv1a.wove" (only fnv1a_byte (value fnv1a_seed)))
 	(use wove-file "./callable_types.wove" (only read_callable_type same_callable_parameters (type CallableShape)))
 	(use wove-file "./constants.wove" (only fold_i32 constant_check))
 	(use wove-file "./syntax.wove"
@@ -39,7 +40,8 @@
 		A native pointer owner stores its flattened defining row in first.
 		A native long double alias carries its C literal and uses count -2.
 		A fixed array has name -1, element type in first, and
-		extent in count. Unit and payload enums have native -1 and -2.
+		extent in count. Its identity is a C fingerprint of the shape.
+		Unit and payload enums have native -1 and -2.
 		They keep their first variant and count in the same positions
 		as a record's fields. A specialization records its original argument
 		site and namespace. A repeated site has a non-emitting alias row with name -2.
@@ -552,6 +554,38 @@
 					(set cursor (struct.get node parent))))
 			(return -1i32)))
 
+	(fn fixed_array_identity
+		(:doc `Hash the extent and exact element key in the fixed-array role.
+
+		Peel owner descriptors to their canonical element. An already interned
+		fixed child contributes its structural fingerprint, and a nominal leaf
+		contributes its defining fingerprint, including any specialization.`)
+		(params (records (shared-array ScalarRecord)) (shape FixedArrayShape)) (returns u32)
+		(body
+			(let-mut hash (call hash_generic_word (call fnv1a_byte fnv1a_seed fixed_array_role)
+				(u32.from-i32 (struct.get shape extent))))
+			(let-mut element (struct.get shape element))
+			(while
+				(:doc "Separate each owner layer from the terminal element category.")
+				(call is_array_owner element)
+				(body
+					(set hash (call fnv1a_byte hash 2u8))
+					(set element (call array_owner_element (borrow-shared records) element))))
+			(if
+				(:doc "Use the defining bridge key even when the alias appears through an import.")
+				(call is_native_integer element)
+				(then (return (call hash_generic_word (call fnv1a_byte hash 4u8)
+					(struct.get (array.load records (call native_integer_index element)) identity)))))
+			(if
+				(:doc "The nominal and structural layout fingerprints occupy separate element domains.")
+				(call is_record_type element)
+				(then
+					(let layout (array.load records (call record_index element)))
+					(let-mut tag 1u8)
+					(if (call is_fixed_array layout) (then (set tag 3u8)))
+					(return (call hash_generic_word (call fnv1a_byte hash tag) (struct.get layout identity)))))
+			(return (call hash_generic_word (call fnv1a_byte hash 0u8) element))))
+
 	(fn intern_fixed_array
 		(:doc `Append a new shape and return the next row, or -1 if the layout table is full.`)
 		(params (shape FixedArrayShape) (records (mut-array ScalarRecord)) (next i32))
@@ -564,9 +598,10 @@
 					(u32.gtz (call find_fixed_array_type (borrow-shared records) shape)))
 				(then (return next)))
 			(if (i32.eq next (array.len records)) (then (return -1i32)))
+			(let identity (call fixed_array_identity (borrow-shared records) shape))
 			(array.store records next
 				(struct.new ScalarRecord (c_name_slot 0i32) (name -1i32) (file -1i32)
-					(identity (u32.from-i32 next)) (first (i32.from-u32 element))
+					(identity identity) (first (i32.from-u32 element))
 					(count (struct.get shape extent)) (declaration -1i32) (native 0i32)
 					(source_base 0i32) (emit_row 0i32) (owns_arrays (bool false)) (borrows_bytes (bool false))
 					(generic -1i32) (specialization -1i32) (argument_file -1i32) (argument_base 0i32) (alias_of -1i32)))
