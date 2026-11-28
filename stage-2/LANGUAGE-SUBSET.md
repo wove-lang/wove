@@ -67,8 +67,14 @@ module containing the embed.
 
 A named `struct` has scalar fields or nested Wove records, including
 records selected through imports. Use `struct.new` to supply every field
-exactly once and `struct.get` to read fields. Records copy by value and keep
-their defining identity, including through import aliases.
+exactly once and `struct.get` to read fields. Copyable records keep their
+defining identity, including through import aliases.
+
+Records can own byte arrays, `i32` arrays, and arrays of owned byte rows.
+Initialize an owning field with a fresh or moved value. Use a field
+projection such as `(borrow-shared (struct.get job arguments))` to lend
+its storage. Move the containing record to transfer its fields. Scope
+cleanup drops each remaining owned field.
 
 ## Control flow and ownership
 
