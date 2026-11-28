@@ -1,0 +1,161 @@
+(module emit_field_uses
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Collect native fields selected by the checked program before emitting its C assertions.")
+
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../source/module.wove" (only form_parts))
+	(use wove-file "../source/c_records.wove" (only is_optional_native_field c_pointer_field_kind))
+	(use wove-file "../scalar/records.wove" (only find_member is_native_record is_record_type
+		record_index record_receiver_type place_reference_target (type ScalarRecord)))
+	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/syntax.wove" (only is_direct_call (value buffered_record_borrow_kind)))
+	(use wove-file "../c/arguments.wove" (only (value c_macro_member_argument)))
+
+	(fn native_field_use_capacity
+		(:doc "Enable the use table only for programs that declare an optional native field.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord)))
+		(returns i32)
+		(body
+			(let-mut index 0i32)
+			(while
+				(:doc "Only concrete native records contribute field declarations.")
+				(i32:lt index records.len)
+				(body
+					(let layout (records.get index))
+					(set index (i32:inc index))
+					(if (i32:eqz layout/name) (then (break)))
+					(if (bool:not (call is_native_record layout)) (then (continue)))
+					(let-mut field layout/first)
+					(while
+						(:doc "Stop at the first optional field.")
+						(i32:not-ltz field)
+						(body
+							(let node (nodes.get field))
+							(if
+								(:doc "Use flattened declaration rows as the table keys.")
+								(call is_optional_native_field (borrow-shared source) (borrow-shared nodes) node)
+								(then (return nodes.len)))
+							(set field node/next_sibling)))))
+			(return 0i32)))
+
+	(fn mark_named_native_field
+		(:doc "Record an adapter's native field when the same name belongs to its declared view.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(type u32) (name i32) (used (mut-array u8)))
+		(returns void)
+		(body
+			(if (bool:or (i32:ltz name) (bool:not (call is_record_type type))) (then (return)))
+			(let layout (records.get (call record_index type)))
+			(if (bool:not (call is_native_record layout)) (then (return)))
+			(let field (call find_member (borrow-shared source) (borrow-shared nodes)
+				layout/first layout/count (nodes.get name)))
+			(let row field/row)
+			(if (i32:not-ltz row) (then (used.set row 1u8)))))
+
+	(fn mark_native_adapter_fields
+		(:doc "Include explicit record input mappings and local snapshots used by a native call.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(parameters (shared-array ScalarParameter)) (callee ScalarFunction) (used (mut-array u8)))
+		(returns void)
+		(body
+			(let input callee/c_input_record)
+			(if
+				(:doc "A record input temporarily writes both named fields of its native object.")
+				(i32:not-ltz input)
+				(then
+					(let type (call place_reference_target (borrow-shared records)
+						(struct:get (parameters.get input) type)))
+					(call mark_named_native_field (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) type callee/c_input_pointer_name (borrow-mut used))
+					(call mark_named_native_field (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) type callee/c_input_count_name (borrow-mut used))))
+			(if
+				(:doc "A local snapshot reads the named field of its borrowed record.")
+				callee/c_snapshot_source
+				(then
+					(let type (call record_receiver_type
+						(struct:get (parameters.get callee/params) type)))
+					(call mark_named_native_field (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) type callee/c_snapshot_field (borrow-mut used))))))
+
+	(fn mark_buffered_pointer_fields
+		(:doc "A raw reborrow selects every pointer field that the caller-backed view must validate.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(type u32) (used (mut-array u8)))
+		(returns void)
+		(body
+			(let layout (records.get (call record_index
+				(call place_reference_target (borrow-shared records) type))))
+			(let-mut field layout/first)
+			(while
+				(:doc "Only the declared pointer fields are read when the record is passed back to C.")
+				(i32:not-ltz field)
+				(body
+					(let node (nodes.get field))
+					(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) node))
+					(if
+						(:doc "Keep the exact declared type check before the buffer-range validation.")
+						(u32:gtz (call c_pointer_field_kind (borrow-shared source) (nodes.get parts/operands)))
+						(then (used.set field 1u8)))
+					(set field node/next_sibling)))))
+
+	(fn collect_native_field_uses
+		(:doc "Mark field reads, writes, explicit initializers, member tokens and native adapters once per declaration.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(functions (shared-array ScalarFunction)) (parameters (shared-array ScalarParameter))
+			(expressions (shared-array ScalarExpression)) (used (mut-array u8)))
+		(returns void)
+		(body
+			(let-mut next 0i32)
+			(while
+				(:doc "Only checked expression rows contribute native field uses.")
+				(i32:lt next expressions.len)
+				(body
+					(let index next)
+					(set next (i32:inc next))
+					(let expression (expressions.get index))
+					(let kind expression/kind)
+					(let target expression/target)
+					(if
+						(:doc "A native projection retains its canonical member name node.")
+						(u32:eq kind 52u32)
+						(then
+							(let receiver (expressions.get expression/first))
+							(let type (call record_receiver_type receiver/type))
+							(if
+								(:doc "A Wove record projection uses its own ordinal instead.")
+								(bool:and (call is_record_type type)
+									(call is_native_record (records.get (call record_index type))))
+								(then (used.set (struct:get (nodes.get target) parent) 1u8)))
+							(continue)))
+					(if
+						(:doc "A constructor supplies a native declaration row when it targets a native record.")
+						(u32:eq kind 51u32)
+						(then
+							(let parent (expressions.get (struct:get (nodes.get index) parent)))
+							(if
+								(:doc "Only a native record constructor uses declaration rows for its initializers.")
+								(bool:and (u32:eq parent/kind 50u32)
+									(call is_native_record (records.get parent/target)))
+								(then (used.set target 1u8)))
+							(continue)))
+					(if
+						(:doc "A macro member token retains the checked native field declaration.")
+						(u32:eq kind c_macro_member_argument)
+						(then (used.set target 1u8) (continue)))
+					(if
+						(:doc "A buffered native record may select fields through its implicit C reborrow.")
+						(u32:eq kind buffered_record_borrow_kind)
+						(then
+							(call mark_buffered_pointer_fields (borrow-shared source) (borrow-shared nodes)
+								(borrow-shared records) expression/type (borrow-mut used))
+							(continue)))
+					(if
+						(:doc "Only actual direct calls consume the fields named by native adapters.")
+						(call is_direct_call kind)
+						(then (call mark_native_adapter_fields (borrow-shared source) (borrow-shared nodes)
+							(borrow-shared records) (borrow-shared parameters) (functions.get target)
+							(borrow-mut used))))))))
+)
