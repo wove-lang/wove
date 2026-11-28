@@ -208,6 +208,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | Tag | Role | ID | Suffix | Scope and agreement |
 | --- | --- | --- | --- | --- |
 | `f` | Function | Module fingerprint extended by the function role, name, and specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
+| `w` | Worker function adapter | Concrete function fingerprint extended by the adapter role | Defining function name | Within an emitted C program. Prototypes, definitions, and submissions use the same exact worker key. |
 | `r` | Named struct or enum | Module fingerprint extended by the layout role, spelling, and any specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
 | `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
@@ -224,11 +225,14 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `a`, `b` | Private bridge string backing and descriptor | Binding name's flattened graph row | Native name | Private to the C unit that defines the string. |
 | `b` | C-string call storage | Call's original file-local tree row | `a` for descriptors, `b` for backing pointers | Within its C function. Setup, invocation, and cleanup use the same call row. |
 
-The worker adapter prefix uses the exact `f` name. Worker drop callbacks and
-ownership take, drop, slot, and occupancy helpers use the corresponding type
-name. Where the common header exposes a helper, its definition and uses share
-that owner's name. A native callback adapter uses a separate private prefix and
-the checked argument row within its emitted C unit.
+A worker adapter continues the checked function fingerprint with `w` and
+reuses the defining name and collision rank. The FNV-1a role step is reversible,
+so equal adapter spellings have the same collision group as their owners.
+Worker drop callbacks and ownership take, drop, slot, and occupancy helpers
+use the corresponding type name. Where the common header exposes a helper,
+its definition and uses share that owner's name. A native callback adapter
+uses a separate private prefix and the checked argument row within its
+emitted C unit.
 
 Generated names use a hierarchy of 32-bit FNV-1a states. Seed a source graph's
 path key with the canonical file path and a zero delimiter. Resume that state
@@ -256,8 +260,8 @@ distinguishes different fields or variants
 even when their fingerprints match.
 
 Different readable suffixes can share a fingerprint. When the complete
-generated spelling coincides, functions, types, and module storage use
-`F`, `R`, `D`, or `S` and place a second seven-digit Base32hex word after the
+generated spelling coincides, functions, worker adapters, types, and module
+storage use `F`, `W`, `R`, `D`, or `S` and place a second seven-digit Base32hex word after the
 fingerprint. A binding and its backing bytes share this rank. The word ranks
 the declarations by their canonical paths, original definitions, and
 normalized specialization arguments. Renaming an import or reordering

@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -105,6 +106,11 @@ def symbols(path):
 	return symbols
 
 
+# Recognize a generated role with any reserved prefix and with or without a collision slot.
+def generated_symbol(name, role):
+	return re.match(rf"w+g[{role}{role.upper()}][0-3][0-9a-v]{{6}}", name) is not None
+
+
 # Independently compile each part, verify its symbols, then link and run all objects together.
 def check_native(certifier, probe, case, layout, parts, prefix):
 	compiler = shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang"))
@@ -133,14 +139,15 @@ def check_native(certifier, probe, case, layout, parts, prefix):
 			table = symbols(object_file)
 			if "entry_unit" in layout:
 				assert (table.get("main") == "T") == (unit == layout["entry_unit"]), (unit, table)
-			assert {name for name, kind in table.items() if kind == "T" and name.startswith("wgf")} == set(names), (unit, table, names)
+			functions = {name for name, kind in table.items() if kind == "T" and generated_symbol(name, "f")}
+			assert functions == set(names), (unit, table, names)
 			# Shared descriptors and values are external. Their byte backing arrays remain private.
 			data = {name for name, kind in table.items() if kind != "U" and name.startswith(("wgd", "wgs", "wgD", "wgS", "wgb", "wga"))}
 			assert data == set(layout.get("data", {}).get(unit, [])), (unit, data)
 			# Numbered adapters and erased drop callbacks each have one definition owner.
 			if "workers" in layout:
 				workers = {name for name, kind in table.items()
-					if kind == "T" and name.startswith(("wvrt_worker_adapter_", "wvrt_worker_drop_"))}
+					if kind == "T" and (generated_symbol(name, "w") or name.startswith("wvrt_worker_drop_"))}
 				assert workers == set(layout["workers"].get(unit, [])), (unit, workers)
 			for dependency in layout.get("imports", {}).get(unit, []):
 				assert table.get(dependency) == "U", (unit, dependency, table)
