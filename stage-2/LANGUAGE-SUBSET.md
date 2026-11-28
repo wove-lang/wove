@@ -95,6 +95,8 @@ owned byte rows, or a Wove record as its element type. Use `array:len`,
 of an operation in its type's namespace. The seed supports that spelling
 for the same operations as its canonical `array:` and `struct:` forms.
 `data.len` is the bare length property.
+A slash path such as `packet/header/size` uses the same field projections
+as nested `struct:get` in the seed.
 A writable receiver is required for stores. Transfer or return an owned
 array with `(move name)`.
 

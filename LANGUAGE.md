@@ -115,6 +115,20 @@ field name. Array length also has the bare property spelling
 `data.len`. Constructors and compound receivers use the canonical forms.
 Bounds, borrowing, moves, and writable-place checks apply in either spelling.
 
+### Field paths
+
+Write `record/header/size` to project successive fields from the bare
+binding `record`. Each segment uses the identifier grammar. The example
+means `(struct:get (struct:get record header) size)`.
+
+A field path can read a value or denote a place. The same type,
+mutability, borrow, and ownership checks apply as for nested `struct:get`.
+Use `(set record/header/size 42i32)` for a writable field. For a
+fixed-array field, `(array:len record/header/samples)` reads its length.
+
+Field paths use slash separators only. Quoted import and embed paths
+continue to use string syntax.
+
 ## Where forms go
 
 | Position | Rules and examples |

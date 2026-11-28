@@ -785,8 +785,20 @@ class FunctionEmitter:
 			raise SourceError(node.line)
 		return binding
 
-	# Forward a bare receiver to the canonical operations for its binding type.
-	def receiver_form(self, node: Node) -> Node:
+	# Normalize field paths and type-directed receivers to their canonical forms.
+	def access_form(self, node: Node) -> Node:
+		# Only an unquoted atom with complete identifier segments is a field path.
+		if isinstance(node, Atom) and not node.quoted and "/" in node.text:
+			root, *fields = node.text.split("/")
+			# A mixed or malformed path keeps its spelling for ordinary rejection.
+			if not IDENTIFIER.fullmatch(root) or not all(IDENTIFIER.fullmatch(field) for field in fields):
+				return node
+			projection: Node = Atom(root, node.line)
+			# Each segment projects a field of the preceding value or place.
+			for field in fields:
+				projection = Form("struct:get", (projection, Atom(field, node.line)), node.line, tag_line=node.line)
+			return projection
+
 		spelling = node.text if isinstance(node, Atom) else node.tag
 		name, separator, operation = spelling.partition(".")
 		# Receiver names are bare identifiers and operations follow qualified-name syntax.
@@ -827,7 +839,7 @@ class FunctionEmitter:
 
 	# Resolve the binding and descriptor for a permitted array access.
 	def array_access(self, node: Node, line: int, writable: bool = False) -> tuple[Binding, BufferType, str]:
-		node = self.receiver_form(node)
+		node = self.access_form(node)
 		# A selected byte row can serve directly as a read-only array receiver.
 		if isinstance(node, Form) and node.tag == "array:get" and not writable:
 			value = self.typed(node, _BYTE_VIEW)
@@ -879,7 +891,7 @@ class FunctionEmitter:
 		exclusive = kind is not None and kind.access == MUT
 		tag = "borrow-mut" if exclusive else "borrow-shared"
 		target, = checked_form(node, tag, 1).operands
-		target = self.receiver_form(target)
+		target = self.access_form(target)
 		# A byte row can be borrowed directly from either kind of outer view.
 		if kind in (None, _BYTE_VIEW) and isinstance(target, Form) and target.tag == "array:get":
 			receiver, subscript = checked_form(target, "array:get", 2).operands
@@ -966,7 +978,7 @@ class FunctionEmitter:
 	# Borrow a stable record place for the remaining arguments and the call.
 	def borrow_record(self, node: Node, kind: SharedRef) -> Value:
 		target, = checked_form(node, "borrow-shared", 1).operands
-		target = self.receiver_form(target)
+		target = self.access_form(target)
 		# An array element loan leaves the containing array as the owner.
 		if isinstance(target, Form) and target.tag == "array:get":
 			receiver, subscript = checked_form(target, "array:get", 2).operands
@@ -1305,7 +1317,7 @@ class FunctionEmitter:
 
 	# Project a field without copying the owner and retain its root binding for loans.
 	def project(self, node: Node, *, named: bool = False) -> tuple[Binding | None, Value]:
-		node = self.receiver_form(node)
+		node = self.access_form(node)
 		# Field paths keep the same root even through nested records.
 		if isinstance(node, Form) and node.tag == "struct:get":
 			target, name = checked_form(node, "struct:get", 2).operands
@@ -1393,7 +1405,7 @@ class FunctionEmitter:
 
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
-		node = self.receiver_form(node)
+		node = self.access_form(node)
 		# A bare name reads a scalar or record before the enclosing operation uses it.
 		if isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text):
 			binding = self.binding(node, read=True)
@@ -1907,7 +1919,7 @@ class FunctionEmitter:
 
 	# Lower a statement and report whether execution can continue past it.
 	def statement(self, node: Node) -> bool:
-		statement = node = checked_form(self.receiver_form(node))
+		statement = node = checked_form(self.access_form(node))
 		# Branches emit and join their own lexical scopes.
 		if statement.tag == "if":
 			return self.conditional(statement)
