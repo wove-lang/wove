@@ -1177,11 +1177,13 @@ including tags defined inside a record, and follows record typedefs across
 redeclarations. An unavailable definition is reported at the type selector.
 
 Numbered native builds reuse checked C declarations when the selected Clang
-sees matching preprocessing and declaration identities in each unit. GNU
-`extern inline` definitions can replay a single returned direct call or a
-bounded conditional expression with checked casts, comparisons, bitwise AND,
-member access, dereference, increment, simple assignment through a
-dereferenced pointer, and direct calls. A return can also compare a literal-masked
+sees matching preprocessing and declaration identities in each unit. Clang's
+`PureAttr` participates in that identity check, including when inherited from
+an earlier declaration. GNU `extern inline` definitions can replay a single
+returned direct call or a bounded conditional expression with checked casts,
+comparisons, bitwise AND, member access, dereference, increment, simple
+assignment through a dereferenced pointer, and direct calls. A return can
+also compare a literal-masked
 integer expression with a literal using `==` or `!=`. The compiler checks
 the resolved calls and operands, and Clang keeps control of inlining and
 external linkage. A declaration or context outside this proof uses the
