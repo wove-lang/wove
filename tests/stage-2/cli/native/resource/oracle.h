@@ -1,0 +1,71 @@
+// Copyright (c) 2026 wove contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+#ifndef WOVE_TEST_RESOURCE_ORACLE_H
+#define WOVE_TEST_RESOURCE_ORACLE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/resource.h>
+
+#if defined(__APPLE__)
+typedef int FixtureWho;
+typedef int FixtureMicros;
+#else
+typedef __rusage_who_t FixtureWho;
+typedef long FixtureMicros;
+#endif
+
+_Static_assert(sizeof(struct rusage) == 144 && _Alignof(struct rusage) == 8, "rusage layout");
+_Static_assert(sizeof(struct timeval) == 16 && _Alignof(struct timeval) == 8, "timeval layout");
+_Static_assert(offsetof(struct rusage, ru_utime) == 0 && offsetof(struct rusage, ru_stime) == 16,
+	"rusage time offsets");
+_Static_assert(offsetof(struct timeval, tv_sec) == 0 && offsetof(struct timeval, tv_usec) == 8,
+	"timeval member offsets");
+_Static_assert(_Generic(((struct timeval *)0)->tv_sec, long: 1, default: 0)
+	&& _Generic(((struct timeval *)0)->tv_usec, FixtureMicros: 1, default: 0), "timeval field types");
+_Static_assert(_Generic(&getrusage, int (*)(FixtureWho, struct rusage *): 1, default: 0), "getrusage prototype");
+
+// Seed distinct seconds and subsecond values through the native field names.
+static inline void fixture_seed_usage(struct rusage *usage)
+{
+	*usage = (struct rusage){
+		.ru_utime = {.tv_sec = 4294967307L, .tv_usec = 123456},
+		.ru_stime = {.tv_sec = 4294967309L, .tv_usec = 654321},
+	};
+}
+
+// Compare each Wove selector with the native value in the actual header.
+static inline bool fixture_usage_selectors(FixtureWho self, FixtureWho children)
+{
+	return self == RUSAGE_SELF && children == RUSAGE_CHILDREN;
+}
+
+// Call the same header directly with a separate native record.
+static inline int32_t fixture_usage_status(FixtureWho who)
+{
+	struct rusage native;
+	return getrusage(who, &native);
+}
+
+// Confirm the native call replaced the seeded times and Wove read the correct fields.
+static inline bool fixture_match_usage(const struct rusage *usage, long user_seconds, FixtureMicros user_micros,
+	long system_seconds, FixtureMicros system_micros)
+{
+	return user_seconds != 4294967307L && system_seconds != 4294967309L
+		&& user_seconds == usage->ru_utime.tv_sec && user_micros == usage->ru_utime.tv_usec
+		&& system_seconds == usage->ru_stime.tv_sec && system_micros == usage->ru_stime.tv_usec
+		&& user_seconds >= 0 && user_micros >= 0 && user_micros < 1000000
+		&& system_seconds >= 0 && system_micros >= 0 && system_micros < 1000000;
+}
+
+#ifdef TEST_MEMBER
+// Read the selected GNU thread-accounting constant from the live header.
+static inline FixtureWho fixture_optional_usage_scope(void)
+{
+	return TEST_MEMBER;
+}
+#endif
+
+#endif

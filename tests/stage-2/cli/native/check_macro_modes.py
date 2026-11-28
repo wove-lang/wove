@@ -17,9 +17,9 @@ from check import check_case, manifest_rows
 
 # Query the same hosted frontend for each header and C mode used by the manifest.
 @cache
-def macro_inventory(frontend, standard, header):
+def macro_inventory(frontend, standard, header, flags=()):
 	capture = subprocess.check_output(
-		[frontend, f"-std={standard}", "-dM", "-E", "-x", "c", "-include", header, "-"],
+		[frontend, f"-std={standard}", *flags, "-dM", "-E", "-x", "c", "-include", header, "-"],
 		input=b"", timeout=30)
 	# Function-like definitions have an opening parenthesis directly after the name.
 	return frozenset(fields[1] for line in capture.splitlines()

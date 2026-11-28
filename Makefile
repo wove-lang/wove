@@ -221,10 +221,10 @@ test-stage-2-cli: $(CLI_PROGRAMS) $(COMMAND_PROGRAM)
 test-stage-2-native: test-stage-2-native-cli test-stage-2-native-interop test-stage-2-f80 test-stage-2-workers
 
 test-stage-2-native-cli: $(NATIVE_CLI_TESTS) test-native-discovery test-native-debug test-native-parallel
-test-stage-2-native-interop: $(NATIVE_INTEROP_TESTS) test-native-numeric test-native-library test-native-emission test-native-macro-modes
+test-stage-2-native-interop: $(NATIVE_INTEROP_TESTS) test-native-numeric test-native-library test-native-emission test-native-macro-modes test-native-fcntl-optional test-native-limits test-native-cpio test-native-tar test-native-utsname test-native-poll test-native-times test-native-resource test-native-timeval test-native-statvfs test-native-signal test-native-string test-native-stdint test-native-inttypes test-native-inttypes-formats
 
 NATIVE_TESTS := $(NATIVE_CLI_TESTS) $(NATIVE_INTEROP_TESTS) \
-	test-native-discovery test-native-debug test-native-parallel test-native-numeric test-native-library test-native-emission test-native-macro-modes
+	test-native-discovery test-native-debug test-native-parallel test-native-numeric test-native-library test-native-emission test-native-macro-modes test-native-fcntl-optional test-native-limits test-native-cpio test-native-tar test-native-utsname test-native-poll test-native-times test-native-resource test-native-timeval test-native-statvfs test-native-signal test-native-string test-native-stdint test-native-inttypes test-native-inttypes-formats
 .PHONY: $(NATIVE_TESTS)
 
 $(NATIVE_TESTS): export WOVE_TEST_CLANG = $(CLANG)
@@ -262,6 +262,18 @@ test-native-emission:
 
 test-native-macro-modes:
 	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/check_macro_modes.py" "$(NATIVE_COMPILER)" "$(NATIVE_CLI_FIXTURES)/macro-modes.tsv"
+
+test-native-fcntl-optional:
+	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/fcntl/check_optional.py" "$(NATIVE_COMPILER)"
+
+test-native-limits:
+	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/limits/check.py" "$(NATIVE_COMPILER)" runtime
+
+test-native-cpio test-native-tar: test-native-%:
+	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/check_native_header.py" "$(NATIVE_COMPILER)" runtime "$(NATIVE_CLI_FIXTURES)/$*" ir
+
+test-native-utsname test-native-poll test-native-times test-native-resource test-native-timeval test-native-statvfs test-native-signal test-native-string test-native-stdint test-native-inttypes test-native-inttypes-formats: test-native-%:
+	CLANG="$(abspath $(BUILD_CLANG))" $(PYTHON) "$(NATIVE_CLI_FIXTURES)/check_native_header.py" "$(NATIVE_COMPILER)" runtime "$(NATIVE_CLI_FIXTURES)/$*" run
 
 # Check f80 admission and run the native cases when the selected tool supports extended precision.
 test-stage-2-f80: export WOVE_TEST_CLANG = $(CLANG)

@@ -1,0 +1,80 @@
+(module glibc_file_handle
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+
+	(use (:pragma (cfg (os "linux"))) c-header "<fcntl.h>"
+		(only (type FileHandle) (value AT_FDCWD) (value MAX_HANDLE_SZ) (value O_RDONLY)
+			name_to_handle_at open_by_handle_at))
+	(use (:pragma (cfg (os "linux"))) c-header "<errno.h>"
+		(only errno (value EBADF) (value ENOENT) (value ENOSYS) (value EOPNOTSUPP) (value EOVERFLOW) (value EPERM)))
+	(use (:pragma (cfg (os "linux"))) c-header "./file-handle.h" (only seed_file_handle))
+	(bridge c-header "./file-handle.h" (:pragma (cfg (os "linux")))
+		(use c-header "<fcntl.h>" (only (type FileHandle)))
+		(fn seed_file_handle (:pragma (c_init handle))
+			(params (handle (mut-ref FileHandle))) (returns i32)))
+
+	(let missing "missing-file-handle-input")
+	(let sample "sample")
+
+	(fn check_missing (:pragma (cfg (os "linux"))) (params) (returns bool)
+		(body
+			(let-mut handle (native.alloc FileHandle 0i64))
+			(let-mut mount_id -1i32)
+			(let status (call name_to_handle_at AT_FDCWD (borrow-shared missing)
+				(borrow-mut handle) (borrow-mut mount_id)))
+			(let failure errno)
+			(return (bool.and (i32.eq status -1i32)
+				(bool.or (i32.eq failure ENOENT)
+					(bool.or (i32.eq failure EPERM) (i32.eq failure ENOSYS)))))))
+
+	(fn check_name (:pragma (cfg (os "linux"))) (params) (returns i32)
+		(body
+			(if (bool.not (call check_missing)) (then (return 1i32)))
+			(let-mut handle (native.alloc FileHandle 0i64))
+			(let-mut mount_id -1i32)
+			(let status (call name_to_handle_at AT_FDCWD (borrow-shared sample)
+				(borrow-mut handle) (borrow-mut mount_id)))
+			(let failure errno)
+			(if (i32.not-eq status -1i32) (then (return 2i32)))
+			(if (bool.or (i32.eq failure EOPNOTSUPP)
+					(bool.or (i32.eq failure EPERM) (i32.eq failure ENOSYS)))
+				(then (return 42i32)))
+			(if (i32.not-eq failure EOVERFLOW) (then (return 3i32)))
+			(let required (native.tail.report (borrow-shared handle)))
+			(if (bool.or (u32.eqz required) (u32.gt required (u32.from-i32 MAX_HANDLE_SZ)))
+				(then (return 4i32)))
+			(set handle (native.alloc FileHandle (i64.from-u32 required)))
+			(if (i32.not-eqz (call name_to_handle_at AT_FDCWD (borrow-shared sample)
+					(borrow-mut handle) (borrow-mut mount_id)))
+				(then (return 5i32)))
+			(let actual (native.tail.report (borrow-shared handle)))
+			(if (bool.or (u32.eqz actual) (u32.gt actual required)) (then (return 6i32)))
+			(let last (native.tail.load (borrow-shared handle) (i64.from-u32 (u32.dec actual))))
+			(return 42i32)))
+
+	(fn check_open (:pragma (cfg (os "linux"))) (params) (returns i32)
+		(body
+			(let-mut handle (native.alloc FileHandle 4i64))
+			(if (i32.not-eqz (call seed_file_handle (borrow-mut handle))) (then (return 7i32)))
+			(if (u8.not-eq (native.tail.load (borrow-shared handle) 3i64) 42u8) (then (return 8i32)))
+			(let status (call open_by_handle_at -1i32 (borrow-mut handle) O_RDONLY))
+			(let failure errno)
+			(if (i32.not-eq status -1i32) (then (return 9i32)))
+			(if (bool.not (bool.or (i32.eq failure EBADF)
+					(bool.or (i32.eq failure EPERM) (i32.eq failure ENOSYS))))
+				(then (return 10i32)))
+			(return 43i32)))
+
+	(fn check_platform (:pragma (cfg (os "linux"))) (params (opening bool)) (returns i32)
+		(body
+			(if opening (then (return (call check_open))))
+			(return (call check_name))))
+
+	(fn check_platform (:pragma (cfg (not (os "linux")))) (params (opening bool)) (returns i32)
+		(body
+			(if opening (then (return 43i32)))
+			(return 42i32)))
+
+	(fn main (:expect (issues "gh:wove-lang/wove:318" "gh:wove-lang/wove:551"))
+		(params (args (shared-array (shared-array u8)))) (returns i32)
+		(body (return (call check_platform (i32.gtz (i32.dec (array.len args))))))))
