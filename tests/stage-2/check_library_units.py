@@ -89,6 +89,22 @@ def build_numbered(parts, root, image_name, allowlist, command, darwin, layout):
 	return image
 
 
+# Verify each trampoline has one spelling in both signatures and no declarations in other parts.
+def check_trampolines(serial, parts, layout):
+	role = layout["trampoline_role"].encode("ascii")
+	word = rb"[0-3][0-9a-v]{6}"
+	private = rb"w+g(?:" + role + word + rb"|" + role.upper() + word + word + rb")"
+	owner = layout["export_unit"]
+	# Public exports retain their source suffix even when the private prefix or rank changes.
+	for symbol in layout["exports"]:
+		declaration = re.compile(rb"\b(" + private + re.escape(symbol.encode("ascii")) + rb")\(")
+		serial_names = declaration.findall(serial)
+		assert len(serial_names) == 2 and serial_names[0] == serial_names[1], (symbol, serial_names)
+		# Private declarations only appear in the unit that owns the wrapper definitions.
+		for name, body in parts.items():
+			assert declaration.findall(body) == (serial_names if name == owner else []), (symbol, name)
+
+
 # Check both output forms against the same serial public interface and complete symbol allowlist.
 def check_library(probe, wovec, target, darwin, root, clang, command, fixture_root, case):
 	files = []
@@ -126,7 +142,7 @@ def check_library(probe, wovec, target, darwin, root, clang, command, fixture_ro
 	assert first.stdout == second.stdout
 	parts = read_parts(first.stdout)
 	assert list(parts) == layout["files"], list(parts)
-	assert b"wvex_" not in parts["program.h"]
+	check_trampolines(serial.stdout.split(b"\n", 1)[1], parts, layout)
 	width = sum(map(len, parts.values()))
 	exact = emit(probe, graph, requested, width)
 	short = emit(probe, graph, requested, width - 1)
