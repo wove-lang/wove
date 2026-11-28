@@ -4,14 +4,14 @@
 	(:doc "Stage a checked graph as a common header and ordered numbered C bodies.")
 
 	(use wove-file "../c/arguments.wove" (only is_c_storage_mode))
-	(use wove-file "./prototype_probes.wove" (only checked_replay_prototype write_prototype_probes))
+	(use wove-file "./prototype_probes.wove" (only checked_replay_prototype write_prototype_probes write_pointer_owner_probes (value pointer_owner_witness)))
 	(use wove-file "./bin/staged.wove" (only numbered_probe_arguments))
 	(use wove-file "./bin/units.wove" (only staged_unit_path (value program_header)))
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "../clang/native_replay.wove" (only (value lvalue_witness_prefix)
-		(value storage_type_witness_prefix) (value release_witness_prefix) (value call_witness_prefix)
+		(value owner_type_witness_prefix) (value release_witness_prefix) (value call_witness_prefix)
 		(value fixed_call_witness_prefix) (value borrowed_cstr_witness_prefix) (value mutable_cstr_witness_prefix)
-		(value typed_call_witness_prefix) (value variadic_call_witness_prefix)))
+		(value typed_call_witness_prefix) (value owner_call_witness_prefix) (value variadic_call_witness_prefix)))
 	(use wove-file "./diagnostics.wove" (only report_argv (value publish_failure)))
 	(use wove-file "./macro_probes.wove" (only write_macro_probes))
 	(use wove-file "./variadic_probes.wove" (only write_variadic_probes))
@@ -25,14 +25,14 @@
 	(use wove-file "../emit/c_values.wove" (only is_borrowed_c_value is_c_integer_constant is_c_vector_snapshot
 		is_writable_c_integer))
 	(use wove-file "../emit/c_vectors.wove" (only write_c_vector_declaration))
-	(use wove-file "../emit/owners.wove" (only is_numbered_storage_owner native_owner_contract write_native_type))
+	(use wove-file "../emit/owners.wove" (only is_numbered_pointer_owner is_numbered_storage_owner native_owner_contract write_native_type))
 	(use wove-file "../emit/runtime.wove" (only write_c_number))
 	(use wove-file "../emit/text.wove" (only c_literal_text c_span))
 	(use wove-file "../emit/graph.wove" (only write_partitioned_graph (type GraphPlan)))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
 	(use wove-file "../emit/units.wove" (only plan_unit_assignments numbered_program_preamble
-		checked_mutable_cstr_parameter numbered_adapted_fixed_call
-		numbered_named_variadic_call numbered_storage_binding
+		checked_mutable_cstr_parameter numbered_adapted_fixed_call numbered_fixed_pointer_owner_call
+		numbered_named_variadic_call numbered_owner_binding
 		(value numbered_preamble_replay) (type UnitIndex)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/function_rows.wove" (only checked_function_count (type ScalarFunction) (type ScalarParameter)))
@@ -175,9 +175,15 @@
 							(borrow-shared parameters) (borrow-shared records))
 						(then
 							(let symbol (array.load nodes (struct.get function name)))
-							(set width (call write_function_witness (borrow-shared arena) symbol
-								(borrow-shared typed_call_witness_prefix) (struct.get function declaration)
-								(borrow-mut output) width writing))
+							(let declaration (struct.get function declaration))
+							(set width (if
+								(:doc "Only owner constructors can depend on the SDK builtin and allocation attributes.")
+								(call numbered_fixed_pointer_owner_call (borrow-shared arena) (borrow-shared nodes)
+									function (borrow-shared parameters))
+								(then (call write_function_witness (borrow-shared arena) symbol
+									(borrow-shared owner_call_witness_prefix) declaration (borrow-mut output) width writing))
+								(else (call write_function_witness (borrow-shared arena) symbol
+									(borrow-shared typed_call_witness_prefix) declaration (borrow-mut output) width writing))))
 							(set fixed_calls (bool true))
 							(set typed_calls (bool true))
 							(continue)))
@@ -218,7 +224,7 @@
 		(:doc "Build the call probes that use checked C types after the implicit header.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
-			(variadics i32) (prototypes bool) (output (mut-array u8)) (writing bool)) (returns u32)
+			(variadics i32) (prototypes bool) (owners (shared-array u8)) (output (mut-array u8)) (writing bool)) (returns u32)
 		(body
 			(let-mut width (call write_macro_probes (borrow-shared arena) (borrow-shared nodes)
 				(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
@@ -241,26 +247,36 @@
 						(borrow-mut output) width writing))
 					(if (u32.lt next width) (then (return 4294967295u32)))
 					(set width next)))
-			(return width)))
+			(return (call write_pointer_owner_probes (borrow-shared arena) (borrow-shared nodes)
+				(borrow-shared owners) (borrow-mut output) width writing))))
 
-	(fn mark_storage_witnesses
-		(:doc "Select canonical owner declarations from both direct bindings and native formals.")
+	(struct OwnerWitnesses (fields (any bool) (pointer bool)))
+	(let storage_owner_witness 1u8)
+
+	(fn mark_owner_witnesses
+		(:doc "Select canonical owner declarations from native type bindings, storage formals, and pointer results.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (bindings (shared-array GraphBinding))
-			(trees (shared-array ScalarTree)) (parameters (shared-array ScalarParameter)) (marked (mut-array u8)))
-		(returns bool)
+			(trees (shared-array ScalarTree)) (functions (shared-array ScalarFunction))
+			(parameters (shared-array ScalarParameter)) (marked (mut-array u8))) (returns OwnerWitnesses)
 		(body
 			(let-mut storage (bool false))
+			(let-mut pointer (bool false))
 			(for
-				(:doc "Each alias of a selected type marks the same original declaration.")
+				(:doc "Each imported alias marks the same defining owner declaration.")
 				(let binding) (borrow-shared bindings)
 				(body
-					(let declaration (call numbered_storage_binding (borrow-shared arena) (borrow-shared nodes)
+					(let declaration (call numbered_owner_binding (borrow-shared arena) (borrow-shared nodes)
 						binding (borrow-shared trees)))
+					(if (i32.ltz declaration) (then (continue)))
 					(if
-						(:doc "An unused import can still select its original native declaration.")
-						(i32.not-ltz declaration)
+						(:doc "Pointer owners need an exact typed release proof in addition to their native type.")
+						(call is_numbered_pointer_owner (borrow-shared arena) (borrow-shared nodes)
+							(call native_owner_type declaration))
 						(then
-							(array.store marked declaration 1u8)
+							(array.store marked declaration pointer_owner_witness)
+							(set pointer (bool true)))
+						(else
+							(array.store marked declaration storage_owner_witness)
 							(set storage (bool true))))))
 			(for
 				(:doc "A selected C signature can require a storage type without importing the type name.")
@@ -268,16 +284,29 @@
 				(body
 					(let type (struct.get parameter type))
 					(if
-						(:doc "Uninitialized parameter rows and nonstorage contracts make no claim.")
+						(:doc "Uninitialized rows and nonstorage contracts make no storage claim.")
 						(bool.and (call is_c_storage_mode (struct.get parameter c_mode))
 							(call is_numbered_storage_owner (borrow-shared arena) (borrow-shared nodes) type))
 						(then
-							(array.store marked (call native_owner_declaration type) 1u8)
+							(array.store marked (call native_owner_declaration type) storage_owner_witness)
 							(set storage (bool true))))))
-			(return storage)))
+			(for
+				(:doc "An admitted pointer constructor selects its owner even if callers never spell the type.")
+				(let index) (range 0i32 (call checked_function_count (borrow-shared functions)))
+				(body
+					(let function (array.load functions index))
+					(let type (struct.get function result))
+					(if
+						(:doc "Selected C functions have passed the numbered signature gate.")
+						(bool.and (i32.ltz (struct.get function body))
+							(call is_numbered_pointer_owner (borrow-shared arena) (borrow-shared nodes) type))
+						(then
+							(array.store marked (call native_owner_declaration type) pointer_owner_witness)
+							(set pointer (bool true))))))
+			(return (struct.new OwnerWitnesses (any (bool.or storage pointer)) (pointer pointer)))))
 
-	(fn write_storage_witnesses
-		(:doc "Witness the original storage representation and cleanup symbol for each checked owning type.")
+	(fn write_owner_witnesses
+		(:doc "Witness the original native representation and cleanup symbol for each checked owner.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (marked (shared-array u8))
 			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
 		(body
@@ -286,25 +315,31 @@
 				(:doc "Use the original declaration order to compare the same witnesses in every context.")
 				(let declaration) (range 0i32 (array.len marked))
 				(body
-					(if (u8.eqz (array.load marked declaration)) (then (continue)))
+					(let kind (array.load marked declaration))
+					(if (u8.eqz kind) (then (continue)))
 					(let owner (call native_owner_contract (borrow-shared arena) (borrow-shared nodes)
 						(call native_owner_type declaration)))
 					(set width (call c_literal_text (borrow-shared storage_witness) (borrow-mut output) width writing))
 					(set width (call write_native_type (borrow-shared arena) (array.load nodes (struct.get owner native))
 						(borrow-mut output) width writing))
 					(set width (call c_literal_text (borrow-shared storage_pointer) (borrow-mut output) width writing))
-					(set width (call c_literal_text (borrow-shared storage_type_witness_prefix) (borrow-mut output) width writing))
+					(set width (call c_literal_text (borrow-shared owner_type_witness_prefix) (borrow-mut output) width writing))
 					(set width (call write_c_number (borrow-mut output) width declaration writing))
 					(set width (call c_literal_text (borrow-shared witness_end_line) (borrow-mut output) width writing))
-					(set width (call write_function_witness (borrow-shared arena)
-						(array.load nodes (struct.get owner drop)) (borrow-shared release_witness_prefix)
-						declaration (borrow-mut output) width writing))))
+					(let drop (array.load nodes (struct.get owner drop)))
+					(set width (if
+						(:doc "Pointer destruction depends on the same effective declaration metadata as its constructor.")
+						(u8.eq kind pointer_owner_witness)
+						(then (call write_function_witness (borrow-shared arena) drop (borrow-shared owner_call_witness_prefix)
+							declaration (borrow-mut output) width writing))
+						(else (call write_function_witness (borrow-shared arena) drop (borrow-shared release_witness_prefix)
+							declaration (borrow-mut output) width writing))))))
 			(return width)))
 
 	(fn write_native_value_witnesses
 		(:doc "Observe the exact expansions of the checked native operands in each include context.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (statements (shared-array ScalarStatement))
-			(storage (shared-array u8)) (functions (shared-array ScalarFunction))
+			(owners (shared-array u8)) (functions (shared-array ScalarFunction))
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (native_calls bool)
 			(output (mut-array u8)) (writing bool))
 		(returns u32)
@@ -359,13 +394,13 @@
 											(set width (call c_span (borrow-shared arena) start end (borrow-mut output) width writing))
 											(set width (call c_literal_text (borrow-shared constant_witness_end) (borrow-mut output) width writing))))))))))
 			(if
-				(:doc "Native calls and storage need their own witnesses even without checked module values.")
-				(bool.or native_calls (i32.gtz (array.len storage)))
+				(:doc "Native calls and owners need their own witnesses even without checked module values.")
+				(bool.or native_calls (i32.gtz (array.len owners)))
 				(then
 					(if (u32.eqz width)
 						(then (set width (call c_literal_text (borrow-shared names_begin) (borrow-mut output) width writing))))
-					(set width (call write_storage_witnesses (borrow-shared arena) (borrow-shared nodes)
-						(borrow-shared storage) (borrow-mut output) width writing))))
+					(set width (call write_owner_witnesses (borrow-shared arena) (borrow-shared nodes)
+						(borrow-shared owners) (borrow-mut output) width writing))))
 			(if
 				(:doc "Checked calls and their releases depend on consistent C declarations in both preambles.")
 				native_calls
@@ -424,10 +459,15 @@
 					(let borrowed (u8.eq mode 2u8))
 					(let writable (bool.and (u8.lt 1u8 mode) (call has_writable_values (borrow-shared statements))))
 					(let-mut marked (array.alloc u8 (if (u8.lt 1u8 mode) (then (array.len nodes)) (else 0i32))))
-					(let storage (bool.and (u8.lt 1u8 mode)
-						(call mark_storage_witnesses (borrow-shared arena) (borrow-shared nodes)
-							(borrow-shared bindings) (borrow-shared trees) (borrow-shared parameters) (borrow-mut marked))))
-					(let storage_length (if storage (then (array.len marked)) (else 0i32)))
+					(let owners (if
+						(:doc "Mark owner contracts only for plans with a full native replay.")
+						(u8.lt 1u8 mode)
+						(then (call mark_owner_witnesses (borrow-shared arena) (borrow-shared nodes)
+							(borrow-shared bindings) (borrow-shared trees) (borrow-shared functions)
+							(borrow-shared parameters) (borrow-mut marked)))
+						(else (struct.new OwnerWitnesses (any (bool false)) (pointer (bool false))))))
+					(let owner_length (if (struct.get owners any) (then (array.len marked)) (else 0i32)))
+					(let pointer_length (if (struct.get owners pointer) (then owner_length) (else 0i32)))
 					(let call_witnesses (if
 						(:doc "Only replayed C signatures add observations to the private probe.")
 						(u8.lt 1u8 mode)
@@ -445,7 +485,7 @@
 								(borrow-shared nodes) (borrow-shared statements) (borrow-mut empty) (bool false)))
 							(set names_width (call write_native_value_witnesses (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements)
-								(borrow-shared (array.range marked 0i32 storage_length)) (borrow-shared functions)
+								(borrow-shared (array.range marked 0i32 owner_length)) (borrow-shared functions)
 								(borrow-shared parameters) (borrow-shared records)
 								native_calls (borrow-mut empty) (bool false)))
 							(if
@@ -482,7 +522,7 @@
 					(let typed_calls (struct.get call_witnesses prototypes))
 					(let typed_width (call write_typed_call_witnesses (borrow-shared arena) (borrow-shared nodes)
 						(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
-						variadic_count typed_calls (borrow-mut empty) (bool false)))
+						variadic_count typed_calls (borrow-shared (array.range marked 0i32 pointer_length)) (borrow-mut empty) (bool false)))
 					(if
 						(:doc "The combined typed witness fragment must fit its measured buffer.")
 						(u32.gt typed_width 2147483647u32)
@@ -494,7 +534,7 @@
 						(then
 							(let written (call write_typed_call_witnesses (borrow-shared arena) (borrow-shared nodes)
 								(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
-								variadic_count typed_calls (borrow-mut typed) (bool true)))
+								variadic_count typed_calls (borrow-shared (array.range marked 0i32 pointer_length)) (borrow-mut typed) (bool true)))
 							(if (u32.not-eq written typed_width) (then (return 0i32)))))
 					(if
 						(:doc "Materialize the measured prelude without changing the emitted include prefix.")
@@ -504,7 +544,7 @@
 								(borrow-shared nodes) (borrow-shared statements) (borrow-mut guards) (bool true)))
 							(let witnesses (call write_native_value_witnesses (borrow-shared arena)
 								(borrow-shared nodes) (borrow-shared statements)
-								(borrow-shared (array.range marked 0i32 storage_length)) (borrow-shared functions)
+								(borrow-shared (array.range marked 0i32 owner_length)) (borrow-shared functions)
 								(borrow-shared parameters) (borrow-shared records)
 								native_calls (borrow-mut names) (bool true)))
 							(if
@@ -520,8 +560,8 @@
 							(bool.not (call certify_numbered_includes (borrow-shared program) (borrow-shared options)
 								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards) (borrow-shared names)
 								(borrow-shared typed)
-								implicit borrowed writable (bool.or writable (bool.or storage native_calls))
-								(struct.get call_witnesses fixed) variadic_count)))
+								implicit borrowed writable (bool.or writable (bool.or (struct.get owners any) native_calls))
+								(bool.or (struct.get owners pointer) (struct.get call_witnesses fixed)) variadic_count)))
 						(then (return 0i32)))))
 			(let-mut ends (array.alloc UnitIndex (i32.inc count)))
 			(let measured (call write_partitioned_graph (borrow-shared arena) (borrow-shared files) (borrow-shared bindings)

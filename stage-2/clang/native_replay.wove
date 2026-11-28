@@ -9,13 +9,14 @@
 	(use wove-file "../text/copy.wove" (only append_bytes))
 
 	(let lvalue_witness_prefix "wove_native_lvalue_probe_")
-	(let storage_type_witness_prefix "wove_native_storage_type_probe_")
+	(let owner_type_witness_prefix "wove_native_owner_type_probe_")
 	(let release_witness_prefix "wove_native_release_probe_")
 	(let call_witness_prefix "wove_native_call_probe_")
 	(let fixed_call_witness_prefix "wove_native_fixed_call_probe_")
 	(let borrowed_cstr_witness_prefix "wove_native_borrowed_cstr_probe_")
 	(let mutable_cstr_witness_prefix "wove_native_mutable_cstr_probe_")
 	(let typed_call_witness_prefix "wove_native_typed_call_probe_")
+	(let owner_call_witness_prefix "wove_native_owner_call_probe_")
 	(let variadic_call_witness_prefix "wove_native_variadic_call_probe_")
 	(let plain_function_witness 0u8)
 	(let fixed_function_witness 1u8)
@@ -23,6 +24,7 @@
 	(let borrowed_cstr_function_witness 3u8)
 	(let mutable_cstr_function_witness 4u8)
 	(let typed_function_witness 5u8)
+	(let owner_function_witness 6u8)
 	(let id_key "id")
 	(let name_key "name")
 	(let type_key "type")
@@ -31,6 +33,9 @@
 	(let mangled_key "mangledName")
 	(let storage_key "storageClass")
 	(let inline_key "inline")
+	(let previous_key "previousDecl")
+	(let implicit_key "isImplicit")
+	(let true_value "true")
 	(let variadic_key "variadic")
 	(let opcode_key "opcode")
 	(let cast_key "castKind")
@@ -54,6 +59,8 @@
 	(let nonnull_kind "\"NonNullAttr\"")
 	(let asm_label_kind "\"AsmLabelAttr\"")
 	(let availability_kind "\"AvailabilityAttr\"")
+	(let builtin_kind "\"BuiltinAttr\"")
+	(let restrict_kind "\"RestrictAttr\"")
 	(let const_kind "\"ConstAttr\"")
 	(let extern_storage "\"extern\"")
 	(let decay_cast "\"FunctionToPointerDecay\"")
@@ -308,14 +315,18 @@
 				(body
 					(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) child
 						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(let owner (u8.eq mode owner_function_witness))
+					(let availability (bool.and (bool.or owner (bool.or (u8.eq mode variadic_function_witness)
+							(u8.eq mode typed_function_witness)))
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared availability_kind))))
+					(let owner_attribute (bool.and owner (bool.or
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared builtin_kind))
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared restrict_kind)))))
 					(let attribute (bool.and (u8.not-eq mode plain_function_witness) (bool.or
-						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared asm_label_kind))
-						(bool.or
-							(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared nothrow_kind))
-							(bool.or (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared nonnull_kind))
-								(bool.and (bool.or (u8.eq mode variadic_function_witness)
-										(u8.eq mode typed_function_witness))
-									(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared availability_kind))))))))
+						(bool.or availability owner_attribute)
+						(bool.or (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared asm_label_kind))
+							(bool.or (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared nothrow_kind))
+								(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared nonnull_kind)))))))
 					(if
 						(:doc "Reject bodies and attributes outside the audited declaration contract.")
 						(bool.not (bool.or attribute (call field_equals (borrow-shared ast)
@@ -444,6 +455,48 @@
 				(then (return drop)))
 			(return -1i32)))
 
+	(fn mark_owner_builtin
+		(:doc "Accept only the implicit builtin redeclaration of a witnessed owner function.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32)
+			(approved (mut-array u8)) (scratch (mut-array u8)))
+		(returns void)
+		(body
+			(let previous (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
+				(borrow-shared previous_key) (borrow-mut scratch)))
+			(if (i32.ltz previous) (then (return)))
+			(let name (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) function
+				(borrow-shared name_key) (borrow-mut scratch)))
+			(let prototype (call type_spelling (borrow-shared ast) (borrow-shared nodes) function
+				(bool false) (borrow-mut scratch)))
+			(let-mut row (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(while
+				(:doc "Clang links a declaration such as fopen64 to its original implicit builtin by AST ID.")
+				(i32.not-ltz row)
+				(body
+					(let id (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+						(borrow-shared id_key) (borrow-mut scratch)))
+					(if
+						(:doc "Only the original linked builtin can share the witnessed declaration's approval.")
+						(call same_field (borrow-shared ast) (borrow-shared nodes) previous id)
+						(then
+							(let implicit (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+								(borrow-shared implicit_key) (borrow-mut scratch)))
+							(let original (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+								(borrow-shared name_key) (borrow-mut scratch)))
+							(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) row
+								(bool false) (borrow-mut scratch)))
+							(if
+								(:doc "Check its exact original name and prototype and exclude definitions or local linkage.")
+								(bool.and (call field_equals (borrow-shared ast) (borrow-shared nodes) implicit (borrow-shared true_value))
+									(bool.and (call same_field (borrow-shared ast) (borrow-shared nodes) name original)
+										(bool.and (call same_field (borrow-shared ast) (borrow-shared nodes) prototype type)
+											(bool.and (call is_linked_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch))
+												(call function_declaration_children (borrow-shared ast) (borrow-shared nodes)
+													row owner_function_witness (borrow-mut scratch))))))
+								(then (array.store approved row 1u8)))
+							(return)))
+					(set row (struct.get (array.load nodes row) next_sibling))))))
+
 	(fn mark_witnessed_declarations
 		(:doc "Admit extra declaration metadata only on functions resolved by selected witnesses.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (approved (mut-array u8))
@@ -467,7 +520,9 @@
 						(borrow-shared nodes) row (borrow-shared mutable_cstr_witness_prefix) (borrow-mut scratch)))))
 					(let typed_call (bool.and fixed_calls (i32.not-ltz (call witness_name (borrow-shared ast)
 						(borrow-shared nodes) row (borrow-shared typed_call_witness_prefix) (borrow-mut scratch)))))
-					(let checked_fixed (bool.or adapted (bool.or typed_call (bool.or borrowed mutable))))
+					(let owner (bool.and fixed_calls (i32.not-ltz (call witness_name (borrow-shared ast)
+						(borrow-shared nodes) row (borrow-shared owner_call_witness_prefix) (borrow-mut scratch)))))
+					(let checked_fixed (bool.or adapted (bool.or owner (bool.or typed_call (bool.or borrowed mutable)))))
 					(let variadic (bool.and variadic_calls (i32.not-ltz (call witness_name (borrow-shared ast)
 						(borrow-shared nodes) row (borrow-shared variadic_call_witness_prefix) (borrow-mut scratch)))))
 					(if
@@ -478,6 +533,7 @@
 							(if borrowed (then (set mode borrowed_cstr_function_witness)))
 							(if mutable (then (set mode mutable_cstr_function_witness)))
 							(if typed_call (then (set mode typed_function_witness)))
+							(if owner (then (set mode owner_function_witness)))
 							(if variadic (then (set mode variadic_function_witness)))
 							(let function (if
 								(:doc "Getter and function-call witnesses enforce distinct native expression shapes.")
@@ -487,6 +543,11 @@
 									mode (borrow-mut scratch)))))
 							(if (i32.ltz function) (then (return (bool false))))
 							(array.store approved function 1u8)
+							(if
+								(:doc "A selected owner builtin can also have an implicit compiler declaration.")
+								owner
+								(then (call mark_owner_builtin (borrow-shared ast) (borrow-shared nodes) function
+									(borrow-mut approved) (borrow-mut scratch))))
 							(set getters (bool.or getters getter))
 							(set fixed (bool.or fixed checked_fixed))
 							(set variadics (bool.or variadics variadic))))
@@ -579,9 +640,9 @@
 				(i32.not-ltz row)
 				(body
 					(let type_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
-						(borrow-shared storage_type_witness_prefix) (borrow-mut scratch)))
+						(borrow-shared owner_type_witness_prefix) (borrow-mut scratch)))
 					(if
-						(:doc "Record the storage type independently of the selected destruction function.")
+						(:doc "Record the native owner type independently of the selected destruction function.")
 						(i32.not-ltz type_name)
 						(then
 							(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool true) (borrow-mut scratch)))
@@ -601,6 +662,8 @@
 						(borrow-shared mutable_cstr_witness_prefix) (borrow-mut scratch)))
 					(let typed_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
 						(borrow-shared typed_call_witness_prefix) (borrow-mut scratch)))
+					(let owner_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
+						(borrow-shared owner_call_witness_prefix) (borrow-mut scratch)))
 					(let variadic_name (call witness_name (borrow-shared ast) (borrow-shared nodes) row
 						(borrow-shared variadic_call_witness_prefix) (borrow-mut scratch)))
 					(let getter (i32.not-ltz getter_name))
@@ -625,6 +688,10 @@
 						(:doc "The typed fixed call also checks the target's availability declaration.")
 						(i32.not-ltz typed_name)
 						(then (set name typed_name) (set mode typed_function_witness)))
+					(if
+						(:doc "An owner constructor or release preserves its native allocation and link metadata.")
+						(i32.not-ltz owner_name)
+						(then (set name owner_name) (set mode owner_function_witness)))
 					(if
 						(:doc "A named C tail has its own variadic address witness.")
 						(i32.not-ltz variadic_name)
