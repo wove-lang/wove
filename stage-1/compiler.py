@@ -20,7 +20,9 @@ from target import compiler_target
 
 I8 = "i8"
 I32 = "i32"
+I64 = "i64"
 U8 = "u8"
+U16 = "u16"
 U32 = "u32"
 U64 = "u64"
 BOOL = "bool"
@@ -33,7 +35,9 @@ UNSIGNED_LITERAL_MACROS = {U32: "UINT32_C", U64: "UINT64_C"}
 SCALAR_LIMITS = {
 	I8: (-128, 127),
 	I32: (-(2**31), 2**31 - 1),
+	I64: (-(2**63), 2**63 - 1),
 	U8: (0, 255),
+	U16: (0, 2**16 - 1),
 	U32: (0, 2**32 - 1),
 	U64: (0, 2**64 - 1),
 }
@@ -44,7 +48,9 @@ MUT = "mut-array"
 C_TYPE = {
 	I8: "int8_t",
 	I32: "int32_t",
+	I64: "int64_t",
 	U8: "uint8_t",
+	U16: "uint16_t",
 	U32: "uint32_t",
 	U64: "uint64_t",
 	BOOL: "bool",
@@ -65,17 +71,28 @@ BINARY_OPS = {
 	"u8.not-eq": (U8, BOOL, "!="),
 	"u8.lt": (U8, BOOL, "<"),
 	"u8.not-lt": (U8, BOOL, ">="),
+	"u16.eq": (U16, BOOL, "=="),
 	"i32.eq": (I32, BOOL, "=="),
 	"i32.not-eq": (I32, BOOL, "!="),
 	"i32.lt": (I32, BOOL, "<"),
 	"i32.not-lt": (I32, BOOL, ">="),
+	"i32.le": (I32, BOOL, "<="),
+	"i32.gt": (I32, BOOL, ">"),
+	"i32.ge": (I32, BOOL, ">="),
 	"i32.mul": (I32, I32, "*"),
 	"i32.div": (I32, I32, "/"),
 	"i32.rem": (I32, I32, "%"),
+	"i64.eq": (I64, BOOL, "=="),
+	"i64.lt": (I64, BOOL, "<"),
+	"i64.gt": (I64, BOOL, ">"),
+	"i64.add": (I64, I64, "+"),
+	"i64.sub": (I64, I64, "-"),
+	"i64.mul": (I64, I64, "*"),
 	"u32.eq": (U32, BOOL, "=="),
 	"u32.not-eq": (U32, BOOL, "!="),
 	"u32.lt": (U32, BOOL, "<"),
 	"u32.not-lt": (U32, BOOL, ">="),
+	"u32.gt": (U32, BOOL, ">"),
 	"u32.mul": (U32, U32, "*"),
 	"u32.div": (U32, U32, "/"),
 	"u32.rem": (U32, U32, "%"),
@@ -101,8 +118,10 @@ ZERO_PREDICATES = {
 	"not-ltz": ("not-lt", False),
 	"gtz": ("lt", True),
 	"not-gtz": ("not-lt", True),
+	"lez": ("le", False),
 }
 SHIFT_OPS = {"shl": "<<", "shr": ">>"}
+BYTE_DECODER_WIDTHS = {U16: 2, U32: 4}
 
 
 @dataclass(frozen=True)
@@ -255,6 +274,9 @@ def read_integer_literal(node: Form) -> Value:
 	# Check the declared type before handing the literal to C.
 	if not low <= number <= high:
 		raise SourceError(node.line)
+	# C parses a leading minus separately, so spell the lowest signed word as a macro.
+	if node.tag == I64:
+		return Value(I64, "INT64_MIN" if number == low else f"INT64_C({number})")
 	macro = UNSIGNED_LITERAL_MACROS.get(node.tag)
 	spelling = str(number) if macro is None else f"{macro}({number})"
 	return Value(node.tag, spelling)
@@ -988,7 +1010,7 @@ class FunctionEmitter:
 	# Use the signed runtime check only with values representable in int64_t.
 	def convert_integer(self, value: Value, kind: str | NativeType, line: int) -> Value:
 		# Clang knows the exact native type width and signedness from the included header.
-		if isinstance(kind, NativeType) or isinstance(value.kind, NativeType):
+		if isinstance(kind, NativeType) or isinstance(value.kind, NativeType) or kind == I64:
 			result = self.temporary(kind, "0")
 			self.emit_line(f"if (__builtin_add_overflow({value.c}, 0, &{result.c})) {{")
 			self.emit_line(f"    wvrt_int_conversion_trap(-1, {line}, {line});")
@@ -1174,6 +1196,17 @@ class FunctionEmitter:
 			)
 
 		prefix, _, predicate = expr.tag.partition(".")
+		# Decode the exact number of bytes using the runtime's endian-independent path.
+		if prefix in BYTE_DECODER_WIDTHS and predicate in ("from-le-bytes", "from-be-bytes"):
+			operand, = form(expr, arity=1).operands
+			checkpoint = len(self.loans)
+			data = self.borrow(operand, _BYTE_VIEW)
+			del self.loans[checkpoint:]
+			endian = "true" if predicate == "from-be-bytes" else "false"
+			width = BYTE_DECODER_WIDTHS[prefix]
+			return self.temporary(prefix, f"({c_type(prefix)})wvrt_int_from_bytes("
+				f"{data.c}, {width}, {endian}, -1, {node.line}, {node.line})")
+
 		step = STEP_OPS.get(predicate)
 		wrapping = WRAPPING_OPS.get(f"{prefix}.{step}" if step is not None else expr.tag)
 		# Evaluate exact-type operands in order before performing wrapping arithmetic.
@@ -1226,6 +1259,10 @@ class FunctionEmitter:
 			if expr.tag == "i32.mul":
 				product = f"(uint32_t)((uint64_t)(uint32_t){first.c} * (uint32_t){second.c})"
 				return self.temporary(I32, f"wvrt_i32_from_wrapped_bits({product})")
+			# Signed 64-bit arithmetic also wraps through its unsigned representation.
+			if result == I64:
+				bits = f"(uint64_t){first.c} {operator} (uint64_t){second.c}"
+				return self.temporary(I64, f"wvrt_i64_from_wrapped_bits({bits})")
 			# Guard both division operations at the original seed source location.
 			if expr.tag in ("u32.div", "u32.rem"):
 				remainder = "true" if operator == "%" else "false"
