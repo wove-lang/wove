@@ -804,13 +804,15 @@ lists the wider header surface.
 | `WINT_MIN` and `WINT_MAX` | Both glibc targets expose `unsigned int`. Both Darwin targets expose `int`. The fixture verifies the exact native type and the full range. |
 | C23 width macros | All 33 use native `int` and `c_optional`, so Clang resolves availability under the effective C flags. On the audited glibc SDK, C23 exposes all widths. C11 and C17 expose them with GNU extensions or `_ISOC23_SOURCE`, `_ISOC2X_SOURCE`, or `__STDC_WANT_IEC_60559_BFP_EXT__`. Both glibc targets report 64 for signed and unsigned fast-16 and fast-32. The audited Darwin SDK exposes none of the widths. |
 | `__STDC_VERSION_STDINT_H__` | Absent from the audited Darwin and glibc SDKs, including their C23 profiles. |
-| `INTN_C`, `UINTN_C`, `INTMAX_C`, and `UINTMAX_C` | The function-like constructors need a checked operand passed as an unsuffixed C integer token to support suffix pasting. [Compiler prerequisite #718](https://github.com/wove-lang/wove/issues/718) |
+| `INTN_C`, `UINTN_C`, `INTMAX_C`, and `UINTMAX_C` | Each constructor uses a `c_macro_integer_literal` formal to check the input range and pass a single unsuffixed C integer token. Clang checks the expansion against `int` for the signed and unsigned 8- and 16-bit results and `INT32_C`, `unsigned int` for `UINT32_C`, and the corresponding native typedef for the 64-bit and maximum-width results. |
 
 The installed fixture uses both the bundled and project-authored declarations.
 It passes every boundary value through a parameter of the corresponding
 native type. A C oracle checks the header's expression types and compares
 the values. The width fixture checks every imported value when the audited
 width family is present and the selector diagnostic when it is absent.
+Both bridge origins exercise zero and the largest accepted operand for
+every constructor, including decimal, hexadecimal, and binary spellings.
 
 ## Bundled math coverage
 
