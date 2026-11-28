@@ -6,8 +6,10 @@
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/c_records.wove" (only read_c_inline_field c_pointer_field_kind (value cstrs_field_kind)))
+	(use wove-file "../source/receiver_words.wove" (only receiver_separator))
 	(use wove-file "../source/module.wove" (only form_parts))
-	(use wove-file "./syntax.wove" (only entry_at entry_form entry_keyword is_scalar_name (value buffered_cstrs_type) (type EntryRead)))
+	(use wove-file "./syntax.wove" (only entry_at entry_form entry_keyword is_scalar_name array_operation
+		(value receiver_operation_kind) (value buffered_cstrs_type) (type EntryRead)))
 	(use wove-file "./loans.wove" (only expression_row writable_place buffered_field_projection (type ScalarExpression)))
 	(use wove-file "./flow.wove" (only (type ScalarStatement)))
 	(use wove-file "./control.wove" (only prior_owner_take))
@@ -57,6 +59,75 @@
 							(end node/end) (error 39u32) (related moved)))))))
 			(return (call entry_at node index 0u32))))
 
+	(struct FieldMember
+		(fields (type u32) (target i32) (extent i32) (buffered bool) (checked EntryRead)))
+
+	(fn field_member_failure
+		(:doc "Retain the rejected receiver or member span before checking the requested operation.")
+		(params (site SourceNode) (error u32))
+		(returns FieldMember)
+		(body
+			(return (struct:new FieldMember (type 0u32) (target -1i32) (extent 0i32)
+				(buffered (bool false)) (checked (call entry_at site -1i32 error))))))
+
+	(fn resolve_field_member
+		(:doc "Look up the exact member type and its lowering information without reading the receiver.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(reference SourceNode) (name SourceNode) (receiver_type u32)
+			(records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding)))
+		(returns FieldMember)
+		(body
+			(let type (call record_receiver_type receiver_type))
+			(if
+				(:doc "Only a record layout can expose named members.")
+				(bool:not (call is_record_type type))
+				(then (return (call field_member_failure reference 24u32))))
+			(let layout (records.get (call record_index type)))
+			(if
+				(:doc "Fixed arrays and enums do not expose named record fields.")
+				(bool:or (call is_fixed_array layout) (call is_enum_layout layout))
+				(then (return (call field_member_failure reference 24u32))))
+			(let field (call find_member (borrow-shared source) (borrow-shared nodes)
+				layout/first layout/count name))
+			(let target field/ordinal)
+			(if
+				(:doc "An unknown field points at its own identifier.")
+				target.ltz
+				(then (return (call field_member_failure name 34u32))))
+			(let row field/row)
+			(let node (nodes.get row))
+			(let checked (call entry_at name row 0u32))
+			(if
+				(:doc "Wove members are resolved in the defining layout's scope.")
+				(bool:not (call is_native_record layout))
+				(then
+					(let result (call member_value_type (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) (borrow-shared bindings) layout node))
+					(return (struct:new FieldMember (type result) (target target)
+						(extent 0i32) (buffered (bool false)) (checked checked)))))
+			(let native_target node/first_child)
+			(let field_parts (call form_parts (borrow-shared source) (borrow-shared nodes) node))
+			(let operand (nodes.get field_parts/operands))
+			(let pointer (call c_pointer_field_kind (borrow-shared source) operand))
+			(if
+				(:doc "A bounded native pointer field advertises its shared descriptor type.")
+				pointer.gtz
+				(then
+					(let-mut result 34u32)
+					(if (pointer.eq cstrs_field_kind) (then (set result buffered_cstrs_type)))
+					(return (struct:new FieldMember (type result) (target native_target)
+						(extent 0i32) (buffered (bool true)) (checked checked)))))
+			(let inline (call read_c_inline_field (borrow-shared source) (borrow-shared nodes) operand))
+			(let extent inline/extent)
+			(let-mut result 34u32)
+			(if
+				(:doc "A native scalar or record field uses the defining C bridge's checked type.")
+				extent.not-gtz
+				(then (set result (call native_field_type (borrow-shared source) (borrow-shared nodes)
+					(borrow-shared records) layout row))))
+			(return (struct:new FieldMember (type result) (target native_target)
+				(extent extent) (buffered (bool false)) (checked checked)))))
+
 	(fn plan_c_inline_field
 		(:doc "Lend caller-stored native bytes only to the immediately enclosing checked array access.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
@@ -66,8 +137,15 @@
 		(body
 			(let parent (nodes.get node/parent))
 			(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) parent))
-			(let kind (call entry_keyword (borrow-shared source) (borrow-shared nodes)
+			(let-mut kind (call entry_keyword (borrow-shared source) (borrow-shared nodes)
 				parts/head))
+			(if
+				(:doc "The inline member has an array receiver type. Read its parent's canonical array operation.")
+				(kind.eq receiver_operation_kind)
+				(then
+					(let head (nodes.get parts/head))
+					(let dot (call receiver_separator (borrow-shared source) head/start head/end))
+					(set kind (call array_operation (borrow-shared source) dot.inc head/end))))
 			(let write (kind.eq 40u32))
 			(let access (write.or (bool:or (kind.eq 36u32) (kind.eq 37u32))))
 			(if
@@ -133,62 +211,35 @@
 					(bool:not (named.or
 						(bool:and (kind.eq 52u32) (i32:not-ltz value/projection)))))
 				(then (return (call entry_at reference -1i32 24u32))))
-			(let layout (records.get (call record_index type)))
+			(let field (call resolve_field_member (borrow-shared source) (borrow-shared nodes)
+				reference name value/type (borrow-shared records) (borrow-shared bindings)))
+			(let checked field/checked)
+			(if (u32:gtz checked/error) (then (return checked)))
+			(let target field/target)
+			(let result field/type)
 			(if
-				(:doc "Fixed arrays and enums do not expose named record fields.")
-				(bool:or (call is_fixed_array layout) (call is_enum_layout layout))
-				(then (return (call entry_at reference -1i32 24u32))))
-			(let field (call find_member (borrow-shared source) (borrow-shared nodes)
-				layout/first layout/count name))
-			(let ordinal field/ordinal)
-			(if
-				(:doc "An unknown field points at the requested name.")
-				ordinal.ltz
-				(then (return (call entry_at name -1i32 34u32))))
-			(let-mut target ordinal)
-			(let-mut result 0u32)
-			(let row field/row)
-			(if
-				(:doc "Native fields use the real C name and the defining bridge's checked type.")
-				(call is_native_record layout)
+				(:doc "Only a present caller-backed record can lend a native pointer field.")
+				field/buffered
 				(then
-					(let field_node (nodes.get row))
-					(set target field_node/first_child)
-					(let field_parts (call form_parts (borrow-shared source) (borrow-shared nodes) field_node))
-					(let operand (nodes.get field_parts/operands))
-					(let pointer (call c_pointer_field_kind (borrow-shared source) operand))
 					(if
-						(:doc "Only a present caller-backed record can lend a native pointer field.")
-						pointer.gtz
-						(then
-							(if
-								(:doc "A named unwrapped view supplies the original scratch bounds for pointer fields.")
-								(bool:not (named.and (call is_buffered_record value/type)))
-								(then (return (call entry_at name -1i32 24u32))))
-							(let-mut projection_type 34u32)
-							(if (pointer.eq cstrs_field_kind) (then (set projection_type buffered_cstrs_type)))
-							(if
-								(:doc "A pointer field yields only a shared byte view or an immutable table binding.")
-								(bool:not (bool:or (expected.eq 42u32)
-									(call value_matches_type expected projection_type)))
-								(then (return (call entry_at node -1i32 24u32))))
-							(expressions.set index
-								(call buffered_field_projection projection_type target receiver 0i32 0i32 0i32))
-							(return (call entry_at node index 0u32))))
-					(let inline (call read_c_inline_field (borrow-shared source) (borrow-shared nodes)
-						(nodes.get field_parts/operands)))
-					(let extent inline/extent)
+						(:doc "A named unwrapped view supplies the original scratch bounds for pointer fields.")
+						(bool:not (named.and (call is_buffered_record value/type)))
+						(then (return (call entry_at name -1i32 24u32))))
 					(if
-						(:doc "Keep an inline byte array in its native record and supply a checked access to its original storage.")
-						extent.gtz
-						(then (return (call plan_c_inline_field (borrow-shared source) (borrow-shared nodes)
-							node index receiver value target extent expected
-							(borrow-mut expressions)))))
-					(set result (call native_field_type (borrow-shared source) (borrow-shared nodes)
-						(borrow-shared records) layout row)))
-				(else
-					(set result (call member_value_type (borrow-shared source) (borrow-shared nodes)
-						(borrow-shared records) (borrow-shared bindings) layout (nodes.get row)))))
+						(:doc "A pointer field yields only a shared byte view or an immutable table binding.")
+						(bool:not (bool:or (expected.eq 42u32)
+							(call value_matches_type expected result)))
+						(then (return (call entry_at node -1i32 24u32))))
+					(expressions.set index
+						(call buffered_field_projection result target receiver 0i32 0i32 0i32))
+					(return (call entry_at node index 0u32))))
+			(let extent field/extent)
+			(if
+				(:doc "Keep inline bytes in native storage and run the original access and permission checks.")
+				extent.gtz
+				(then (return (call plan_c_inline_field (borrow-shared source) (borrow-shared nodes)
+					node index receiver value target extent expected (borrow-mut expressions)))))
+			(let layout (records.get (call record_index type)))
 			(if
 				(:doc "A destination discovers the exact field type. A read must match its expected type.")
 				(bool:and expected.not-eqz

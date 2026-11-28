@@ -522,10 +522,11 @@
 												(else
 													(let separator (call receiver_separator (borrow-shared source) start end))
 													(if
-														(:doc "A call adds its receiver row. A bare operation also adds a form and reuses the token as its head.")
+														(:doc "Reserve the complete receiver. A bare operation also adds its surrounding form.")
 														separator.not-ltz
 														(then
-															(set receiver_rows receiver_rows.inc)
+															(let segments (call field_path_segments (borrow-shared source) start separator))
+															(set receiver_rows (receiver_rows.add (u32:inc (segments.mul 3u32))))
 															(if needs_tag.not (then (set receiver_rows receiver_rows.inc))))
 														(else
 															(if
@@ -1298,8 +1299,11 @@
 								(then (set identifier_start start.inc)))
 							(if
 								(:doc "Report malformed heads at the bare tag's byte span.")
-								(bool:not (call is_identifier_head (borrow-shared source)
-										identifier_start end entry.not))
+								(bool:not (bool:or (call is_identifier_head (borrow-shared source)
+										identifier_start end entry.not)
+									(bool:and (i32:not-ltz (call receiver_separator (borrow-shared source) start end))
+										(call inside_function_body (borrow-shared source) (borrow-shared nodes)
+											child_index))))
 								(then (return (call source_node_failure 12u32 head))))
 							(if
 								(:doc "Retired wrappers and lists fail where their exact tags occur.")
@@ -1464,7 +1468,7 @@
 			(let head form/first_child)
 			(let tag (struct:get (nodes.get head) kind))
 			(if
-				(:doc "Only a method head reserved an implicit child at the next physical row.")
+				(:doc "Only a method head reserved an implicit receiver at the next physical row.")
 				(tag.not-eq receiver_call_head)
 				(then (return)))
 			(let receiver head.inc)
@@ -1480,25 +1484,11 @@
 			(let link (nodes.get previous))
 			(nodes.set previous
 				(call revise_source_node link link/end link/first_child receiver))
-			(let name (nodes.get receiver))
-			(nodes.set receiver (call revise_source_node name name/end -1i32 operand))))
+			(let value (nodes.get receiver))
+			(nodes.set receiver (call revise_source_node value value/end value/first_child operand))))
 
-	(fn append_bare_receiver
-		(:doc "Represent a bare receiver atom as a form with its exact implicit binding span.")
-		(params (nodes (mut-array SourceNode)) (parent i32) (index i32) (start i32) (end i32) (separator i32))
-		(returns void)
-		(body
-			(call append_source_child (borrow-mut nodes) parent index
-				(call new_source_node 40u32 start -1i32 parent))
-			(call append_source_child (borrow-mut nodes) index index.inc
-				(call new_source_node receiver_call_head start end index))
-			(call append_source_child (borrow-mut nodes) index (index.add 2i32)
-				(call new_source_node 1u32 start separator index))
-			(let form (nodes.get index))
-			(call seal_source_node (borrow-mut nodes) index form end)))
-
-	(fn append_field_path
-		(:doc "Build nested canonical projections in preorder and retain the exact binding and field spans.")
+	(fn write_field_path
+		(:doc "Write a detached canonical projection or binding and retain each segment's exact span.")
 		(params (source (shared-array u8)) (nodes (mut-array SourceNode)) (parent i32)
 			(index i32) (start i32) (end i32) (segments u32))
 		(returns i32)
@@ -1519,11 +1509,7 @@
 					(let receiver head.inc)
 					(let form (call new_source_node 40u32 start field_end container))
 					(let projection (call revise_source_node form field_end head sibling))
-					(if
-						(:doc "Only the outer projection is a child of the written container.")
-						(node.eq index)
-						(then (call append_source_child (borrow-mut nodes) parent node projection))
-						(else (nodes.set node projection)))
+					(nodes.set node projection)
 					(let tag (call new_source_node field_path_get_head field_start field_end node))
 					(nodes.set head (call revise_source_node tag field_end -1i32 receiver))
 					(nodes.set field (call new_source_node 1u32 field_start field_end node))
@@ -1535,6 +1521,25 @@
 			(let binding (call new_source_node 1u32 start field_end container))
 			(nodes.set node (call revise_source_node binding field_end -1i32 sibling))
 			(return limit)))
+
+	(fn append_bare_receiver
+		(:doc "Attach a synthetic operation and its complete receiver at the original token.")
+		(params (source (shared-array u8)) (nodes (mut-array SourceNode)) (parent i32)
+			(index i32) (start i32) (end i32) (separator i32) (segments u32))
+		(returns i32)
+		(body
+			(call append_source_child (borrow-mut nodes) parent index
+				(call new_source_node 40u32 start -1i32 parent))
+			(call append_source_child (borrow-mut nodes) index index.inc
+				(call new_source_node receiver_call_head start end index))
+			(let receiver (index.add 2i32))
+			(let next (call write_field_path (borrow-shared source) (borrow-mut nodes)
+				index receiver start separator segments))
+			(let value (nodes.get receiver))
+			(call append_source_child (borrow-mut nodes) index receiver value)
+			(let form (nodes.get index))
+			(call seal_source_node (borrow-mut nodes) index form end)
+			(return next)))
 
 	(fn build_tree
 		(:doc "Build raw source rows or insert compiler-only receiver operands in the same preorder table.")
@@ -1613,42 +1618,46 @@
 														(else
 															(set separator (call receiver_separator (borrow-shared source) start end))
 															(if
-																(:doc "Only a bare operand can contribute a field path.")
-																(bool:and head.not separator.ltz)
-																(then (set segments (call field_path_segments (borrow-shared source) start end))))))))))
-									(if
-										(:doc "Emit the entire field path as one canonical subtree.")
-										segments.gtz
-										(then
-											(set index (call append_field_path (borrow-shared source) (borrow-mut nodes)
-												parent index start end segments))
-											(continue)))
-									(if
-										(:doc "A bare operation supplies a form, head, and receiver at its original location.")
-										(bool:and head.not separator.not-ltz)
-										(then
-											(call append_bare_receiver (borrow-mut nodes) parent index start end separator)
-											(set index (index.add 3i32)))
-										(else
+																(:doc "Count the path up to the dot, or the whole token for a plain field operand.")
+													separator.not-ltz
+													(then (set segments (call field_path_segments (borrow-shared source) start separator)))
+													(else
+														(if head.not
+															(then (set segments (call field_path_segments (borrow-shared source) start end))))))))))))
+								(if
+									(:doc "Attach a plain field operand as one canonical subtree.")
+									(bool:and separator.ltz segments.gtz)
+									(then
+										(let next (call write_field_path (borrow-shared source) (borrow-mut nodes)
+											parent index start end segments))
+										(let projection (nodes.get index))
+										(call append_source_child (borrow-mut nodes) parent index projection)
+										(set index next)
+										(continue)))
+								(if
+									(:doc "A bare operation supplies a form, head, and receiver at its original location.")
+									(bool:and head.not separator.not-ltz)
+									(then
+										(set index (call append_bare_receiver (borrow-shared source) (borrow-mut nodes)
+											parent index start end separator segments)))
+									(else
 											(let opened (kind.eq 40u32))
 											(let-mut node_end end)
 											(let-mut node_kind kind)
 											(if opened (then (set node_end -1i32)))
 											(if
-												(:doc "A method head reserves a bare binding row inside the same subtree.")
+												(:doc "A method head keeps its original span and reserves a detached receiver subtree.")
 												separator.not-ltz
-												(then
-													(set node_kind receiver_call_head)
-													(nodes.set index.inc
-														(call new_source_node 1u32 start separator parent))))
+												(then (set node_kind receiver_call_head)))
 											(call append_source_child (borrow-mut nodes) parent index
 												(call new_source_node node_kind start node_end parent))
 											(if opened (then (set parent index)))
 											(set index index.inc)
 											(if
-												(:doc "Advance past the extra method operand before writing the next token.")
+												(:doc "Write the receiver now and splice it into operand order at the closer.")
 												(node_kind.eq receiver_call_head)
-												(then (set index index.inc)))))))))))
+												(then (set index (call write_field_path (borrow-shared source)
+													(borrow-mut nodes) parent index start separator segments))))))))))))
 			(let root (nodes.get 0i32))
 			(call seal_source_node (borrow-mut nodes) 0i32 root length)
 			(if normalize.not (then (return checked)))

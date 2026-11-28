@@ -122,8 +122,8 @@ field name. When the receiver is the only operand, write `index.dec` or
 `data.len` directly. Both the bare and parenthesized spellings use the
 binding as a value or place. Calls with additional operands use parentheses.
 Use canonical forms for constructors with a type operand,
-destination-qualified conversions such as `u32:from-i32`, and compound
-receivers. Both spellings apply the same type and ownership checks and
+destination-qualified conversions such as `u32:from-i32`, and receivers
+computed by another operation. Both spellings apply the same type and ownership checks and
 preserve operand order and Boolean short-circuiting.
 
 ### Field paths
@@ -137,8 +137,18 @@ mutability, borrow, and ownership checks apply as for nested `struct:get`.
 Use `(set record/header/size 42i32)` for a writable field. For a
 fixed-array field, `(array:len record/header/samples)` reads its length.
 
-Field paths use slash separators only. Quoted import and embed paths
-continue to use string syntax.
+A field path can supply the receiver of one dot operation. The compiler
+resolves each field first and uses the last field's type to select the
+operation namespace.
+
+| Shorthand | Canonical form |
+| --- | --- |
+| `record/header/samples.len` or `(record/header/samples.len)` | `(array:len (struct:get (struct:get record header) samples))` |
+| `(record/header/samples.get index)` | `(array:get (struct:get (struct:get record header) samples) index)` |
+| `record/header/size.inc` | `(i32:inc (struct:get (struct:get record header) size))` for an `i32` field |
+
+A receiver path uses slash separators before the dot. Quoted import and
+embed paths continue to use string syntax.
 
 ## Where forms go
 
