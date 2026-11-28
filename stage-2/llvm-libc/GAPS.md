@@ -814,7 +814,7 @@ width family is present and the selector diagnostic when it is absent.
 Both bridge origins exercise zero and the largest accepted operand for
 every constructor, including decimal, hexadecimal, and binary spellings.
 
-## Bundled `<inttypes.h>` maximum-width operations
+## Bundled `<inttypes.h>` arithmetic and formats
 
 All six functions in the [LLVM libc inttypes catalog](https://libc.llvm.org/headers/inttypes.html)
 are declared in the audited macOS SDK 27.2 and Debian glibc 2.41 headers
@@ -828,7 +828,8 @@ arithmetic prototypes and the exact native result layout in 264 profiles.
 | `imaxdiv` | Uses the exact `imaxdiv_t` by-value result and `intmax_t` operands. Both bridge origins check all operand signs, zero numerator, and representable 64-bit limits. The denominator must be nonzero and the quotient must be representable. [Generic native result support](https://github.com/wove-lang/wove/pull/733) |
 | `strtoimax`, `strtoumax`, `wcstoimax`, `wcstoumax` | Clang checked the four exact prototypes. Glibc redirects them to their corresponding `__isoc23_*` symbols in C23 and the audited earlier-mode GNU extension profiles. Separate conversion slices cover narrow and wide text, end pointers into the input, and range handling. |
 | `PRId`, `PRIi`, `PRIo`, `PRIu`, `PRIx`, `PRIX` | All 84 traditional printing macros use the existing C string constant contract. One native literal expansion backs each immutable byte view. The installed fixtures compare the bytes and length of every exact, least, fast, pointer, and maximum-width selector with the active C header. |
-| Binary printing and scanning formats | The 70 traditional `SCN` macros remain for a separate slice. Glibc exposes another 28 binary printing macros in the `PRIb` and `PRIB` families and 14 `SCNb` macros in C23 and in the earlier-mode GNU profiles. Darwin omits the binary families on the audited SDK. |
+| `SCNd`, `SCNi`, `SCNo`, `SCNu`, `SCNx` | All 70 traditional scanning macros use the same immutable byte views as the printing formats. The native literal oracle verifies bytes and lengths for every exact, least, fast, pointer, and maximum-width selector. |
+| Binary printing and scanning formats | The binary families remain for separate coverage. Glibc exposes another 28 binary printing macros in the `PRIb` and `PRIB` families and 14 `SCNb` macros in C23 and in the earlier-mode GNU profiles. Darwin omits the binary families on the audited SDK. |
 | `__STDC_VERSION_INTTYPES_H__` | Absent in all audited Darwin and glibc profiles. |
 
 ## Bundled math coverage
