@@ -35,6 +35,7 @@
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../source/c_headers.wove" (only read_c_native_parameter))
 	(use wove-file "../source/c_formals.wove" (only next_c_value_formal))
+	(use wove-file "../source/c_markers.wove" (only read_c_macro_integer_literal))
 	(use wove-file "../source/c_owners.wove" (only is_c_storage_type read_c_owner))
 	(use wove-file "../source/c_arguments.wove" (only read_c_view_type c_row_slice_type))
 	(use wove-file "../emit/names.wove" (only module_identity function_identity parameter_identity))
@@ -43,7 +44,7 @@
 	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null c_null_argument_kind
 		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode c_handle_mut_mode is_c_exclusive_owner_mode
 		is_c_storage_mode is_c_storage_init_mode is_c_handle_init_mode is_c_consuming_mode (value c_open_variadic_tail) (value c_shared_handle_slot_mode)
-		(value c_static_string_mode) (value c_static_string_argument)))
+		(value c_static_string_mode) (value c_static_string_argument) (value c_macro_integer_argument)))
 	(use wove-file "../source/target.wove" (only default_selection (type SelectionContext)))
 	(use wove-file "../source/types.wove" (only void_type is_builtin_integer_value is_builtin_float is_builtin_numeric is_builtin_scalar builtin_type_keyword reference_mode (value f128_type) (value worker_receipt_type) (value worker_queue_type) (value worker_pool_type) (value worker_permit_type)))
 	(use wove-file "../source/float_ops.wove" (only float_literal_shape is_float_conversion (value float_literal)))
@@ -5388,8 +5389,37 @@
 					(set argument (struct.get site next_sibling))))
 			(return (call body_success 0i32))))
 
+	(fn check_c_macro_literal_argument
+		(:doc "Require a directly written integer literal and retain its validated digit span.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (formal ScalarParameter)
+			(caller ScalarFunction) (site SourceNode) (argument i32) (expressions (mut-array ScalarExpression)))
+		(returns BodyPlan)
+		(body
+			(let name (array.load nodes (struct.get formal name)))
+			(let parameter (array.load nodes (struct.get name parent)))
+			(let marker (call read_c_macro_integer_literal (borrow-shared source) (borrow-shared nodes)
+				(call form_parts (borrow-shared source) (borrow-shared nodes) parameter)))
+			(if
+				(:doc "The ordinary macro formals keep their checked runtime arguments.")
+				(bool.not (struct.get marker present))
+				(then (return (call body_success 0i32))))
+			(let row (array.load expressions argument))
+			(let radix (struct.get row target))
+			(let digits (bool.or (i32.eq radix -10i32) (bool.or (i32.eq radix -2i32) (i32.eq radix -16i32))))
+			(if
+				(:doc "A character, constant reference, operation, or negative value cannot supply a literal token.")
+				(bool.not (bool.and (bool.and (u32.eq (struct.get row kind) 1u32) digits)
+					(bool.and (bool.not (struct.get row negative))
+						(bool.and (i32.not-lt (struct.get row start) (struct.get site start))
+							(i32.not-lt (struct.get site end) (struct.get row end))))))
+				(then (return (call body_error caller (struct.get site start) (struct.get site end) 25u32))))
+			(array.store expressions argument
+				(call expression_row c_macro_integer_argument (struct.get row type) radix -1i32
+					(struct.get row start) (struct.get row end) (bool false)))
+			(return (call body_success 0i32))))
+
 	(fn check_call_arguments
-		(:doc "Validate inferred C tails and record the runtime checks for exact Wove arguments.")
+		(:doc "Validate native literal tokens and tails and record checks for exact Wove arguments.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32) (limit i32)
 			(caller ScalarFunction) (view_start i32) (functions (shared-array ScalarFunction))
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (bindings (shared-array GraphBinding))
@@ -5420,13 +5450,22 @@
 								(:doc "The pooled permit occupies no formal slot in the handler.")
 								(u32.eq (struct.get invocation kind) worker_spawn_on_kind)
 								(then (set argument (struct.get (array.load nodes argument) next_sibling))))
+							(let guards (bool.or (i32.not-ltz (struct.get callee body)) (struct.get callee c_void_pointer)))
+							(let macro (struct.get callee c_macro))
 							(while
 								(:doc "The original sibling order and the formal table pair each operand exactly once.")
-								(bool.and (bool.or (i32.not-ltz (struct.get callee body)) (struct.get callee c_void_pointer))
+								(bool.and (bool.or guards macro)
 									(bool.and (i32.lt formal formal_end) (i32.lt -1i32 argument)))
 								(body
 									(let site (array.load nodes argument))
 									(let parameter (array.load parameters formal))
+									(if
+										(:doc "A marked native macro formal checks the original Wove operand after type planning.")
+										macro
+										(then
+											(let checked (call check_c_macro_literal_argument (borrow-shared source)
+												(borrow-shared nodes) parameter caller site argument (borrow-mut expressions)))
+											(if (u32.gtz (struct.get checked error)) (then (return checked)))))
 									(let expected (struct.get parameter extent))
 									(if
 										(:doc "Every inline owner slot must be occupied before the argument enters the callee.")
@@ -5441,7 +5480,7 @@
 													(struct.get caller source_base) view_start))))
 									(if
 										(:doc "Ordinary arguments keep their existing code and evaluation order.")
-										(i32.lt -1i32 expected)
+										(bool.and guards (i32.lt -1i32 expected))
 										(then
 											(let loan (array.load expressions argument))
 											(let actual (call known_loan_extent (borrow-shared source) (borrow-shared nodes)
