@@ -759,6 +759,25 @@ forms use the transitive `FILE` type in the profiles that expose them.
 [Darwin group database reference](https://github.com/apple-oss-distributions/Libinfo/blob/main/lookup.subproj/getgrent.3)
 [glibc group lookup reference](https://sourceware.org/glibc/manual/2.41/html_node/Lookup-Group.html)
 
+## Bundled `<string.h>` checked strings
+
+The first installed slice uses the native `size_t` and the ordinary
+`c_cstr` contract for length and comparison calls. It retains the
+already-written `strerror` owned snapshot. The five prototypes agree across
+the audited Darwin and glibc C11, C17, and C23 SDK profiles. The
+[LLVM libc string index](https://libc.llvm.org/headers/string.html) tracks
+the rest of the native surface.
+
+| Native members | Coverage or outstanding contract |
+| --- | --- |
+| `strlen` and `size_t` | The result is the byte count before the NUL. Installed fixtures cover empty, ASCII, and multibyte input with the same ABI in bundled and project bridges. |
+| `strcmp`, `strncmp`, `strcoll` | The two source views use the normal checked C-string conversion. `strncmp` uses native `size_t` and tests zero and a shared prefix. Both origins verify comparison signs. The `strcoll` fixture selects the C locale. |
+| `strerror` | Copy the borrowed native message into an optional owner. The fixture checks a retained error string against an independent C copy after a different `strerror` call. |
+| `memcmp`, `memcpy`, `memmove`, `memset`, and other raw memory operations | A separate binary-buffer slice covers exact extents, overlap, and writes. |
+| `strchr`, `strrchr`, `strstr`, `strpbrk`, and tokenizers | An interior result can refer into call-scoped C-string scratch. Tokenizer state can also keep access to mutable input across calls. |
+| `strerror_r` | Darwin exposes the XSI `int (int, char *, size_t)` form in its available profiles. Glibc exposes that form or the GNU `char *(int, char *, size_t)` form under different flags. The GNU pointer may refer to the supplied buffer or to library storage. The two ABI and lifetime contracts remain separate follow-up work. |
+| Other scalar queries, locale-explicit comparisons, allocation, and destination-writing calls | Require per-member coverage in subsequent string slices. |
+
 ## Bundled math coverage
 
 Both compiler inventories load the checked-in `<math.h>` provider. The
