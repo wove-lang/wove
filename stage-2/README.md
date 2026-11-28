@@ -202,6 +202,9 @@ so declarations and references agree in one or many translation units.
 `encode_base62_padded` also supports fixed-width unit and staging names.
 BLAKE2b digest text uses 43 Base62 digits. [FNV-1a](hashing/fnv1a.wove) is used
 for lookup fingerprints alongside exact declaration, layout, and specialization keys.
+`fnv1a_span` updates an incoming state with a half-open byte span.
+`fnv1a_u32_le` updates it with four little-endian bytes. Callers supply
+their existing seeds and separators.
 
 The result gives the written count and a view-relative span. Successful
 emission spans the module. A failure preserves the destination bytes and
