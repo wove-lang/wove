@@ -52,6 +52,10 @@ static inline bool fixture_check_alignment(const max_align_t *value)
 {
 	return (uintptr_t)value % _Alignof(max_align_t) == 0;
 }
+
+// Measure the operand's emitted type before passing its address to the oracle.
+#define fixture_check_layout(value) \
+	(sizeof(*(value)) == sizeof(max_align_t) && fixture_check_alignment(value))
 #endif
 #if defined(__APPLE__)
 #include <float.h>
