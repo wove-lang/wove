@@ -12,17 +12,21 @@
 	(let reference_kind "\"DeclRefExpr\"")
 	(let member_kind "\"MemberExpr\"")
 	(let integer_kind "\"IntegerLiteral\"")
+	(let character_kind "\"CharacterLiteral\"")
 	(let binary_kind "\"BinaryOperator\"")
 	(let unary_kind "\"UnaryOperator\"")
 	(let implicit_cast_kind "\"ImplicitCastExpr\"")
 	(let c_cast_kind "\"CStyleCastExpr\"")
 	(let cast_key "castKind")
 	(let opcode_key "opcode")
+	(let literal_key "value")
 	(let value_category_key "valueCategory")
 	(let lvalue_kind "\"lvalue\"")
+	(let zero_literal "\"0\"")
 	(let read_cast "\"LValueToRValue\"")
 	(let integer_cast "\"IntegralCast\"")
 	(let pointer_cast "\"BitCast\"")
+	(let null_cast "\"NullToPointer\"")
 	(let array_cast "\"ArrayToPointerDecay\"")
 	(let builtin_cast "\"BuiltinFnToFnPtr\"")
 	(let function_cast "\"FunctionToPointerDecay\"")
@@ -70,6 +74,14 @@
 				(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) opcode (borrow-shared deref_op))
 					(call field_equals (borrow-shared ast) (borrow-shared nodes) category (borrow-shared lvalue_kind)))))))
 
+	(fn integer_literal
+		(:doc "Clang resolves C integer and character literals to exact typed values.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (kind i32))
+		(returns bool)
+		(body
+			(return (bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared integer_kind))
+				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared character_kind))))))
+
 	(fn expression_arity
 		(:doc "Classify one AST expression without interpreting its C operation.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
@@ -80,9 +92,9 @@
 			(if (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared conditional_kind)) (then (return 3i32)))
 			(if (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared call_kind)) (then (return variable_arity)))
 			(if
-				(:doc "Only a direct reference or an integer literal is an operand leaf.")
+				(:doc "An operand leaf is a direct reference or an integer or character literal.")
 				(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared reference_kind))
-					(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared integer_kind)))
+					(call integer_literal (borrow-shared ast) (borrow-shared nodes) kind))
 				(then (return 0i32)))
 			(if
 				(:doc "Parentheses and direct record member selection each have one base expression.")
@@ -118,24 +130,26 @@
 			(let cast (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
 				(borrow-shared cast_key) (borrow-mut scratch)))
 			(if
-				(:doc "An explicit C cast can reinterpret a pointer or convert an integer value.")
+				(:doc "An explicit C cast can reinterpret a pointer, convert an integer, or form a null pointer.")
 				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared c_cast_kind))
 				(then
 					(if
-						(:doc "Both cast forms retain the checked operand and result type.")
+						(:doc "Each cast retains the checked operand and result type.")
 						(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared pointer_cast))
-							(call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared integer_cast)))
+							(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared integer_cast))
+								(call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared null_cast))))
 						(then (return 1i32)))
 					(return -1i32)))
 			(if
-				(:doc "Implicit casts may read, convert an integer, or prepare a reference for an ordinary call.")
+				(:doc "Implicit casts may read, convert values, or decay a reference for an ordinary call.")
 				(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared implicit_cast_kind))
 					(bool:or
 						(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared read_cast))
 							(call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared integer_cast)))
-						(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared array_cast))
-							(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared builtin_cast))
-								(call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared function_cast))))))
+						(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared null_cast))
+							(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared array_cast))
+								(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared builtin_cast))
+									(call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared function_cast)))))))
 				(then (return 1i32)))
 			(return -1i32)))
 
@@ -180,6 +194,109 @@
 				(body (set current (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) current (borrow-mut scratch)))))
 			(return current)))
 
+	(fn expression_field_matches
+		(:doc "Match a stable expression field in the validated tree.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(key (shared-array u8)) (value (shared-array u8)) (scratch (mut-array u8)))
+		(returns bool)
+		(body
+			(let field (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared key) (borrow-mut scratch)))
+			(return (call field_equals (borrow-shared ast) (borrow-shared nodes) field (borrow-shared value)))))
+
+	(fn forwarded_null
+		(:doc "Follow checked pointer casts to a null conversion of the integer literal zero.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let-mut current row)
+			(while
+				(:doc "The validated tree bounds the number of pointer casts and parentheses.")
+				(call expression_field_matches (borrow-shared ast) (borrow-shared nodes) current
+					(borrow-shared cast_key) (borrow-shared pointer_cast) (borrow-mut scratch))
+				(body
+					(let child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) current (borrow-mut scratch)))
+					(set current (call expression_root (borrow-shared ast) (borrow-shared nodes) child (borrow-mut scratch)))))
+			(if
+				(:doc "A pointer reinterpretation alone does not establish a null pointer.")
+				(bool:not (call expression_field_matches (borrow-shared ast) (borrow-shared nodes) current
+					(borrow-shared cast_key) (borrow-shared null_cast) (borrow-mut scratch)))
+				(then (return (bool false))))
+			(let child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) current (borrow-mut scratch)))
+			(let zero (call expression_root (borrow-shared ast) (borrow-shared nodes) child (borrow-mut scratch)))
+			(return (bool:and (call expression_field_matches (borrow-shared ast) (borrow-shared nodes) zero
+					(borrow-shared clang_kind_key) (borrow-shared integer_kind) (borrow-mut scratch))
+				(call expression_field_matches (borrow-shared ast) (borrow-shared nodes) zero
+					(borrow-shared literal_key) (borrow-shared zero_literal) (borrow-mut scratch))))))
+
+	(fn forwarded_argument
+		(:doc "Admit direct declared reads, integer or character literals, and typed null arguments.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let root (call expression_root (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) root
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if
+				(:doc "The serializer records the exact type and value of the literal.")
+				(call integer_literal (borrow-shared ast) (borrow-shared nodes) kind)
+				(then (return (bool true))))
+			(if
+				(:doc "Keep the existing direct read and array-decay rules for named operands.")
+				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared implicit_cast_kind))
+				(then
+					(let cast (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) root
+						(borrow-shared cast_key) (borrow-mut scratch)))
+					(let child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) root (borrow-mut scratch)))
+					(if
+						(:doc "Only a direct declaration may supply a value read or an array address.")
+						(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared read_cast))
+							(call field_equals (borrow-shared ast) (borrow-shared nodes) cast (borrow-shared array_cast)))
+						(then (return (call expression_field_matches (borrow-shared ast) (borrow-shared nodes) child
+							(borrow-shared clang_kind_key) (borrow-shared reference_kind) (borrow-mut scratch)))))))
+			(return (call forwarded_null (borrow-shared ast) (borrow-shared nodes) root (borrow-mut scratch)))))
+
+	(fn forwarding_return
+		(:doc "Require a direct call, optionally wrapped in one explicit integral return cast.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let-mut invocation row)
+			(if
+				(:doc "Clang supplies the source and destination types of an integral return cast.")
+				(call expression_field_matches (borrow-shared ast) (borrow-shared nodes) row
+					(borrow-shared clang_kind_key) (borrow-shared c_cast_kind) (borrow-mut scratch))
+				(then
+					(if
+						(:doc "Other casts cannot wrap a direct forwarding return.")
+						(bool:not (call expression_field_matches (borrow-shared ast) (borrow-shared nodes) row
+							(borrow-shared cast_key) (borrow-shared integer_cast) (borrow-mut scratch)))
+						(then (return (bool false))))
+					(let child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-mut scratch)))
+					(set invocation (call expression_root (borrow-shared ast) (borrow-shared nodes) child (borrow-mut scratch)))))
+			(if
+				(:doc "Only the call form supplies a callee and ordered arguments.")
+				(bool:not (call expression_field_matches (borrow-shared ast) (borrow-shared nodes) invocation
+					(borrow-shared clang_kind_key) (borrow-shared call_kind) (borrow-mut scratch)))
+				(then (return (bool false))))
+			(let callee (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) invocation (borrow-mut scratch)))
+			(if
+				(:doc "An ordinary forwarder cannot use an intrinsic or an indirect call.")
+				(bool:not (call expression_field_matches (borrow-shared ast) (borrow-shared nodes) callee
+					(borrow-shared cast_key) (borrow-shared function_cast) (borrow-mut scratch)))
+				(then (return (bool false))))
+			(let-mut argument (struct:get (nodes.get callee) next_sibling))
+			(while
+				(:doc "Check every operand before the identity pass records the full call.")
+				argument.not-ltz
+				(body
+					(if
+						(:doc "A forwarding call cannot evaluate an arbitrary argument expression.")
+						(bool:not (call forwarded_argument (borrow-shared ast) (borrow-shared nodes) argument (borrow-mut scratch)))
+						(then (return (bool false))))
+					(set argument (struct:get (nodes.get argument) next_sibling))))
+			(return (bool true))))
+
 	(fn mask_comparison
 		(:doc "Recognize a returned equality test of an integer mask against a literal.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
@@ -218,7 +335,7 @@
 			(return (call field_equals (borrow-shared ast) (borrow-shared nodes) mask_kind (borrow-shared integer_kind)))))
 
 	(fn checked_return_expression
-		(:doc "Admit a bounded conditional or literal mask comparison for the expression identity pass.")
+		(:doc "Admit a bounded forwarding call, conditional, or literal mask comparison.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
 			(scratch (mut-array u8))) (returns bool)
 		(body
@@ -232,6 +349,8 @@
 				(borrow-shared clang_kind_key) (borrow-mut scratch)))
 			(return (bool:or
 				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared conditional_kind))
-				(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared binary_kind))
-					(call mask_comparison (borrow-shared ast) (borrow-shared nodes) root (borrow-mut scratch)))))))
+				(bool:or
+					(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared binary_kind))
+						(call mask_comparison (borrow-shared ast) (borrow-shared nodes) root (borrow-mut scratch)))
+					(call forwarding_return (borrow-shared ast) (borrow-shared nodes) root (borrow-mut scratch)))))))
 )
