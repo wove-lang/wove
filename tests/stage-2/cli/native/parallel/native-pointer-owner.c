@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 #include "native-pointer-owner.h"
+#include "native-scalar-owner.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -45,10 +46,25 @@ int fixture_close(fixture_handle handle)
     return 0;
 }
 
+fixture_handle fixture_adopt(fixture_descriptor descriptor)
+{
+    if (descriptor != 17) {
+        failed += 1;
+        return NULL;
+    }
+    return fixture_open("native stream", "rb");
+}
+
 fixture_handle fixture_alternate_open(const char *path, const char *mode)
 {
     (void)path;
     (void)mode;
+    return NULL;
+}
+
+fixture_handle fixture_alternate_adopt(fixture_descriptor descriptor)
+{
+    (void)descriptor;
     return NULL;
 }
 
