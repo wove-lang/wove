@@ -18,6 +18,8 @@ typedef char source_filename[sizeof(__BASE_FILE__)];
 extern int getpid(void) __attribute__((nothrow));
 #elif BRIDGE_MODE == 4
 extern int getpid(void) __attribute__((availability(macos, introduced=12.0)));
+#elif BRIDGE_MODE == 11
+extern int getpid(void) __attribute__((cold));
 #else
 extern int getpid(void);
 #endif
