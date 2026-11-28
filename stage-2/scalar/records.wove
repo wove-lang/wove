@@ -13,7 +13,7 @@
 			(value checked_type_operand) (value checked_i32_operand) (value checked_bool_operand) (value checked_enum_operand) (value generic_bool_kind) (value generic_enum_kind) (value generic_operation_kind)
 			(value checked_operation_operand)
 			(type GenericConstant)))
-	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value enum_constructor) (value variants_list) (value match_case)))
+	(use wove-file "../source/enum_forms.wove" (only (value enum_declaration) (value variants_list) (value match_case)))
 	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_encoder receiver_may_encode_bytes))
 	(use wove-file "../source/c_scope.wove" (only declaring_c_bridge project_bridge))
 	(use wove-file "../source/c_dependencies.wove" (only find_bridge_type_dependency))
@@ -30,9 +30,9 @@
 	(use wove-file "./callable_types.wove" (only read_callable_type callable_identity order_callable_signatures (type CallableShape)))
 	(use wove-file "./constants.wove" (only fold_i32 constant_check))
 	(use wove-file "./syntax.wove"
-		(only entry_at entry_form entry_keyword is_scalar_name same_name scalar_type is_byte_view_type is_fixed_array_type_head
+		(only entry_at entry_form entry_keyword enum_operands is_scalar_name same_name scalar_type is_byte_view_type is_fixed_array_type_head
 			callable_keyword (value fn_type_kind)
-			(type EntryRead) (type FixedArrayShape)))
+			(type EntryRead) (type EnumOperands) (type FixedArrayShape)))
 
 	(struct ScalarRecord
 		(:doc `One registered value layout or native type.
@@ -1463,6 +1463,28 @@
 				(then (return type)))
 			(return 0u32)))
 
+	(fn enum_operand_type
+		(:doc "Resolve the explicit or inline qualifier in the same type namespace.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (scope TypeScope) (arguments EnumOperands))
+		(returns u32)
+		(body
+			(if
+				(:doc "Explicit type operands can also name a registered specialization.")
+				(arguments/type_index.not-ltz)
+				(then (return (call value_type (borrow-shared source) (borrow-shared nodes)
+					(borrow-shared records) (borrow-shared bindings) scope/file scope/source_base arguments/type_index))))
+			(let name arguments/qualifier)
+			(if
+				(:doc "A cloned qualifier carries its checked type across module boundaries.")
+				(name/generic_kind.eq checked_type_operand)
+				(then (return name/generic_value)))
+			(if (call is_checked_non_type_operand name/generic_kind) (then (return 0u32)))
+			(let row (call find_record (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) (borrow-shared bindings) scope/file scope/source_base name))
+			(if row.ltz (then (return 0u32)))
+			(return (call record_type row))))
+
 	(fn check_enum_argument
 		(:doc "Normalize an exact fieldless enum argument to its defining variant row.")
 		(:expect (tests "stage-2/generic_enums/cases.tsv") (issues "gh:wove-lang/wove:99"))
@@ -1480,23 +1502,17 @@
 					(if (variant/parent.eq first/parent)
 						(then (return (call constant_at node value 0u32))))
 					(return (call constant_at node 0u32 23u32))))
-			(let form (call entry_form (borrow-shared source) (borrow-shared nodes) node
-				enum_constructor 23u32))
+			(let operands (call enum_operands (borrow-shared source) (borrow-shared nodes) node 23u32))
+			(let form operands/checked)
 			(if
 				(:doc "Preserve the rejected constructor or metadata span.")
 				form/error.gtz
 				(then (return (GenericConstant.new (value 0u32) (start form/start)
 					(end form/end) (error form/error)))))
-			(let name form/operand)
-			(if name.ltz (then (return (call constant_at node 0u32 23u32))))
-			(let type_name (nodes.get name))
-			(let actual (call value_type (borrow-shared source) (borrow-shared nodes)
-				(borrow-shared records) (borrow-shared bindings) scope/file
-				scope/source_base name))
-			(if (actual.not-eq type) (then (return (call constant_at type_name 0u32 23u32))))
-			(let variant type_name/next_sibling)
-			(if variant.ltz (then (return (call constant_at node 0u32 23u32))))
-			(let spelling (nodes.get variant))
+			(let actual (call enum_operand_type (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) (borrow-shared bindings) scope operands))
+			(if (actual.not-eq type) (then (return (call constant_at operands/qualifier 0u32 23u32))))
+			(let spelling operands/variant)
 			(let extra spelling/next_sibling)
 			(if extra.not-ltz (then (return (call constant_at (nodes.get extra) 0u32 23u32))))
 			(let member (call find_member (borrow-shared source) (borrow-shared nodes)
@@ -2347,19 +2363,12 @@
 			(let layout (records.get enclosing))
 			(let leaf (call owned_array_leaf_node (borrow-shared source) (borrow-shared nodes) operand))
 			(let name (nodes.get leaf))
+			(let operands (call enum_operands (borrow-shared source) (borrow-shared nodes) name 23u32))
 			(if
-				(:doc "A literal constructor names a type in its first operand, while its variant name has a separate namespace.")
-				(name/kind.eq 40u32)
-				(then
-					(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) name))
-					(let first parts/operands)
-					(if
-						(:doc "Only an enum type name can make an enum constant argument depend on an enclosing parameter.")
-						(first.not-ltz.and
-							(u32:eq (call entry_keyword (borrow-shared source) (borrow-shared nodes)
-								parts/head) enum_constructor))
-						(then (return (i32:not-ltz (call generic_parameter_argument (borrow-shared source)
-							(borrow-shared nodes) layout (nodes.get first) 0u32)))))))
+				(:doc "The enum qualifier can depend on an enclosing type parameter. The variant belongs to that type.")
+				(operands/checked/error.eqz)
+				(then (return (i32:not-ltz (call generic_parameter_argument (borrow-shared source)
+					(borrow-shared nodes) layout operands/qualifier 0u32)))))
 			(return (i32:not-ltz (call generic_parameter_argument (borrow-shared source) (borrow-shared nodes)
 				layout name 0u32)))))
 

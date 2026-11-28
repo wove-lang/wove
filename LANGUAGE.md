@@ -779,15 +779,19 @@ unvisited rows.
 ## Enums
 
 Use `(enum Status (variants (Ok) (IoError) (Invalid)))` to
-declare a nominal, copyable type. `(enum:new Status Ok)` constructs one
-variant of that type. `(match value (case Ok statements...) ...)`
+declare a nominal, copyable type. Use `Status:Ok`, `(Status:Ok)`, or
+`(Status.new Ok)` to construct the `Ok` variant. The canonical spelling is
+`(enum:new Status Ok)`. Both qualified spellings resolve `Status` in the
+type namespace, including imported type aliases.
+`(match value (case Ok statements...) ...)`
 evaluates its subject once and runs only the selected case in its own
 scope. Cover all enum variants or use a final `(case _ ...)` for
 uncovered variants. In an enum that declares a variant named `_`, that
 spelling continues to select the declared variant.
 
 A variant can carry one value. Declare it as `(Push i64)`, build it
-with `(enum:new Instruction Push value)`, and match it with
+with `(Instruction:Push value)`, `(Instruction.new Push value)`, or
+`(enum:new Instruction Push value)`, and match it with
 `(case Push (let word) statements...)`. The payload must have the
 variant's exact declared type. The immutable binding is scoped to that arm.
 A copyable payload is copied into its binding. Use `(let _)` to discard it.
