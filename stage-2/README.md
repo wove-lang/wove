@@ -425,9 +425,10 @@ C with C re-emitted by the final compiler and builds and runs a smoke
 program using that compiler.
 
 The seed translates a separate [Wove fixture root](../tests/stage-2/source_scan.wove)
-for the [C source probe](../tests/stage-2/source_scan.probe.c). Run
-`make test-stage-2` to exercise the bootstrap entry and compare scanner
-streams with the Stage 1 lexer. The
+for the [C source probe](../tests/stage-2/source_scan.probe.c). The probe
+uses C aliases generated from the fixture's selected imports and the seed's
+resolved graph. Run `make test-stage-2` to exercise the bootstrap entry and
+compare scanner streams with the Stage 1 lexer. The
 [layout fixtures](../tests/stage-2/lexer_layouts.tsv) supply indentation, line
 endings, and parent view bytes. The parity check compares token kinds and raw
 spellings. `make test` includes these checks.

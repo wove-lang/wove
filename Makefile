@@ -75,12 +75,14 @@ AST_PROBE := $(STAGE2)/ast/probe
 SOURCE_SCAN := $(STAGE2)/source_scan
 SOURCE_PROBE_ROOT := tests/stage-2/source_scan.wove
 SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
+SOURCE_PROBE_EMITTER := tests/stage-2/emit_source_probe.py
 SEED_UTILITY_PROGRAMS := $(HASHING_PROGRAMS) $(JSON_PROGRAMS) $(CLI_PROGRAMS) $(DIAGNOSTIC_PROGRAM)
 SEED_UTILITY_C := $(addsuffix .c,$(SEED_UTILITY_PROGRAMS) $(CONFIG_PROGRAM) $(COMMAND_PROGRAM))
 NATIVE_FIXTURE_C := $(addsuffix .c,$(TEST_RUNNER) $(AST_LIVE) $(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE))
 SEED_TARGET := stage-1/target.py tools/run-build-clang.sh
 SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py stage-1/bridge_types.py stage-1/inputs.py stage-1/make_deps.py $(SEED_TARGET)
-SEED_COMPILER = WOVE_BUILD_CLANG="$(CLANG) -std=c11 $(CFLAGS)" $(PYTHON) stage-1/wovec.py
+SEED_FRONTEND = WOVE_BUILD_CLANG="$(CLANG) -std=c11 $(CFLAGS)"
+SEED_COMPILER = $(SEED_FRONTEND) $(PYTHON) stage-1/wovec.py
 SEED_EMIT := stage-1/emit.py
 SEED_EMIT_SOURCES := $(SEED_EMIT) stage-1/inputs.py stage-1/syntax.py stage-1/make_deps.py
 NATIVE_FIXTURE_TOOLS := $(SOURCE_SCAN) $(SEED_EMIT_SOURCES)
@@ -410,8 +412,8 @@ mv "$$deps" "$@.d"; \
 mv "$$c_output" "$@"
 endef
 
-$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SEED)
-	$(call emit_seed_graph,$(SEED_COMPILER))
+$(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SOURCE_PROBE_EMITTER) $(SEED)
+	$(call emit_seed_graph,$(SEED_FRONTEND) $(PYTHON) "$(SOURCE_PROBE_EMITTER)")
 
 $(SEED_UTILITY_C): $(STAGE2)/%.c: tests/stage-2/%.wove $(SEED)
 	$(call emit_seed_graph,$(SEED_COMPILER))

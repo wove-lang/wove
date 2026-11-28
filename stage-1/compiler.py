@@ -2901,6 +2901,11 @@ def compile_source(
 ) -> str:
 	root = read_module(source, filename, 0, 0, 0, entry=True, imports=imports)
 	modules, headers = load_modules(root, imports=imports, bridge_files=bridge_files)
+	return emit_graph(modules, headers, imports=imports)
+
+
+# Emit the resolved graph so callers can use the same declaration identities as the C unit.
+def emit_graph(modules: list[Module], headers: list[str], *, imports: dict[str, None] | None = None) -> str:
 	records = list(ordered_records(modules))
 	functions = [function for module in modules for function in module.functions.values()]
 	values = [value for module in modules for value in module.values.values()]
