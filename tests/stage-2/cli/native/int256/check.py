@@ -3,16 +3,31 @@
 
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from check import check_manifest, manifest_rows
+
+
+# The entry and bundled providers precede the sole local import in these fixtures.
+def supported_rows(manifest, bundled):
+	inventory = bundled.read_text(encoding="utf-8")
+	first_project_file = len(re.findall(r"\(call\s+append_bundled_source\b", inventory))
+	# Preserve the exact stream, including the identifier of the imported fixture.
+	for row in manifest_rows(manifest):
+		row[-1] = row[-1].replace("{first-project-file}", str(first_project_file))
+		yield row
+
+
 # Check real toolchain support before choosing the native execution or rejection cases.
 def main():
 	directory = Path(__file__).resolve().parent
-	compiler, wide_probe = (Path(value).resolve() for value in sys.argv[1:])
+	compiler, wide_probe, bundled = (Path(value).resolve() for value in sys.argv[1:])
 	check = [sys.executable, str(directory.parent / "check.py"), str(compiler)]
 	selected = os.environ.get("CLANG")
 	clang = [selected] if selected else shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang"))
@@ -33,7 +48,7 @@ def main():
 	if probe.returncode:
 		subprocess.run([*check, directory / "unsupported.tsv"], check=True)
 	elif native:
-		subprocess.run([*check, directory / "supported.tsv"], check=True)
+		check_manifest(compiler, directory, supported_rows(directory / "supported.tsv", bundled))
 		# Only run mixed fixtures for the floating formats exposed by this target.
 		macros = subprocess.check_output([*clang, "-dM", "-E", "-x", "c", "-"], input=b"").splitlines()
 		if b"#define __FLT16_MANT_DIG__ 11" in macros:

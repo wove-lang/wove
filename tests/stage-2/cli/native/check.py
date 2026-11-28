@@ -313,14 +313,8 @@ def check_host(program, manifest):
 			run_program(Path(workspace), program, label, manifest.parent, json.loads(expected))
 
 
-# Run either a host probe or compiler scenarios using the suite's compiler settings.
-def main():
-	# A host probe is already executable and needs no compiler relocation or build phase.
-	if sys.argv[1:2] == ["--host"]:
-		program, manifest = (Path(value).resolve() for value in sys.argv[2:])
-		check_host(program, manifest)
-		return
-	compiler, manifest = (Path(value).resolve() for value in sys.argv[1:])
+# Run the supplied cases against an installed copy of this compiler.
+def check_manifest(compiler, fixtures, rows):
 	clang = [*shlex.split(os.environ.get("WOVE_TEST_CLANG", "clang")), "-std=c11",
 		*shlex.split(os.environ.get("WOVE_TEST_CFLAGS", ""))]
 	runtime = Path(os.environ.get("WOVE_TEST_RUNTIME", "runtime/wove_runtime.c")).resolve()
@@ -329,8 +323,19 @@ def main():
 		installed = Path(install) / compiler.name
 		shutil.copy2(compiler, installed)
 		# The manifest supplies paths, argv, artifacts, and diagnostics.
-		for row in manifest_rows(manifest):
-			check_case(installed, clang, runtime, manifest.parent, row)
+		for row in rows:
+			check_case(installed, clang, runtime, fixtures, row)
+
+
+# Run either a host probe or compiler scenarios using the suite's compiler settings.
+def main():
+	# A host probe is already executable and needs no compiler relocation or build phase.
+	if sys.argv[1:2] == ["--host"]:
+		program, manifest = (Path(value).resolve() for value in sys.argv[2:])
+		check_host(program, manifest)
+		return
+	compiler, manifest = (Path(value).resolve() for value in sys.argv[1:])
+	check_manifest(compiler, manifest.parent, manifest_rows(manifest))
 
 
 if __name__ == "__main__":
