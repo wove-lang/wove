@@ -181,6 +181,39 @@ static inline bool fixture_limit_matches(FixtureLimitKind resource, rlim_t curre
 	return getrlimit(resource, &native) == 0 && native.rlim_cur == current && native.rlim_max == maximum;
 }
 
+
+#if defined(__GLIBC__) && defined(__USE_LARGEFILE64)
+_Static_assert(sizeof(rlim64_t) == 8 && (rlim64_t)-1 > (rlim64_t)0, "unsigned 64-bit rlim64_t");
+_Static_assert(sizeof(struct rlimit64) == 16 && _Alignof(struct rlimit64) == 8, "rlimit64 layout");
+_Static_assert(offsetof(struct rlimit64, rlim_cur) == 0 && offsetof(struct rlimit64, rlim_max) == 8,
+	"rlimit64 member offsets");
+_Static_assert(_Generic(((struct rlimit64 *)0)->rlim_cur, rlim64_t: 1, default: 0)
+	&& _Generic(((struct rlimit64 *)0)->rlim_max, rlim64_t: 1, default: 0), "rlimit64 member types");
+_Static_assert(_Generic(&getrlimit64, int (*)(FixtureLimitKind, struct rlimit64 *): 1, default: 0),
+	"getrlimit64 prototype");
+_Static_assert(_Generic(&setrlimit64, int (*)(FixtureLimitKind, const struct rlimit64 *): 1, default: 0),
+	"setrlimit64 prototype");
+
+#if defined(__USE_GNU)
+_Static_assert(_Generic(&prlimit64,
+	int (*)(__pid_t, enum __rlimit_resource, const struct rlimit64 *, struct rlimit64 *): 1, default: 0),
+	"prlimit64 prototype");
+#endif
+
+/* Compare the selected explicit sentinel with the exact unsigned native value. */
+static inline bool fixture_limit64_sentinel(rlim64_t value)
+{
+	return value == RLIM64_INFINITY && value == UINT64_MAX;
+}
+
+/* Compare Wove's two projections with an independent native call. */
+static inline bool fixture_limit64_matches(FixtureLimitKind resource, rlim64_t current, rlim64_t maximum)
+{
+	struct rlimit64 native;
+	return getrlimit64(resource, &native) == 0 && native.rlim_cur == current && native.rlim_max == maximum;
+}
+#endif
+
 #ifdef WOVE_TEST_PRIORITY_SENTINEL
 /* Produce both meanings of -1 through the same exact native prototype. */
 static inline int fixture_priority_sentinel(FixturePriorityWhich which, id_t id)

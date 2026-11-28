@@ -16,12 +16,15 @@ from constant_result import folded_i32_result
 
 
 # Stage the shared fixture and give cc and bin the same C mode and feature flags.
-def stage_project(fixtures, project, header, source, standard, flags, macro=None):
+def stage_project(fixtures, project, header, source, standard, flags, macro=None, selection=None):
 	project.mkdir()
 	# Both bridge origins read the same native header through distinct import keys.
 	for name in ("project.wove", "oracle.h", "user.h"):
 		shutil.copy2(fixtures / name, project / name)
 	template = (fixtures / source).read_text()
+	# Selection cases substitute one explicit Wove import for the diagnostic.
+	if selection is not None:
+		template = template.replace("TEST_SELECTOR", selection)
 	# A parameterized optional fixture uses the manifest's native name in Wove and C.
 	if macro is not None:
 		template = template.replace("TEST_MEMBER", macro)
@@ -35,9 +38,9 @@ def stage_project(fixtures, project, header, source, standard, flags, macro=None
 
 # Verify values through the fixture result or check the original diagnostic.
 def check_case(compiler, clang, runtime, fixtures, project, header, standard, flags, *,
-		source="probe.wove", unavailable=None, execute=False, macro=None, native_error=None):
+		source="probe.wove", unavailable=None, execute=False, macro=None, native_error=None, selection=None):
 	flags = [*flags, "-I.", "-Wall", "-Wextra", "-Wpedantic", "-Werror"]
-	stage_project(fixtures, project, header, source, standard, flags, macro)
+	stage_project(fixtures, project, header, source, standard, flags, macro, selection)
 	env = {**os.environ, "CLANG": clang}
 	# Check-only matches the stored diagnostic when the SDK hides the selector.
 	if unavailable is not None:
@@ -73,6 +76,8 @@ def main():
 	optional_cases = list(manifest_rows(optional)) if optional.is_file() else []
 	field_manifest = fixtures / "field-cases.tsv"
 	field_cases = list(manifest_rows(field_manifest)) if field_manifest.is_file() else []
+	profile_manifest = fixtures / "profile-cases.tsv"
+	profile_cases = list(manifest_rows(profile_manifest)) if profile_manifest.is_file() else []
 	profiles = [(label, json.loads(flags))
 		for label, flags in manifest_rows(fixtures.parent / "header-profiles.tsv")]
 	extra_profiles = fixtures / "extra-profiles.tsv"
@@ -103,6 +108,16 @@ def main():
 				extension = project.with_name(f"{project.name}-{Path(source).stem}")
 				check_case(installed, clang, runtime, fixtures, extension, header, standard, flags,
 					source=source, execute=True, native_error=None if diagnostic == "-" else diagnostic)
+			# Explicit profile cases exercise selected declarations and their diagnostic spans.
+			for platform, selected_profile, selected_origin, label, source, extra, selection, diagnostic in profile_cases:
+				# Use the same target profile for the reference and project bridge.
+				if (platform, selected_profile, selected_origin) != (sys.platform, profile, origin):
+					continue
+				extension = project.with_name(f"{project.name}-{label}")
+				check_case(installed, clang, runtime, fixtures, extension, header, standard,
+					[*flags, *json.loads(extra)], source=source, execute=execute,
+					unavailable=None if diagnostic == "-" else diagnostic,
+					selection=None if selection == "-" else selection)
 			# Test optional declarations according to the configured compiler's header.
 			for case_origin, native, macro, source, diagnostic, *mode in optional_cases:
 				if case_origin != origin:
