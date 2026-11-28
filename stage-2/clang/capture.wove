@@ -3,7 +3,7 @@
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
 	(:doc "Read one complete frontend observation from a separate private directory.")
 
-	(use wove-file "./run.wove" (only replay_arguments replay_prototype_arguments deployment_arguments))
+	(use wove-file "./run.wove" (only replay_arguments replay_prototype_arguments deployment_arguments dependency_arguments))
 	(use wove-file "./trace.wove" (only read_trace))
 	(use wove-file "../driver/files.wove" (only file_stamp read_source_file))
 	(use wove-file "../io/capture/child.wove" (only reap_capture_child))
@@ -15,6 +15,7 @@
 	(let directory_suffix "/wove-clang.XXXXXX")
 	(let stdout_suffix "/stdout")
 	(let trace_suffix "/trace")
+	(let dependency_ast_limit 1048576i32)
 
 	(fn capture_path
 		(:doc "Reserve the complete child pathname before opening a capture file.")
@@ -35,12 +36,12 @@
 
 	(fn read_capture
 		(:doc "Measure completed regular stdout, then read its full extent and check EOF.")
-		(params (path (shared-array u8)))
+		(params (path (shared-array u8)) (limit i32))
 		(returns (optional (owned-array u8)))
 		(body
 			(let stamp (call file_stamp (borrow-shared path)))
 			(let length stamp/length)
-			(if length.ltz (then (return (optional:none (owned-array u8)))))
+			(if (length.ltz.or (limit.lt length)) (then (return (optional:none (owned-array u8)))))
 			(let allocated (array:try-alloc u8 length))
 			(if allocated.is-null (then (return (move allocated))))
 			(let-mut bytes (move allocated.unwrap))
@@ -53,7 +54,7 @@
 	(fn capture_frontend
 		(:doc "Reap the frontend, verify both captures, and remove both privately owned files on every result.")
 		(params (program (shared-array u8)) (arguments (shared-array u8)) (directory (shared-array u8))
-			(trace (mut-array u8))) (returns (optional (owned-array u8)))
+			(trace (mut-array u8)) (limit i32)) (returns (optional (owned-array u8)))
 		(body
 			(let output_path (call capture_path (borrow-shared directory) (borrow-shared stdout_suffix)))
 			(let trace_path (call capture_path (borrow-shared directory) (borrow-shared trace_suffix)))
@@ -71,7 +72,7 @@
 				(:doc "Trust stdout only when the child exits successfully and its complete include trace fits.")
 				(child/ok.and (status.eqz.and
 					(u32:eqz (call read_trace (borrow-shared diagnostics) (borrow-mut trace)))))
-				(then (call read_capture (borrow-shared output)))
+				(then (call read_capture (borrow-shared output) limit))
 				(else (optional:none (owned-array u8)))))
 			(let removed_output (call unlink (borrow-shared output)))
 			(let removed_trace (call unlink (borrow-shared diagnostics)))
@@ -83,13 +84,13 @@
 
 	(fn capture_replay_arguments
 		(:doc "Capture one staged frontend invocation and discard its private temporary directory.")
-		(params (program (shared-array u8)) (arguments (shared-array u8)) (trace (mut-array u8)))
+		(params (program (shared-array u8)) (arguments (shared-array u8)) (trace (mut-array u8)) (limit i32))
 		(returns (optional (owned-array u8)))
 		(body
 			(let directory (call create_temporary_directory (borrow-shared directory_suffix)))
 			(if directory.len.eqz (then (return (optional:none (owned-array u8)))))
 			(let result (call capture_frontend (borrow-shared program) (borrow-shared arguments)
-				(borrow-shared directory) (borrow-mut trace)))
+				(borrow-shared directory) (borrow-mut trace) limit))
 			(if
 				(:doc "A retained private directory makes the audit unsuccessful.")
 				(i32:not-eqz (call rmdir (borrow-shared directory)))
@@ -106,7 +107,18 @@
 			(if packed.is-null (then (return (optional:none (owned-array u8)))))
 			(let arguments (move packed.unwrap))
 			(return (call capture_replay_arguments (borrow-shared program) (borrow-shared arguments)
-				(borrow-mut trace)))))
+				(borrow-mut trace) 2147483647i32))))
+
+	(fn capture_replay_dependency
+		(:doc "Capture a filtered declaration from a complete emitted translation unit.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (source (shared-array u8))
+			(name (shared-array u8)) (trace (mut-array u8))) (returns (optional (owned-array u8)))
+		(body
+			(let packed (call dependency_arguments (borrow-shared options) (borrow-shared source) (borrow-shared name)))
+			(if packed.is-null (then (return (move packed))))
+			(let arguments (move packed.unwrap))
+			(return (call capture_replay_arguments (borrow-shared program) (borrow-shared arguments)
+				(borrow-mut trace) dependency_ast_limit))))
 
 	(fn capture_replay_prototypes
 		(:doc "Capture the missing prototype payloads without changing the eventual native compilation.")
@@ -117,7 +129,7 @@
 			(if packed.is-null (then (return (move packed))))
 			(let arguments (move packed.unwrap))
 			(return (call capture_replay_arguments (borrow-shared program) (borrow-shared arguments)
-				(borrow-mut trace)))))
+				(borrow-mut trace) 2147483647i32))))
 
 	(fn check_replay_deployment
 		(:doc "Require successful syntax checking of a complete unit with unguarded availability treated as an error.")
@@ -127,6 +139,6 @@
 			(let packed (call deployment_arguments (borrow-shared options) (borrow-shared source)))
 			(if packed.is-null (then (return (bool false))))
 			(let arguments (move packed.unwrap))
-			(let output (call capture_replay_arguments (borrow-shared program) (borrow-shared arguments) (borrow-mut trace)))
+			(let output (call capture_replay_arguments (borrow-shared program) (borrow-shared arguments) (borrow-mut trace) 2147483647i32))
 			(return output.is-null.not)))
 )

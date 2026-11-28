@@ -4,11 +4,12 @@
 	(:doc "Certify a checked include prefix in the private directory that will compile the numbered units.")
 
 	(use wove-file "../clang/run.wove" (only run_bounded_preprocessing))
-	(use wove-file "../clang/capture.wove" (only run_clang_replay_capture capture_replay_prototypes check_replay_deployment))
+	(use wove-file "../clang/capture.wove" (only run_clang_replay_capture capture_replay_prototypes check_replay_deployment capture_replay_dependency))
 	(use wove-file "../clang/attribute_replay.wove" (only needs_prototype_payloads append_prototype_payloads))
 	(use wove-file "../clang/trace.wove" (only include_line trace_length))
 	(use wove-file "../clang/replay.wove" (only replay_directives_safe replay_declaration_mode))
 	(use wove-file "../clang/native_replay.wove" (only write_native_identities (value plain_declaration)))
+	(use wove-file "../clang/dependencies.wove" (only dependency_name_end unused_native_function))
 	(use wove-file "../clang/static_inline_uses.wove" (only static_inline_uses_safe))
 	(use wove-file "../clang/macro_directives.wove" (only safe_macro_definitions))
 	(use wove-file "../clang/macro_replay.wove" (only append_macro_identities))
@@ -19,6 +20,7 @@
 	(use wove-file "../io/write.wove" (only write_new_file))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../text/copy.wove" (only append_bytes))
+	(use wove-file "./output.wove" (only stage_native_unit))
 	(use wove-file "./paths.wove" (only join_file_path))
 	(use wove-file "./files.wove" (only file_stamp same_file_stamp (type FileStamp)))
 	(use c-header "<unistd.h>" (only unlink))
@@ -111,7 +113,7 @@
 		(:doc "Check the serial prefix's preprocessing and declarations together before comparing numbered paths.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
 			(baseline (shared-array u8)) (trace (mut-array u8)) (identities (mut-array FileStamp))
-			(declaration (mut-array u8)) (macros (shared-array u8)) (borrowed bool) (writable bool) (fixed_calls bool) (variadic_calls bool))
+			(declaration (mut-array u8)) (deferred (mut-array u8)) (macros (shared-array u8)) (borrowed bool) (writable bool) (fixed_calls bool) (variadic_calls bool))
 		(returns (optional (owned-array u8)))
 		(body
 			(let captured (call run_clang_replay_capture (borrow-shared program) (borrow-shared options)
@@ -159,7 +161,7 @@
 				(then (return (optional:none (owned-array u8)))))
 			(let-mut statements (move workspace.unwrap))
 			(let mode (call replay_declaration_mode (borrow-shared declarations_bytes)
-				(borrow-mut statements) borrowed writable fixed_calls variadic_calls))
+				(borrow-mut statements) (borrow-mut deferred) borrowed writable fixed_calls variadic_calls))
 			(if
 				(:doc "Declarations outside the replay contract require the serial C unit.")
 				mode.eqz
@@ -354,10 +356,49 @@
 			(let-mut nodes (move workspace.unwrap))
 			(return (call static_inline_uses_safe (borrow-shared ast) (borrow-mut nodes)))))
 
+	(fn check_unit_dependencies
+		(:doc "All deferred declarations must remain unreferenced after Clang parses the real unit.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
+			(deferred (shared-array u8)) (trace (mut-array u8))) (returns bool)
+		(body
+			(let-mut start 0i32)
+			(while
+				(:doc "Each exact name is audited once per emitted unit, including all its redeclarations.")
+				(start.lt deferred.len)
+				(body
+					(let end (call dependency_name_end (borrow-shared deferred) start))
+					(if (end.eq start) (then (return (bool true))))
+					(let name (borrow-shared (deferred.range start end)))
+					(let result (call capture_replay_dependency (borrow-shared program) (borrow-shared options)
+						(borrow-shared path) (borrow-shared name) (borrow-mut trace)))
+					(if result.is-null (then (return (bool false))))
+					(let ast (move result.unwrap))
+					(if (bool:not (call unused_native_function (borrow-shared ast) (borrow-shared name))) (then (return (bool false))))
+					(set start end.inc)))
+			(return (bool false))))
+
+	(fn check_serial_dependencies
+		(:doc "Observe the canonical unit before numbered files exist, with the same appended runtime as the real build.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
+			(serial (shared-array u8)) (deferred (shared-array u8))) (returns i32)
+		(body
+			(if
+				(:doc "A staging failure must propagate to the private build cleanup.")
+				(bool:not (call stage_native_unit (borrow-shared path) (borrow-shared serial)))
+				(then (return -1i32)))
+			(let-mut trace (array:alloc u8 trace_capacity))
+			(let checked (call check_unit_dependencies (borrow-shared program) (borrow-shared options)
+				(borrow-shared path) (borrow-shared deferred) (borrow-mut trace)))
+			(if
+				(:doc "Leave the serial name vacant for either ordinary publication or the numbered path.")
+				(i32:not-eqz (call unlink (borrow-shared path)))
+				(then (return -1i32)))
+			(return (if checked (then 1i32) (else 0i32)))))
+
 	(fn check_numbered_uses
 		(:doc "Check actual calls for availability and, when required, internal-linkage use.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8)) (count i32)
-			(static_helpers bool))
+			(deployment bool) (static_helpers bool) (deferred (shared-array u8)))
 		(returns bool)
 		(body
 			(let-mut trace (array:alloc u8 trace_capacity))
@@ -371,9 +412,14 @@
 						static_helpers
 						(then (call check_static_unit (borrow-shared program) (borrow-shared options)
 							(borrow-shared path) (borrow-mut trace)))
-						(else (call check_replay_deployment (borrow-shared program) (borrow-shared options)
-							(borrow-shared path) (borrow-mut trace)))))
-					(if checked.not (then (return (bool false))))))
+						(else (deployment.not.or (call check_replay_deployment (borrow-shared program) (borrow-shared options)
+							(borrow-shared path) (borrow-mut trace))))))
+					(if
+						(:doc "A deferred declaration requires its own dependency query after the existing use checks.")
+						(checked.not.or (deferred.len.gtz.and
+							(bool:not (call check_unit_dependencies (borrow-shared program) (borrow-shared options)
+								(borrow-shared path) (borrow-shared deferred) (borrow-mut trace)))))
+						(then (return (bool false))))))
 			(return (bool true))))
 
 	(fn replay_numbered_context
@@ -531,7 +577,7 @@
 		An uncertain audit leaves the serial path and its diagnostics available.`)
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8))
 			(count i32) (prefix (shared-array u8)) (guards (shared-array u8)) (names (shared-array u8))
-			(macros (shared-array u8)) (declaration (mut-array u8))
+			(macros (shared-array u8)) (declaration (mut-array u8)) (deferred (mut-array u8))
 			(implicit u8) (borrowed bool) (writable bool) (resolve_native bool) (fixed_calls bool)
 			(variadic_count i32)) (returns bool)
 		(body
@@ -568,7 +614,7 @@
 			(let-mut identities (array:alloc FileStamp include_limit))
 			(let captured (call serial_snapshot (borrow-shared program) (borrow-shared options) (borrow-shared serial_path)
 				(borrow-shared (baseline.range 0i32 base)) (borrow-mut trace)
-				(borrow-mut identities) (borrow-mut declaration) (borrow-shared macros) borrowed writable
+				(borrow-mut identities) (borrow-mut declaration) (borrow-mut deferred) (borrow-shared macros) borrowed writable
 				fixed_calls variadic_count.gtz))
 			(if
 				(:doc "Remove the temporary serial prefix even when preprocessing or certification failed.")

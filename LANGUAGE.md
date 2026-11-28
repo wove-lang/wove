@@ -1238,8 +1238,11 @@ increment, simple assignment through a dereferenced pointer, and direct
 calls. A return can compare a literal-masked integer expression with a
 literal using `==` or `!=`. The compiler checks
 the resolved calls and operands, and Clang keeps control of inlining and
-external linkage. A declaration or context outside this proof uses the
-ordinary serial C build and its C diagnostics.
+external linkage. Some unproved external prototypes and GNU extern-inline
+definitions can be replayed when Clang finds no reference in the emitted
+serial or numbered units. The check includes calls, addresses, and references
+from header helpers and the runtime. Other unproved declarations or contexts
+use the ordinary serial C build and its C diagnostics.
 
 A C `static inline` helper with one integer parameter can also replay a
 single return built from that parameter, integer literals, integral casts,
