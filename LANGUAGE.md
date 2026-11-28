@@ -121,10 +121,9 @@ Array `.get` takes an index expression. Record `.get` takes a bare
 field name. When the receiver is the only operand, write `index.dec` or
 `data.len` directly. Both the bare and parenthesized spellings use the
 binding as a value or place. Calls with additional operands use parentheses.
-Use canonical forms for constructors with a type operand,
-and destination-qualified conversions such as `u32:from-i32`. Both
-spellings apply the same type and ownership checks and preserve operand
-order and Boolean short-circuiting.
+Use a qualified tag for destination-qualified conversions such as
+`u32:from-i32`. Receiver forms apply the same type and ownership checks
+and preserve operand order and Boolean short-circuiting.
 
 Chain dot operations to use each checked result as the next receiver.
 Every intermediate operation takes only its receiver. The terminal
@@ -133,6 +132,18 @@ For example, `data.len.not-eqz` is `(i32:not-eqz (array:len data))` and
 `(data.len.gt 1i32)` is `(i32:gt (array:len data) 1i32)`. The compiler
 evaluates the receiver of each operation once, before any written
 operands.
+
+### Struct constructors
+
+`(Point.new (x 3i32) (y 4i32))` has the same meaning as
+`(struct:new Point (x 3i32) (y 4i32))`. The qualifier names the struct
+in the type namespace. An imported type alias works the same way, even
+with a local value of the same name. The compiler checks the same field
+types and ownership rules and evaluates the initializers in written
+order.
+
+A constructor with no written operands accepts either spelling,
+`Empty.new` or `(Empty.new)`, when `(struct:new Empty)` is valid.
 
 ### Field paths
 
