@@ -757,26 +757,26 @@ class FunctionEmitter:
 	def site(self, line: int) -> str:
 		return f"(wvrt_location){{{self.source}, {line}, 1}}"
 
-	# Register a loan for a call argument or infer the type of a local shared range.
+	# Register a loan for a call argument or infer the type of a local shared view.
 	def borrow(self, node: Node, kind: BufferType | None) -> Value:
 		exclusive = kind is not None and kind.access == MUT
 		tag = "borrow-mut" if exclusive else "borrow-shared"
 		target, = checked_form(node, tag, 1).operands
 		# A byte row can be borrowed directly from either kind of outer view.
-		if kind == _BYTE_VIEW and isinstance(target, Form) and target.tag == "array.load":
+		if kind in (None, _BYTE_VIEW) and isinstance(target, Form) and target.tag == "array.load":
 			receiver, subscript = checked_form(target, "array.load", 2).operands
 			binding, rows, fields = self.array_access(receiver, target.line)
+			# Reserve the containing array before the subscript evaluates.
+			if rows.element not in (_BYTE_VIEW, _OWNED_BYTE_ROW):
+				raise SourceError(target.line)
+			self.loans.append((binding, SHARED))
 			index = self.typed(subscript, I32)
 			# The host already provides a descriptor per argument.
 			if rows.element == _BYTE_VIEW:
-				return self.temporary(kind, self.typed_element(fields, kind, index, target.line))
-			# A row in an owned array is loaned from its live pointer slot.
-			if rows.element == _OWNED_BYTE_ROW:
-				view = array_view(fields, SHARED)
-				self.loans.append((binding, SHARED))
-				return self.temporary(kind,
-					f"wvrt_array_borrow_row_at_span({view}, {index.c}, -1, {target.line}, {target.line})")
-			raise SourceError(target.line)
+				return self.temporary(_BYTE_VIEW, self.typed_element(fields, _BYTE_VIEW, index, target.line))
+			view = array_view(fields, SHARED)
+			return self.temporary(_BYTE_VIEW,
+				f"wvrt_array_borrow_row_at_span({view}, {index.c}, -1, {target.line}, {target.line})")
 		source = target
 		range_bounds = None
 		# A range projects a half-open part of the named source.
@@ -1663,7 +1663,7 @@ class FunctionEmitter:
 		# Each name can be declared once in the current lexical scope.
 		if symbol in scope:
 			raise SourceError(name.line)
-		# A bound shared range keeps its loan until this binding's block exits.
+		# A bound shared view keeps its loan until this binding's block exits.
 		if statement.tag == "let" and isinstance(initializer, Form) and initializer.tag == "borrow-shared":
 			value = self.borrow(initializer, None)
 		else:
