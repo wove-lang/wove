@@ -34,6 +34,7 @@
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../source/graph.wove" (only find_binding (type GraphBinding)))
 	(use wove-file "../source/c_headers.wove" (only read_c_native_parameter))
+	(use wove-file "../source/c_tokens.wove" (only c_macro_token_mode c_macro_token_operand))
 	(use wove-file "../source/c_formals.wove" (only next_c_value_formal))
 	(use wove-file "../source/c_markers.wove" (only read_c_macro_integer_literal))
 	(use wove-file "../source/c_owners.wove" (only is_c_storage_type read_c_owner))
@@ -41,6 +42,8 @@
 	(use wove-file "../emit/names.wove" (only module_identity function_identity parameter_identity))
 	(use wove-file "./binding_names.wove" (only module_binding_key))
 	(use wove-file "../hashing/fnv1a.wove" (only (value fnv1a_seed)))
+	(use wove-file "../c/arguments.wove" (only (value c_macro_type_mode) (value c_macro_member_mode)
+		(value c_macro_type_argument) (value c_macro_member_argument)))
 	(use wove-file "../c/arguments.wove" (only c_value_mode c_consume_mode is_c_null_mode accepts_c_null accepts_c_null_value c_null_argument_kind
 		c_storage_shared_mode c_storage_mut_mode c_storage_init_mode c_storage_consume_mode c_handle_mut_mode is_c_exclusive_owner_mode
 		is_c_storage_mode is_c_storage_init_mode is_c_handle_init_mode is_c_consuming_mode (value c_open_variadic_tail) (value c_shared_handle_slot_mode)
@@ -254,10 +257,19 @@
 						(borrow-shared records) (borrow-shared bindings)
 						(scope.get file) (scope.get source_base) operand (i32:ltz bridge)))
 					(let type_node (nodes.get operand))
+					(let-mut token_mode 0u8)
+					(if
+						(:doc "Only native C macro signatures recognize token types.")
+						native
+						(then (set token_mode (call c_macro_token_mode (borrow-shared source) type_node))))
 					(let-mut declared_type 0u32)
 					(if
+						(:doc "A checked token formal occupies a syntax slot with no runtime value type.")
+						(u8:gtz token_mode)
+						(then (set declared_type (call void_type))))
+					(if
 						(:doc "The adapted signature is a direct native-only argument and has no Wove function value.")
-						(bool:and native (u32:gtz (checked.get error)))
+						(bool:and (bool:and native (u8:eqz token_mode)) (u32:gtz (checked.get error)))
 						(then
 							(let callback (call read_callback_shape (borrow-shared source) (borrow-shared nodes) type_node))
 							(if
@@ -310,11 +322,11 @@
 						(bool:and (u32:eq (type_node.get kind) 1u32)
 							(u32:eqz (call scalar_type (borrow-shared source) (borrow-shared nodes) operand)))))
 					(let-mut type declared_type)
-					(let-mut mode (call c_value_mode))
+					(let-mut mode token_mode)
 					(if
 						(:doc "Native aliases in scalar and slice positions resolve in the defining bridge.")
 						(bool:and (bool:or (u32:gtz declared_type) (u32:eqz (checked.get error)))
-							(bool:not (bool:or native_alias native_view)))
+							(bool:or (u8:gtz token_mode) (bool:not (bool:or native_alias native_view))))
 						(then
 							(if
 								(:doc "Only ordinary parameters take their type from the view or scalar reader.")
@@ -2022,6 +2034,45 @@
 				(then (return -1i32)))
 			(return (struct:get (statements.get defining) target))))
 
+	(fn plan_c_macro_token
+		(:doc "Resolve a native type spelling or a declared member without evaluating either operand.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (caller ScalarFunction)
+			(argument i32) (previous i32) (mode u8) (records (shared-array ScalarRecord))
+			(bindings (shared-array GraphBinding)) (expressions (mut-array ScalarExpression)))
+		(returns EntryRead)
+		(body
+			(let node (nodes.get argument))
+			(let token (call c_macro_token_operand (borrow-shared source) (borrow-shared nodes) node mode))
+			(if (i32:ltz token) (then (return (call entry_at node -1i32 24u32))))
+			(let name (nodes.get token))
+			(if
+				(:doc "A type token must resolve to an imported native record view in the caller.")
+				(u8:eq mode c_macro_type_mode)
+				(then
+					(let type (call value_type (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) (borrow-shared bindings)
+						(caller.get file) (caller.get source_base) token))
+					(if
+						(:doc "The native record supplies a checked C spelling and declared member namespace.")
+						(bool:not (bool:and (call is_record_type type)
+							(call is_native_record (records.get (call record_index type)))))
+						(then (return (call entry_at name -1i32 24u32))))
+					(expressions.set argument
+						(call expression_row c_macro_type_argument type -1i32 -1i32 0i32 0i32 (bool false)))
+					(return (call entry_at node argument 0u32))))
+			(let type (struct:get (expressions.get previous) type))
+			(let layout (records.get (call record_index type)))
+			(let member (call find_member (borrow-shared source) (borrow-shared nodes)
+				(layout.get first) (layout.get count) name))
+			(if
+				(:doc "The field must be in the preceding type's declared view.")
+				(i32:ltz (member.get row))
+				(then (return (call entry_at name -1i32 24u32))))
+			(expressions.set argument
+				(call expression_row c_macro_member_argument 0u32 -1i32 -1i32
+					(name.get start) (name.get end) (bool false)))
+			(return (call entry_at node argument 0u32))))
+
 	(fn plan_call
 		(:doc `Resolve the callee and seed each argument from its formal type.
 
@@ -2149,6 +2200,7 @@
 					(if (u32:gtz (checked.get error)) (then (return checked)))
 					(set argument (checked.get operand))))
 			(let-mut formal (callee.get params))
+			(let-mut previous_token -1i32)
 			(let-mut returned_argument -1i32)
 			(let-mut returned_scratch -1i32)
 			(let limit (i32:add formal (callee.get arity)))
@@ -2167,6 +2219,18 @@
 						(then (set returned_scratch argument)))
 					(let operand (nodes.get argument))
 					(let mode (param.get c_mode))
+					(if
+						(:doc "Native type and member tokens bypass runtime expression planning.")
+						(bool:or (u8:eq mode c_macro_type_mode) (u8:eq mode c_macro_member_mode))
+						(then
+							(let checked (call plan_c_macro_token (borrow-shared source) (borrow-shared nodes)
+								caller argument previous_token mode (borrow-shared records)
+								(borrow-shared bindings) (borrow-mut expressions)))
+							(if (u32:gtz (checked.get error)) (then (return checked)))
+							(set previous_token argument)
+							(set argument (operand.get next_sibling))
+							(set formal (i32:inc formal))
+							(continue)))
 					(let literal_null (bool:and (call accepts_c_null mode)
 						(bool:and (u32:eq (operand.get kind) 1u32)
 							(call same_bytes (borrow-shared source) (operand.get start) (operand.get end)
