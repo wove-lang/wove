@@ -793,7 +793,7 @@ class FunctionEmitter:
 	# Resolve the binding and descriptor for a permitted array access.
 	def array_access(self, node: Node, line: int, writable: bool = False) -> tuple[Binding, BufferType, str]:
 		# A selected byte row can serve directly as a read-only array receiver.
-		if isinstance(node, Form) and node.tag == "array:load" and not writable:
+		if isinstance(node, Form) and node.tag == "array:get" and not writable:
 			value = self.typed(node, _BYTE_VIEW)
 			return Binding(value), _BYTE_VIEW, value.c + "."
 		binding, value = self.project(node, named=True)
@@ -844,8 +844,8 @@ class FunctionEmitter:
 		tag = "borrow-mut" if exclusive else "borrow-shared"
 		target, = checked_form(node, tag, 1).operands
 		# A byte row can be borrowed directly from either kind of outer view.
-		if kind in (None, _BYTE_VIEW) and isinstance(target, Form) and target.tag == "array:load":
-			receiver, subscript = checked_form(target, "array:load", 2).operands
+		if kind in (None, _BYTE_VIEW) and isinstance(target, Form) and target.tag == "array:get":
+			receiver, subscript = checked_form(target, "array:get", 2).operands
 			binding, rows, fields = self.array_access(receiver, target.line)
 			# Reserve the containing array before the subscript evaluates.
 			if rows.element not in (_BYTE_VIEW, _OWNED_BYTE_ROW):
@@ -930,8 +930,8 @@ class FunctionEmitter:
 	def borrow_record(self, node: Node, kind: SharedRef) -> Value:
 		target, = checked_form(node, "borrow-shared", 1).operands
 		# An array element loan leaves the containing array as the owner.
-		if isinstance(target, Form) and target.tag == "array:load":
-			receiver, subscript = checked_form(target, "array:load", 2).operands
+		if isinstance(target, Form) and target.tag == "array:get":
+			receiver, subscript = checked_form(target, "array:get", 2).operands
 			binding, rows, fields = self.array_access(receiver, target.line)
 			# The exact record identity determines the element layout.
 			if rows.element is not kind.record:
@@ -1526,7 +1526,7 @@ class FunctionEmitter:
 			return self.temporary(I32, f"{fields}wvrt_length")
 
 		# Copy an element through either descriptor after checking its index.
-		if expr.tag == "array:load":
+		if expr.tag == "array:get":
 			target, subscript = form(expr, arity=2).operands
 			_, kind, fields = self.array_access(target, node.line)
 			element = kind.element
@@ -1932,7 +1932,7 @@ class FunctionEmitter:
 			return True
 
 		# Store directly into the backing storage of a mutable owner or view.
-		if statement.tag == "array:store":
+		if statement.tag == "array:set":
 			target, subscript, operand = form(statement, arity=3).operands
 			binding, kind, fields = self.array_access(target, node.line, writable=True)
 			element = kind.element

@@ -90,7 +90,7 @@ path back to a `while` condition must preserve owners live on entry.
 
 Use `(array:alloc T count)` for a local owned array with `u8`, `i32`,
 owned byte rows, or a Wove record as its element type. Use `array:len`,
-`array:load`, and `array:store` with exact element types and `i32` indices.
+`array:get`, and `array:set` with exact element types and `i32` indices.
 A writable receiver is required for stores. Transfer or return an owned
 array with `(move name)`.
 
