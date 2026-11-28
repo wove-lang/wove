@@ -5,7 +5,7 @@
 
 	(use wove-file "../hashing/base32hex.wove" (only encode_base32hex32))
 	(use wove-file "../c/arguments.wove" (only (value c_storage_init_always_mode) c_checked_string_mode
-		is_c_bytes_mode is_c_null_mode is_c_storage_mode is_c_value_mode))
+		is_c_bytes_mode is_c_null_mode is_c_storage_mode is_c_value_mode (value c_open_variadic_tail)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
 	(use wove-file "../scalar/native_owner_types.wove" (only is_native_owner native_owner_type))
 	(use wove-file "../scalar/owners.wove" (only optional_byte_owner_type))
@@ -320,6 +320,49 @@
 					(set index (i32.inc index))))
 			(return (bool true))))
 
+	(fn numbered_named_variadic_prefix
+		(:doc "Find the resolved prefix of a closed named C tail containing only directly captured scalars.")
+		(params (nodes (shared-array SourceNode)) (function ScalarFunction)
+			(parameters (shared-array ScalarParameter))) (returns i32)
+		(body
+			(let tail (struct.get function c_variadic))
+			(let result (struct.get function result))
+			(if
+				(:doc "Allow checked string preparation and ordinary scalar captures within a fixed Wove arity.")
+				(bool.or (bool.or (i32.not-gtz tail) (i32.eq tail c_open_variadic_tail))
+					(bool.or (bool.or (struct.get function c_macro) (struct.get function c_snapshot))
+						(bool.or (bool.or (struct.get function c_storage) (call is_record_input function))
+							(bool.or (bool.or (i32.gtz (struct.get function c_extents)) (i32.gtz (struct.get function c_nulls)))
+								(bool.or (call has_c_argument_adapters function (bool true))
+									(bool.and (u32.not-eq result (call void_type))
+										(bool.not (call direct_scalar_abi result))))))))
+				(then (return -1i32)))
+			(let first (struct.get function params))
+			(let end (i32.add first (struct.get function arity)))
+			(let-mut position first)
+			(let-mut native (struct.get function c_formals))
+			(let-mut prefix -1i32)
+			(while
+				(:doc "Use the actual native-formal boundary recorded by the source checker.")
+				(bool.and (i32.lt position end) (i32.not-ltz native))
+				(body
+					(if (i32.eq native tail) (then (set prefix (i32.sub position first))))
+					(let parameter (array.load parameters position))
+					(let scalar (bool.and (call is_c_value_mode (struct.get parameter c_mode))
+						(call direct_scalar_abi (struct.get parameter type))))
+					(if
+						(:doc "Only the fixed prefix can contain a converted NUL-checked string.")
+						(bool.not (bool.or scalar (bool.and (i32.ltz prefix)
+							(call checked_shared_cstr_parameter parameter))))
+						(then (return -1i32)))
+					(set native (struct.get (array.load nodes native) next_sibling))
+					(set position (i32.inc position))))
+			(if
+				(:doc "The witness needs both a native prefix and a declared tail.")
+				(bool.or (bool.or (i32.not-eq position end) (i32.not-ltz native)) (i32.not-gtz prefix))
+				(then (return -1i32)))
+			(return prefix)))
+
 	(fn ordinary_bridge_signature
 		(:doc "Admit direct scalar, pointer loan, fixed storage, and bounded byte contracts.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
@@ -331,6 +374,11 @@
 				(struct.get function c_macro)
 				(then (return (call numbered_macro_call function (borrow-shared parameters)))))
 			(if
+				(:doc "Only named, completely declared C tails can use the promotion proof.")
+				(i32.not-eqz (struct.get function c_variadic))
+				(then (return (i32.gtz (call numbered_named_variadic_prefix (borrow-shared nodes) function
+					(borrow-shared parameters))))))
+			(if
 				(:doc "The existing allocating snapshot adapter carries its own arguments and cleanup.")
 				(call numbered_owned_cstr_call function (borrow-shared parameters))
 				(then (return (bool true))))
@@ -341,8 +389,7 @@
 			(let result (struct.get function result))
 			(if
 				(:doc "Void and direct scalar results need no ownership adapter.")
-				(bool.or (bool.or (call has_c_other_arguments function (bool false))
-					(i32.not-eqz (struct.get function c_variadic)))
+				(bool.or (call has_c_other_arguments function (bool false))
 					(bool.and (u32.not-eq result (call void_type)) (bool.not (call direct_scalar_abi result))))
 				(then (return (bool false))))
 			(let-mut index (struct.get function params))
@@ -417,7 +464,7 @@
 								(:doc "Checked native adapters require the effective preamble even without a selected type.")
 								(bool.and (u8.eq mode 1u8) (bool.or (bool.or (struct.get function c_snapshot)
 										(bool.or (struct.get function c_storage) (i32.gtz (struct.get function c_extents))))
-									(bool.or (struct.get function c_macro)
+									(bool.or (bool.or (struct.get function c_macro) (i32.gtz (struct.get function c_variadic)))
 										(call numbered_record_call function (borrow-shared parameters) (borrow-shared records)))))
 								(then (set mode numbered_preamble_replay)))))
 					(set index (i32.inc index))))
