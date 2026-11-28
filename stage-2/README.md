@@ -208,6 +208,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | Tag | Role | ID | Suffix | Scope and agreement |
 | --- | --- | --- | --- | --- |
 | `f` | Function | Module fingerprint extended by the function role, name, and specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
+| `y` | Private export trampoline | Concrete function fingerprint extended by the trampoline role | Defining function name | The declaration and definition share the body's collision rank. The public assembler label is the declared C name. |
 | `w` | Worker function adapter | Concrete function fingerprint extended by the adapter role | Defining function name | Within an emitted C program. Prototypes, definitions, and submissions use the same exact worker key. |
 | `z` | Erased worker drop wrapper | Concrete owning layout fingerprint extended by the wrapper role | Type name | The serial definition, numbered declaration and definition, and callback pointers share the same name. |
 | `c` | Native callback adapter | Concrete enclosing function fingerprint extended by the callback role and function-relative actual row | Empty | Within its emitted C unit. The definition and native call use the same checked argument. |
