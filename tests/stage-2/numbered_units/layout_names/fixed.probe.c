@@ -3,6 +3,6 @@
 
 #include <stddef.h>
 
-// The callee drops the removed left element before the caller drops the right heap and the emptied left heap.
+// The callees drop both removed elements in call order, then the caller drops the two emptied heaps in reverse order.
 static const size_t wove_track_drop_order[] = {2, 3, 1, 0};
 #include "../../../support/array_order_tracking.h"
