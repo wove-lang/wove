@@ -33,6 +33,7 @@ class NativeType:
 	c_name: str
 	owned: bool = False
 	storage_drop: str | None = None
+	pointer_drop: str | None = None
 
 
 @dataclass(frozen=True)
