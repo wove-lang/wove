@@ -55,6 +55,7 @@ SCALAR_TYPES = (*SCALAR_LIMITS, BOOL)
 OWNED = "owned-array"
 SHARED = "shared-array"
 MUT = "mut-array"
+OWNER_NULL_OPERATION = "owner:is-null"
 C_TYPE = {
 	I8: "int8_t",
 	I32: "int32_t",
@@ -804,10 +805,10 @@ class FunctionEmitter:
 		# Receiver names are bare identifiers and operations follow qualified-name syntax.
 		if not separator or not IDENTIFIER.fullmatch(name) or not RECEIVER_OPERATION.fullmatch(operation):
 			return node
-		# Length is the property spelling. Other bare atoms remain ordinary data.
+		# A bare receiver atom has no written operands after its receiver.
 		if isinstance(node, Atom):
-			# Quoted text keeps its spelling even when it looks like a property.
-			if node.quoted or operation != "len":
+			# Quoted text keeps its spelling even when it looks like an operation.
+			if node.quoted:
 				return node
 			node = Form(spelling, (), node.line, tag_line=node.line)
 		receiver = ReceiverAtom(name, node.tag_line)
@@ -817,6 +818,12 @@ class FunctionEmitter:
 			family = "array"
 		elif isinstance(kind, (Record, SharedRef)):
 			family = "struct"
+		elif isinstance(kind, (OptionalOwner, NativePointerOwner)) and f"owner:{operation}" == OWNER_NULL_OPERATION:
+			family = "owner"
+		elif isinstance(kind, OptionalOwner):
+			family = "optional"
+		elif kind in SCALAR_TYPES and not operation.startswith("from-"):
+			family = kind
 		else:
 			raise SourceError(receiver.line)
 		return replace(node, tag=f"{family}:{operation}", operands=(receiver, *node.operands))
@@ -1561,7 +1568,7 @@ class FunctionEmitter:
 			return Value(OptionalOwner(value.kind), value.c)
 
 		# Inspect absence without consuming or borrowing the payload.
-		if expr.tag == "owner:is-null":
+		if expr.tag == OWNER_NULL_OPERATION:
 			operand, = form(expr, arity=1).operands
 			binding = self.binding(operand)
 			# Optional arrays and native pointer owners can represent absence.
@@ -1712,6 +1719,7 @@ class FunctionEmitter:
 	# Transfer an owner once and leave its source slot empty on the continuing path.
 	def move_owner(self, node: Form) -> Value:
 		target, = form(node, arity=1).operands
+		target = self.access_form(target)
 		unwrap = target if isinstance(target, Form) and target.tag == "optional:unwrap" else None
 		# An unwrap exposes the payload of a named optional owner.
 		if unwrap is not None:

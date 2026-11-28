@@ -17,13 +17,14 @@
 	(use wove-file "./slice_options.wove" (only plan_try_slice plan_view_option))
 	(use wove-file "../source/slice_options.wove" (only (value try_slice_kind) (value optional_view_type) (value optional_view_absent) (value optional_view_unwrap)))
 	(use wove-file "./locals.wove" (only find_local check_binding_name))
+	(use wove-file "./receivers.wove" (only receiver_value_operation))
 	(use wove-file "./integer_literals.wove" (only plan_integer_value))
 	(use wove-file "./matches.wove" (only plan_match_cases enter_case_owner match_continues seed_match_value seed_match_results finish_match_value find_match_binding))
 	(use wove-file "./loops.wove" (only read_for_names read_iteration_source register_iteration_bindings is_iteration_statement enter_consuming_iteration))
 	(use wove-file "../source/integer_compare.wove" (only is_explicit_integer_equality))
 	(use wove-file "../source/integer_ops.wove" (only is_checked_integer_operator is_integer_division))
 	(use wove-file "../source/integer_checks.wove" (only read_integer_check is_integer_check (value integer_fits) (type IntegerCheck)))
-	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion integer_byte_width is_integer_byte_conversion
+	(use wove-file "../source/numeric_ops.wove" (only read_named_conversion read_value_encoding (type NamedConversion) integer_byte_width is_integer_byte_conversion
 		is_integer_byte_encoder (value typed_integer_conversion) (value exact_byte_view)))
 	(use wove-file "../text/character.wove" (only decode_character))
 	(use wove-file "../source/extent.wove" (only normalized_extent))
@@ -94,7 +95,7 @@
 	(use wove-file "../source/integer_bits.wove" (only word_count_type word_rotates))
 	(use wove-file "./worker.wove" (only worker_signature worker_receipt_result worker_result_type worker_queue_loan))
 	(use wove-file "./syntax.wove"
-		(only entry_keyword place_keyword array_operation record_operation (value receiver_operation_kind) (value binding_reference) entry_at entry_form (value array_try_copy_kind) (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch is_worker_submission is_worker_pool_operation (value worker_spawn_join_kind)
+		(only entry_keyword place_keyword (value receiver_operation_kind) (value binding_reference) entry_at entry_form entry_operands (value array_try_copy_kind) (value fn_ref_kind) (value indirect_call_kind) is_direct_call is_worker_launch is_worker_submission is_worker_pool_operation (value worker_spawn_join_kind)
 			(value worker_spawn_on_kind) (value worker_try_spawn_kind) (value worker_open_pool_kind) (value worker_try_close_kind) (value worker_join_kind) (value worker_queue_kind) (value worker_push_kind) (value worker_pop_front_kind) is_worker_queue_access is_worker_collect read_statement scalar_type scalar_operator is_fixed_initializer (value fixed_owner_take) (value fixed_owner_transfer) (value fixed_list_kind) (value pending_exact_move) (value fixed_take_request)
 			is_byte_view_type is_reborrow_keyword is_scalar_name same_name native_alloc_kind is_native_owner_constructor
 			(value native_tail_report_kind) (value native_tail_load_kind) (value native_tail_report_borrow_kind)
@@ -2402,14 +2403,11 @@
 
 	(fn plan_integer_check
 		(:doc "Type a fit check or seed two arithmetic values followed by an exclusive writeback place.")
-		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
+		(params (nodes (shared-array SourceNode)) (node SourceNode) (left i32)
 			(operation IntegerCheck) (index i32) (expected u32) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
 			(let kind operation/kind)
-			(let form (call entry_form (borrow-shared source) (borrow-shared nodes) node kind 24u32))
-			(if (u32:gtz form/error) (then (return form)))
-			(let left form/operand)
 			(if
 				(:doc "All checks produce a bool and require at least one input value.")
 				(bool:or (i32:ltz left) (bool:not (call value_matches_type expected 12u32)))
@@ -2460,19 +2458,16 @@
 	(fn plan_named_conversion
 		(:doc `Check a named conversion against its exact source and destination types.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode)
-			(head i32) (index i32) (tag u32) (expected u32) (caller ScalarFunction) (view_start i32)
+			(value i32) (index i32) (operation NamedConversion) (expected u32) (caller ScalarFunction) (view_start i32)
 			(records (shared-array ScalarRecord)) (expressions (mut-array ScalarExpression)))
 		(returns EntryRead)
 		(body
-			(let form (call entry_form (borrow-shared source) (borrow-shared nodes) node tag 24u32))
-			(if (u32:gtz form/error) (then (return form)))
-			(let value form/operand)
+			(let tag operation/kind)
 			(if
 				(:doc "Each named operation consumes just one value.")
 				(bool:or (i32:ltz value)
 					(i32:lt -1i32 (struct:get (nodes.get value) next_sibling)))
 				(then (return (call entry_at node -1i32 24u32))))
-			(let operation (call read_named_conversion (borrow-shared source) (nodes.get head)))
 			(let-mut result operation/type)
 			(let-mut input operation/operand)
 			(let-mut kind tag)
@@ -4474,8 +4469,9 @@
 					(borrow-shared bindings) (borrow-shared records) (borrow-shared statements)
 					(borrow-mut expressions)))))
 			(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) node))
+			(let written_tag (call entry_keyword (borrow-shared source) (borrow-shared nodes) parts/head))
 			(let resolved (call resolve_receiver_operation (borrow-shared source) (borrow-shared nodes)
-				node (call entry_keyword (borrow-shared source) (borrow-shared nodes) parts/head) caller statement
+				node written_tag caller statement
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared statements) (borrow-shared expressions)))
 			(if (u32:gtz resolved/error) (then (return resolved)))
 			(let tag (u32:from-i32 resolved/operand))
@@ -4589,17 +4585,41 @@
 				(:doc "Recoverable integer forms check the exact written width and return success as a boolean.")
 				(call is_integer_check tag)
 				(then
-					(let operation (call read_integer_check (borrow-shared source)
-						(nodes.get parts/head)))
-					(return (call plan_integer_check (borrow-shared source) (borrow-shared nodes)
-						node operation index expected (borrow-mut expressions)))))
+					(let form (call entry_operands (borrow-shared source) (borrow-shared nodes) node parts))
+					(if (u32:gtz form/error) (then (return form)))
+					(let-mut operation (call read_integer_check (borrow-shared source) (nodes.get parts/head)))
+					(if
+						(:doc "The receiving binding supplies the width that a qualified head spells explicitly.")
+						(u32:eq written_tag receiver_operation_kind)
+						(then
+							(let type (call receiver_binding_type (borrow-shared source) (borrow-shared nodes)
+								caller statement form/operand (borrow-shared parameters) (borrow-shared statements)
+								(borrow-shared expressions)))
+							(set operation (struct:new IntegerCheck (kind tag) (type type)))))
+					(return (call plan_integer_check (borrow-shared nodes)
+						node form/operand operation index expected (borrow-mut expressions)))))
 			(if
 				(:doc "Typed forms derive the exact result and operand types from their head.")
 				(bool:or (call is_float_conversion tag)
 					(bool:or (u32:eq tag typed_integer_conversion) (call is_integer_byte_conversion tag)))
-				(then (return (call plan_named_conversion (borrow-shared source) (borrow-shared nodes)
-					node parts/head index tag expected caller view_start
-					(borrow-shared records) (borrow-mut expressions)))))
+				(then
+					(let form (call entry_operands (borrow-shared source) (borrow-shared nodes) node parts))
+					(if (u32:gtz form/error) (then (return form)))
+					(let head (nodes.get parts/head))
+					(let-mut operation (call read_named_conversion (borrow-shared source) head))
+					(if
+						(:doc "An encoding with a receiver obtains its input width from the binding.")
+						(u32:eq written_tag receiver_operation_kind)
+						(then
+							(let receiver (nodes.get form/operand))
+							(let type (call receiver_binding_type (borrow-shared source) (borrow-shared nodes)
+								caller statement form/operand (borrow-shared parameters) (borrow-shared statements)
+								(borrow-shared expressions)))
+							(set operation (call read_value_encoding (borrow-shared source)
+								(i32:inc receiver/end) head/end type))))
+					(return (call plan_named_conversion (borrow-shared source) (borrow-shared nodes)
+						node form/operand index operation expected caller view_start
+						(borrow-shared records) (borrow-mut expressions)))))
 			(if
 				(:doc "An optional constructor introduces a new owner of the exact checked optional type.")
 				(bool:or (u32:eq tag optional_none) (u32:eq tag optional_some))
@@ -4756,7 +4776,7 @@
 							(bool:or (bool:or constructing member_read)
 								(u32:eq tag 9u32)))))
 				(then (return (call entry_at node -1i32 24u32))))
-			(let form (call entry_form (borrow-shared source) (borrow-shared nodes) node tag 24u32))
+			(let form (call entry_operands (borrow-shared source) (borrow-shared nodes) node parts))
 			(if
 				(:doc "Known selection pragmas cannot alter expression structure or call arguments.")
 				(u32:gtz form/error)
@@ -6363,14 +6383,21 @@
 			(if
 				(:doc "A formal's declared view or place type leads to the same canonical access checks.")
 				(i32:not-ltz parameter)
-				(then (return (struct:get (parameters.get parameter) type))))
+				(then
+					(let type (struct:get (parameters.get parameter) type))
+					(let pointee (call mutable_scalar_target type))
+					(if (u32:gtz pointee) (then (return pointee)))
+					(return type)))
 			(if
-				(:doc "Substituted constants and operations shadow module values and have no receiver access.")
-				(bool:or (bool:or (u8:eq name/generic_kind checked_i32_operand)
-					(u8:eq name/generic_kind checked_enum_operand))
-					(bool:or (u8:eq name/generic_kind checked_bool_operand)
-						(u8:eq name/generic_kind checked_operation_operand)))
-				(then (return 5u32)))
+				(:doc "Generic boolean and integer values use their exact type and shadow module values.")
+				(u8:eq name/generic_kind checked_bool_operand)
+				(then (return 12u32)))
+			(if (u8:eq name/generic_kind checked_i32_operand) (then (return 5u32)))
+			(if
+				(:doc "Enum constants and operation parameters have no receiver operations.")
+				(bool:or (u8:eq name/generic_kind checked_enum_operand)
+					(u8:eq name/generic_kind checked_operation_operand))
+				(then (return 0u32)))
 			(let root (statements.get caller/tree_base))
 			(let module_binding (call find_module_binding (borrow-shared source) (borrow-shared nodes)
 				(borrow-shared statements) root/first name))
@@ -6405,19 +6432,8 @@
 				(then (return (call entry_at node -1i32 24u32))))
 			(let start (i32:inc reference/end))
 			(let end (struct:get (nodes.get parts/head) end))
-			(let-mut operation 0u32)
-			(if
-				(:doc "Array storage and views use the canonical array operations.")
-				(bool:or (call is_array_owner type)
-					(bool:or (call is_readable_slice type)
-						(bool:and (call is_record_type type)
-							(call is_fixed_array (records.get (call record_index type))))))
-				(then (set operation (call array_operation (borrow-shared source) start end)))
-				(else
-					(if
-						(:doc "A record place or reference uses the canonical struct operations.")
-						(call is_record_type (call record_receiver_type type))
-						(then (set operation (call record_operation (borrow-shared source) start end))))))
+			(let operation (call receiver_value_operation (borrow-shared source) start end type
+				(borrow-shared records)))
 			(if
 				(:doc "Unknown operations are diagnosed at the complete written head.")
 				(u32:eqz operation)
