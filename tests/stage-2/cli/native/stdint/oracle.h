@@ -103,6 +103,18 @@ FIXTURE_LIMIT(INT_FAST64_MIN, int_fast64_t, INT64_MIN);
 FIXTURE_LIMIT(INT_FAST64_MAX, int_fast64_t, INT64_MAX);
 FIXTURE_LIMIT(UINT_FAST64_MAX, uint_fast64_t, UINT64_MAX);
 
+FIXTURE_TYPE((intptr_t)0, long);
+FIXTURE_TYPE((uintptr_t)0, unsigned long);
+FIXTURE_LIMIT(INTPTR_MIN, intptr_t, (-9223372036854775807L - 1));
+FIXTURE_LIMIT(INTPTR_MAX, intptr_t, 9223372036854775807L);
+FIXTURE_LIMIT(UINTPTR_MAX, uintptr_t, 18446744073709551615UL);
+
+FIXTURE_TYPE((intmax_t)0, long);
+FIXTURE_TYPE((uintmax_t)0, unsigned long);
+FIXTURE_LIMIT(INTMAX_MIN, intmax_t, (-9223372036854775807L - 1));
+FIXTURE_LIMIT(INTMAX_MAX, intmax_t, 9223372036854775807L);
+FIXTURE_LIMIT(UINTMAX_MAX, uintmax_t, 18446744073709551615UL);
+
 #undef FIXTURE_LIMIT
 #undef FIXTURE_TYPE
 
@@ -164,6 +176,16 @@ static inline bool fixture_fast32(int_fast32_t minimum, int_fast32_t maximum, ui
 // Verify all three fast-64 endpoints after passing through the native types.
 static inline bool fixture_fast64(int_fast64_t minimum, int_fast64_t maximum, uint_fast64_t unsigned_maximum) {
 	return minimum == INT_FAST64_MIN && maximum == INT_FAST64_MAX && unsigned_maximum == UINT_FAST64_MAX;
+}
+
+// Compare the pointer-width endpoints passed through the native pointer-width typedefs.
+static inline bool fixture_pointer_limits(intptr_t minimum, intptr_t maximum, uintptr_t unsigned_maximum) {
+	return minimum == INTPTR_MIN && maximum == INTPTR_MAX && unsigned_maximum == UINTPTR_MAX;
+}
+
+// Compare the maximum-width endpoints passed through the native maximum-width typedefs.
+static inline bool fixture_maximum_limits(intmax_t minimum, intmax_t maximum, uintmax_t unsigned_maximum) {
+	return minimum == INTMAX_MIN && maximum == INTMAX_MAX && unsigned_maximum == UINTMAX_MAX;
 }
 
 #endif
