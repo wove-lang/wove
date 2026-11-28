@@ -1277,6 +1277,15 @@ null value. In other expression and place positions, `null` is an ordinary
 binding name. To supply a nullable byte view from a binding named `null`,
 pass `(borrow-shared null)`.
 
+A bridge can declare an object-like C null pointer constant as
+`(const NAME (:pragma (c_null_value)))`. Select or rename it with a value
+import and pass the imported name directly to a fixed `c_nullable`
+parameter. The generated C uses the original macro spelling.
+Clang checks the direct null pointer conversion at each emitted call
+under the selected target, C standard, and build profile. The binding has no Wove value
+type, so it cannot be stored, returned, or passed in a variadic tail.
+A `c_null` slot still requires the Wove literal `null`.
+
 For a nullable shared native scalar alias or a nullable native record
 reference, a present argument uses the original address and the normal
 shared or exclusive loan checks. An absent argument uses the exact C
