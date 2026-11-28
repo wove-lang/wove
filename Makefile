@@ -119,7 +119,7 @@ GRAPH_TESTS := $(GRAPH_LANGUAGE_TESTS) $(GRAPH_INTEROP_TESTS) $(GRAPH_TRACKED_TE
 NATIVE_CLI_TESTS := $(call suite_targets,native-cli,$(NATIVE_CLI_FIXTURES),test-native)
 NATIVE_INTEROP_TESTS := $(call suite_targets,native-interop,$(NATIVE_CLI_FIXTURES),test-native)
 
-.PHONY: all stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
+.PHONY: all clean stage-1 stage-2 self-host test test-stage-2 test-stage-2-json test-stage-2-cli test-stage-2-config test-stage-2-clang test-stage-2-diagnostics
 .PHONY: test-stage-2-hashing test-stage-2-blake2b test-stage-2-native test-stage-2-f80 test-stage-2-workers test-stage-2-process test-stage-2-version force-build-info
 .PHONY: test-stage-2-inventory vscode test-stage-1 test-stage-2-source test-stage-2-language test-stage-2-utilities
 .PHONY: test-stage-2-interop test-stage-2-runtime test-stage-2-self-host test-stage-2-array-copy
@@ -128,6 +128,11 @@ NATIVE_INTEROP_TESTS := $(call suite_targets,native-interop,$(NATIVE_CLI_FIXTURE
 .SECONDARY:
 
 all: $(FINAL_COMPILER)
+
+# Remove the selected build tree, including retained C and compiler caches.
+clean: export WOVE_CLEAN_BUILD_DIR = $(BUILD_DIR)
+clean:
+	@$(PYTHON) tools/clean-build.py
 
 # Package the editor extension without building the compiler.
 vscode: $(VSCODE_PACKAGE)

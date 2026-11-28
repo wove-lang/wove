@@ -32,6 +32,8 @@ make
 
 The compiler is `build/wovec`. Run `make test` for the test suite and
 `make self-host` to verify the bootstrap chain.
+Run `make clean` to remove `build/`, including retained C and caches.
+For a dedicated alternate output directory, use `make clean BUILD_DIR=path`.
 
 ## VS Code
 
