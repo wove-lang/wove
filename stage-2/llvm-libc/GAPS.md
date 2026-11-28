@@ -563,9 +563,31 @@ allocation and diagnoses the original operand before calling C.
 | `POLLMSG`, `POLLREMOVE`, and `POLLRDHUP` | GNU glibc extensions. Optional selection follows the actual feature flags. |
 | `ppoll` | Active where Clang finds the declaration in the selected Linux headers. GNU glibc uses the checked `pollfd` prefix, `const struct timespec *` and `const sigset_t *`. Each pointer is independently nullable. The shared Linux signal-set provider exposes `sigemptyset` for initialization. |
 
-The broader `signal.h` corpus remains in `signal.wove`. Darwin's ordinary
-shared scalar set bindings such as `sigismember` still need a typed loan
-contract for their nonnullable `sigset_t` alias.
+The bundled `signal.h` provider supplies the same Linux `SignalSet` to
+`sigemptyset` and `ppoll`. Mask and signal-set operations outside that shared
+dependency are covered in the [signal inventory](#bundled-signalh-scalar-signals).
+
+## Bundled `<signal.h>` scalar signals
+
+The first installed slice covers the 39 scalar constants already in the
+corpus, `sig_atomic_t`, and `raise`, `kill`, and `killpg`. The Darwin and glibc
+SDK profiles use `int` for `sig_atomic_t`. The installed fixtures compare each
+constant with the selected header, catch a signal from `raise` in the fixture
+process, and exercise `kill` and `killpg` after checking the fixture owns its
+process group. The [LLVM libc signal index](https://libc.llvm.org/headers/signal.html)
+tracks the wider header surface.
+
+| Native members | Coverage or outstanding contract |
+| --- | --- |
+| `SIGABRT`, `SIGFPE`, `SIGILL`, `SIGINT`, `SIGSEGV`, `SIGTERM`, and the other 20 constants common to the audited profiles | Required integer constants. The fixtures compare each value against native C under the same C mode and flags. |
+| `SIGPOLL`, `SIGEMT`, `SIGINFO`, `SIGWINCH`, `SIG_BLOCK`, `SIG_UNBLOCK`, `SIG_SETMASK`, and the six `CLD_*` names | Optional integer declarations follow the selected header. Darwin exposes `SIGPOLL` in the audited POSIX/X/Open profiles and `SIGEMT`, `SIGINFO`, and `SIGWINCH` in its audited extension and default ISO profiles. Glibc gates the mask selectors and child codes on different POSIX feature levels. |
+| `raise`, `kill`, `killpg`, and the PID type | `raise` is available in all audited profiles. `kill` and `killpg` follow Clang's function availability. Darwin uses `pid_t`. Glibc uses the header's `__pid_t`, including early POSIX profiles that declare `kill` without publishing `pid_t`. |
+| `sigset_t` and `sigemptyset` | The complete Linux `SignalSet` has one defining declaration and exposes no implementation fields. `ppoll` borrows that same type. The existing nullable Linux fixtures verify the shared type and its initializer. |
+| `sigfillset`, `sigaddset`, `sigdelset`, `sigpending`, `sigprocmask`, `pthread_sigmask`, `sigismember`, `sigsuspend`, `sigwait`, and `psignal` | Retain the declarations for subsequent profile and runtime coverage. Darwin represents `sigset_t` as a scalar, and its ordinary nonnullable shared set calls still need the corresponding typed loan contract. The nullable mask calls use the contract from [#686](https://github.com/wove-lang/wove/issues/686). |
+| `SIG_DFL`, `SIG_IGN`, `SIG_ERR`, `SIG_HOLD`, `signal` and callback-bearing `sigaction` members | Follow-up for native disposition sentinels and callback lifetime at signal delivery. |
+| `sigaltstack`, `stack_t`, `SS_*`, `SIGSTKSZ`, and `MINSIGSTKSZ` | The stack address may remain live until disabled or thread exit. Some native stack-size expressions depend on the selected libc configuration. |
+| `sigqueue`, `sigwaitinfo`, `sigtimedwait`, `sigevent`, `sigval`, `SIGEV_*`, `SIGRTMIN`, `SIGRTMAX`, and `pthread_kill` | Retain the union, runtime-valued macro, notification, and thread-handle requirements recorded in the provider. |
+| `SIGIO`, `SIGIOT`, `SIGSYS`, and Darwin `CLD_NOOP` | Additional scalar aliases found by the audit. They are outside the existing scalar corpus and await the next signal inventory slice. |
 
 ## Bundled `<sys/times.h>` CPU accounting
 
