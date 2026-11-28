@@ -18,18 +18,21 @@
 	(use wove-file "../source/integer_ops.wove" (only read_integer_operator integer_arithmetic_operation integer_operator is_integer_step))
 	(use wove-file "../source/float_ops.wove" (only float_operator_keyword float_operation is_float_operator float_operator_type
 		float_operator_slot float_operator_symbol))
-	(use wove-file "../source/enum_forms.wove" (only enum_keyword (value match_statement)))
+	(use wove-file "../source/enum_forms.wove" (only enum_keyword enum_short_separator enum_inline_qualifier
+		(value enum_constructor) (value match_statement)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
 	(use wove-file "../text/boolean.wove" (only read_boolean_word))
 	(use wove-file "../text/match.wove" (only (as is_byte_at is_head_byte) is_three_bytes))
 	(use wove-file "../source/generics.wove" (only (value checked_type_operand)))
-	(use wove-file "../source/receiver_words.wove" (only is_receiver_head (value type_new_head)))
+	(use wove-file "../source/receiver_words.wove" (only is_receiver_head type_new_separator (value type_new_head)))
 	(use wove-file "../source/field_paths.wove" (only (value field_path_get_head)))
-	(use wove-file "../source/scan.wove" (only is_wove_name (type SourceNode)))
+	(use wove-file "../source/scan.wove" (only is_wove_name new_source_node revise_source_node (type SourceNode)))
 	(use wove-file "../source/module.wove" (only form_parts next_form_operand skip_disabled_siblings validate_form_metadata (type FormParts)))
 	(use wove-file "../source/types.wove" (only builtin_type_keyword is_builtin_scalar is_builtin_integer_value is_builtin_float))
 
 	(struct EntryRead (fields (operand i32) (start i32) (end i32) (error u32) (related i32)))
+	(struct EnumOperands
+		(fields (type_index i32) (qualifier SourceNode) (variant SourceNode) (checked EntryRead)))
 	(struct StatementRead (fields (kind u32) (binding i32) (value i32) (start i32) (end i32) (error u32)))
 	(struct ScalarOperator (fields (operand u32) (result u32) (symbol u8) (arity i32) (short_circuit bool)))
 	(struct FixedArrayShape (fields (element u32) (extent i32)))
@@ -52,6 +55,7 @@
 	(let array_try_copy_kind 615u32)
 	(let array_get_head "get")
 	(let receiver_operation_kind 640u32)
+	(let enum_short_kind 641u32)
 	(let array_set_head "set")
 	(let worker_spawn_join_head "worker:spawn-join")
 	(let worker_spawn_head "worker:spawn")
@@ -1029,6 +1033,19 @@
 			(if integer_check.gtz (then (return integer_check)))
 			(return (struct:get (call read_named_conversion (borrow-shared source) node) kind))))
 
+	(fn value_keyword
+		(:doc "Recognize a qualified enum variant in value position after the canonical form keywords.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (parts FormParts))
+		(returns u32)
+		(body
+			(let tag (call entry_keyword (borrow-shared source) (borrow-shared nodes) parts/head))
+			(if tag.gtz (then (return tag)))
+			(let-mut word node)
+			(if (parts/head.not-ltz) (then (set word (nodes.get parts/head))))
+			(if (i32:not-ltz (call enum_short_separator (borrow-shared source) word))
+				(then (return enum_short_kind)))
+			(return 0u32)))
+
 	(fn place_keyword
 		(:doc "Distinguish a bare binding reference from a compound projection or operation.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode))
@@ -1088,6 +1105,59 @@
 					(start metadata/start) (end metadata/end)
 					(error metadata/error) (related -1i32)))))
 			(return (call entry_at node parts/operands 0u32))))
+
+	(fn invalid_enum_operands
+		(:doc "Carry the constructor diagnostic without exposing incomplete operands.")
+		(params (node SourceNode) (checked EntryRead))
+		(returns EnumOperands)
+		(body
+			(return (EnumOperands.new (type_index -1i32) (qualifier node) (variant node) (checked checked)))))
+
+	(fn enum_operands
+		(:doc "Read the type, variant, and following payload in any enum constructor spelling.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (node SourceNode) (error u32))
+		(returns EnumOperands)
+		(body
+			(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) node))
+			(let tag (call value_keyword (borrow-shared source) (borrow-shared nodes) node parts))
+			(let-mut word node)
+			(if (parts/head.not-ltz) (then (set word (nodes.get parts/head))))
+			(let shortened (tag.eq enum_short_kind))
+			(let-mut separator -1i32)
+			(if
+				(:doc "A specialization in a signature can retain its raw dotted constructor head.")
+				(tag.eqz.and parts/head.not-ltz)
+				(then (set separator (call type_new_separator (borrow-shared source) word/start word/end))))
+			(if
+				(:doc "A dotted new head can use the same form reader once its type is known.")
+				(bool:not (bool:or (shortened.or (tag.eq enum_constructor))
+					(bool:or separator.not-ltz (word/kind.eq type_new_head))))
+				(then (return (call invalid_enum_operands node (call entry_at node -1i32 error)))))
+			(let checked (call entry_operands (borrow-shared source) (borrow-shared nodes) node parts))
+			(if checked/error.gtz (then (return (call invalid_enum_operands node checked))))
+			(let name checked/operand)
+			(if
+				(:doc "A short variant folds both names into the head, leaving the written payload as the first operand.")
+				shortened
+				(then
+					(set separator (call enum_short_separator (borrow-shared source) word))
+					(let variant (call new_source_node 1u32 separator.inc word/end word/parent))
+					(return (EnumOperands.new (type_index -1i32)
+						(qualifier (call enum_inline_qualifier word separator))
+						(variant (call revise_source_node variant variant/end -1i32 name))
+						(checked checked)))))
+			(if name.ltz (then (return (call invalid_enum_operands node (call entry_at node -1i32 error)))))
+			(if
+				(:doc "A raw dotted qualifier supplies the type and keeps the written variant operand.")
+				separator.not-ltz
+				(then (return (EnumOperands.new (type_index -1i32)
+					(qualifier (call enum_inline_qualifier word separator))
+					(variant (nodes.get name)) (checked checked)))))
+			(let qualifier (nodes.get name))
+			(let variant qualifier/next_sibling)
+			(if variant.ltz (then (return (call invalid_enum_operands node (call entry_at node -1i32 error)))))
+			(return (EnumOperands.new (type_index name) (qualifier qualifier)
+				(variant (nodes.get variant)) (checked checked)))))
 
 	(fn statement_error
 		(:doc `Keep the original syntax diagnostic when no statement can be read.`)

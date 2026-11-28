@@ -17,6 +17,7 @@ select `build/editors/vscode/wove-language.vsix`.
 ## Editing Wove
 
 The grammar highlights form tags, names, metadata, types, and literals.
+It recognizes qualified constructors such as `Point.new` and `Status:Ok`.
 Double-quoted strings use JSON escapes. Raw backtick strings can span lines and
 use a doubled backtick for an embedded backtick. Parentheses, double quotes,
 single quotes, and backticks pair while typing and can surround a selection.
