@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import re
 
-from bridge_types import NativeType, c_bridges, declarations, read_native_type
+from bridge_types import (
+	C_READONLY_BYTES, NativeType, c_bridges, declarations, native_pragmas, read_native_function, read_native_type,
+)
 from syntax import IDENTIFIER, WORD, Atom, Form, Node, SourceError, form, identifier, parse
 from target import compiler_target
 
@@ -148,6 +150,11 @@ class SharedRef:
 
 
 @dataclass(frozen=True)
+class NativeRef:
+	owner: NativeType
+
+
+@dataclass(frozen=True)
 class BufferType:
 	access: str
 	element: str | NamedType | BufferType
@@ -164,7 +171,7 @@ class FixedArrayType:
 	count: int
 
 
-Type = str | NamedType | SharedRef | BufferType | OptionalOwner | FixedArrayType
+Type = str | NamedType | SharedRef | NativeRef | BufferType | OptionalOwner | FixedArrayType
 
 
 _BYTE_VIEW = BufferType(SHARED, U8)
@@ -208,6 +215,14 @@ class Function:
 
 
 @dataclass(frozen=True)
+class NativeFunction:
+	c_name: str
+	params: tuple[tuple[str, Type], ...]
+	result: Type
+	byte_extents: tuple[tuple[int, int, int], ...]
+
+
+@dataclass(frozen=True)
 class Module:
 	filename: str
 	function_index: int
@@ -216,9 +231,9 @@ class Module:
 	uses: list[Form] = field(default_factory=list)
 	type_bindings: dict[str, NamedType] = field(default_factory=dict)
 	functions: dict[str, Function] = field(default_factory=dict)
-	bindings: dict[str, Function] = field(default_factory=dict)
+	bindings: dict[str, Function | NativeFunction] = field(default_factory=dict)
 	values: dict[str, ModuleValue] = field(default_factory=dict)
-	value_bindings: dict[str, ModuleValue] = field(default_factory=dict)
+	value_bindings: dict[str, Binding] = field(default_factory=dict)
 	syntax: Form | None = None
 
 
@@ -243,6 +258,9 @@ def c_type(kind: Type) -> str:
 	# A shared record reference carries the address of the original value.
 	if isinstance(kind, SharedRef):
 		return f"const {c_type(kind.record)} *"
+	# A borrowed C handle already has a pointer representation in the header.
+	if isinstance(kind, NativeRef):
+		return kind.owner.c_name
 	# A nullable owner uses the same pointer ABI as its payload.
 	if isinstance(kind, OptionalOwner):
 		return c_type(kind.payload)
@@ -682,8 +700,7 @@ class FunctionEmitter:
 			# A moved binding still shadows an outer declaration.
 			if binding is not None:
 				return binding
-		declaration = self.values.get(symbol)
-		return declaration.binding if declaration is not None else None
+		return self.values.get(symbol)
 
 	# Resolve the nearest live binding at the written operand.
 	def binding(self, node: Node) -> Binding:
@@ -890,8 +907,8 @@ class FunctionEmitter:
 		if self.find_binding(symbol) is not None:
 			raise SourceError(name.line)
 		callee = self.functions.get(symbol)
-		# Calls resolve only ordinary Wove bindings.
-		if callee is None or callee.is_entry:
+		# Neither an unavailable selection nor the host entry can be called.
+		if callee is None or (isinstance(callee, Function) and callee.is_entry):
 			raise SourceError(node.line)
 		parameters = tuple(kind for _, kind in callee.params)
 		return_type = callee.result
@@ -910,6 +927,16 @@ class FunctionEmitter:
 			else:
 				value = self.typed(argument, kind)
 			values.append(value.c)
+		# C borrows checked bytes through the slice pointer and a native handle through its own ABI.
+		if isinstance(callee, NativeFunction):
+			# Run each extent check after all its input arguments have been captured.
+			for buffer, size, count in callee.byte_extents:
+				self.emit_line(f"wvrt_check_c_bytes_native({values[buffer]}, {values[size]}, {values[count]}, "
+					f"-1, {node.line}, {node.line});")
+			abi = ", ".join(C_READONLY_BYTES if kind == _BYTE_VIEW else c_type(kind) for kind in parameters)
+			self.emit_line(f'_Static_assert(_Generic(&({callee.c_name}), {c_type(return_type)} (*)({abi}): 1, '
+				f'default: 0), "Wove C prototype does not match {callee.c_name}");')
+			values = [f"{value}.wvrt_items" if kind == _BYTE_VIEW else value for value, kind in zip(values, parameters)]
 		expression = f"{callee.c_name}({', '.join(values)})"
 		# A void call is a statement and supplies no C value to a consumer.
 		if return_type == VOID:
@@ -1076,8 +1103,15 @@ class FunctionEmitter:
 		# A bare name reads a scalar or record before the enclosing operation uses it.
 		if isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text):
 			binding = self.binding(node)
+			kind = binding.value.kind
+			# Capture the header's borrowed value before another argument can be evaluated.
+			if isinstance(kind, NativeRef):
+				self.emit_line(f"WVRT_CHECK_C_POINTER_TYPEDEF({c_type(kind)});")
+				self.emit_line(f'_Static_assert(_Generic(({binding.value.c}), {c_type(kind)}: 1, default: 0), '
+					'"Wove C borrowed value does not match its declared handle type");')
+				return self.temporary(kind, binding.value.c)
 			# Array and slice places need an explicit operation.
-			if not copyable(binding.value.kind):
+			if not copyable(kind):
 				raise SourceError(node.line)
 			self.check_access(binding, False, node.line)
 			# Capture the value now even if a later statement writes to its slot.
@@ -1902,7 +1936,7 @@ def prepare_functions(module: Module, *, entry: bool) -> None:
 		for index, (name, node) in enumerate(module.function_declarations.items(), module.function_index):
 			module.functions[name] = read_function(name, node, index, module.type_bindings, entry_module=entry)
 	module.bindings.update(module.functions)
-	module.value_bindings.update(module.values)
+	module.value_bindings.update((name, declaration.binding) for name, declaration in module.values.items())
 
 
 # Decode the seed's local-file provider and its explicit selection list.
@@ -1966,12 +2000,13 @@ def read_header_include(node: Form, directory: Path) -> tuple[str, str]:
 	return f'"{key}"', f'"{spelling}"'
 
 
-# Index native type forms by the same header key used to emit the include.
-def native_type_index(modules: Iterator[tuple[str, Form]]):
+# Index supported native declarations by the same header key used to emit the include.
+def native_declaration_index(modules: Iterator[tuple[str, Form]]):
 	index = {}
-	# Sources can extend the same header while retaining the original C spelling.
+	namespaces = {"type": "type", "struct": "type", "fn": "fn", "let": "value"}
+	# Sources can extend the same header while retaining its original C spelling.
 	for filename, module in modules:
-		# Select only declared types and records, leaving signatures and other C pragmas opaque.
+		# Only declared bridge members can supply names to a native use.
 		for bridge in c_bridges(module):
 			# A bridge with an invalid header cannot match an active include.
 			try:
@@ -1982,53 +2017,145 @@ def native_type_index(modules: Iterator[tuple[str, Form]]):
 			# Keep selection deferred until the seed actually needs this name.
 			for declaration in declarations(bridge.node.operands[2:], scope):
 				node = declaration.node
-				# Other C bridge members cannot define a seed type.
-				if node.tag in ("type", "struct") and node.names:
-					name = node.names[0].text
-					index.setdefault((key, name), []).append((filename, declaration))
+				namespace = namespaces.get(node.tag)
+				# Other C members cannot provide seed bindings in this subset.
+				if namespace is not None and node.names:
+					identity = (key, namespace, node.names[0].text)
+					index.setdefault(identity, []).append((filename, declaration))
 	return index
 
 
-class NativeTypes:
+class NativeDeclarations:
 	# Share selected type identities across every use of the same bridge.
 	def __init__(self, index):
 		self.index = index
-		self.bound = {}
+		self.types = {}
 
-	# Lower a selected type through its C declaration and the active target cfg.
-	def resolve(self, key: str, name: str) -> NamedType | None:
-		identity = key, name
-		# A native record can refer to a type already created while resolving its fields.
-		if identity in self.bound:
-			return self.bound[identity]
+	# Resolve a selected declaration under its own active module, group, and target cfg.
+	def select(self, key: str, namespace: str, name: str) -> tuple[str, Form] | None:
 		# A project declaration encountered after supplied providers can extend the view.
-		for filename, declaration in reversed(self.index.get(identity, ())):
+		for filename, declaration in reversed(self.index.get((key, namespace, name), ())):
+			# Selection errors belong to the provider's source.
 			with source_file(filename):
 				node = declaration.node
-				# Excluded definitions contribute neither spellings nor record fields.
-				if not all(metadata_enabled(part, selectable=True) for part in (*declaration.enclosing, node)):
-					continue
-				spelling, fields = read_native_type(node)
-				# A typedef has its own identity and takes its representation from the header.
-				if fields is None:
-					kind = self.bound[identity] = NativeType(spelling)
-					return kind
-				record = self.bound[identity] = Record(spelling, {}, native=True)
-				# Only scalar or native named fields are in the seed's record subset.
-				for field, operand in fields.items():
-					# Keep other field shapes opaque until the seed needs to lower them.
-					if not isinstance(operand, Atom) or operand.quoted:
-						continue
-					field_type = operand.text
-					kind = field_type if field_type in SCALAR_TYPES else self.resolve(key, field_type)
-					# An unsupported member has no seed field access.
-					if kind is not None:
-						record.fields[field] = RecordField(kind, field)
-				return record
-		self.bound[identity] = None
+				# Excluded definitions contribute no seed binding.
+				if all(metadata_enabled(part, selectable=True) for part in (*declaration.enclosing, node)):
+					return filename, node
 		return None
 
-	# Bind only explicit type selections from an active header use.
+	# Lower a selected type through its C declaration and the active target cfg.
+	def resolve_type(self, key: str, name: str) -> NamedType | None:
+		identity = key, name
+		# A native record can refer to a type already created while resolving its fields.
+		if identity in self.types:
+			return self.types[identity]
+		selected = self.select(key, "type", name)
+		# Save misses too, since several functions can use a typedef from one header.
+		if selected is None:
+			self.types[identity] = None
+			return None
+		filename, node = selected
+		# Type and record fields are checked in the defining provider.
+		with source_file(filename):
+			spelling, fields = read_native_type(node)
+			# A typedef takes its representation and pointer-owner marker from the bridge.
+			if fields is None:
+				kind = NativeType(spelling, any(pragma.tag == "c_owned" for pragma in native_pragmas(node)))
+				self.types[identity] = kind
+				return kind
+			record = self.types[identity] = Record(spelling, {}, native=True)
+			# Only scalar or native named fields are in the seed's record subset.
+			for field, operand in fields.items():
+				# Keep other field shapes opaque until the seed needs to lower them.
+				if not isinstance(operand, Atom) or operand.quoted:
+					continue
+				field_type = operand.text
+				kind = field_type if field_type in SCALAR_TYPES else self.resolve_type(key, field_type)
+				# An unsupported member has no seed field access.
+				if kind is not None:
+					record.fields[field] = RecordField(kind, field)
+			return record
+
+	# Resolve a borrowed native pointer without creating a Wove owner or adding indirection.
+	def reference(self, key: str, node: Node) -> NativeRef:
+		owner, = checked_form(node, "shared-ref", 1).operands
+		kind = self.resolve_type(key, identifier(owner))
+		# A handle spelled as a C pointer or marked as an owned typedef has pointer ABI.
+		if not isinstance(kind, NativeType) or not (kind.owned or kind.c_name.endswith("*")):
+			raise SourceError(owner.line)
+		return NativeRef(kind)
+
+	# Resolve copyable scalar operands using their exact native typedef identity.
+	def scalar(self, key: str, node: Node) -> str | NativeType:
+		name = identifier(node)
+		# Built-in scalars keep the ordinary seed representation.
+		if name in SCALAR_TYPES:
+			return name
+		kind = self.resolve_type(key, name)
+		# Owning and pointer values require a separate bridge contract.
+		if isinstance(kind, NativeType) and not kind.owned and not kind.c_name.endswith("*"):
+			return kind
+		raise SourceError(node.line)
+
+	# Lower the bounded borrowed-stream subset from the provider's declared types and pragmas.
+	def function(self, key: str, node: Form) -> NativeFunction:
+		symbol, operands, result_node = read_native_function(node)
+		parameters = {}
+		# Keep named formal order and distinguish borrowed handles from byte descriptors.
+		for name, operand in operands.items():
+			# A C handle borrow passes the native value directly.
+			if isinstance(operand, Form) and operand.tag == "shared-ref":
+				kind = self.reference(key, operand)
+			# The supported array contract borrows immutable bytes.
+			elif isinstance(operand, Form) and operand.tag == SHARED:
+				element, = checked_form(operand, SHARED, 1).operands
+				# Other element types have no byte-view C representation in the seed.
+				if identifier(element) != U8:
+					raise SourceError(element.line)
+				kind = _BYTE_VIEW
+			else:
+				kind = self.scalar(key, operand)
+			parameters[name] = kind
+		# Other C function slices remain opaque to the seed.
+		if not any(isinstance(kind, NativeRef) for kind in parameters.values()):
+			raise SourceError(node.line)
+		result = VOID if identifier(result_node) == VOID else self.scalar(key, result_node)
+		positions = {name: index for index, name in enumerate(parameters)}
+		extents = {}
+		# Recover every byte extent from its named formal operands.
+		for pragma in native_pragmas(node):
+			# Selection was applied before the declaration was resolved.
+			if pragma.tag == "cfg":
+				continue
+			# A nullable handle can also receive the ordinary non-null borrowed value.
+			if pragma.tag == "c_nullable":
+				names = tuple(map(identifier, pragma.operands))
+				# This slice handles only the non-null borrowed operands of nullable handle formals.
+				if not names or any(not isinstance(parameters.get(name), NativeRef) for name in names):
+					raise SourceError(pragma.line)
+				continue
+			buffer, size, count = map(identifier, form(pragma, "c_bytes", 3).operands)
+			# Check that the extent guards a byte view and uses two captured integer operands.
+			if parameters.get(buffer) != _BYTE_VIEW or buffer in extents or any(
+				parameters.get(name) not in SCALAR_LIMITS and not isinstance(parameters.get(name), NativeType)
+				for name in (size, count)
+			):
+				raise SourceError(pragma.line)
+			extents[buffer] = (positions[buffer], positions[size], positions[count])
+		# A bare byte view cannot cross the bridge without a checked extent.
+		if any(kind == _BYTE_VIEW and name not in extents for name, kind in parameters.items()):
+			raise SourceError(node.line)
+		return NativeFunction(symbol, tuple(parameters.items()), result, tuple(extents.values()))
+
+	# Resolve a borrowed C value through the actual header expression, including macro aliases.
+	def value(self, key: str, node: Form) -> Binding:
+		operand, = form(node, "let", 1).operands
+		# Other value adaptations require their own seed support.
+		if any(pragma.tag != "cfg" for pragma in native_pragmas(node)):
+			raise SourceError(node.line)
+		return Binding(Value(self.reference(key, operand), identifier(node.names[0])))
+
+	# Bind explicit selections without opening declarations outside the seed's current subset.
 	def bind(self, module: Module, use: Form, key: str) -> None:
 		# Includes with absent or opaque selectors still pass through to C.
 		if len(use.operands) != 3:
@@ -2037,26 +2164,47 @@ class NativeTypes:
 		# Other selectors stay opaque until the seed lowers their corresponding features.
 		if not isinstance(only, Form) or only.tag != "only":
 			return
-		# Reuse the ordinary type selector spelling and alias.
+		# Reuse the ordinary namespace and alias spelling.
 		for item in only.operands:
-			# The C include can also supply functions, values or caller-only declarations.
-			if not isinstance(item, Form) or item.tag != "type" or len(item.operands) != 1:
-				continue
-			original = local = item.operands[0]
-			# Renames only affect the local type namespace.
-			if isinstance(original, Form) and original.tag == "as" and len(original.operands) == 2:
-				original, local = original.operands
+			namespace = "fn"
+			# Explicit type and value selectors wrap a name or rename.
+			if isinstance(item, Form) and item.tag in ("type", "value") and len(item.operands) == 1:
+				namespace = item.tag
+				item, = item.operands
+			original = local = item
+			# Renames only affect the importing module's spelling.
+			if isinstance(item, Form) and item.tag == "as" and len(item.operands) == 2:
+				original, local = item.operands
 			# Leave unsupported selectors opaque.
 			if not isinstance(original, Atom) or not isinstance(local, Atom):
 				continue
-			kind = self.resolve(key, identifier(original))
+			# Explicit type selections already participate in normal Wove signatures.
+			if namespace == "type":
+				target = self.resolve_type(key, identifier(original))
+				bindings, reserved = module.type_bindings, C_TYPE
+			else:
+				# An opaque include selector does not contribute a function or value binding.
+				if original.quoted or not IDENTIFIER.fullmatch(original.text):
+					continue
+				selected = self.select(key, namespace, original.text)
+				# A bare selection may belong to the header's opaque declaration set.
+				if selected is None:
+					continue
+				_, node = selected
+				# Keep other C declaration forms opaque until the seed supports their ABI.
+				try:
+					target = self.function(key, node) if namespace == "fn" else self.value(key, node)
+				except SourceError:
+					continue
+				bindings, reserved = (module.bindings, module.function_declarations) if namespace == "fn" else (
+					module.value_bindings, module.values)
 			# An include's unused declarations need not be modeled by the seed.
-			if kind is not None:
+			if target is not None:
 				name = identifier(local)
-				# Preserve the ordinary local type namespace.
-				if name in C_TYPE or name in module.type_bindings:
+				# Keep the selected native and Wove names in the same local namespace.
+				if name in reserved or name in bindings:
 					raise SourceError(local.line)
-				module.type_bindings[name] = kind
+				bindings[name] = target
 
 
 # Bind provider declarations directly so aliases retain the defining identity.
@@ -2086,7 +2234,8 @@ def bind_use(only: Form, provider: Module, importer: Module) -> None:
 			reserved = importer.function_declarations
 		# Value bindings share the selected declaration's existing storage.
 		else:
-			target = provider.values.get(spelling)
+			declaration = provider.values.get(spelling)
+			target = declaration.binding if declaration is not None else None
 			bindings = importer.value_bindings
 			reserved = importer.values
 		# Only declarations defined in the provider can be selected.
@@ -2191,7 +2340,7 @@ def load_modules(
 			stack.append((target_identity, target, iter(provider.uses)))
 
 	# Supply compiler inventory declarations before project declarations.
-	def type_sources() -> Iterator[tuple[str, Form]]:
+	def declaration_sources() -> Iterator[tuple[str, Form]]:
 		# Inventory files contribute their C bridges only.
 		for filename in bridge_files:
 			with source_file(filename):
@@ -2206,7 +2355,7 @@ def load_modules(
 			if module.syntax is not None:
 				yield module.filename, module.syntax
 
-	native = NativeTypes(native_type_index(type_sources()))
+	native = NativeDeclarations(native_declaration_index(declaration_sources()))
 	# The imports of each Wove provider are ready before any importer binds it.
 	for identity in order:
 		module = modules[identity]

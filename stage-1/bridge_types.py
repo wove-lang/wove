@@ -1,7 +1,7 @@
 # Copyright (c) 2026 wove contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-"""Find the native C type declarations the Python seed can lower."""
+"""Read the C bridge declarations needed by the Python seed."""
 
 from __future__ import annotations
 
@@ -9,15 +9,23 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 import re
 
-from syntax import Atom, Form, Node, SourceError, form, identifier
+from syntax import IDENTIFIER, Atom, Form, Node, SourceError, form, identifier
 
 
 C_TYPE_SPELLING = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?: +[A-Za-z_][A-Za-z0-9_]*)*(?: *\*)*")
+# The native byte-view contract admits const byte pointers with either volatile qualification.
+C_READONLY_BYTES = (
+	"union __attribute__((__transparent_union__)) {"
+	"const void *p0; const char *p1; const signed char *p2; const unsigned char *p3; "
+	"const volatile void *p4; const volatile char *p5; "
+	"const volatile signed char *p6; const volatile unsigned char *p7;}"
+)
 
 
 @dataclass(eq=False, frozen=True)
 class NativeType:
 	c_name: str
+	owned: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,3 +81,41 @@ def read_native_type(node: Form) -> tuple[str, dict[str, Node] | None]:
 	if fields is None:
 		return operand.text, {}
 	return operand.text, {field.tag: form(field, arity=1).operands[0] for field in map(form, fields.operands)}
+
+
+# Expose bridge pragmas without interpreting unrelated metadata.
+def native_pragmas(node: Form) -> Iterator[Form]:
+	return (form(operand) for entry in node.metadata if entry.tag == ":pragma" for operand in entry.operands)
+
+
+# Read a fixed C function's signature and original symbol before resolving its types.
+def read_native_function(node: Form) -> tuple[str, dict[str, Node], Node]:
+	fields = {}
+	# A fixed signature has one parameter list, one result, and an optional C name.
+	for operand in node.operands:
+		field = form(operand)
+		# Other native fields require their own lowering rules.
+		if field.tag not in ("params", "returns", "c-name") or field.tag in fields:
+			raise SourceError(field.line)
+		fields[field.tag] = field
+	# A bodyless function still supplies its complete signature.
+	if "params" not in fields or "returns" not in fields:
+		raise SourceError(node.line)
+	parameters = {}
+	# Retain parameter names so extent pragmas can select exact operands.
+	for operand in fields["params"].operands:
+		param = form(operand, arity=1)
+		# A fixed operand must be a distinct named parameter.
+		if not IDENTIFIER.fullmatch(param.tag) or param.tag in parameters:
+			raise SourceError(param.line)
+		parameters[param.tag] = param.operands[0]
+	result, = form(fields["returns"], arity=1).operands
+	symbol = identifier(node.names[0])
+	# A declaration may introduce a Wove alias for a differently named C function.
+	if "c-name" in fields:
+		spelling, = form(fields["c-name"], arity=1).operands
+		# The quoted spelling must be one C identifier.
+		if not isinstance(spelling, Atom) or not spelling.quoted or not IDENTIFIER.fullmatch(spelling.text):
+			raise SourceError(spelling.line)
+		symbol = spelling.text
+	return symbol, parameters, result
