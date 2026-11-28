@@ -68,6 +68,10 @@ def main():
 	optional_cases = list(manifest_rows(optional)) if optional.is_file() else []
 	profiles = [(label, json.loads(flags))
 		for label, flags in manifest_rows(fixtures.parent / "header-profiles.tsv")]
+	extra_profiles = fixtures / "extra-profiles.tsv"
+	# Add profiles specific to one header without changing the shared baseline.
+	if extra_profiles.is_file():
+		profiles.extend((label, json.loads(flags)) for label, flags in manifest_rows(extra_profiles))
 	# Move the compiler and every project outside the source checkout.
 	with TemporaryDirectory(prefix=f"wove-{fixtures.name}-") as directory:
 		stage = Path(directory)

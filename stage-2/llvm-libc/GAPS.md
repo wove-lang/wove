@@ -833,14 +833,22 @@ arithmetic prototypes and the exact native result layout in 264 profiles.
 | `PRIb`, `PRIB`, `SCNb` | The 28 binary printing and 14 binary scanning macros use ordinary optional C string constants. Clang determines availability from the header and effective flags. The audited glibc SDK exposes all 42 in C23 and the earlier-mode GNU profiles. They are absent on the audited Darwin SDK and in the other earlier-mode glibc profiles. The shared oracle checks the literal bytes and lengths when the binary formats are available. |
 | `__STDC_VERSION_INTTYPES_H__` | Absent in all audited Darwin and glibc profiles. |
 
-## Bundled `<stddef.h>` wide character type
+## Bundled `<stddef.h>` coverage
+
+Clang's direct header inventory covers C11, C17, and C23 with ISO, POSIX,
+X/Open, extensions, and Annex K settings on Darwin and glibc arm64 and
+x86_64. Both bridge origins use the same native typedef and macro forms.
 
 | Native members | Coverage or outstanding contract |
 | --- | --- |
-| `wchar_t` | The shared `WChar` bridge uses the exact Clang typedef. It occupies four bytes on the audited Darwin and glibc targets. It is `unsigned int` on glibc arm64 and `int` on the other targets. |
-| `size_t`, `ptrdiff_t`, `rsize_t` | These native integer aliases remain in the broader `<stddef.h>` coverage under #318. The audited headers expose `rsize_t` only in an opt-in profile. |
-| `max_align_t` | The audited Darwin headers use `long double`, and glibc headers use a record. Exact layout coverage remains open under #318. |
-| `NULL`, `offsetof`, `nullptr_t`, `unreachable` | These remain in the broader `<stddef.h>` coverage under #318. The audited headers expose `nullptr_t` and `unreachable` in C23. |
+| `size_t`, `ptrdiff_t`, and `wchar_t` | `Size`, `PtrDiff`, and `WChar` preserve exact C typedefs. The fixtures round-trip the native unsigned maxima and the signed pointer-difference minimum. `wchar_t` is `unsigned int` on glibc arm64 and `int` on the other audited targets. |
+| `rsize_t` | The optional `RSize` uses the exact native typedef. The audited Clang headers expose it when `__STDC_WANT_LIB_EXT1__=1`. The fixtures check the largest representable value with the opt-in flag and the selector span without it. |
+| glibc `max_align_t` | `MaxAlign` uses an optional complete native record view with an empty field list. The C typedef supplies its size and alignment. The fixture allocates a Wove value and borrows its address into C to verify alignment. |
+| Darwin `max_align_t` | The native type is a typedef for `long double`. Binding it needs an exact floating typedef contract that retains the C spelling and target ABI. [Compiler prerequisite #783](https://github.com/wove-lang/wove/issues/783) |
+| `unreachable()` | The zero-argument void macro is emitted directly. The fixture calls it on a path unreachable for the test executable. The audited C23 headers define it. Clang diagnoses a call in earlier modes without the macro. |
+| `NULL` | The audited headers expand it to `((void*)0)`. Binding the macro needs a native null-value contract for admitted nullable uses. [Compiler prerequisite #784](https://github.com/wove-lang/wove/issues/784) |
+| `nullptr_t` | The C23 headers define it as the type of `nullptr`. Binding it needs a distinct native null type and exact ABI support. [Compiler prerequisite #784](https://github.com/wove-lang/wove/issues/784) |
+| `offsetof` | The function-like macro needs a C type and tied member designator emitted as tokens. The result has native `size_t` type. [Compiler prerequisite #785](https://github.com/wove-lang/wove/issues/785) |
 | `__STDC_VERSION_STDDEF_H__` | Absent in the audited profiles. |
 
 ## Bundled math coverage
