@@ -516,17 +516,41 @@ char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrtarguments, size_t wvrtcount) {
 	return wvrt_storage;
 }
 
+// Measure an element address without subtracting pointers that may have unrelated provenance.
+static int32_t wvrt_c_end_position(const void *wvrtinput, const void *wvrtend, size_t wvrtelement_size,
+	int32_t wvrtlength) {
+	const uintptr_t wvrt_start = (uintptr_t)wvrtinput;
+	const uintptr_t wvrt_end = (uintptr_t)wvrtend;
+	if (wvrtend == NULL || wvrt_end < wvrt_start) { return -1; }
+	const uintptr_t wvrt_distance = wvrt_end - wvrt_start;
+	// Only complete elements through the terminator are valid end positions.
+	if (wvrt_distance % wvrtelement_size != 0 || wvrt_distance / wvrtelement_size > (uintptr_t)wvrtlength) {
+		return -1;
+	}
+	return (int32_t)(wvrt_distance / wvrtelement_size);
+}
+
 // Return the distance into the prepared input, including its terminating byte's position.
 int32_t wvrt_cstr_offset(const wvrt_cstr_argument *wvrtinput, const char *wvrtend) {
-	const uintptr_t wvrt_start = (uintptr_t)wvrtinput->wvrt_value;
-	const uintptr_t wvrt_end = (uintptr_t)wvrtend;
-	// An invalid pointer need not belong to this allocation. Compare addresses without pointer subtraction.
-	if (wvrtend == NULL || wvrt_end < wvrt_start ||
-		wvrt_end - wvrt_start > (uintptr_t)wvrtinput->wvrt_view.wvrt_length) {
+	const int32_t wvrt_position = wvrt_c_end_position(wvrtinput->wvrt_value, wvrtend, 1,
+		wvrtinput->wvrt_view.wvrt_length);
+	// Retain the original C-string error and location.
+	if (wvrt_position < 0) {
 		wvrt_trap_at_span(wvrtinput->wvrt_file, wvrtinput->wvrt_start, wvrtinput->wvrt_end,
 			"C string end pointer outside input");
 	}
-	return (int32_t)(wvrt_end - wvrt_start);
+	return wvrt_position;
+}
+
+// Project a call-scoped pointer into the checked copy without exposing the pointer to Wove.
+int32_t wvrt_c_terminated_array_offset(const void *wvrtinput, const void *wvrtend, int32_t wvrtlength,
+	size_t wvrtelement_size, int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend_span) {
+	const int32_t wvrt_position = wvrt_c_end_position(wvrtinput, wvrtend, wvrtelement_size, wvrtlength);
+	// Diagnose missing, out-of-range, and non-element addresses at the original input.
+	if (wvrt_position < 0) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend_span, "C terminated array end pointer is not an input element");
+	}
+	return wvrt_position;
 }
 
 // Restore only the original view bytes and keep the native call's errno.
@@ -644,6 +668,29 @@ static void *wvrt_calloc(size_t wvrtcount, size_t wvrtsize, size_t wvrtalignment
 	void *wvrt_storage = aligned_alloc(wvrtalignment, wvrt_bytes);
 	if (wvrt_storage != NULL) { memset(wvrt_storage, 0, wvrt_bytes); }
 	return wvrt_storage;
+}
+
+// Copy the validated view and reserve a correctly aligned native terminator.
+void *wvrt_c_terminated_array_copy(wvrt_slice wvrtview, size_t wvrtelement_size, size_t wvrtalignment,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	wvrt_check_c_array(wvrtview, wvrtelement_size, wvrtview.wvrt_length, wvrtfile, wvrtstart, wvrtend);
+	const size_t wvrt_length = (size_t)wvrtview.wvrt_length;
+	const int wvrt_saved_errno = errno;
+	void *wvrt_storage = wvrt_calloc(wvrt_length + 1, wvrtelement_size, wvrtalignment);
+	// Allocation belongs to the original argument's source span.
+	if (wvrt_storage == NULL) {
+		wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "could not allocate C terminated array");
+	}
+	if (wvrt_length != 0) { memcpy(wvrt_storage, wvrtview.wvrt_items, wvrt_length * wvrtelement_size); }
+	errno = wvrt_saved_errno;
+	return wvrt_storage;
+}
+
+// Release an invalid copy before reporting the embedded zero.
+_Noreturn void wvrt_c_terminated_array_embedded_zero(void *wvrtcopy,
+	int32_t wvrtfile, int32_t wvrtstart, int32_t wvrtend) {
+	free(wvrtcopy);
+	wvrt_trap_at_span(wvrtfile, wvrtstart, wvrtend, "embedded zero in C terminated array");
 }
 
 // Keep native object storage stable until the Wove owner is released.

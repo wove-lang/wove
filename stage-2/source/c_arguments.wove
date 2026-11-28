@@ -19,7 +19,7 @@
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
 			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode) (value c_storage_init_always_mode) (value c_nullable_native_reference_mode)
 			c_storage_shared_mode (value c_nullable_storage_shared_mode)
-			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_string_offset_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode) (value c_nullable_sync_callback_mode) is_c_sync_callback_mode))
+			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_string_offset_mode) (value c_terminated_array_mode) (value c_terminated_array_offset_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode) (value c_nullable_sync_callback_mode) is_c_sync_callback_mode))
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (scalar_ref u32) (record_reference bool) (nullable_reference bool) (owner_mode u8) (nullable bool)))
 	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (handle_out bool) (void_pointer bool) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
@@ -39,6 +39,8 @@
 	(let init_always_directive "c_init_always")
 	(let owner_out_directive "c_owner_out")
 	(let string_offset_directive "c_cstr_offset")
+	(let terminated_array_directive "c_terminated_array")
+	(let terminated_array_offset_directive "c_terminated_array_offset")
 	(let macro_directive "c_macro")
 	(let variadic_directive "c_variadic")
 	(let open_tail "...")
@@ -125,6 +127,10 @@
 				(:doc "A synchronous callback has an explicit call lifetime contract.")
 				(call matches_pragma (borrow-shared source) head (borrow-shared callback_directive))
 				(then (return c_sync_callback_mode)))
+			(if
+				(:doc "A terminated copy preserves the declared native element type.")
+				(call matches_pragma (borrow-shared source) head (borrow-shared terminated_array_directive))
+				(then (return c_terminated_array_mode)))
 			(if
 				(:doc "An array bound counts native elements.")
 				(call matches_pragma (borrow-shared source) head (borrow-shared array_directive))
@@ -236,6 +242,11 @@
 				(:doc "C string vectors borrow the rows through a shared projection.")
 				(call is_c_vector_mode mode)
 				(then (return (u32.eq rows 34u32))))
+			(if
+				(:doc "A terminated input borrows an ordinary shared view.")
+				(u8.eq mode c_terminated_array_mode)
+				(then (return (u32.eq (struct.get (call read_c_view_type (borrow-shared source)
+					(borrow-shared nodes) type (bool false)) access) 34u32))))
 			(if
 				(:doc "A native array exposes copyable elements through either view access mode.")
 				(call is_c_array_mode mode)
@@ -631,11 +642,12 @@
 			(return (call reserve_c_argument (borrow-mut contracts) flag
 				c_owner_marker_flag_mode -1i32 output_position))))
 
-	(fn read_c_string_offset
-		(:doc "Bind a mutable Wove offset place to the named shared byte string.")
-		(:expect (tests "stage-2/cli/native/cstr-offsets/cases.tsv") (issues "gh:wove-lang/wove:742"))
+	(fn read_c_end_offset
+		(:doc "Bind a mutable Wove offset place to the named shared input.")
+		(:expect (tests "stage-2/cli/native/cstr-offsets/cases.tsv" "stage-2/cli/native/terminated-arrays/cases.tsv")
+			(issues "gh:wove-lang/wove:742" "gh:wove-lang/wove:758"))
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32)
-			(directive SourceNode) (begin i32) (contracts (mut-array CArgument))) (returns CArguments)
+			(directive SourceNode) (begin i32) (mode u8) (contracts (mut-array CArgument))) (returns CArguments)
 		(body
 			(if (i32.ltz begin) (then (return (call c_argument_error_at directive))))
 			(let output_name (array.load nodes begin))
@@ -666,13 +678,19 @@
 			(let input_node (struct.get input type_node))
 			(if (i32.ltz input_node) (then (return (call c_argument_error_at input_name))))
 			(let input_type (array.load nodes input_node))
+			(let-mut access (call c_byte_slice_type (borrow-shared source) (borrow-shared nodes)
+				input_type (bool false)))
 			(if
-				(:doc "The source must be an immutable byte view whose prepared copy lives through the call.")
-				(u32.not-eq (call c_byte_slice_type (borrow-shared source) (borrow-shared nodes)
-					input_type (bool false)) 34u32)
+				(:doc "Typed end positions follow the native element type of the shared input.")
+				(u8.eq mode c_terminated_array_offset_mode)
+				(then (set access (struct.get (call read_c_view_type (borrow-shared source)
+					(borrow-shared nodes) input_type (bool false)) access))))
+			(if
+				(:doc "An end pointer can only refer to a prepared shared copy.")
+				(u32.not-eq access 34u32)
 				(then (return (call c_argument_error_at input_type))))
 			(return (call reserve_c_argument (borrow-mut contracts) output
-				c_string_offset_mode -1i32 (struct.get input position)))))
+				mode -1i32 (struct.get input position)))))
 
 	(fn read_c_directive
 		(:doc `Dispatch the recognized argument directives in the checked pragma stream.`)
@@ -719,8 +737,13 @@
 			(if
 				(:doc "A C string offset links an output place to its converted input.")
 				(call matches_pragma (borrow-shared source) name (borrow-shared string_offset_directive))
-				(then (return (call read_c_string_offset (borrow-shared source) (borrow-shared nodes)
-					first node begin (borrow-mut contracts)))))
+				(then (return (call read_c_end_offset (borrow-shared source) (borrow-shared nodes)
+					first node begin c_string_offset_mode (borrow-mut contracts)))))
+			(if
+				(:doc "A terminated array can lend an optional pointer-out slot for its element position.")
+				(call matches_pragma (borrow-shared source) name (borrow-shared terminated_array_offset_directive))
+				(then (return (call read_c_end_offset (borrow-shared source) (borrow-shared nodes)
+					first node begin c_terminated_array_offset_mode (borrow-mut contracts)))))
 			(let mode (call c_argument_directive (borrow-shared source) name))
 			(if
 				(:doc "Other directives leave these argument contracts untouched.")
@@ -844,15 +867,26 @@
 					(let count (struct.get slot count))
 					(if
 						(:doc "Resolve the offset's source after all pragmas have bound, regardless of their order.")
-						(u8.eq mode c_string_offset_mode)
+						(bool.or (u8.eq mode c_string_offset_mode) (u8.eq mode c_terminated_array_offset_mode))
 						(then
 							(let input (array.load contracts count))
+							(let-mut expected (call c_checked_string_mode))
 							(if
-								(:doc "A fixed native function must write an offset into a checked, present input copy.")
+								(:doc "The array offset requires a prepared input with the matching element contract.")
+								(u8.eq mode c_terminated_array_offset_mode)
+								(then (set expected c_terminated_array_mode)))
+							(if
+								(:doc "An end slot belongs to a fixed prototype and a present checked input copy.")
 								(bool.or (bool.or (struct.get slot nullable) (struct.get input nullable))
-									(bool.or (u8.not-eq (struct.get input mode) (call c_checked_string_mode))
+									(bool.or (u8.not-eq (struct.get input mode) expected)
 										(bool.or (struct.get arguments macro) (i32.not-eqz (struct.get arguments variadic)))))
 								(then (return (call c_argument_error_at type))))))
+					(if
+						(:doc "A terminated native array requires an exact fixed prototype and a shared input.")
+						(bool.and (u8.eq mode c_terminated_array_mode)
+							(bool.or (struct.get slot nullable)
+								(bool.or (struct.get arguments macro) (i32.not-eqz (struct.get arguments variadic)))))
+						(then (return (call c_argument_error_at type))))
 					(if
 						(:doc "An in-out array count always passes a concrete typed pointer. Check this after all adaptations have bound.")
 						(bool.and (call is_c_array_mode mode) (i32.not-ltz count))

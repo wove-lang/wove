@@ -8,7 +8,7 @@
 	while the scratch is live, copy back mutable views, then release the scratch.`)
 
 	(use wove-file "../c/arguments.wove" (only is_c_string_mode is_c_checked_string_mode is_c_array_mode is_c_extent_mode is_c_vector_mode c_null_argument_kind is_c_storage_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_owner_marker_flag_mode) (value c_static_string_mode) (value c_adapted_callback_argument)
-		(value c_string_offset_mode) (value c_nullable_native_reference_mode) (value c_nullable_storage_shared_mode) (value c_macro_integer_argument)))
+		(value c_string_offset_mode) (value c_terminated_array_mode) (value c_terminated_array_offset_mode) (value c_nullable_native_reference_mode) (value c_nullable_storage_shared_mode) (value c_macro_integer_argument)))
 	(use wove-file "../source/types.wove" (only void_type))
 	(use wove-file "../source/graph.wove" (only (type GraphBinding)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode) (type Token)))
@@ -25,13 +25,15 @@
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./integers.wove" (only write_c_macro_integer_token))
 	(use wove-file "./runtime.wove" (only write_runtime_site write_c_number write_site_number write_slice_items))
-	(use wove-file "./c_formals.wove" (only native_nullable_needs_prototype fixed_c_needs_prototype native_owner_needs_prototype native_long_double_needs_prototype native_record_result_needs_prototype native_static_strings native_sync_callbacks native_c_string_offsets write_fixed_c_argument))
+	(use wove-file "./c_formals.wove" (only native_nullable_needs_prototype fixed_c_needs_prototype native_owner_needs_prototype native_long_double_needs_prototype native_record_result_needs_prototype native_static_strings native_sync_callbacks native_c_string_offsets native_terminated_arrays write_fixed_c_argument))
 	(use wove-file "./c_record_out.wove" (only open_record_out close_record_out))
 	(use wove-file "./c_record_in.wove" (only open_record_input close_record_input))
 	(use wove-file "./c_snapshots.wove" (only open_c_snapshot close_c_snapshot))
 	(use wove-file "./c_record_snapshots.wove" (only open_record_snapshot close_record_snapshot))
 	(use wove-file "./c_extents.wove" (only write_c_extent_checks write_c_array_pointer_type))
 	(use wove-file "./c_vectors.wove" (only write_c_vector_name write_c_vector_scratch))
+	(use wove-file "./c_terminated.wove" (only write_terminated_name write_terminated_array_phase
+		(value prepare_terminated_arrays) (value project_terminated_offsets) (value release_terminated_arrays)))
 	(use wove-file "./c_storage.wove" (only write_storage_argument write_storage_after_call write_storage_pointer_type))
 
 	(fn c_symbol_text
@@ -210,11 +212,23 @@
 			(return (call c_string_text (borrow-mut output) descriptor 5u32 writing))))
 
 	(fn write_c_captured_argument
-		(:doc "A string offset passes the temporary char pointer slot instead of the captured Wove place.")
+		(:doc "Pass the prepared native pointer or end slot when a terminated input owns the call storage.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (argument i32) (tree_base i32)
 			(mode u8) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
+			(if
+				(:doc "A checked native array lends its prepared typed pointer.")
+				(u8.eq mode c_terminated_array_mode)
+				(then (return (call write_terminated_name (borrow-shared nodes) argument
+					(borrow-mut output) offset name_prefix writing))))
+			(if
+				(:doc "A present typed end slot passes its address only to C.")
+				(u8.eq mode c_terminated_array_offset_mode)
+				(then
+					(let address (call c_byte (borrow-mut output) offset 38u8 writing))
+					(return (call write_terminated_name (borrow-shared nodes) argument
+						(borrow-mut output) address name_prefix writing))))
 			(if
 				(:doc "Only C sees the address of the call's end pointer.")
 				(u8.eq mode c_string_offset_mode)
@@ -457,7 +471,8 @@
 						(struct.get callee c_formals)))
 					(bool.or (call native_owner_needs_prototype (borrow-shared source) (borrow-shared nodes)
 							(borrow-shared parameters) callee)
-						(bool.or (call native_c_string_offsets (borrow-shared parameters) callee)
+						(bool.or (bool.or (call native_c_string_offsets (borrow-shared parameters) callee)
+								(call native_terminated_arrays (borrow-shared parameters) callee))
 							(call native_long_double_needs_prototype (borrow-shared records)
 								(borrow-shared parameters) callee))))))
 			(let parenthesized (bool.and (bool.not open)
@@ -896,6 +911,14 @@
 					(borrow-shared nodes) (borrow-shared parameters) (borrow-shared expressions)
 					expression caller callee index (bool true)
 					(borrow-mut output) cursor name_prefix writing))))
+			(let terminated (call native_terminated_arrays (borrow-shared parameters) callee))
+			(if
+				(:doc "Construct all typed copies and present end slots before entering native code.")
+				terminated
+				(then (set cursor (call write_terminated_array_phase (borrow-shared source) (borrow-shared nodes)
+					(borrow-shared records) (borrow-shared parameters) (borrow-shared expressions)
+					(struct.get expression first) caller callee prepare_terminated_arrays
+					(borrow-mut output) cursor name_prefix writing))))
 			(set cursor (call write_c_native_invocation (borrow-shared source) (borrow-shared nodes)
 				(borrow-shared parameters) (borrow-shared records) (borrow-shared bindings) (borrow-shared expressions)
 				expression callee caller index
@@ -907,6 +930,18 @@
 					(borrow-shared nodes) (borrow-shared parameters) (borrow-shared expressions)
 					expression caller callee index (bool false)
 					(borrow-mut output) cursor name_prefix writing))))
+			(if
+				(:doc "Project all typed offsets before freeing the prepared copies.")
+				terminated
+				(then
+					(set cursor (call write_terminated_array_phase (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) (borrow-shared parameters) (borrow-shared expressions)
+						(struct.get expression first) caller callee project_terminated_offsets
+						(borrow-mut output) cursor name_prefix writing))
+					(set cursor (call write_terminated_array_phase (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) (borrow-shared parameters) (borrow-shared expressions)
+						(struct.get expression first) caller callee release_terminated_arrays
+						(borrow-mut output) cursor name_prefix writing))))
 			(if
 				(:doc "Normalize pointer sentinels, activate storage, and release consumed wrappers after C.")
 				(bool.or (struct.get callee c_storage) (struct.get callee c_handle_out))
