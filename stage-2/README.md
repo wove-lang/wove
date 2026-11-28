@@ -229,7 +229,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `q` | Read-only C type alias | Defining bridge file and header extended by the role and original declaration name | Native name | The lvalue contract and its qualified check share the cached key and collision rank. |
 | `d` | Module value or descriptor | Module fingerprint extended by the data role and spelling | Defining name | The common header, unique definition, and references use the same checked binding. |
 | `s` | Module backing bytes | Module fingerprint extended by the backing role and spelling | Defining name | Private to the C unit that defines the bytes. |
-| `a`, `b` | Private bridge string backing and descriptor | Binding name's flattened graph row | Native name | Private to the C unit that defines the string. |
+| `a`, `b` | Private bridge string backing and descriptor | Defining bridge file and header extended by the descriptor role and original name. The backing role extends that descriptor key. | Native name | The definitions and all selected reads share the defining key and collision rank. |
 | `b` | C-string call storage | Call's original file-local tree row | `a` for descriptors, `b` for backing pointers | Within its C function. Setup, invocation, and cleanup use the same call row. |
 
 A worker adapter continues the checked function fingerprint with `w` and
