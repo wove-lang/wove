@@ -381,6 +381,13 @@ alias keeps its defining identity through imports and copies. Its native
 layout and calling convention follow Clang, including when `long double`
 and `double` share a representation.
 
+Use `(type Alias (:pragma (c_long_double)) (c-type "native_alias_t"))`
+when the header gives the type a typedef name. Wove emits that name and
+keeps the same nominal floating behavior as the intrinsic spelling.
+When compiling the emitted C, Clang checks that the name denotes unqualified
+`long double`, even on a target where `double` has the same size and precision. A bridge-local
+import retains the defining header and its prerequisites.
+
 Use width-qualified `add`, `sub`, `mul`, `div`, and unary `neg` for native
 floating arithmetic. The `eq`, `not-eq`, `lt`, `le`, `gt`, and `ge` operators
 take two values of the named width and return `bool`. Eager operands evaluate

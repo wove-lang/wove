@@ -11,10 +11,11 @@
 	(use wove-file "./scan.wove" (only skip_whitespace (type SourceNode) (type Token)))
 	(use wove-file "./module.wove" (only form_parts next_form_metadata next_form_operand source_keyword validate_form_metadata (type FormParts)))
 	(use wove-file "./strings.wove" (only decode_string))
+	(use wove-file "./c_markers.wove" (only read_c_long_double))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte is_c_identifier))
 
 	(struct COwnerRead (fields (native i32) (drop i32) (storage bool) (tail i32) (count i32)
-		(vector i32) (vector_count i32) (vector_offset i32)
+		(vector i32) (vector_count i32) (vector_offset i32) (long_double_typedef bool)
 		(start i32) (end i32) (error u32)))
 
 	(let storage_flag "storage")
@@ -94,7 +95,7 @@
 		(params (native i32) (drop i32) (storage bool) (site SourceNode) (error u32))
 		(returns COwnerRead)
 		(body (return (struct:new COwnerRead (native native) (drop drop) (storage storage)
-			(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
+			(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (long_double_typedef (bool false))
 			(start (struct:get site start)) (end (struct:get site end)) (error error)))))
 
 	(fn owner_keyword
@@ -185,7 +186,7 @@
 						(borrow-shared source) (struct:get skip start) (struct:get skip end)))
 				(then (return (call owner_read -1i32 -1i32 (bool false) skip 23u32))))
 			(return (struct:new COwnerRead (native -1i32) (drop destructor) (storage (bool true))
-				(tail -1i32) (count -1i32) (vector data) (vector_count count) (vector_offset offset)
+				(tail -1i32) (count -1i32) (vector data) (vector_count count) (vector_offset offset) (long_double_typedef (bool false))
 				(start (struct:get clause start)) (end (struct:get clause end)) (error 0u32)))))
 
 	(fn read_owner_drop
@@ -221,7 +222,7 @@
 							(bool:not (call is_native_name (borrow-shared source) tail_name)))
 						(then (return (call owner_read -1i32 -1i32 (bool false) tail_name 23u32))))
 					(return (struct:new COwnerRead (native -1i32) (drop -1i32) (storage (bool true))
-						(tail tail) (count count) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
+						(tail tail) (count count) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (long_double_typedef (bool false))
 						(start (struct:get drop start)) (end (struct:get drop end)) (error 0u32)))))
 			(if
 				(:doc "The contract starts with a single destructor clause.")
@@ -324,7 +325,7 @@
 									(set index (struct:get directive next_sibling))))))
 					(set metadata (call next_form_metadata (borrow-shared source) (borrow-shared nodes) parts entry))))
 			(return (struct:new COwnerRead (native -1i32) (drop drop) (storage storage)
-				(tail tail) (count count) (vector vector) (vector_count vector_count) (vector_offset vector_offset)
+				(tail tail) (count count) (vector vector) (vector_count vector_count) (vector_offset vector_offset) (long_double_typedef (bool false))
 				(start (struct:get site start)) (end (struct:get site end)) (error 0u32)))))
 
 	(fn read_c_type_form
@@ -346,7 +347,7 @@
 				(:doc "Selection belongs to the enclosing declaration. Keep the directive's own span.")
 				(u32:gtz (struct:get choice error))
 				(then (return (struct:new COwnerRead (native -1i32) (drop -1i32) (storage (bool false))
-					(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
+					(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32) (long_double_typedef (bool false))
 					(start (struct:get choice start)) (end (struct:get choice end))
 					(error (struct:get choice error))))))
 			(let value (array:get nodes literal))
@@ -382,6 +383,14 @@
 				(i32:ltz name_index)
 				(then (return (call owner_read -1i32 -1i32 (bool false) node 23u32))))
 			(let name (array:get nodes name_index))
+			(let floating (call read_c_long_double (borrow-shared source) (borrow-shared nodes) parts))
+			(if
+				(:doc "Keep an invalid floating typedef directive at its original span.")
+				(u32:gtz (struct:get floating error))
+				(then (return (struct:new COwnerRead (native -1i32) (drop -1i32) (storage (bool false))
+					(tail -1i32) (count -1i32) (vector -1i32) (vector_count -1i32) (vector_offset -1i32)
+					(long_double_typedef (bool false)) (start (struct:get floating start))
+					(end (struct:get floating end)) (error (struct:get floating error))))))
 			(let drop (call owner_destructor (borrow-shared source) (borrow-shared nodes) parts name))
 			(if (u32:gtz (struct:get drop error)) (then (return drop)))
 			(let native (call read_c_type_literal (borrow-shared source) (borrow-shared nodes) name (struct:get parts operands)))
@@ -390,7 +399,7 @@
 				(drop (struct:get drop drop)) (storage (struct:get drop storage))
 				(tail (struct:get drop tail)) (count (struct:get drop count))
 				(vector (struct:get drop vector)) (vector_count (struct:get drop vector_count))
-				(vector_offset (struct:get drop vector_offset))
+				(vector_offset (struct:get drop vector_offset)) (long_double_typedef (struct:get floating present))
 				(start (struct:get node start)) (end (struct:get node end)) (error 0u32)))))
 
 	(fn is_c_storage_type
@@ -499,6 +508,24 @@
 			(return (bool:and (u32:eqz (struct:get value error))
 				(call is_long_double_spelling (borrow-shared (array:range decoded 0i32 (struct:get value written))))))))
 
+	(fn c_type_is_long_double
+		(:doc "Classify both the intrinsic spelling and the checked header-defined alias as floating values.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (read COwnerRead))
+		(returns bool)
+		(body
+			(let literal (array:get nodes (struct:get read native)))
+			(return (bool:or (struct:get read long_double_typedef)
+				(call is_c_long_double (borrow-shared source) (struct:get literal start) (struct:get literal end))))))
+
+	(fn is_typedef_identifier
+		(:doc "Allow one ordinary C identifier with surrounding horizontal whitespace.")
+		(params (text (shared-array u8))) (returns bool)
+		(body
+			(let first (call skip_whitespace (borrow-shared text) 0i32))
+			(let end (call c_type_word_end (borrow-shared text) first))
+			(return (bool:and (i32:eq (call skip_whitespace (borrow-shared text) end) (array:len text))
+				(call is_c_identifier (borrow-shared text) first end)))))
+
 	(fn check_c_type_spelling
 		(:doc `Check the spelling of a value or pointer representation before emitting it.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (read COwnerRead))
@@ -518,6 +545,12 @@
 				(then (return (call owner_read -1i32 -1i32 (bool false) literal 23u32))))
 			(let length (struct:get value written))
 			(let owned (i32:lt -1i32 (struct:get read drop)))
+			(if
+				(:doc "A floating typedef represents an unowned value named by one C identifier.")
+				(bool:and (struct:get read long_double_typedef)
+					(bool:or (bool:or owned (struct:get read storage))
+						(bool:not (call is_typedef_identifier (borrow-shared (array:range decoded 0i32 length))))))
+				(then (return (call owner_read -1i32 -1i32 (bool false) literal 23u32))))
 			(let valid (bool:or
 				(bool:and (bool:or (bool:not owned) (struct:get read storage))
 					(call is_c_type_words (borrow-shared (array:range decoded 0i32 length))))

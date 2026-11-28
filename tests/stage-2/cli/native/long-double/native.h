@@ -8,6 +8,7 @@
 #include <float.h>
 
 #define NATIVE_DOUBLE_EXPRESSION ((double)0.5)
+#define NATIVE_LONG_EXPRESSION (1.0L + LDBL_EPSILON)
 
 typedef struct {
 	long double value;
@@ -17,6 +18,12 @@ typedef struct {
 static inline long double native_long_roundtrip(long double value)
 {
 	return value;
+}
+
+/* Read the original value through a writable native reference. */
+static inline long double native_long_read(long double *value)
+{
+	return *value;
 }
 
 /* Return the first long double after one under round-to-nearest. */

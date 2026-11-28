@@ -53,4 +53,19 @@ static inline bool fixture_check_alignment(const max_align_t *value)
 	return (uintptr_t)value % _Alignof(max_align_t) == 0;
 }
 #endif
+#if defined(__APPLE__)
+#include <float.h>
+
+// Return a value whose increment needs the target's full long double precision.
+static inline max_align_t fixture_max_align_value(void)
+{
+	return 1.0L + LDBL_EPSILON;
+}
+
+// Compare the value in the header's native floating ABI.
+static inline bool fixture_max_align_matches(max_align_t value)
+{
+	return value == 1.0L + LDBL_EPSILON;
+}
+#endif
 #endif
