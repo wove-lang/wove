@@ -19,7 +19,7 @@
 		(only c_value_mode c_checked_string_mode c_raw_string_mode c_bytes_mode is_c_value_mode is_c_bytes_mode
 			c_null_mode is_c_null_mode c_nullable_mode is_c_nullable_mode accepts_c_null is_c_string_mode c_vector_mode is_c_vector_mode c_array_mode is_c_array_mode is_c_extent_mode c_storage_init_mode is_c_storage_init_mode c_handle_init_mode is_c_handle_init_mode is_c_init_mode (value c_open_variadic_tail) (value c_void_pointer_mode) (value c_shared_handle_slot_mode) (value c_storage_init_always_mode) (value c_nullable_native_reference_mode)
 			c_storage_shared_mode (value c_nullable_storage_shared_mode)
-			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode) (value c_nullable_sync_callback_mode) is_c_sync_callback_mode))
+			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_string_offset_mode) (value c_nullable_string_mode) (value c_static_string_mode) (value c_sync_callback_mode) (value c_nullable_sync_callback_mode) is_c_sync_callback_mode))
 
 	(struct CArgument (fields (mode u8) (size i32) (count i32) (integer bool) (scalar_ref u32) (nullable_reference bool) (owner_mode u8) (nullable bool)))
 	(struct CArguments (fields (strings i32) (vectors bool) (extents i32) (nulls i32) (initializers i32) (handle_out bool) (void_pointer bool) (macro bool) (variadic i32) (start i32) (end i32) (error u32)))
@@ -38,6 +38,7 @@
 	(let init_directive "c_init")
 	(let init_always_directive "c_init_always")
 	(let owner_out_directive "c_owner_out")
+	(let string_offset_directive "c_cstr_offset")
 	(let macro_directive "c_macro")
 	(let variadic_directive "c_variadic")
 	(let open_tail "...")
@@ -361,7 +362,7 @@
 				(:doc "The final contract table records vectors, initializers, and void pointers.")
 				(bool.or (bool.or (u8.eq mode c_void_pointer_mode) (u8.eq mode c_shared_handle_slot_mode))
 					(bool.or (bool.or (call is_c_init_mode mode) (call is_c_vector_mode mode))
-						(u8.eq mode c_owner_marker_flag_mode)))
+						(bool.or (u8.eq mode c_owner_marker_flag_mode) (u8.eq mode c_string_offset_mode))))
 				(then (return (call checked_c_arguments 0i32 0i32 0i32 (bool false) 0i32))))
 			(return (call checked_c_arguments 1i32 0i32 0i32 (bool false) 0i32))))
 
@@ -626,6 +627,49 @@
 			(return (call reserve_c_argument (borrow-mut contracts) flag
 				c_owner_marker_flag_mode -1i32 output_position))))
 
+	(fn read_c_string_offset
+		(:doc "Bind a mutable Wove offset place to the named shared byte string.")
+		(:expect (tests "stage-2/cli/native/cstr-offsets/cases.tsv") (issues "gh:wove-lang/wove:742"))
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32)
+			(directive SourceNode) (begin i32) (contracts (mut-array CArgument))) (returns CArguments)
+		(body
+			(if (i32.ltz begin) (then (return (call c_argument_error_at directive))))
+			(let output_name (array.load nodes begin))
+			(let input_index (struct.get output_name next_sibling))
+			(if (i32.ltz input_index) (then (return (call c_argument_error_at directive))))
+			(let input_name (array.load nodes input_index))
+			(if
+				(:doc "The directive names exactly one output and one input.")
+				(i32.not-ltz (struct.get input_name next_sibling))
+				(then (return (call c_argument_error_at directive))))
+			(let output (call find_named_c_formal (borrow-shared source) (borrow-shared nodes)
+				first output_name))
+			(let output_node (struct.get output type_node))
+			(if (i32.ltz output_node) (then (return (call c_argument_error_at output_name))))
+			(let output_type (array.load nodes output_node))
+			(let parts (call form_parts (borrow-shared source) (borrow-shared nodes) output_type))
+			(let target (struct.get parts operands))
+			(if
+				(:doc "The output lends an exclusive, exact i32 place for a Wove slice offset.")
+				(bool.or (u32.not-eq (call reference_mode (borrow-shared source) (borrow-shared nodes)
+					(struct.get parts head)) 2u32)
+					(bool.or (i32.ltz target)
+						(u32.not-eq (call source_builtin_type (borrow-shared source)
+							(array.load nodes target)) 5u32)))
+				(then (return (call c_argument_error_at output_type))))
+			(let input (call find_named_c_formal (borrow-shared source) (borrow-shared nodes)
+				first input_name))
+			(let input_node (struct.get input type_node))
+			(if (i32.ltz input_node) (then (return (call c_argument_error_at input_name))))
+			(let input_type (array.load nodes input_node))
+			(if
+				(:doc "The source must be an immutable byte view whose prepared copy lives through the call.")
+				(u32.not-eq (call c_byte_slice_type (borrow-shared source) (borrow-shared nodes)
+					input_type (bool false)) 34u32)
+				(then (return (call c_argument_error_at input_type))))
+			(return (call reserve_c_argument (borrow-mut contracts) output
+				c_string_offset_mode -1i32 (struct.get input position)))))
+
 	(fn read_c_directive
 		(:doc `Dispatch the recognized argument directives in the checked pragma stream.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (first i32)
@@ -667,6 +711,11 @@
 				(:doc "An opaque sentinel output binds two Wove formals and one native name.")
 				(call matches_pragma (borrow-shared source) name (borrow-shared owner_out_directive))
 				(then (return (call read_c_owner_out (borrow-shared source) (borrow-shared nodes)
+					first node begin (borrow-mut contracts)))))
+			(if
+				(:doc "A C string offset links an output place to its converted input.")
+				(call matches_pragma (borrow-shared source) name (borrow-shared string_offset_directive))
+				(then (return (call read_c_string_offset (borrow-shared source) (borrow-shared nodes)
 					first node begin (borrow-mut contracts)))))
 			(let mode (call c_argument_directive (borrow-shared source) name))
 			(if
@@ -789,6 +838,17 @@
 					(let slot (array.load contracts index))
 					(let-mut mode (struct.get slot mode))
 					(let count (struct.get slot count))
+					(if
+						(:doc "Resolve the offset's source after all pragmas have bound, regardless of their order.")
+						(u8.eq mode c_string_offset_mode)
+						(then
+							(let input (array.load contracts count))
+							(if
+								(:doc "A fixed native function must write an offset into a checked, present input copy.")
+								(bool.or (bool.or (struct.get slot nullable) (struct.get input nullable))
+									(bool.or (u8.not-eq (struct.get input mode) (call c_checked_string_mode))
+										(bool.or (struct.get arguments macro) (i32.not-eqz (struct.get arguments variadic)))))
+								(then (return (call c_argument_error_at type))))))
 					(if
 						(:doc "An in-out array count always passes a concrete typed pointer. Check this after all adaptations have bound.")
 						(bool.and (call is_c_array_mode mode) (i32.not-ltz count))
