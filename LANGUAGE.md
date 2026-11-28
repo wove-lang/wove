@@ -1324,7 +1324,9 @@ that edits the bytes must stay within the buffer and keep a NUL terminator.
 Concurrent native access to the lvalue or the bytes requires synchronization.
 
 A native record field written `(name (array char 255))` describes the
-header's exact inline plain C `char[255]` member. Use `array:len`,
+header's exact inline plain C `char[255]` member. A field written
+`(bytes (array u8 16))` describes an exact native `uint8_t[16]` member.
+Use `array:len`,
 `array:get`, and `array:set` directly on `(struct:get record name)`.
 A store needs a mutable record. Loads and stores check the index and read or
 write `u8` byte representations in the original record. A native build checks
