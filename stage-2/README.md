@@ -216,8 +216,8 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `e` | Aggregate drop helper | Concrete layout key extended by the drop role | Type name for named layouts, empty for fixed arrays | Cleanup and runtime macro arguments use the exact layout. |
 | `h` | Heap-owned aggregate slot | Concrete layout key extended by the heap slot role | Type name for named layouts, empty for fixed arrays | Allocation, access, and worker collection use the same slot type. |
 | `o` | Erased heap slot destructor | Concrete layout key extended by the slot destructor role | Type name for named layouts, empty for fixed arrays | The slot definition, allocation, replacement, and worker collection share the callback name. |
-| `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
-| `i` | Fixed-array inline occupancy slot | Interned fixed-array layout key extended by the slot role | Empty | The slot definition, inline elements, and zero-extent alignment use the same name. |
+| `v` | Fixed array typedef | Structural fingerprint of exact element type and extent | Empty | The common header and every user share the resolved layout and collision rank. |
+| `i` | Fixed-array inline occupancy slot | Structural fixed-array key extended by the slot role | Empty | The slot definition, inline elements, and zero-extent alignment use the same name. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
 | `m` | Named record field | Concrete layout fingerprint extended by the member role and exact field spelling | Field name | Within its C struct. Definitions, designators, accesses, and cleanup use the same key. |
 | `m` | Enum payload member | Concrete enum fingerprint extended by the member role and exact variant spelling | Variant name | Within its C union. Tags retain their declaration ordinals. |
@@ -237,13 +237,17 @@ reuses the defining name and collision rank. The FNV-1a role step is reversible,
 so equal adapter spellings have the same collision group as their owners.
 Aggregate take and drop helpers continue the concrete layout key with their
 own role and use the same suffix and collision rank as the layout. A fixed
-array keeps its interned layout key and empty suffix. Erased worker drop
-wrappers continue the same layout key with `z` and pass their name explicitly
-to the C definition macro. Heap slots and their erased destructors use
+array hashes its checked extent and exact element category, including owner
+layers, nested fixed layouts, and nominal specializations. A native integer
+leaf uses the defining file, bridge header, and original alias name. Equal
+types share an interned layout. Equal fingerprints for distinct shapes use
+collision ranks ordered by extent and the exact resolved element key.
+Erased worker drop wrappers continue the same layout key with `z` and pass
+their name explicitly to the C definition macro. Heap slots and their erased destructors use
 separate roles with the same layout suffix and rank. Calls pass the erased
 destructor explicitly when they install it on an array or replace a slot.
-Fixed inline slots continue the interned array key with `i` and have an
-empty suffix. Occupancy checks use the corresponding type name.
+Fixed inline slots continue the structural array key with `i` and use the
+same rank and empty suffix. Occupancy checks use the corresponding type name.
 Native callback adapters keep separate keys per actual, including repeated
 calls to the same target. Exact owners and argument rows determine the slot
 for a genuine C spelling collision.
