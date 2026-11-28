@@ -1,7 +1,7 @@
 # Copyright (c) 2026 wove contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-"""Pass build inputs to the shared Wove C emitter."""
+"""Pass standalone fixture inputs to the Wove source probe."""
 
 from argparse import ArgumentParser
 import platform
@@ -22,20 +22,17 @@ def native_target():
 	return os_name, arch, "-"
 
 
-# Supply the ordered sources and assets to the seed-built native emitter.
-def emit_native(probe, version, paths, assets, private_helpers=False, root=Path("."), target=None):
-	files = [(index, "/" + name, str(root / name)) for index, name in enumerate(paths)]
+# Supply the ordered fixture sources and assets to the native emitter.
+def emit_native(probe, paths, assets, private_helpers):
+	files = [(index, "/" + name, name) for index, name in enumerate(paths)]
 	rows = [str(field) for entry in files for field in entry]
 	command = "--emit-private-graph" if private_helpers else "--emit-graph"
 	capacity = max(4194304, 4 * sum(Path(source).stat().st_size for _, _, source in files))
-	invocation = [probe, "--mode", "native", "--target", *(target or native_target()), command,
+	invocation = [probe, "--mode", "native", "--target", *native_target(), command,
 		"0", "auto:8192", str(capacity), *rows]
-	# The version keeps its virtual path even when Make uses a separate build directory.
-	if version is not None:
-		invocation.extend(("--asset", "/build/version.txt", version))
 	# Give assets the virtual paths their Wove embeds resolve against.
 	for asset in assets:
-		invocation.extend(("--asset", "/" + asset, str(root / asset)))
+		invocation.extend(("--asset", "/" + asset, asset))
 	result = subprocess.run(invocation, capture_output=True)
 	header, separator, source = result.stdout.partition(b"\n")
 	# Keep a graph failure at its repository-relative source path.
@@ -78,7 +75,7 @@ def main():
 	# Propagate the native emitter's source diagnostics without publishing failed dependencies.
 	try:
 		sources, assets, dependencies = fixture_inputs(Path("."), args.entry)
-		status = emit_native(args.probe, None, sources, assets, args.private_helpers)
+		status = emit_native(args.probe, sources, assets, args.private_helpers)
 		# Make stages the C and dependencies until the complete invocation has succeeded.
 		if status == 0:
 			write_make_deps(args.make_deps, dependencies)
@@ -90,6 +87,6 @@ def main():
 	return 1
 
 
-# Keep the fixed bootstrap's import of the emitter free of command-line parsing.
+# Emit a standalone fixture when invoked by its Make recipe.
 if __name__ == "__main__":
 	sys.exit(main())

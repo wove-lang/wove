@@ -5,9 +5,9 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Stage 1 seed
 
-The Python seed lowers the [subset](../stage-2/LANGUAGE-SUBSET.md) used by
-the shared Wove graph checker and C emitter. The build then uses that emitter
-to compile [`stage-2/wovec.wove`](../stage-2/wovec.wove) and its imports.
+The Python seed directly lowers [`stage-2/wovec.wove`](../stage-2/wovec.wove)
+and its imports to C. It supports the [subset](../stage-2/LANGUAGE-SUBSET.md)
+needed by the compiler sources.
 
 ```sh
 make stage-1

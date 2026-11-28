@@ -393,11 +393,10 @@ test-stage-1: stage-1 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TE
 	$(PYTHON) "$(OWNERSHIP_TESTS)/check_strings.py" "$(OWNERSHIP_TESTS)/strings.tsv"
 	sh "$(OWNERSHIP_TESTS)/check_includes.sh" "$(STAGE1)/imports.c_headers.c" "$(OWNERSHIP_TESTS)/imports/c_headers/includes.txt"
 
-# Build the compiler from its ordinary entry with the seed-built Wove emitter.
-$(STAGE1)/wovec.c: export WOVE_BUILD_CLANG = $(CLANG) -std=c11 $(CFLAGS)
-$(STAGE1)/wovec.c: $(SOURCE_SCAN) $(SELF_HOST_SOURCE)/.ready stage-1/build.py $(SEED_EMIT_SOURCES) stage-1/target.py $(BUILD_CLANG) $(BUILD_VERSION) force-build-info
+# Lower the ordinary compiler entry directly with the Python seed.
+$(STAGE1)/wovec.c: $(SELF_HOST_SOURCE)/.ready $(SEED) $(BUILD_VERSION) force-build-info
 	$(call build_versioned,mkdir -p "$(@D)"; c_output="$@.tmp.$$$$"; \
-		trap 'rm -f "$$c_output"' 0; WOVE_BUILD_DIR="$(abspath $(BUILD_DIR))" $(PYTHON) stage-1/build.py > "$$c_output"; \
+		trap 'rm -f "$$c_output"' 0; WOVE_SEED_SOURCE="$(abspath $(SELF_HOST_SOURCE))" $(SEED_COMPILER) > "$$c_output"; \
 		mv "$$c_output" "$@")
 
 # Publish the generated pair after the seed has resolved and emitted its graph.

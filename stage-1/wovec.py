@@ -1,7 +1,7 @@
 # Copyright (c) 2026 wove contributors
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-"""Emit C11 for a Stage 1 root and its local imports."""
+"""Emit C11 for the compiler entry or a standalone seed fixture."""
 
 import os
 from pathlib import Path
@@ -20,29 +20,34 @@ ROOT = Path(__file__).resolve().parents[1]
 def main() -> int:
 	arguments = sys.argv[1:]
 	imports = None
+	root = ROOT
+	# The build supplies only the source snapshot root and uses the fixed entry.
+	if not arguments:
+		root = Path(os.environ.get("WOVE_SEED_SOURCE", ROOT))
+		filename = os.path.relpath(root / COMPILER_ENTRY)
 	# Make requests a dependency sidecar from the same successful compilation.
-	if len(arguments) == 3 and arguments[0] == "--make-deps":
+	elif len(arguments) == 3 and arguments[0] == "--make-deps":
 		_, destination, filename = arguments
 		imports = {}
 	# The invocation names the executable root of the source graph.
 	elif len(arguments) == 1:
 		filename, = arguments
 	else:
-		print("usage: wovec.py [--make-deps FILE] SOURCE", file=sys.stderr)
+		print("usage: wovec.py [[--make-deps FILE] SOURCE]", file=sys.stderr)
 		return 1
 	# Buffer the translation so a rejected source emits no C.
 	try:
 		path = Path(filename)
 		bridge_files = ()
 		# The fixed compiler build supplies the same bridge inventory as the native emitter.
-		if path.resolve() == ROOT / COMPILER_ENTRY:
-			inventory, providers = bundled_provider_inputs(ROOT)
-			bridge_files = tuple(str(ROOT / provider) if path.is_absolute() else os.path.relpath(ROOT / provider)
+		if path.resolve() == root.resolve() / COMPILER_ENTRY:
+			inventory, providers = bundled_provider_inputs(root)
+			bridge_files = tuple(str(root / provider) if path.is_absolute() else os.path.relpath(root / provider)
 				for provider in providers)
 			# An edit to the inventory changes the declarations available to the seed.
 			if imports is not None:
 				for source in inventory:
-					imports[str(ROOT / source) if path.is_absolute() else os.path.relpath(ROOT / source)] = None
+					imports[str(root / source) if path.is_absolute() else os.path.relpath(root / source)] = None
 		output = compile_source(path.read_text(encoding="utf-8"), filename, imports=imports, bridge_files=bridge_files)
 		# A failed graph never replaces the previous dependency inventory.
 		if imports is not None:
