@@ -78,7 +78,9 @@ SOURCE_PROBE_C := $(dir $(SOURCE_SCAN))source_scan.c
 SEED_UTILITY_PROGRAMS := $(HASHING_PROGRAMS) $(JSON_PROGRAMS) $(CLI_PROGRAMS) $(DIAGNOSTIC_PROGRAM)
 SEED_UTILITY_C := $(addsuffix .c,$(SEED_UTILITY_PROGRAMS) $(CONFIG_PROGRAM) $(COMMAND_PROGRAM))
 NATIVE_FIXTURE_C := $(addsuffix .c,$(TEST_RUNNER) $(AST_LIVE) $(HASHING_NATIVE_PROGRAMS) $(BLAKE2B_PROBE))
-SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py stage-1/make_deps.py
+SEED_TARGET := stage-1/target.py tools/run-build-clang.sh
+SEED := stage-1/wovec.py stage-1/syntax.py stage-1/compiler.py stage-1/make_deps.py $(SEED_TARGET)
+SEED_COMPILER = WOVE_BUILD_CLANG="$(CLANG) -std=c11 $(CFLAGS)" $(PYTHON) stage-1/wovec.py
 SEED_EMIT := stage-1/emit.py
 SEED_EMIT_SOURCES := $(SEED_EMIT) stage-1/inputs.py stage-1/syntax.py stage-1/make_deps.py
 NATIVE_FIXTURE_TOOLS := $(SOURCE_SCAN) $(SEED_EMIT_SOURCES)
@@ -381,7 +383,7 @@ test-stage-1: stage-1 $(STAGE1)/runtime.cstr_cleanup $(addprefix $(STAGE1)/,$(TE
 
 # Build the compiler from its ordinary entry with the seed-built Wove emitter.
 $(STAGE1)/wovec.c: export WOVE_BUILD_CLANG = $(CLANG) -std=c11 $(CFLAGS)
-$(STAGE1)/wovec.c: $(SOURCE_SCAN) $(SELF_HOST_SOURCE)/.ready stage-1/build.py $(SEED_EMIT_SOURCES) $(BUILD_CLANG) $(BUILD_VERSION) force-build-info
+$(STAGE1)/wovec.c: $(SOURCE_SCAN) $(SELF_HOST_SOURCE)/.ready stage-1/build.py $(SEED_EMIT_SOURCES) stage-1/target.py $(BUILD_CLANG) $(BUILD_VERSION) force-build-info
 	$(call build_versioned,mkdir -p "$(@D)"; c_output="$@.tmp.$$$$"; \
 		trap 'rm -f "$$c_output"' 0; WOVE_BUILD_DIR="$(abspath $(BUILD_DIR))" $(PYTHON) stage-1/build.py > "$$c_output"; \
 		mv "$$c_output" "$@")
@@ -398,10 +400,10 @@ mv "$$c_output" "$@"
 endef
 
 $(SOURCE_PROBE_C): $(SOURCE_PROBE_ROOT) $(SEED)
-	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
+	$(call emit_seed_graph,$(SEED_COMPILER))
 
 $(SEED_UTILITY_C): $(STAGE2)/%.c: tests/stage-2/%.wove $(SEED)
-	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
+	$(call emit_seed_graph,$(SEED_COMPILER))
 
 # Include the resolved inputs. A missing sidecar forces regeneration, and its timestamp is irrelevant.
 .PHONY: force-seed-deps
@@ -488,18 +490,18 @@ $(COMMAND_PROGRAM): $(CLI_FIXTURES)/command.probe.c $(COMMAND_PROGRAM).c $(STAGE
 
 # Discover the standalone probe's imports with the Python seed.
 $(AST_PROBE).c: $(AST_FIXTURES)/probe.wove $(SEED)
-	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
+	$(call emit_seed_graph,$(SEED_COMPILER))
 
 $(AST_PROBE): $(AST_FIXTURES)/probe.probe.c $(AST_PROBE).c $(STAGE1)/runtime.o
 	$(CLANG) -std=c11 $(CFLAGS) -I runtime -I "$(@D)" "$<" "$(STAGE1)/runtime.o" -o "$@"
 
 # Manifest-driven Stage 1 fixtures use the same successful-build sidecar rule.
 $(STAGE1_FIXTURE_C): $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
-	$(call emit_seed_graph,$(PYTHON) stage-1/wovec.py)
+	$(call emit_seed_graph,$(SEED_COMPILER))
 
 $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 	mkdir -p "$(@D)"
-	$(PYTHON) stage-1/wovec.py "$<" > "$@"
+	$(SEED_COMPILER) "$<" > "$@"
 
 # The seed reports Wove imports. Keep the project C include inputs explicit.
 C_HEADER_PROJECT_HEADERS := $(addprefix $(OWNERSHIP_TESTS)/imports/c_headers/,project.h link lookup.h tree/lookup.h tree/leaf/value.h)
