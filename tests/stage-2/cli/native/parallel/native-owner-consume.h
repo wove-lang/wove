@@ -8,6 +8,10 @@
 #include "ast-growth.h"
 #endif
 
+#if defined(WOVE_AST_WORKSPACE)
+#include "ast-workspace.h"
+#endif
+
 typedef struct fixture_resource *fixture_resource_handle;
 
 fixture_resource_handle fixture_open_resource(int status);
