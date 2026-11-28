@@ -184,6 +184,14 @@ class Binding:
 	writable: bool = False
 
 
+@dataclass
+class LoopScope:
+	depth: int
+	incoming: set[Binding]
+	break_moved: set[Binding] = field(default_factory=set)
+	found_break: bool = False
+
+
 @dataclass(frozen=True)
 class ModuleValue:
 	binding: Binding
@@ -648,6 +656,7 @@ class FunctionEmitter:
 		self.next_value = len(function.params)
 		self.moved: set[Binding] = set()
 		self.loans: list[tuple[Binding, str]] = []
+		self.loops: list[LoopScope] = []
 
 	# Indent generated statements at the current lexical scope.
 	def emit_line(self, line: str) -> None:
@@ -1370,17 +1379,16 @@ class FunctionEmitter:
 			continues = self.statement(node)
 		return continues
 
-	# Enter a scope and release local loans and owners when it exits.
-	def block(self, node: Form, test: Node | None = None) -> bool:
+	# Enter a scope for an ordinary conditional arm.
+	def block(self, node: Form) -> bool:
 		self.scopes.append({})
-		loan_checkpoint = len(self.loans)
-		# Lower the loop's condition inside the C loop so it runs each iteration.
-		if test is not None:
-			condition = self.typed(test, BOOL)
-			self.emit_line(f"if (!{condition.c}) {{ break; }}")
+		return self.scoped_statements(node, len(self.loans))
+
+	# Release the current scope's loans and owners on normal fallthrough.
+	def scoped_statements(self, node: Form, loan_checkpoint: int) -> bool:
 		continues = self.statements(node.operands)
 		del self.loans[loan_checkpoint:]
-		# A return has already dropped the locals in this block.
+		# A terminating statement has already dropped the locals in this block.
 		if continues:
 			self.cleanup(self.scopes[-1:])
 		scope = self.scopes.pop()
@@ -1417,17 +1425,104 @@ class FunctionEmitter:
 		return then_continues or else_continues
 
 	# Emit a pre-test loop with one body scope per iteration.
-	def loop(self, node: Form) -> None:
+	def loop(self, node: Form) -> bool:
 		test, body_node = form(node, arity=2).operands
 		body = checked_form(body_node, "body")
-		incoming = self.moved.copy()
+		checkpoint = len(self.loans)
+		loop = LoopScope(len(self.scopes), self.moved.copy())
+		self.loops.append(loop)
 		self.emit_line("while (true) {")
-		continues = self.block(body, test)
+		self.scopes.append({})
+		condition = self.typed(test, BOOL)
+		exit_moved = self.moved.copy()
+		# A literal true loop reaches its successor only by an explicit break.
+		if condition.c != "true":
+			self.emit_line(f"if (!{condition.c}) {{ break; }}")
+		continues = self.scoped_statements(body, checkpoint)
+		self.finish_loop(node, continues, exit_moved)
+		return condition.c != "true" or loop.found_break
+
+	# Check the back edge and expose moves from paths that exit a loop.
+	def finish_loop(self, node: Form, continues: bool, exit_moved: set[Binding]) -> None:
+		loop = self.loops.pop()
 		# Outer owners available at entry must survive every path back to the test.
-		if continues and self.moved - incoming:
+		if continues and self.moved - loop.incoming:
 			raise SourceError(node.line)
-		self.moved = incoming
+		self.moved = exit_moved | loop.break_moved
 		self.emit_line("}")
+
+	# Emit a half-open range or a shared array iteration with one fixed input.
+	def for_loop(self, node: Form) -> None:
+		binder, iterator, body_node = form(node, arity=3).operands
+		pattern = checked_form(binder, "let", 0)
+		names = tuple(identifier(name) for name in pattern.names)
+		body = checked_form(body_node, "body")
+		source = checked_form(iterator)
+		checkpoint = len(self.loans)
+		# The range endpoints evaluate once, before the loop's binding exists.
+		if source.tag == "range":
+			start_node, end_node = form(source, arity=2).operands
+			start = self.expression(start_node)
+			# Range iteration needs one name and an exact integer width.
+			if len(names) != 1 or start.kind not in (I32, U64):
+				raise SourceError(source.line)
+			end = self.typed(end_node, start.kind)
+			view = None
+		# A shared source stays borrowed until every iteration completes.
+		else:
+			target, = checked_form(source, "borrow-shared", 1).operands
+			_, value = self.project(target, named=True)
+			# Indexed iteration introduces a separate name for the current row.
+			if not isinstance(value.kind, (BufferType, FixedArrayType)) or len(set(names)) != len(names):
+				raise SourceError(source.line)
+			view = self.borrow(source, BufferType(SHARED, value.kind.element))
+			start = Value(I32, "0")
+			end = Value(I32, f"{view.c}.wvrt_length")
+		index = self.value_slot(start.kind)
+		self.emit_line(f"for ({c_type(index.kind)} {index.c} = {start.c}; {index.c} < {end.c}; ++{index.c}) {{")
+		loop = LoopScope(len(self.scopes), self.moved.copy())
+		self.loops.append(loop)
+		scope = {}
+		self.scopes.append(scope)
+		# A range binds the cursor, and an indexed view binds it before the row.
+		if view is None or len(names) == 2:
+			scope[names[0]] = Binding(index)
+		# Copy a row or borrow an owned byte row without moving it.
+		if view is not None:
+			fields = view.c + "."
+			element = view.kind.element
+			# The seed's owned row layout provides a checked borrowed byte descriptor.
+			if element == _OWNED_BYTE_ROW:
+				item = self.temporary(_BYTE_VIEW,
+					f"wvrt_array_borrow_row_at_span({view.c}, {index.c}, -1, {node.line}, {node.line})")
+			# Scalar, copyable record and host argv rows are ordinary C values.
+			elif copyable(element) or element == _BYTE_VIEW:
+				item = self.temporary(element, self.typed_element(fields, element, index, node.line))
+			else:
+				raise SourceError(source.line)
+			self.emit_line(f"(void){item.c};")
+			scope[names[-1]] = Binding(item)
+		continues = self.scoped_statements(body, checkpoint)
+		self.finish_loop(node, continues, loop.incoming)
+
+	# Drop all iteration locals before a break or continue crosses their scopes.
+	def loop_exit(self, node: Form) -> None:
+		form(node, arity=0)
+		# An exit must belong to an enclosing loop.
+		if not self.loops:
+			raise SourceError(node.line)
+		loop = self.loops[-1]
+		outer_moved = self.moved.intersection(binding for scope in self.scopes[:loop.depth]
+			for binding in scope.values())
+		# A break contributes its outer ownership state to the loop successor.
+		if node.tag == "break":
+			loop.found_break = True
+			loop.break_moved.update(outer_moved)
+		# A continue must restore owners before returning to the loop header.
+		elif outer_moved - loop.incoming:
+			raise SourceError(node.line)
+		self.cleanup(self.scopes[loop.depth:])
+		self.emit_line(f"{node.tag};")
 
 	# Lower a statement and report whether execution can continue past it.
 	def statement(self, node: Node) -> bool:
@@ -1436,10 +1531,19 @@ class FunctionEmitter:
 		if statement.tag == "if":
 			return self.conditional(statement)
 
-		# A loop may continue past its body when the condition becomes false.
+		# A pre-test loop can fall through when its condition becomes false or it breaks.
 		if statement.tag == "while":
-			self.loop(statement)
+			return self.loop(statement)
+
+		# An empty or exhausted iterator always has a natural exit.
+		if statement.tag == "for":
+			self.for_loop(statement)
 			return True
+
+		# Loop exits terminate only the current statement path.
+		if statement.tag in ("break", "continue"):
+			self.loop_exit(statement)
+			return False
 
 		# Assignment replaces the value in the named mutable slot.
 		if statement.tag == "set":
