@@ -251,6 +251,24 @@ static inline bool fixture_glibc_limit_selectors(FixtureLimitKind ofile, Fixture
 _Static_assert(_Generic(&getiopolicy_np, int (*)(int, int): 1, default: 0), "getiopolicy_np prototype");
 _Static_assert(_Generic(&setiopolicy_np, int (*)(int, int, int): 1, default: 0), "setiopolicy_np prototype");
 
+/* Compare the disk, scope, and policy operands available in earlier Darwin SDKs. */
+static inline bool fixture_iopol_disk_values(int32_t io_type, int32_t process, int32_t thread,
+	int32_t throttle, int32_t passive)
+{
+	return io_type == IOPOL_TYPE_DISK && process == IOPOL_SCOPE_PROCESS && thread == IOPOL_SCOPE_THREAD
+		&& throttle == IOPOL_THROTTLE && passive == IOPOL_PASSIVE;
+}
+
+/* Check the observed policy with a separate C call at the same type and scope. */
+static inline bool fixture_iopol_matches(int32_t io_type, int32_t scope, int32_t observed)
+{
+	errno = 0;
+	const int native = getiopolicy_np(io_type, scope);
+	return errno == 0 && native == observed;
+}
+#endif
+
+#ifdef WOVE_TEST_IOPOL_ALL
 /* Compare each Wove constant with its live SDK expression in declaration order. */
 static inline bool fixture_iopol_value(int32_t index, int32_t value)
 {
@@ -308,14 +326,6 @@ static inline bool fixture_iopol_value(int32_t index, int32_t value)
 	};
 	return index >= 0 && (size_t)index < sizeof(expected) / sizeof(expected[0])
 		&& expected[index] == value;
-}
-
-/* Check the observed policy with a separate C call at the same type and scope. */
-static inline bool fixture_iopol_matches(int32_t io_type, int32_t scope, int32_t observed)
-{
-	errno = 0;
-	const int native = getiopolicy_np(io_type, scope);
-	return errno == 0 && native == observed;
 }
 #endif
 
