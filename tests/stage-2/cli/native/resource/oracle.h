@@ -4,17 +4,21 @@
 #ifndef WOVE_TEST_RESOURCE_ORACLE_H
 #define WOVE_TEST_RESOURCE_ORACLE_H
 
+#include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 #if defined(__APPLE__)
 typedef int FixtureWho;
+typedef int FixturePriorityWhich;
 typedef int FixtureMicros;
 #else
 typedef __rusage_who_t FixtureWho;
+typedef __priority_which_t FixturePriorityWhich;
 typedef long FixtureMicros;
 #endif
 
@@ -98,5 +102,54 @@ static inline bool fixture_counter_value(int32_t index, long value)
 {
 	return value == LONG_MAX - index;
 }
+
+_Static_assert(_Generic((id_t)0, uint32_t: 1, default: 0), "priority identifier type");
+_Static_assert(_Generic(&getpriority, int (*)(FixturePriorityWhich, id_t): 1, default: 0),
+	"getpriority prototype");
+_Static_assert(_Generic(&setpriority, int (*)(FixturePriorityWhich, id_t, int): 1, default: 0),
+	"setpriority prototype");
+
+#ifdef TEST_MEMBER
+/* Compare the Wove constant with the native expression selected by the fixture. */
+static inline int32_t fixture_priority_constant(void)
+{
+	return (int32_t)TEST_MEMBER;
+}
+#endif
+
+/* Compare the three portable selectors against definitions from the live header. */
+static inline bool fixture_priority_selectors(FixturePriorityWhich process, FixturePriorityWhich group,
+	FixturePriorityWhich user)
+{
+	return process == PRIO_PROCESS && group == PRIO_PGRP && user == PRIO_USER;
+}
+
+/* Identify only the fixture subprocess for the priority change. */
+static inline id_t fixture_priority_pid(void)
+{
+	return (id_t)getpid();
+}
+
+/* Check the priority as read independently by the native function. */
+static inline bool fixture_priority_matches(id_t id, int32_t expected)
+{
+	errno = 0;
+	const int actual = getpriority(PRIO_PROCESS, id);
+	return errno == 0 && actual == expected;
+}
+
+#ifdef WOVE_TEST_PRIORITY_SENTINEL
+/* Produce both meanings of -1 through the same exact native prototype. */
+static inline int fixture_priority_sentinel(FixturePriorityWhich which, id_t id)
+{
+	/* Keep errno intact on the simulated success path. */
+	if (which != PRIO_PROCESS || id != 0) {
+		errno = EINVAL;
+	}
+	return -1;
+}
+
+#define getpriority fixture_priority_sentinel
+#endif
 
 #endif
