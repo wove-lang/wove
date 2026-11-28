@@ -217,6 +217,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `h` | Heap-owned aggregate slot | Concrete layout key extended by the heap slot role | Type name for named layouts, empty for fixed arrays | Allocation, access, and worker collection use the same slot type. |
 | `o` | Erased heap slot destructor | Concrete layout key extended by the slot destructor role | Type name for named layouts, empty for fixed arrays | The slot definition, allocation, replacement, and worker collection share the callback name. |
 | `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
+| `i` | Fixed-array inline occupancy slot | Interned fixed-array layout key extended by the slot role | Empty | The slot definition, inline elements, and zero-extent alignment use the same name. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
 | `m` | Named record field | Concrete layout fingerprint extended by the member role and exact field spelling | Field name | Within its C struct. Definitions, designators, accesses, and cleanup use the same key. |
 | `m` | Enum payload member | Concrete enum fingerprint extended by the member role and exact variant spelling | Variant name | Within its C union. Tags retain their declaration ordinals. |
@@ -241,7 +242,8 @@ wrappers continue the same layout key with `z` and pass their name explicitly
 to the C definition macro. Heap slots and their erased destructors use
 separate roles with the same layout suffix and rank. Calls pass the erased
 destructor explicitly when they install it on an array or replace a slot.
-Fixed inline slots and occupancy helpers use the corresponding type name.
+Fixed inline slots continue the interned array key with `i` and have an
+empty suffix. Occupancy checks use the corresponding type name.
 Native callback adapters keep separate keys per actual, including repeated
 calls to the same target. Exact owners and argument rows determine the slot
 for a genuine C spelling collision.
