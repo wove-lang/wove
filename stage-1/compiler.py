@@ -8,28 +8,33 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from itertools import repeat
 import os
 from pathlib import Path
 import re
 
 from syntax import IDENTIFIER, WORD, Atom, Form, Node, SourceError, form, identifier, parse
+from target import compiler_target
 
 
 I8 = "i8"
 I32 = "i32"
 U8 = "u8"
 U32 = "u32"
+U64 = "u64"
 BOOL = "bool"
 VOID = "void"
 RUNTIME_INCLUDE = '"wove_runtime.h"'
 HEADER_PATH = re.compile(r"[A-Za-z0-9_./-]+")
 INTEGER_LITERAL = re.compile(r"-?(?:0[xX][0-9a-fA-F]+|[0-9]+)")
 INTEGER_SUFFIX = re.compile(rf"({INTEGER_LITERAL.pattern})([iu][0-9]+)")
+UNSIGNED_LITERAL_MACROS = {U32: "UINT32_C", U64: "UINT64_C"}
 SCALAR_LIMITS = {
 	I8: (-128, 127),
 	I32: (-(2**31), 2**31 - 1),
 	U8: (0, 255),
 	U32: (0, 2**32 - 1),
+	U64: (0, 2**64 - 1),
 }
 SCALAR_TYPES = (*SCALAR_LIMITS, BOOL)
 OWNED = "owned-array"
@@ -40,6 +45,7 @@ C_TYPE = {
 	I32: "int32_t",
 	U8: "uint8_t",
 	U32: "uint32_t",
+	U64: "uint64_t",
 	BOOL: "bool",
 	VOID: "void",
 	OWNED: "wvrt_array *",
@@ -75,6 +81,17 @@ BINARY_OPS = {
 	"u32.and": (U32, U32, "&"),
 	"u32.or": (U32, U32, "|"),
 	"u32.xor": (U32, U32, "^"),
+	"u64.eq": (U64, BOOL, "=="),
+	"u64.not-eq": (U64, BOOL, "!="),
+	"u64.lt": (U64, BOOL, "<"),
+	"u64.not-lt": (U64, BOOL, ">="),
+	"u64.gt": (U64, BOOL, ">"),
+	"u64.add": (U64, U64, "+"),
+	"u64.sub": (U64, U64, "-"),
+	"u64.mul": (U64, U64, "*"),
+	"u64.and": (U64, U64, "&"),
+	"u64.or": (U64, U64, "|"),
+	"u64.xor": (U64, U64, "^"),
 }
 ZERO_PREDICATES = {
 	"eqz": ("eq", False),
@@ -84,10 +101,7 @@ ZERO_PREDICATES = {
 	"gtz": ("lt", True),
 	"not-gtz": ("not-lt", True),
 }
-U32_SHIFT_OPS = {
-	"u32.shl": "<<",
-	"u32.shr": ">>",
-}
+SHIFT_OPS = {"shl": "<<", "shr": ">>"}
 
 
 @dataclass(frozen=True)
@@ -209,7 +223,8 @@ def read_integer_literal(node: Form) -> Value:
 	# Check the declared type before handing the literal to C.
 	if not low <= number <= high:
 		raise SourceError(node.line)
-	spelling = f"UINT32_C({number})" if node.tag == U32 else str(number)
+	macro = UNSIGNED_LITERAL_MACROS.get(node.tag)
+	spelling = str(number) if macro is None else f"{macro}({number})"
 	return Value(node.tag, spelling)
 
 
@@ -230,8 +245,75 @@ def read_fixed_array_type(node: Node) -> FixedArrayType:
 	return FixedArrayType(element, count)
 
 
-# Read an immutable scalar or byte table without evaluating runtime expressions.
-def read_module_value(node: Form, index: int) -> tuple[str, ModuleValue]:
+# Accept the scalar literals available in static array initializers.
+def read_scalar_literal(node: Form) -> Value:
+	# Validate boolean literals independently of integer ranges.
+	if node.tag == BOOL:
+		literal, = form(node, arity=1).operands
+		spelling = identifier(literal)
+		# The boolean domain has two named values.
+		if spelling not in ("true", "false"):
+			raise SourceError(literal.line)
+		return Value(BOOL, spelling)
+	# Static data cannot evaluate arbitrary expressions.
+	if node.tag not in SCALAR_LIMITS:
+		raise SourceError(node.line)
+	return read_integer_literal(node)
+
+
+# Resolve a fixed initializer's shape and element operands before lowering it.
+def fixed_array_initializer(node: Form) -> tuple[FixedArrayType, tuple[Node, ...]]:
+	# The first operand supplies the element type and extent.
+	if not node.operands:
+		raise SourceError(node.line)
+	kind = read_fixed_array_type(node.operands[0])
+	elements = node.operands[1:]
+	expected = kind.count if node.tag == "array.new" else 1
+	# A repetition takes one value, whereas an explicit initializer lists every element.
+	if len(elements) != expected:
+		raise SourceError(node.line)
+	return kind, elements
+
+
+# Emit a portable C initializer for an inline array's backing field.
+def fixed_array_braces(elements: Iterator[str]) -> str:
+	return "{{" + (", ".join(elements) or "0") + "}}"
+
+
+# Track both the spelling used by the source and the resolved file used for reading.
+def track_file(imports: dict[str, None], candidate: Path, target: Path, absolute: bool) -> None:
+	# Use the same checkout-relative spelling as the generated C by default.
+	for dependency in (candidate, target):
+		name = os.path.normpath(dependency) if absolute else os.path.relpath(dependency)
+		imports[name] = None
+
+
+# Load static bytes relative to the declaring Wove file.
+def read_embed(node: Form, filename: str, imports: dict[str, None] | None) -> bytes:
+	operand, = form(node, "embed", 1).operands
+	# An embed takes a quoted path whose final component denotes a file.
+	if not isinstance(operand, Atom) or not operand.quoted or operand.text.rsplit("/", 1)[-1] in ("", ".", ".."):
+		raise SourceError(operand.line)
+	candidate = Path(filename).resolve().parent / operand.text
+	# Resolve aliases for dependency tracking and read binary data without decoding it.
+	try:
+		target = candidate.resolve(strict=True)
+		data = target.read_bytes()
+	except (OSError, RuntimeError, ValueError):
+		raise SourceError(operand.line) from None
+	# Shared views use signed i32 lengths.
+	if len(data) > SCALAR_LIMITS[I32][1]:
+		raise SourceError(operand.line)
+	# Track the asset through the same dependency channel as source imports.
+	if imports is not None:
+		track_file(imports, candidate, target, Path(filename).is_absolute())
+	return data
+
+
+# Read an immutable scalar or array without evaluating runtime expressions.
+def read_module_value(
+	node: Form, index: int, filename: str, imports: dict[str, None] | None
+) -> tuple[str, ModuleValue]:
 	initializer, = form(node, "let", 1).operands
 	name_node, = node.names
 	name = identifier(name_node)
@@ -246,33 +328,50 @@ def read_module_value(node: Form, index: int) -> tuple[str, ModuleValue]:
 		# Slice lengths fit the signed i32 domain.
 		if len(data) > SCALAR_LIMITS[I32][1]:
 			raise SourceError(initializer.line)
-		return name, ModuleValue(Binding(Value(BufferType(SHARED, U8), c_name)), data)
+		return name, ModuleValue(Binding(Value(_BYTE_VIEW, c_name)), data)
 	literal = value_form(initializer)
-	# Only the supported integer literals can initialize a module scalar.
-	if literal.tag not in SCALAR_LIMITS:
-		raise SourceError(initializer.line)
-	value = read_integer_literal(literal)
+	# An embedded asset supplies the same representation as a static byte string.
+	if literal.tag == "embed":
+		data = read_embed(literal, filename, imports)
+		return name, ModuleValue(Binding(Value(_BYTE_VIEW, c_name)), data)
+	# Static inline arrays carry their own element storage.
+	if literal.tag in ("array.new", "array.repeat"):
+		kind, elements = fixed_array_initializer(literal)
+		values = []
+		# Check each literal against the element type before constructing the C initializer.
+		for element in elements:
+			value = read_scalar_literal(value_form(element))
+			# Array initialization does not convert element values.
+			if value.kind != kind.element:
+				raise SourceError(element.line)
+			values.append(value.c)
+		items = iter(values) if literal.tag == "array.new" else repeat(values[0], kind.count)
+		return name, ModuleValue(Binding(Value(kind, c_name)), fixed_array_braces(items))
+	value = read_scalar_literal(literal)
 	return name, ModuleValue(Binding(Value(value.kind, c_name)), value.c)
 
 
-# Give each byte table one read-only backing array and a static shared view.
+# Give static bytes a read-only backing array and a shared view.
+def static_byte_view(name: str, data: bytes) -> list[str]:
+	lines = []
+	items = "NULL"
+	# An empty view needs no backing storage.
+	if data:
+		items = f"{name}_bytes"
+		bytes_c = ", ".join(str(byte) for byte in data)
+		lines.append(f"static const uint8_t {items}[{len(data)}] = {{{bytes_c}}};")
+	lines.append(f"static const wvrt_slice {name} = {{{items}, {len(data)}, sizeof(uint8_t)}};")
+	return lines
+
+
+# Declare each module binding using its immutable storage representation.
 def module_value_definition(declaration: ModuleValue) -> list[str]:
 	value = declaration.binding.value
 	initializer = declaration.initializer
-	# Scalars are stored in their declared C type.
+	# A scalar or fixed array is stored directly in its declared C type.
 	if isinstance(initializer, str):
 		return [f"static const {c_type(value.kind)} {value.c} = {initializer};"]
-	lines = []
-	items = "NULL"
-	# Empty views need no backing allocation.
-	if initializer:
-		items = f"{value.c}_bytes"
-		bytes_c = ", ".join(str(byte) for byte in initializer)
-		lines.append(f"static const uint8_t {items}[{len(initializer)}] = {{{bytes_c}}};")
-	lines.append(
-		f"static const wvrt_slice {value.c} = {{{items}, {len(initializer)}, sizeof(uint8_t)}};"
-	)
-	return lines
+	return static_byte_view(value.c, initializer)
 
 
 # Collect scalar fields in declaration order for the record's native layout.
@@ -334,7 +433,7 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 		raise SourceError(element_node.line)
 	element = identifier(element_node)
 	# Keep the declared element type as part of the slice type.
-	if element != U8 and element not in records:
+	if element not in SCALAR_TYPES and element not in records:
 		raise SourceError(node.line)
 	return BufferType(view.tag, records.get(element, element))
 
@@ -417,12 +516,17 @@ def signature(function: Function) -> str:
 
 class FunctionEmitter:
 	# Initialize the function scope, C names, and ownership state.
-	def __init__(self, function: Function, module: Module, source: str):
+	def __init__(
+		self, function: Function, module: Module, fixed_arrays: set[FixedArrayType], imports: dict[str, None] | None
+	):
 		self.function = function
 		self.functions = module.bindings
 		self.records = module.type_bindings
 		self.values = module.value_bindings
-		self.source = source
+		self.filename = module.filename
+		self.source = c_string(module.filename)
+		self.fixed_arrays = fixed_arrays
+		self.imports = imports
 		self.lines = []
 		self.scopes = [{
 			name: Binding(Value(kind, f"wv_value_{index}"))
@@ -436,12 +540,17 @@ class FunctionEmitter:
 	def emit_line(self, line: str) -> None:
 		self.lines.append("    " * len(self.scopes) + line)
 
-	# Evaluate each operation in source order before emitting its consumer.
-	def temporary(self, kind: Type, expression: str) -> Value:
+	# Reserve a unique slot for the next emitted value.
+	def value_slot(self, kind: Type) -> Value:
 		name = f"wv_value_{self.next_value}"
 		self.next_value += 1
-		self.emit_line(f"{c_type(kind)} {name} = {expression};")
 		return Value(kind, name)
+
+	# Evaluate each operation in source order before emitting its consumer.
+	def temporary(self, kind: Type, expression: str) -> Value:
+		value = self.value_slot(kind)
+		self.emit_line(f"{c_type(kind)} {value.c} = {expression};")
+		return value
 
 	# Find the first visible declaration without checking its use.
 	def find_binding(self, symbol: str) -> Binding | None:
@@ -487,15 +596,10 @@ class FunctionEmitter:
 		binding = self.binding(node)
 		value = binding.value
 		kind = value.kind
-		# Fixed array parameters are immutable values with inline storage.
+		# Inline arrays can be accessed through a temporary view of their storage.
 		if isinstance(kind, FixedArrayType):
-			# Only a shared view may refer to the parameter's own storage.
-			if writable:
-				raise SourceError(line)
-			view_type = BufferType(SHARED, kind.element)
-			view = self.temporary(view_type,
-				f"(wvrt_slice){{{value.c}.items, {kind.count}, sizeof({c_type(kind.element)})}}")
-			return binding, view_type, view.c + "."
+			view = self.fixed_view(binding, writable, line)
+			return binding, view.kind, view.c + "."
 		# Only array owners and views carry an element descriptor.
 		if not isinstance(kind, BufferType):
 			raise SourceError(line)
@@ -505,6 +609,19 @@ class FunctionEmitter:
 			raise SourceError(line)
 		self.check_access(binding, writable, line)
 		return binding, kind, value.c + ("->" if owned else ".")
+
+	# Form a checked view of a named inline array's storage.
+	def fixed_view(self, binding: Binding, exclusive: bool, line: int) -> Value:
+		value = binding.value
+		kind = value.kind
+		# Only a mutable local permits exclusive access to its inline storage.
+		if exclusive and not binding.writable:
+			raise SourceError(line)
+		self.check_access(binding, exclusive, line)
+		access = MUT if exclusive else SHARED
+		view = BufferType(access, kind.element)
+		return self.temporary(view,
+			f"({C_TYPE[access]}){{{value.c}.items, {kind.count}, sizeof({c_type(kind.element)})}}")
 
 	# Index a typed C element only after the runtime verifies the signed index.
 	def typed_element(
@@ -540,15 +657,25 @@ class FunctionEmitter:
 		origin = binding.value
 		origin_kind = origin.kind
 		# The loan and its source must agree on the exact element type.
-		if not isinstance(origin_kind, BufferType) or origin_kind.element != kind.element:
+		if not isinstance(origin_kind, (BufferType, FixedArrayType)) or origin_kind.element != kind.element:
 			raise SourceError(node.line)
-		owned = origin_kind.access == OWNED
-		writable = binding.writable if owned else origin_kind.access == MUT
-		# Exclusive access comes from a writable owner or a mutable slice type.
-		if exclusive and not writable:
-			raise SourceError(node.line)
-		self.check_access(binding, exclusive, node.line)
-		fields = origin.c + ("->" if owned else ".")
+		# Inline storage requires a descriptor before it can be projected.
+		if isinstance(origin_kind, FixedArrayType):
+			view = self.fixed_view(binding, exclusive, node.line)
+			# Whole-place borrows can use the descriptor directly.
+			if range_bounds is None:
+				self.loans.append((binding, kind.access))
+				return view
+			fields = view.c + "."
+		# Owners and received views already carry a descriptor.
+		else:
+			owned = origin_kind.access == OWNED
+			writable = binding.writable if owned else origin_kind.access == MUT
+			# Exclusive access comes from a writable owner or a mutable slice type.
+			if exclusive and not writable:
+				raise SourceError(node.line)
+			self.check_access(binding, exclusive, node.line)
+			fields = origin.c + ("->" if owned else ".")
 
 		# Evaluate both range endpoints before acquiring the new loan.
 		if range_bounds is not None:
@@ -660,6 +787,38 @@ class FunctionEmitter:
 			raise SourceError(name.line)
 		return self.temporary(field.kind, f"{value.c}.{field.c_name}")
 
+	# Lower scalar fixed arrays with inline storage and ordered element evaluation.
+	def initialize_fixed_array(self, node: Form) -> Value:
+		kind, elements = fixed_array_initializer(node)
+		self.fixed_arrays.add(kind)
+		# A repeat evaluates its operand once, even when the result is empty.
+		if node.tag == "array.repeat":
+			element = self.typed(elements[0], kind.element)
+			value = self.temporary(kind, "{0}")
+			index = self.value_slot(I32)
+			self.emit_line(f"for (int32_t {index.c} = 0; {index.c} < {kind.count}; ++{index.c}) {{")
+			self.emit_line(f"    {value.c}.items[{index.c}] = {element.c};")
+			self.emit_line("}")
+			return value
+		items = fixed_array_braces(self.typed(element, kind.element).c for element in elements)
+		return self.temporary(kind, items)
+
+	# Use the signed runtime check only with values representable in int64_t.
+	def convert_integer(self, value: Value, kind: str, line: int) -> Value:
+		low, high = SCALAR_LIMITS[kind]
+		site = self.site(line)
+		# Every supported nonnegative seed integer fits the wider unsigned type.
+		if kind == U64:
+			# A negative signed value fails the existing checked conversion.
+			if SCALAR_LIMITS[value.kind][0] < 0:
+				self.emit_line(f"(void)wvrt_int_convert({value.c}, 0, INT64_MAX, {site});")
+			return self.temporary(U64, f"(uint64_t){value.c}")
+		operand = value.c
+		# Substitute a representable out-of-range value before passing an oversized u64 to C's signed check.
+		if value.kind == U64:
+			operand = f"({value.c} > UINT64_C({high}) ? INT64_C({high + 1}) : (int64_t){value.c})"
+		return self.temporary(kind, f"({C_TYPE[kind]})wvrt_int_convert({operand}, {low}, {high}, {site})")
+
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
 		# A bare name reads a scalar or record before the enclosing operation uses it.
@@ -668,20 +827,29 @@ class FunctionEmitter:
 			# Array and slice places need an explicit operation.
 			if not copyable(binding.value.kind):
 				raise SourceError(node.line)
+			self.check_access(binding, False, node.line)
 			# Capture the value now even if a later statement writes to its slot.
 			if binding.writable:
 				return self.temporary(binding.value.kind, binding.value.c)
 			return binding.value
 
 		expr = node = value_form(node)
-		# A boolean literal carries the same type as a comparison result.
-		if expr.tag == BOOL:
-			literal, = form(expr, arity=1).operands
-			spelling = identifier(literal)
-			# Accept the two boolean spellings.
-			if spelling not in ("true", "false"):
-				raise SourceError(literal.line)
-			return Value(BOOL, spelling)
+		# Function literals follow the same rules as module initializers.
+		if expr.tag in SCALAR_TYPES:
+			return read_scalar_literal(expr)
+
+		# Store embedded bytes in the translation unit rather than reading them at runtime.
+		if expr.tag == "embed":
+			data = read_embed(expr, self.filename, self.imports)
+			value = self.value_slot(_BYTE_VIEW)
+			# A function-local embed still has static backing storage.
+			for line in static_byte_view(value.c, data):
+				self.emit_line(line)
+			return value
+
+		# Fixed-size constructors do not allocate a runtime-owned array.
+		if expr.tag in ("array.new", "array.repeat"):
+			return self.initialize_fixed_array(expr)
 
 		# Binary boolean expressions guard every operation in the right operand.
 		if expr.tag in ("bool.and", "bool.or"):
@@ -694,14 +862,11 @@ class FunctionEmitter:
 			return self.temporary(BOOL, f"!{value.c}")
 
 		# Discard promoted bits above the exact width of the complemented word.
-		if expr.tag == "u32.not":
+		if expr.tag in ("u32.not", "u64.not"):
 			operand, = form(expr, arity=1).operands
-			value = self.typed(operand, U32)
-			return self.temporary(U32, f"(uint32_t)~(uint64_t){value.c}")
-
-		# Function literals follow the same rules as module initializers.
-		if expr.tag in SCALAR_LIMITS:
-			return read_integer_literal(expr)
+			kind = expr.tag.split(".")[0]
+			value = self.typed(operand, kind)
+			return self.temporary(kind, f"({C_TYPE[kind]})~(uint64_t){value.c}")
 
 		# Match the complete typed alias using only the seed's current integer types.
 		destination, separator, origin = expr.tag.partition(".from-")
@@ -725,11 +890,7 @@ class FunctionEmitter:
 			# Retain the seed's existing direct widening lowering for this alias.
 			if expr.tag == "i32.from-u8":
 				return self.temporary(I32, f"(int32_t){value.c}")
-			low, high = SCALAR_LIMITS[kind]
-			return self.temporary(
-				kind, f"({C_TYPE[kind]})wvrt_int_convert({value.c}, {low}, {high}, "
-				f"{self.site(node.line)})"
-			)
+			return self.convert_integer(value, kind, node.line)
 
 		# A record construction produces a new value of its declared type.
 		if expr.tag == "struct.new":
@@ -803,6 +964,12 @@ class FunctionEmitter:
 			second = self.typed(right, kind)
 			return self.temporary(kind, f"{helper}({first.c}, {second.c})")
 
+		# The driver increments an unsigned 64-bit counter with wrapping arithmetic.
+		if expr.tag == "u64.inc":
+			operand, = form(expr, arity=1).operands
+			value = self.typed(operand, U64)
+			return self.temporary(U64, f"{value.c} + UINT64_C(1)")
+
 		zero_comparison = ZERO_PREDICATES.get(predicate)
 		# Reuse the same typed operators when a zero operand is implicit.
 		if zero_comparison is not None:
@@ -814,7 +981,7 @@ class FunctionEmitter:
 				operand, = form(expr, arity=1).operands
 				value = self.typed(operand, kind)
 				# Keep the operand evaluation when unsigned comparison with zero is constant.
-				if kind in (U8, U32) and predicate in ("ltz", "not-ltz"):
+				if kind in (U8, U32, U64) and predicate in ("ltz", "not-ltz"):
 					truth = "true" if predicate == "not-ltz" else "false"
 					return self.temporary(result, f"((void){value.c}, {truth})")
 				left, right = ("0", value.c) if reverse else (value.c, "0")
@@ -847,15 +1014,29 @@ class FunctionEmitter:
 					f"wvrt_i32_divide_at_span({first.c}, {second.c}, {remainder}, -1, {node.line}, {node.line})")
 			return self.temporary(result, f"{first.c} {operator} {second.c}")
 
-		shift = U32_SHIFT_OPS.get(expr.tag)
-		# Widen the word before shifting and check the count at this form's location.
-		if shift is not None:
+		shift = SHIFT_OPS.get(predicate)
+		# Check the exact signed shift count before passing the unsigned word to C.
+		if prefix in (U32, U64) and shift is not None:
 			left, right = form(expr, arity=2).operands
-			word = self.typed(left, U32)
+			word = self.typed(left, prefix)
+			count = self.typed(right, I32)
+			# Preserve the location-bearing seed helper for 32-bit operations.
+			if prefix == U32:
+				return self.temporary(
+					U32, f"(uint32_t)((uint64_t){word.c} {shift} "
+					f"wvrt_u32_shift_count({count.c}, {self.site(node.line)}))"
+				)
+			return self.temporary(
+				U64, f"{word.c} {shift} wvrt_u64_shift_count_at_span({count.c}, -1, {node.line}, {node.line})"
+			)
+
+		# BLAKE2b rotates an unsigned word using the existing runtime operation.
+		if expr.tag == "u64.rotr":
+			left, right = form(expr, arity=2).operands
+			word = self.typed(left, U64)
 			count = self.typed(right, I32)
 			return self.temporary(
-				U32, f"(uint32_t)((uint64_t){word.c} {shift} "
-				f"wvrt_u32_shift_count({count.c}, {self.site(node.line)}))"
+				U64, f"wvrt_u64_rotr_at_span({word.c}, {count.c}, -1, {node.line}, {node.line})"
 			)
 
 		# Call lowering manages the lifetime of its argument loans.
@@ -991,8 +1172,8 @@ class FunctionEmitter:
 			binding, kind, fields = self.array_access(target, node.line, writable=True)
 			element = kind.element
 			checkpoint = len(self.loans)
-			# Projecting a writable view of the owner reserves it through both operands.
-			if kind.access == OWNED:
+			# A writable owner or inline slot remains reserved through both operands.
+			if kind.access == OWNED or isinstance(binding.value.kind, FixedArrayType):
 				self.loans.append((binding, MUT))
 			# Restore the enclosing loan prefix if either operand fails checking.
 			try:
@@ -1058,17 +1239,47 @@ class FunctionEmitter:
 		return self.lines
 
 
-# Stage 1 selects bootstrap with test mode disabled.
+# Select bootstrap declarations against the target of the generated C.
 def cfg_matches(node: Node) -> bool:
-	negated = isinstance(node, Form)
-	# The seed only supports negating a single named predicate.
-	if negated:
-		node, = form(node, "not", 1).operands
-	predicate = identifier(node, WORD)
-	# An unsupported predicate cannot silently select a different declaration.
-	if predicate not in ("bootstrap", "test"):
-		raise SourceError(node.line)
-	return (predicate == "bootstrap") != negated
+	# The seed recognizes bootstrap and excludes tests.
+	if isinstance(node, Atom):
+		predicate = identifier(node, WORD)
+		# Keep the existing rejection of unknown flag predicates.
+		if predicate not in ("bootstrap", "test"):
+			raise SourceError(node.line)
+		return predicate == "bootstrap"
+	# Negation has exactly one child.
+	if node.tag == "not":
+		predicate, = form(node, arity=1).operands
+		return not cfg_matches(predicate)
+	# Evaluate every child so selection does not hide malformed expressions.
+	if node.tag in ("all", "any"):
+		results = [cfg_matches(child) for child in node.operands]
+		return all(results) if node.tag == "all" else any(results)
+	operand, = form(node, arity=1).operands
+	# Target identity takes a quoted OS or architecture name.
+	if node.tag in ("os", "arch"):
+		# A bare atom is not a target name.
+		if not isinstance(operand, Atom) or not operand.quoted or not IDENTIFIER.fullmatch(operand.text):
+			raise SourceError(operand.line)
+		os_name, arch, _ = compiler_target()
+		return operand.text == (os_name if node.tag == "os" else arch)
+	# Deployment bounds are inclusive and match only when Clang reports a deployment.
+	if node.tag in ("os_min", "os_max"):
+		# Versions are nonnegative decimal atoms in the native selector.
+		if not isinstance(operand, Atom) or operand.quoted or not re.fullmatch(r"[0-9]+", operand.text):
+			raise SourceError(operand.line)
+		digits = operand.text.lstrip("0") or "0"
+		# Keep the deployment representable in the same signed domain.
+		if len(digits) > 10 or (bound := int(digits)) > SCALAR_LIMITS[I32][1]:
+			raise SourceError(operand.line)
+		_, _, deployment = compiler_target()
+		# A target without deployment metadata cannot satisfy either bound.
+		if deployment == "-":
+			return False
+		version = int(deployment)
+		return version >= bound if node.tag == "os_min" else version <= bound
+	raise SourceError(node.line)
 
 
 # Apply the seed's known selection pragmas to an eligible form.
@@ -1157,7 +1368,8 @@ def source_file(filename: str) -> Iterator[None]:
 
 # Collect active local declarations and preserve their emission order.
 def read_module(
-	source: str, filename: str, record_index: int, function_index: int, value_index: int, *, entry: bool = False
+	source: str, filename: str, record_index: int, function_index: int, value_index: int,
+	*, entry: bool = False, imports: dict[str, None] | None = None
 ) -> Module:
 	# Parsing and declaration selection belong to the defining file.
 	with source_file(filename):
@@ -1186,7 +1398,7 @@ def read_module(
 				records[name] = record
 			# Seed module storage only accepts immutable literal declarations.
 			elif node.tag == "let":
-				name, value = read_module_value(node, value_index + len(values))
+				name, value = read_module_value(node, value_index + len(values), filename, imports)
 				# A file has one module binding per value name.
 				if name in values:
 					raise SourceError(node.line)
@@ -1389,10 +1601,7 @@ def load_modules(root: Module, *, imports: dict[str, None] | None = None) -> tup
 				raise SourceError(use.line) from None
 			# Track the active import and its resolved file before deduplicating modules.
 			if imports is not None:
-				# Use the same checkout-relative spelling as the generated C by default.
-				for dependency in (candidate, target):
-					name = os.path.normpath(dependency) if absolute_paths else os.path.relpath(dependency)
-					imports[name] = None
+				track_file(imports, candidate, target, absolute_paths)
 			# An edge back into the current path is a cycle.
 			if target_identity in active:
 				raise SourceError(use.line)
@@ -1403,7 +1612,7 @@ def load_modules(root: Module, *, imports: dict[str, None] | None = None) -> tup
 				continue
 			filename = str(target) if absolute_paths else os.path.relpath(target)
 			source = read_provider(target, filename, use)
-			provider = read_module(source, filename, record_index, function_index, value_index)
+			provider = read_module(source, filename, record_index, function_index, value_index, imports=imports)
 			modules[target_identity] = provider
 			record_index += len(provider.records)
 			function_index += len(provider.function_declarations)
@@ -1415,7 +1624,7 @@ def load_modules(root: Module, *, imports: dict[str, None] | None = None) -> tup
 
 # Emit a complete C translation unit after the source graph succeeds.
 def compile_source(source: str, filename: str, *, imports: dict[str, None] | None = None) -> str:
-	root = read_module(source, filename, 0, 0, 0, entry=True)
+	root = read_module(source, filename, 0, 0, 0, entry=True, imports=imports)
 	modules, headers = load_modules(root, imports=imports)
 	functions = [function for module in modules for function in module.functions.values()]
 	values = [value for module in modules for value in module.values.values()]
@@ -1425,6 +1634,21 @@ def compile_source(source: str, filename: str, *, imports: dict[str, None] | Non
 	)
 	fixed_arrays = {kind for function in functions for _, kind in function.params
 		if isinstance(kind, FixedArrayType)}
+	fixed_arrays.update(value.binding.value.kind for value in values
+		if isinstance(value.binding.value.kind, FixedArrayType))
+
+	bodies = []
+	# Lower bodies before the C preamble so local inline shapes are declared with the signature shapes.
+	for module in modules:
+		# Runtime sites and embedded paths belong to the source that defines each function.
+		with source_file(module.filename):
+			# Emit provider bodies only once, regardless of their local aliases.
+			for function in module.functions.values():
+				references = retained if function.is_entry else ()
+				bodies.extend(FunctionEmitter(function, module, fixed_arrays, imports).emit(references))
+				# Reuse the same borrowed host argument vector as the native compiler.
+				if function.is_entry:
+					bodies.extend([f"WVRT_HOST_ENTRY({function.c_name})", ""])
 
 	lines = [f"#include {operand}" for operand in headers]
 	lines.append("")
@@ -1447,16 +1671,4 @@ def compile_source(source: str, filename: str, *, imports: dict[str, None] | Non
 		lines.append("")
 	lines.extend(signature(function) + ";" for function in functions)
 	lines.append("")
-	# Resolve names and trap locations in the function's defining file.
-	for module in modules:
-		path = c_string(module.filename)
-		# Lower each body against its file's local types and selected function bindings.
-		with source_file(module.filename):
-			# Emit provider bodies only once, regardless of their local aliases.
-			for function in module.functions.values():
-				references = retained if function.is_entry else ()
-				lines.extend(FunctionEmitter(function, module, path).emit(references))
-				# Reuse the same borrowed host argument vector as the native compiler.
-				if function.is_entry:
-					lines.extend([f"WVRT_HOST_ENTRY({function.c_name})", ""])
-	return "\n".join(lines)
+	return "\n".join(lines + bodies)

@@ -27,6 +27,12 @@ The seed excludes test declarations before opening providers or binding
 names. The compiler entry uses ordinary imports to reach the same driver
 at every stage.
 
+Target predicates select declarations using Clang's OS, architecture, and
+deployment. Use `(os "linux")`, `(arch "aarch64")`, or inclusive
+`(os_min 270000)` and `(os_max 270000)` bounds. Combine them with
+`all`, `any`, and `not`. Deployment bounds are false when no deployment
+version is available.
+
 An excluded module contributes no names or nested imports. An empty `(only)`
 can visit an excluded provider. A named selection reports the unavailable
 name. The entry module must be active. Other directives and metadata
@@ -34,25 +40,30 @@ payloads stay opaque to the seed.
 
 ## Values and operators
 
-Use `bool`, `i8`, `u8`, `i32`, and `u32`. Integer literals take decimal or
+Use `bool`, `i8`, `u8`, `i32`, `u32`, and `u64`. Integer literals take decimal or
 hexadecimal digits, with either a suffix (`0xc2u8`) or a type head
 (`(u8 0xC2)`). For a signed negative hexadecimal literal, put the minus
 before the prefix (`-0x80i8`). Write bytes as typed integers.
 
 | Family | Available forms |
 | --- | --- |
-| Wrapping arithmetic | `add`, `sub`, `mul`, `inc`, and `dec` on `i32` and `u32`. |
+| Wrapping arithmetic | `add`, `sub`, `mul`, and `inc` on `i32`, `u32`, and `u64`. `dec` on `i32` and `u32`. |
 | Division and remainder | `div` and `rem` on `i32` and `u32`. Both trap on a zero divisor. |
-| Comparisons | `eq`, `lt`, `eqz`, `ltz`, and `gtz` and their `not-` forms on `u8`, `i32`, and `u32` |
-| Bitwise operations | `u32.and`, `u32.or`, `u32.xor`, and `u32.not` |
-| Shifts | `u32.shl` and `u32.shr` with an exact `i32` count in `[0, 32)` |
-| Checked conversions | `(int.convert T value)` and `(T.from-S value)` between the four integer types |
+| Comparisons | `eq`, `lt`, `eqz`, `ltz`, and `gtz` and their `not-` forms on `u8`, `i32`, `u32`, and `u64`. `gt` on `u64`. |
+| Bitwise operations | `and`, `or`, `xor`, and `not` on `u32` and `u64`. |
+| Shifts and rotation | `shl` and `shr` on `u32` and `u64`, and `u64.rotr`. Counts are `i32` and less than the bit width. |
+| Checked conversions | `(int.convert T value)` and `(T.from-S value)` between the five integer types |
 | Boolean logic | `bool.and`, `bool.or`, and `bool.not` |
 
-An immutable module `let` takes a typed integer literal or a quoted byte
-string. Read it by its bare name, as in `(return count)`. A local or
-parameter shadows a module binding with the same name. A string or raw
-backtick string gives a static `(shared-array u8)`.
+An immutable module `let` takes a scalar literal, a quoted byte string,
+an `embed`, or a fixed scalar array of literals. Read it by its bare
+name, as in `(return count)`. A local or parameter shadows a module binding
+with the same name. A string or raw backtick string gives a static
+`(shared-array u8)`.
+
+Use `(embed "./data.bin")` at module or function scope to read a file at
+compile time as a static `(shared-array u8)`. Relative paths start at the
+module containing the embed.
 
 A named `struct` has scalar fields of the types above. Use `struct.new` to
 supply every field exactly once and `struct.get` to read fields. Records copy
@@ -70,12 +81,16 @@ path back to a `while` condition must preserve owners live on entry.
 Use `(array.alloc T count)` for a local owned array with `u8` or a
 copyable record as its element type. Use `array.len`, `array.load`, and
 `array.store` with exact element types and `i32` indices. A writable
-receiver is required for stores. Fixed scalar arrays can be passed by
-value and read with `array.len` and `array.load`. Transfer or return an
-owned array with `(move name)`.
+receiver is required for stores. Transfer or return an owned array with
+`(move name)`.
+
+Use `(array.new (array T N) item ...)` to initialize a fixed scalar array
+with exactly `N` items, or `(array.repeat (array T N) item)` to evaluate
+an item once and fill the array with it. Fixed scalar arrays support
+the same length, load, and store operations and can also be passed by value.
 
 Pass `(shared-array T)` and `(mut-array T)` parameters using
-`borrow-shared` and `borrow-mut` on an owner or received view. For a
+`borrow-shared` and `borrow-mut` on an owner, received view, or fixed array. For a
 checked byte subrange, borrow `(array.range name start end)`.
 The `i32` endpoints evaluate once in source order, and equal endpoints
 are valid. Call loans remain active through later arguments and the call.
