@@ -5,8 +5,8 @@
 
 	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_kind_key)))
 	(use wove-file "./macro_directives.wove" (only declares_macro_probe))
-	(use wove-file "./native_replay.wove" (only function_declaration_children mark_witnessed_declarations proved_lvalue_macro
-		(value plain_function_witness)))
+	(use wove-file "./native_replay.wove" (only function_declaration_mode is_linked_function mark_witnessed_declarations proved_lvalue_macro
+		(value plain_function_witness) (value plain_declaration) (value attributed_declaration)))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte))
 	(use wove-file "../json/reader.wove" (only json_parse (type JsonNode)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -216,10 +216,10 @@
 					(if (i32.lt index length) (then (set index (i32.inc index))))))
 			(return (bool true))))
 
-	(fn declaration_only
-		(:doc "Admit C type declarations and ordinary external function prototypes without attributes or bodies.")
+	(fn declaration_mode
+		(:doc "Admit replayable types and prototypes and mark declarations that require identity checks.")
 		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)) (borrowed bool))
-		(returns bool)
+		(returns u8)
 		(body
 			(let kind (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
 				(borrow-shared clang_kind_key) (borrow-mut scratch)))
@@ -228,13 +228,20 @@
 				(bool.or (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared typedef_kind))
 					(bool.or (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared record_kind))
 						(call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared enum_kind))))
-				(then (return (bool true))))
+				(then (return plain_declaration)))
 			(if
 				(:doc "An ordinary extern declaration does not instantiate a separate object per numbered unit.")
 				(bool.and borrowed (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared object_kind)))
-				(then (return (call external_object (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch)))))
-			(if (bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared function_kind)))
-				(then (return (bool false))))
+				(then
+					(return (if
+						(:doc "An admitted object needs no additional prototype comparison.")
+						(call external_object (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch))
+						(then plain_declaration)
+						(else 0u8)))))
+			(if
+				(:doc "Any remaining declaration must be an external function prototype.")
+				(bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared function_kind)))
+				(then (return 0u8)))
 			(let storage (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
 				(borrow-shared storage_key) (borrow-mut scratch)))
 			(let inline (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
@@ -243,42 +250,54 @@
 				(:doc "Inline and static functions can carry per-unit definitions or local linkage.")
 				(bool.or (i32.not-ltz inline) (bool.and (i32.not-ltz storage)
 					(bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) storage (borrow-shared extern_value)))))
-				(then (return (bool false))))
-			(return (call function_declaration_children (borrow-shared source) (borrow-shared nodes)
-				row plain_function_witness (borrow-mut scratch)))))
+				(then (return 0u8)))
+			(let mode (call function_declaration_mode (borrow-shared source) (borrow-shared nodes)
+				row plain_function_witness (borrow-mut scratch)))
+			(if
+				(:doc "An attributed external function must expose its link identity in the AST.")
+				(bool.and (u8.eq mode attributed_declaration)
+					(bool.not (call is_linked_function (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch))))
+				(then (return 0u8)))
+			(return mode)))
 
-	(fn replay_declarations_safe
-		(:doc "Validate the complete AST and check only the direct declarations of its translation unit.")
+	(fn replay_declaration_mode
+		(:doc "Validate the complete AST and report whether ordinary attributes require identity comparison.")
 		(params (source (shared-array u8)) (nodes (mut-array JsonNode))
-			(borrowed bool) (writable bool) (fixed_calls bool) (variadic_calls bool)) (returns bool)
+			(borrowed bool) (writable bool) (fixed_calls bool) (variadic_calls bool)) (returns u8)
 		(body
 			(let result (call json_parse (borrow-shared source) (borrow-mut nodes)))
-			(if (u32.not-eqz (struct.get result error)) (then (return (bool false))))
+			(if (u32.not-eqz (struct.get result error)) (then (return 0u8)))
 			(let-mut scratch (array.alloc u8 24i32))
 			(let kind (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) 0i32
 				(borrow-shared clang_kind_key) (borrow-mut scratch)))
-			(if (bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared unit_kind)))
-				(then (return (bool false))))
+			(if
+				(:doc "Only a translation-unit root establishes the complete declaration context.")
+				(bool.not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared unit_kind)))
+				(then (return 0u8)))
 			(let permits_attributes (bool.or writable (bool.or fixed_calls variadic_calls)))
 			(let approval_buffer (array.try-alloc u8 (if permits_attributes (then (struct.get result rows)) (else 0i32))))
-			(if (owner.is-null approval_buffer) (then (return (bool false))))
+			(if (owner.is-null approval_buffer) (then (return 0u8)))
 			(let-mut approved (move (optional.unwrap approval_buffer)))
 			(if
-				(:doc "An attributed declaration must be resolved by an explicitly supported witness.")
+				(:doc "Resolve declarations whose special call or storage semantics need an explicit witness.")
 				(bool.and permits_attributes (bool.not (call mark_witnessed_declarations
 					(borrow-shared source) (borrow-shared nodes) (borrow-mut approved)
 					writable fixed_calls variadic_calls (borrow-mut scratch))))
-				(then (return (bool false))))
+				(then (return 0u8)))
 			(let-mut row (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
+			(let-mut result_mode plain_declaration)
 			(while
 				(:doc "Reject object definitions, assembly, function bodies, and unrecognized side effects.")
 				(i32.not-ltz row)
 				(body
-					(if
-						(:doc "Every direct declaration must be safe to include in all numbered units.")
-						(bool.not (bool.or (bool.and permits_attributes (u8.gtz (array.load approved row)))
-							(call declaration_only (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch) borrowed)))
-						(then (return (bool false))))
+					(let mode (if
+						(:doc "Approved witnesses already arrange an identity comparison for their declarations.")
+						(bool.and permits_attributes (u8.gtz (array.load approved row)))
+						(then plain_declaration)
+						(else (call declaration_mode (borrow-shared source) (borrow-shared nodes) row
+							(borrow-mut scratch) borrowed))))
+					(if (u8.eqz mode) (then (return 0u8)))
+					(if (u8.eq mode attributed_declaration) (then (set result_mode attributed_declaration)))
 					(set row (struct.get (array.load nodes row) next_sibling))))
-			(return (bool true))))
+			(return result_mode)))
 )

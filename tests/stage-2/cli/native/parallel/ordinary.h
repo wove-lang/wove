@@ -14,6 +14,10 @@ static int local_state __attribute__((used));
 typedef char source_filename[sizeof(__BASE_FILE__)];
 #endif
 
+#if BRIDGE_MODE == 3
+extern int getpid(void) __attribute__((nothrow));
+#else
 extern int getpid(void);
+#endif
 
 #endif
