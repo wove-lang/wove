@@ -226,7 +226,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `l` | Local | Concrete function fingerprint extended by the local role, function-relative lexical scope, defining row, and spelling | Local name | Within its C function. Shadowed bindings retain distinct keys. |
 | `t` | Expression temporary | Concrete function fingerprint extended by the temporary role and function-relative capture row | Empty | Within its C function. The declaration and all uses share the checked capture row. |
 | `j` | Loop break label | Concrete function fingerprint extended by the label role and function-relative loop row | Empty | Within its C function. A break uses the checked row of its target loop. |
-| `q` | Read-only C type alias | Binding name's flattened graph row | Native name | Where the lvalue contract is emitted, the typedef and its check share the binding row. |
+| `q` | Read-only C type alias | Defining bridge file and header extended by the role and original declaration name | Native name | The lvalue contract and its qualified check share the cached key and collision rank. |
 | `d` | Module value or descriptor | Module fingerprint extended by the data role and spelling | Defining name | The common header, unique definition, and references use the same checked binding. |
 | `s` | Module backing bytes | Module fingerprint extended by the backing role and spelling | Defining name | Private to the C unit that defines the bytes. |
 | `a`, `b` | Private bridge string backing and descriptor | Binding name's flattened graph row | Native name | Private to the C unit that defines the string. |
@@ -252,6 +252,9 @@ Callable typedefs hash the result and each parameter as fixed-width words,
 ending with the reserved zero type code. Inferred references and explicit
 signatures share the same type key. Collisions rank by result, then by
 parameter type in order, with shorter equal prefixes first.
+For a read-only C lvalue, the original bridge declaration supplies the key
+even when several imports use it under different names. Collisions rank by
+defining file and declaration position. The checks still address the original C lvalue.
 Native callback adapters keep separate keys per actual, including repeated
 calls to the same target. Exact owners and argument rows determine the slot
 for a genuine C spelling collision.
