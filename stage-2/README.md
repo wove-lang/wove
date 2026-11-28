@@ -211,6 +211,8 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `w` | Worker function adapter | Concrete function fingerprint extended by the adapter role | Defining function name | Within an emitted C program. Prototypes, definitions, and submissions use the same exact worker key. |
 | `c` | Native callback adapter | Concrete enclosing function fingerprint extended by the callback role and function-relative actual row | Empty | Within its emitted C unit. The definition and native call use the same checked argument. |
 | `r` | Named struct or enum | Module fingerprint extended by the layout role, spelling, and any specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
+| `x` | Aggregate take helper | Concrete layout key extended by the take role | Type name for named layouts, empty for fixed arrays | Definitions and moves use the exact layout. |
+| `e` | Aggregate drop helper | Concrete layout key extended by the drop role | Type name for named layouts, empty for fixed arrays | Cleanup and runtime macro arguments use the exact layout. |
 | `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
 | `m` | Named record field | Concrete layout fingerprint extended by the member role and exact field spelling | Field name | Within its C struct. Definitions, designators, accesses, and cleanup use the same key. |
@@ -229,12 +231,14 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 A worker adapter continues the checked function fingerprint with `w` and
 reuses the defining name and collision rank. The FNV-1a role step is reversible,
 so equal adapter spellings have the same collision group as their owners.
-Worker drop callbacks and ownership take, drop, slot, and occupancy helpers
-use the corresponding type name. Where the common header exposes a helper,
-its definition and uses share that owner's name. Native callback adapters
-keep separate keys per actual, including repeated calls to the same target.
-Exact owners and argument rows determine the slot for a genuine C spelling
-collision.
+Aggregate take and drop helpers continue the concrete layout key with their
+own role and use the same suffix and collision rank as the layout. A fixed
+array keeps its interned layout key and empty suffix. Worker drop callbacks,
+ownership slots, and occupancy helpers use the corresponding type name.
+The common header and every caller use the same helper spelling. Native
+callback adapters keep separate keys per actual, including repeated calls to
+the same target. Exact owners and argument rows determine the slot for a
+genuine C spelling collision.
 
 Generated names use a hierarchy of 32-bit FNV-1a states. Seed a source graph's
 path key with the canonical file path and a zero delimiter. Resume that state
