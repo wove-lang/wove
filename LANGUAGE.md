@@ -63,7 +63,7 @@ It prints `Hello, Wove` and exits with status 0.
 
 The entry module's `main` takes one `(shared-array (shared-array u8))`
 and returns `i32`. `array:len` counts the arguments, including the
-host's `argv[0]` when present. `array:load` selects one shared byte view
+host's `argv[0]` when present. `array:get` selects one shared byte view
 by its checked `i32` index. Row zero is the executable spelling supplied by
 the host. User arguments follow in order. Each row contains the original
 bytes without the C terminator, and an empty argument has its own empty row.
@@ -214,7 +214,7 @@ In a compiler checkout, save this as `checks.wove`.
         (params) (returns void)
         (body
             (let data (array:alloc u8 1i32))
-            (let first (array:load data 0i32)))))
+            (let first (array:get data 0i32)))))
 ```
 
 Build the graph probe and test runtime, then discover, emit, and run the tests.
@@ -424,7 +424,7 @@ file, or an inline table. A quoted string gives a `(shared-array u8)` view
 whose length counts the decoded bytes. Declare an inline table with
 `array:new` or `array:repeat`.
 Its elements are exact scalar constants or constant constructors of a
-named Wove record. `array:load` can read the table directly.
+named Wove record. `array:get` can read the table directly.
 
 Stage 2 evaluates exact `i32` arithmetic in immutable module initializers,
 inline table elements, and fixed-array extents. Expressions can use
@@ -529,7 +529,7 @@ function at its call site.
 (fn last (generic (const Width i32))
     (params (bytes (array u8 Width)))
     (returns u8)
-    (body (return (array:load bytes (i32:sub Width 1i32)))))
+    (body (return (array:get bytes (i32:sub Width 1i32)))))
 
 (call (specialize last 4i32) (array:new (array u8 4) 1u8 2u8 3u8 4u8))
 ```
@@ -719,8 +719,8 @@ expression supplies the result.
 | `(shared-array T)` | Borrow read access to an array view. |
 | `(mut-array T)` | Borrow exclusive write access to an array view. |
 | `(array:len data)` | Count the elements in a live owner, fixed array, or received view as `i32`. |
-| `(array:load data index)` | Read an element by value from a readable receiver. |
-| `(array:store data index value)` | Write an exact element value through a mutable view or into writable array storage. |
+| `(array:get data index)` | Read an element or name its place in a borrow, move, or nested update. |
+| `(array:set data index value)` | Write an exact element value through a mutable view or into writable array storage. |
 | `(borrow-shared data)` | Lend read access to the whole array for a call. |
 | `(borrow-mut data)` | Lend exclusive write access to the whole array for a call. |
 | `(borrow-shared (array:range data start end))` | Lend a half-open range of a named owner or view. |
@@ -733,9 +733,9 @@ A call loan lasts through later arguments and the call.
 
 An ordinary Stage 2 function can receive `(shared-array (shared-array u8))`
 as a read-only view of byte rows. Use `array:len` to count the rows, and
-`array:load` with a checked `i32` index to select a shared byte view.
+`array:get` with a checked `i32` index to select a shared byte view.
 Bind the selected row with `let` or lend it to a byte-view parameter with
-`(borrow-shared (array:load rows index))`. A returned row needs a
+`(borrow-shared (array:get rows index))`. A returned row needs a
 `(from rows)` contract naming the outer view it came from. An in-bounds
 row may have zero bytes.
 
@@ -778,7 +778,7 @@ transfers the original owner to the vector. Removing a populated
 row transfers it to the result, and removing an unfilled slot traps.
 Truncation drops the owners in the removed suffix immediately.
 
-`(array:push (array:load batches index) (move row))`
+`(array:push (array:get batches index) (move row))`
 appends to a populated batch. An indexed receiver is checked before later
 operands run, and each index evaluates once. The outer slot keeps the row
 owner as its storage grows. Selecting an unfilled slot traps.
@@ -786,20 +786,20 @@ owner as its storage grows. Selecting an unfilled slot traps.
 `array:alloc` supports numeric elements, Wove records, and nested owners.
 For example, `(array:alloc (owned-array Digest) count)` creates an
 `(owned-array (owned-array Digest))` with unfilled row slots. Fill a slot
-with `array:store` and a row returned by a call or transferred with `move`.
+with `array:set` and a row returned by a call or transferred with `move`.
 Bind an allocation before moving it into the slot. Replacing a slot drops
 its previous row. Use
-`(borrow-shared (array:load rows index))` to read a populated row
+`(borrow-shared (array:get rows index))` to read a populated row
 through its exact shared view.
 
 An owned array can store owning Wove structs with no borrowed fields.
-`(array:alloc Entry count)` starts with unfilled slots. Use `array:store`
+`(array:alloc Entry count)` starts with unfilled slots. Use `array:set`
 or `array:push` with a fresh `Entry` or an explicit `(move entry)`.
 Replacing a populated slot drops its old record. Removing a populated
 slot transfers its record out and shifts later slots. Truncation and
 array cleanup release the owning fields of each remaining populated slot.
 
-Use `(borrow-shared (array:load entries index))` for a
+Use `(borrow-shared (array:get entries index))` for a
 `(shared-ref Entry)` call parameter or `borrow-mut` for a `(mut-ref Entry)`
 parameter when the original array view is writable. Borrowing or removing
 an unfilled slot traps. Indexed loans keep the source array live for the
@@ -829,28 +829,28 @@ A fixed array of copyable elements copies by value.
 
 - `(array:new (array u8 2) (u8 17) (u8 25))` lists the elements.
 - `(array:repeat (array u8 128) (u8 0))` evaluates one value and fills the array.
-- `(array:load value index)` reads an element.
-- `(array:store data index value)` writes into a mutable local array.
-- `(array:store (struct:get state block) index value)` writes into
+- `(array:get value index)` reads an element.
+- `(array:set data index value)` writes into a mutable local array.
+- `(array:set (struct:get state block) index value)` writes into
   an inline array field of a writable record.
-- `(array:store (array:load grid row) column value)` updates the
+- `(array:set (array:get grid row) column value)` updates the
   selected row in the original writable grid. In a value expression,
-  `(array:load grid row)` returns a copy when the row is copyable.
+  `(array:get grid row)` returns a copy when the row is copyable.
 
 A fixed array that contains owners is itself an owner, including through
 nested fixed arrays and record fields. Initialize each slot with a fresh
 owner or an explicit `move` in `array:new`. Copying an owning element or
 using `array:repeat` with an owning layout is a compile-time error.
 
-Use `(borrow-shared (array:load rows index))` to lend an owned array
+Use `(borrow-shared (array:get rows index))` to lend an owned array
 element as a view. Use `borrow-mut` for a mutable view. An owning record
 element lends its exact `shared-ref` or `mut-ref` type. Dynamic indices into
 the same fixed array are treated as potentially overlapping for loan checks.
 
-Use `(move (array:load rows index))` to transfer an element from a
+Use `(move (array:get rows index))` to transfer an element from a
 mutable local owner. The slot becomes empty and the array keeps its extent.
 An attempt to borrow or transfer an empty slot traps at the indexed expression.
-`array:store` fills an empty slot or drops a live owner before installing its
+`array:set` fills an empty slot or drops a live owner before installing its
 replacement. Cleanup releases the remaining live slots in reverse index order.
 
 A fixed integer array, including one stored in a record field, can lend a
@@ -1204,7 +1204,7 @@ Concurrent native access to the lvalue or the bytes requires synchronization.
 
 A native record field written `(name (array char 255))` describes the
 header's exact inline plain C `char[255]` member. Use `array:len`,
-`array:load`, and `array:store` directly on `(struct:get record name)`.
+`array:get`, and `array:set` directly on `(struct:get record name)`.
 A store needs a mutable record. Loads and stores check the index and read or
 write `u8` byte representations in the original record. A native build checks
 the field's C element type and extent against the header and includes the
