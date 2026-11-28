@@ -91,13 +91,13 @@ owned byte rows, or a Wove record as its element type. Use `array.len`,
 A writable receiver is required for stores. Transfer or return an owned
 array with `(move name)`.
 
-A function can return `(optional (owned-array u8))`. Use
-`(array.try-alloc u8 length)` for fallible allocation,
-`(optional.none (owned-array u8))` for absence, or `(optional.some value)`
-to wrap a fresh or moved byte array. Check a named optional with
-`owner.is-null`. Use `(move (optional.unwrap name))` to check presence
-and transfer its payload. An optional that still owns a payload drops
-it at scope exit.
+A function can return `(optional (owned-array T))` for a supported array
+element type. Use `(array.try-alloc T length)` for fallible allocation of
+copyable elements, `(optional.none (owned-array T))` for absence, or
+`(optional.some value)` to wrap a fresh or moved array. Check a named
+optional with `owner.is-null`. Use `(move (optional.unwrap name))` to
+check presence and transfer the exact payload type. An optional that still
+owns a payload drops it at scope exit.
 
 Use `(array.new (array T N) item ...)` to initialize a fixed scalar array
 with exactly `N` items, or `(array.repeat (array T N) item)` to evaluate

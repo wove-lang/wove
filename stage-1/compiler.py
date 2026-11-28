@@ -150,7 +150,6 @@ Type = str | NamedType | SharedRef | BufferType | OptionalOwner | FixedArrayType
 
 _BYTE_VIEW = BufferType(SHARED, U8)
 _OWNED_BYTE_ROW = BufferType(OWNED, U8)
-_OPTIONAL_BYTE_OWNER = OptionalOwner(_OWNED_BYTE_ROW)
 _HOST_ARGV = BufferType(SHARED, _BYTE_VIEW)
 
 
@@ -483,13 +482,10 @@ def read_owned_element(node: Node, records: dict[str, NamedType]) -> str | Recor
 	raise SourceError(node.line)
 
 
-# Read the byte-array payload of the seed's supported optional owner.
-def read_optional_byte_owner(payload: Node) -> OptionalOwner:
+# Preserve the declared element type when an owned array may be absent.
+def read_optional_owner(payload: Node, records: dict[str, NamedType]) -> OptionalOwner:
 	element, = checked_form(payload, OWNED, 1).operands
-	# Only byte array optionals are needed for the initial seed path.
-	if identifier(element) != U8:
-		raise SourceError(element.line)
-	return _OPTIONAL_BYTE_OWNER
+	return OptionalOwner(BufferType(OWNED, read_owned_element(element, records)))
 
 
 # Read a value input or a shared or mutable view of a supported element.
@@ -562,10 +558,10 @@ def read_function(
 	if isinstance(result_node, Form) and result_node.tag == OWNED:
 		element_node, = checked_form(result_node, OWNED, 1).operands
 		result = BufferType(OWNED, read_owned_element(element_node, records))
-	# Optional byte owners have the same return ABI with a nullable pointer.
+	# Optional array owners return a pointer that may be null.
 	elif isinstance(result_node, Form) and result_node.tag == "optional":
 		payload, = checked_form(result_node, "optional", 1).operands
-		result = read_optional_byte_owner(payload)
+		result = read_optional_owner(payload, records)
 	# Scalar results copy by value. Void has no return operand.
 	else:
 		result_name = identifier(result_node)
@@ -1114,33 +1110,38 @@ class FunctionEmitter:
 				kind, f"wvrt_array_new({size.c}, sizeof({native}), _Alignof({native}), {site})"
 			)
 
-		# A fallible byte allocation keeps its nullable result in an owning slot.
+		# A fallible allocation uses the native layout of a copyable element.
 		if expr.tag == "array.try-alloc":
-			element, length = form(expr, arity=2).operands
-			# Other optional element shapes are outside the seed subset.
-			if identifier(element) != U8:
-				raise SourceError(element.line)
+			element_node, length = form(expr, arity=2).operands
+			element = read_owned_element(element_node, self.records)
+			# Owning elements require an initialized-slot allocator.
+			if not copyable(element):
+				raise SourceError(element_node.line)
 			size = self.typed(length, I32)
-			return self.temporary(_OPTIONAL_BYTE_OWNER,
-				f"wvrt_array_try_new({size.c}, sizeof(uint8_t), _Alignof(uint8_t))")
+			native = c_type(element)
+			kind = OptionalOwner(BufferType(OWNED, element))
+			return self.temporary(kind, f"wvrt_array_try_new({size.c}, sizeof({native}), _Alignof({native}))")
 
 		# An absent optional is a movable slot with a null pointer.
 		if expr.tag == "optional.none":
 			payload, = form(expr, arity=1).operands
-			return self.temporary(read_optional_byte_owner(payload), "NULL")
+			return self.temporary(read_optional_owner(payload, self.records), "NULL")
 
-		# Wrap a fresh or transferred byte array without another allocation.
+		# Wrap a fresh or transferred owned array without another allocation.
 		if expr.tag == "optional.some":
 			operand, = form(expr, arity=1).operands
-			value = self.typed(operand, _OWNED_BYTE_ROW)
-			return Value(_OPTIONAL_BYTE_OWNER, value.c)
+			value = self.expression(operand)
+			# A slice or an already optional value cannot supply this payload.
+			if not isinstance(value.kind, BufferType) or value.kind.access != OWNED:
+				raise SourceError(operand.line)
+			return Value(OptionalOwner(value.kind), value.c)
 
 		# Inspect absence without consuming or borrowing the payload.
 		if expr.tag == "owner.is-null":
 			operand, = form(expr, arity=1).operands
 			binding = self.binding(operand)
 			# Ordinary owned arrays are always present.
-			if binding.value.kind != _OPTIONAL_BYTE_OWNER:
+			if not isinstance(binding.value.kind, OptionalOwner):
 				raise SourceError(operand.line)
 			self.check_access(binding, False, node.line)
 			return self.temporary(BOOL, f"{binding.value.c} == NULL")
@@ -1286,7 +1287,7 @@ class FunctionEmitter:
 		expression = storage
 		# Check presence before clearing the original slot.
 		if unwrap is not None:
-			# The unwrap accepts only the supported nullable byte owner.
+			# Once present, the payload keeps its exact array type.
 			if not isinstance(kind, OptionalOwner):
 				raise SourceError(unwrap.line)
 			kind = kind.payload
