@@ -90,7 +90,11 @@ path back to a `while` condition must preserve owners live on entry.
 
 Use `(array:alloc T count)` for a local owned array with `u8`, `i32`,
 owned byte rows, or a Wove record as its element type. Use `array:len`,
-`array:get`, and `array:set` with exact element types and `i32` indices.
+`array:get`, and `array:set` with exact element types and `i32` indices. Use
+`(receiver.operation args...)` to pass a bare binding as the first operand
+of an operation in its type's namespace. The seed supports that spelling
+for the same operations as its canonical `array:` and `struct:` forms.
+`data.len` is the bare length property.
 A writable receiver is required for stores. Transfer or return an owned
 array with `(move name)`.
 

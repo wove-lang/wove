@@ -14,12 +14,14 @@
 	(use wove-file "../text/quoted.wove" (only scan_double_quoted))
 	(use wove-file "../text/character.wove" (only scan_character_span decode_character))
 
+	(use wove-file "./receiver_words.wove" (only receiver_separator (value receiver_call_head)))
+
 	(let character_token 4u32)
 
 	(struct Token (fields (kind u32) (start i32) (end i32) (error u32)))
 	(struct SourceDiagnostic (fields (error u32) (start i32) (end i32)))
 	(struct SourcePosition (fields (line u32) (column u32)))
-	(struct FormCheck (fields (rows u32) (start i32) (end i32) (error u32)))
+	(struct FormCheck (fields (rows u32) (start i32) (end i32) (error u32) (receiver_rows u32)))
 	(struct SourceNode
 		(:doc "A source row and its checked annotations. The expression name is a temporary or a native callback adapter. A negative local name slot marks an uncached name.")
 		(fields (kind u32) (start i32) (end i32) (parent i32) (first_child i32) (next_sibling i32)
@@ -411,7 +413,7 @@
 		(returns FormCheck)
 		(body
 			(return (struct:new FormCheck
-					(rows 0u32) (start start) (end end) (error error)))))
+					(rows 0u32) (start start) (end end) (error error) (receiver_rows 0u32)))))
 
 	(fn unclosed_form_start
 		(:doc `Locate the last opener at the final depth of a stream that reached EOF.`)
@@ -470,6 +472,9 @@
 			(let-mut root_start -1i32)
 			(let-mut root_end 0i32)
 			(let-mut needs_tag (bool false))
+			(let-mut receiver_rows 0u32)
+			(let-mut metadata_depth -1i32)
+			(let-mut body_depth -1i32)
 			(while
 				(:doc "Advance by raw token ends and keep only the state of the open forms.")
 				(i32:lt cursor length)
@@ -496,6 +501,32 @@
 								(:doc "The first significant token after an opener must be a bare tag.")
 								(bool:and needs_tag (u32:not-eq kind 1u32))
 								(then (return (call form_failure 7u32 start end))))
+							(if
+								(:doc "Only unquoted atoms outside metadata can introduce receiver shorthand.")
+								(bool:and (u32:eq kind 1u32) (i32:ltz metadata_depth))
+								(then
+									(if
+										(:doc "Preserve every atom inside a metadata entry as written.")
+										(bool:and needs_tag (u8:eq (array:get source start) 58u8))
+										(then (set metadata_depth depth))
+										(else
+											(if
+												(:doc "Only executable bodies use receiver syntax. Signature and layout heads keep their raw grammar.")
+												(i32:ltz body_depth)
+												(then
+													(if
+														(:doc "Remember the outer executable body through its matching closer.")
+														(bool:and needs_tag (call same_bytes (borrow-shared source) start end
+															(borrow-shared body_head) 0i32 4i32))
+														(then (set body_depth depth))))
+												(else
+													(let separator (call receiver_separator (borrow-shared source) start end needs_tag))
+													(if
+														(:doc "A call adds its receiver row and a property adds its head too.")
+														(i32:not-ltz separator)
+														(then
+															(set receiver_rows (u32:inc receiver_rows))
+															(if (bool:not needs_tag) (then (set receiver_rows (u32:inc receiver_rows))))))))))))
 							(set needs_tag (u32:eq kind 40u32))
 							(if
 								(:doc "At depth zero, a significant token must start the only root.")
@@ -520,6 +551,14 @@
 								(then
 									(set depth (i32:dec depth))
 									(if
+										(:doc "Resume counting only after the complete metadata entry ends.")
+										(i32:lt depth metadata_depth)
+										(then (set metadata_depth -1i32)))
+									(if
+										(:doc "Declarations after the executable body use the raw word grammar.")
+										(i32:lt depth body_depth)
+										(then (set body_depth -1i32)))
+									(if
 										(:doc "Preserve the exclusive end of the actual root.")
 										(i32:eqz depth)
 										(then (set root_end end)))))
@@ -538,7 +577,7 @@
 				(i32:ltz root_start)
 				(then (return (call form_failure 6u32 length length))))
 			(return (struct:new FormCheck
-					(rows rows) (start root_start) (end root_end) (error 0u32)))))
+					(rows rows) (start root_start) (end root_end) (error 0u32) (receiver_rows receiver_rows)))))
 
 	(fn new_source_node
 		(:doc `Initialize a row with its parent and empty child and sibling links.`)
@@ -606,68 +645,13 @@
 					(struct:get node next_sibling)))))
 
 	(fn build_source_tree
-		(:doc `Build the checked view as a source-ordered tree in caller-provided record storage.
-
-		Check the row capacity before writing. Parent links track open forms, so deeply
-		nested input needs no recursive walk or separate stack.`)
+		(:doc "Build the source-ordered tree used by scanners and source rendering.")
 		(:expect
 			(tests "stage-2/source_trees.tsv")
 			(issues "gh:wove-lang/wove:45"))
 		(params (source (shared-array u8)) (checked FormCheck) (nodes (mut-array SourceNode)))
 		(returns FormCheck)
-		(body
-			(if
-				(:doc "Leave storage alone when the same view failed its form check.")
-				(u32:gtz (struct:get checked error))
-				(then (return checked)))
-			(let capacity (u32:from-i32 (array:len nodes)))
-			(if
-				(:doc "The row count from admission guarantees room for every write below.")
-				(u32:lt capacity (struct:get checked rows))
-				(then
-					(return (call form_failure 11u32
-							(struct:get checked start) (struct:get checked end)))))
-			(let length (array:len source))
-			(array:set nodes 0i32 (call new_source_node 0u32 0i32 -1i32 -1i32))
-			(let-mut cursor 0i32)
-			(let-mut parent 0i32)
-			(let-mut next_index 1i32)
-			(while
-				(:doc "An open form's parent link acts as the stack for the admitted token stream.")
-				(i32:lt cursor length)
-				(body
-					(let token (call scan_token (borrow-shared source) cursor))
-					(let kind (struct:get token kind))
-					(let end (struct:get token end))
-					(set cursor end)
-					(if
-						(:doc "The closer seals its form rather than occupying its own row.")
-						(u32:eq kind 41u32)
-						(then
-							(let open_node (array:get nodes parent))
-							(call seal_source_node (borrow-mut nodes) parent open_node end)
-							(set parent (struct:get open_node parent))))
-					(if
-						(:doc "Each opener or atom appends one child row.")
-						(bool:not (bool:or (u32:eqz kind) (u32:eq kind 41u32)))
-						(then
-							(let is_form (u32:eq kind 40u32))
-							(let-mut node_end end)
-							(if
-								(:doc "An open form starts with no last child until a token is appended.")
-								is_form
-								(then (set node_end -1i32)))
-							(let child (call new_source_node kind (struct:get token start)
-									node_end parent))
-							(call append_source_child (borrow-mut nodes) parent next_index child)
-							(if
-								(:doc "Subsequent tokens belong to the new form until its closer.")
-								is_form
-								(then (set parent next_index)))
-							(set next_index (i32:inc next_index))))))
-			(let root (array:get nodes 0i32))
-			(call seal_source_node (borrow-mut nodes) 0i32 root length)
-			(return checked)))
+		(body (return (call build_tree (borrow-shared source) checked (borrow-mut nodes) (bool false)))))
 
 	(fn is_qualified_part_tail
 		(:doc "Allow hyphens in addition to identifier bytes within an operation name.")
@@ -1456,4 +1440,163 @@
 								closing
 								(then (set index (struct:get node parent)))
 								(else (set index sibling)))))))
-			(return (struct:new RenderResult (written written) (error 0u32))))))
+			(return (struct:new RenderResult (written written) (error 0u32)))))
+	(fn semantic_tree_rows
+		(:doc "Include the compiler-only receiver operands in the measured tree size.")
+		(params (checked FormCheck)) (returns u32)
+		(body (return (u32:add (struct:get checked rows) (struct:get checked receiver_rows)))))
+
+	(fn build_semantic_tree
+		(:doc "Keep original spans and materialize the implicit receiver in compiler trees.")
+		(params (source (shared-array u8)) (checked FormCheck) (nodes (mut-array SourceNode)))
+		(returns FormCheck)
+		(body (return (call build_tree (borrow-shared source) checked (borrow-mut nodes)
+			(u32:gtz (struct:get checked receiver_rows))))))
+
+	(fn place_method_receiver
+		(:doc "Insert the reserved receiver after any metadata and before the written operands.")
+		(params (source (shared-array u8)) (nodes (mut-array SourceNode)) (form SourceNode))
+		(returns void)
+		(body
+			(let head (struct:get form first_child))
+			(let tag (struct:get (array:get nodes head) kind))
+			(if
+				(:doc "Only a method head reserved an implicit child at the next physical row.")
+				(u32:not-eq tag receiver_call_head)
+				(then (return)))
+			(let receiver (i32:inc head))
+			(let-mut previous head)
+			(let-mut operand (struct:get (array:get nodes head) next_sibling))
+			(while
+				(:doc "Give the original metadata prefix the same position relative to the operands.")
+				(bool:and (i32:not-ltz operand)
+					(call is_metadata_form (borrow-shared source) (borrow-shared nodes) (array:get nodes operand)))
+				(body
+					(set previous operand)
+					(set operand (struct:get (array:get nodes operand) next_sibling))))
+			(let link (array:get nodes previous))
+			(array:set nodes previous
+				(call revise_source_node link (struct:get link end) (struct:get link first_child) receiver))
+			(let name (array:get nodes receiver))
+			(array:set nodes receiver (call revise_source_node name (struct:get name end) -1i32 operand))))
+
+	(fn append_length_property
+		(:doc "Represent an atom property as a length form around its original binding span.")
+		(params (nodes (mut-array SourceNode)) (parent i32) (index i32) (start i32) (end i32))
+		(returns void)
+		(body
+			(call append_source_child (borrow-mut nodes) parent index
+				(call new_source_node 40u32 start -1i32 parent))
+			(call append_source_child (borrow-mut nodes) index (i32:inc index)
+				(call new_source_node receiver_call_head start end index))
+			(call append_source_child (borrow-mut nodes) index (i32:add index 2i32)
+				(call new_source_node 1u32 start (i32:sub end 4i32) index))
+			(let property (array:get nodes index))
+			(call seal_source_node (borrow-mut nodes) index property end)))
+
+	(fn build_tree
+		(:doc "Build raw source rows or insert compiler-only receiver operands in the same preorder table.")
+		(params (source (shared-array u8)) (checked FormCheck) (nodes (mut-array SourceNode)) (normalize bool))
+		(returns FormCheck)
+		(body
+			(if
+				(:doc "Leave storage alone when the same view failed its form check.")
+				(u32:gtz (struct:get checked error))
+				(then (return checked)))
+			(let-mut needed (struct:get checked rows))
+			(if
+				(:doc "Only the semantic tree includes the extra receiver rows.")
+				normalize
+				(then (set needed (call semantic_tree_rows checked))))
+			(if
+				(:doc "Check the full capacity before publishing any rows.")
+				(u32:lt (u32:from-i32 (array:len nodes)) needed)
+				(then (return (call form_failure 11u32 (struct:get checked start) (struct:get checked end)))))
+			(let length (array:len source))
+			(array:set nodes 0i32 (call new_source_node 0u32 0i32 -1i32 -1i32))
+			(let-mut cursor 0i32)
+			(let-mut parent 0i32)
+			(let-mut index 1i32)
+			(let-mut metadata -1i32)
+			(let-mut body -1i32)
+			(while
+				(:doc "Track the parent and opaque metadata while materializing the admitted token stream.")
+				(i32:lt cursor length)
+				(body
+					(let token (call scan_token (borrow-shared source) cursor))
+					(let kind (struct:get token kind))
+					(let start (struct:get token start))
+					(let end (struct:get token end))
+					(set cursor end)
+					(if
+						(:doc "A closer splices any method operand and finalizes the original span.")
+						(u32:eq kind 41u32)
+						(then
+							(let open (array:get nodes parent))
+							(if
+								(:doc "Only the compiler tree can carry an implicit child.")
+								normalize
+								(then (call place_method_receiver (borrow-shared source) (borrow-mut nodes) open)))
+							(if (i32:eq metadata parent) (then (set metadata -1i32)))
+							(if (i32:eq body parent) (then (set body -1i32)))
+							(call seal_source_node (borrow-mut nodes) parent open end)
+							(set parent (struct:get open parent)))
+						(else
+							(if
+								(:doc "An opener or atom contributes its own source node.")
+								(u32:gtz kind)
+								(then
+									(let container (array:get nodes parent))
+									(let head (i32:ltz (struct:get container first_child)))
+									(let-mut separator -1i32)
+									(if
+										(:doc "Keep every atom inside a leading-colon entry in raw form.")
+										(bool:and normalize (bool:and (i32:ltz metadata) (u32:eq kind 1u32)))
+										(then
+											(if
+												(:doc "Record the container until its matching closer.")
+												(bool:and head (u8:eq (array:get source start) 58u8))
+												(then (set metadata parent))
+												(else
+													(if
+														(:doc "Enter the body at its original head. Only its children can be operations.")
+														(i32:ltz body)
+														(then
+															(if
+																(:doc "Keep the outer body row until its matching closer.")
+																(bool:and head (call same_bytes (borrow-shared source) start end
+																	(borrow-shared body_head) 0i32 4i32))
+																(then (set body parent))))
+														(else (set separator (call receiver_separator (borrow-shared source) start end head))))))))
+									(if
+										(:doc "A length property supplies a form, head, and receiver at its original location.")
+										(bool:and (bool:not head) (i32:not-ltz separator))
+										(then
+											(call append_length_property (borrow-mut nodes) parent index start end)
+											(set index (i32:add index 3i32)))
+										(else
+											(let opened (u32:eq kind 40u32))
+											(let-mut node_end end)
+											(let-mut node_kind kind)
+											(if opened (then (set node_end -1i32)))
+											(if
+												(:doc "A method head reserves a bare binding row inside the same subtree.")
+												(i32:not-ltz separator)
+												(then
+													(set node_kind receiver_call_head)
+													(array:set nodes (i32:inc index)
+														(call new_source_node 1u32 start separator parent))))
+											(call append_source_child (borrow-mut nodes) parent index
+												(call new_source_node node_kind start node_end parent))
+											(if opened (then (set parent index)))
+											(set index (i32:inc index))
+											(if
+												(:doc "Advance past the extra method operand before writing the next token.")
+												(u32:eq node_kind receiver_call_head)
+												(then (set index (i32:inc index))))))))))))
+			(let root (array:get nodes 0i32))
+			(call seal_source_node (borrow-mut nodes) 0i32 root length)
+			(if (bool:not normalize) (then (return checked)))
+			(return (struct:new FormCheck (rows needed) (start (struct:get checked start))
+				(end (struct:get checked end)) (error 0u32) (receiver_rows 0u32)))))
+)
