@@ -155,8 +155,13 @@ class NativeRef:
 
 
 @dataclass(frozen=True)
+class NativeStorage:
+	owner: NativeType
+
+
+@dataclass(frozen=True)
 class NativePlaceRef:
-	kind: str | NamedType
+	kind: str | NamedType | NativeStorage
 	writable: bool
 
 
@@ -177,7 +182,7 @@ class FixedArrayType:
 	count: int
 
 
-Type = str | NamedType | SharedRef | NativeRef | NativePlaceRef | BufferType | OptionalOwner | FixedArrayType
+Type = str | NamedType | SharedRef | NativeRef | NativeStorage | NativePlaceRef | BufferType | OptionalOwner | FixedArrayType
 
 
 _BYTE_VIEW = BufferType(SHARED, U8)
@@ -235,6 +240,8 @@ class NativeFunction:
 	byte_extents: tuple[tuple[int, int | None, int], ...]
 	c_strings: tuple[int, ...]
 	null_only: frozenset[int]
+	nullable: frozenset[int]
+	initializers: frozenset[int]
 	snapshot: NativeStringResult | None
 	macro: bool
 	variadic_start: int | None
@@ -262,7 +269,7 @@ def owns(kind: Type) -> bool:
 	# By-value records release their owned fields recursively.
 	if isinstance(kind, Record):
 		return any(owns(field.kind) for field in kind.fields.values())
-	return isinstance(kind, OptionalOwner) or (isinstance(kind, BufferType) and kind.access == OWNED)
+	return isinstance(kind, (OptionalOwner, NativeStorage)) or (isinstance(kind, BufferType) and kind.access == OWNED)
 
 
 # Scalars and records without owners can be read by value.
@@ -281,8 +288,15 @@ def c_type(kind: Type) -> str:
 	# A borrowed C handle already has a pointer representation in the header.
 	if isinstance(kind, NativeRef):
 		return kind.owner.c_name
+	# A C storage owner keeps the C object and its activation state together.
+	if isinstance(kind, NativeStorage):
+		return "wvrt_c_storage *"
 	# A native object loan points at the exact caller-owned type.
 	if isinstance(kind, NativePlaceRef):
+		# Qualify the whole underlying object, including when its native type is a pointer typedef.
+		if isinstance(kind.kind, NativeStorage):
+			native = kind.kind.owner.c_name
+			return f"{native} *" if kind.writable else f"const __typeof__({native}) *"
 		qualifier = "" if kind.writable else "const "
 		return f"{qualifier}{c_type(kind.kind)} *"
 	# A nullable owner uses the same pointer ABI as its payload.
@@ -517,6 +531,14 @@ def drop_statements(kind: Type, expression: str) -> Iterator[str]:
 		# Each member recursively drops any owned values still in its slot.
 		for member in reversed(kind.fields.values()):
 			yield from drop_statements(member.kind, f"{expression}.{member.c_name}")
+	# Destroy only an initialized native object, then release its backing storage.
+	elif isinstance(kind, NativeStorage):
+		native = kind.owner.c_name
+		drop = kind.owner.storage_drop
+		yield f"if (wvrt_c_storage_active({expression})) {{"
+		yield f"    (void){drop}(({native} *)wvrt_c_storage_data({expression}));"
+		yield "}"
+		yield f"wvrt_c_storage_free({expression});"
 	# Moved or absent array owners carry a null descriptor.
 	elif owns(kind):
 		yield f"wvrt_array_drop({expression});"
@@ -921,7 +943,7 @@ class FunctionEmitter:
 		return self.temporary(kind, expression)
 
 	# Lend the original scalar or record place using the declared native pointer type.
-	def borrow_native_place(self, node: Node, kind: NativePlaceRef) -> Value:
+	def borrow_native_place(self, node: Node, kind: NativePlaceRef, *, initializing: bool = False) -> Value:
 		tag = "borrow-mut" if kind.writable else "borrow-shared"
 		target, = checked_form(node, tag, 1).operands
 		binding, value = self.project(target, named=True)
@@ -930,6 +952,11 @@ class FunctionEmitter:
 			raise SourceError(target.line)
 		self.check_access(binding, kind.writable, target.line)
 		self.loans.append((binding, MUT if kind.writable else SHARED))
+		# A storage loan keeps the owner available for its checked address and possible activation.
+		if isinstance(kind.kind, NativeStorage):
+			mode = "true" if initializing else "false"
+			self.emit_line(f"wvrt_c_storage_access({value.c}, {mode}, -1, {target.line}, {target.line});")
+			return Value(kind, value.c)
 		return self.temporary(kind, f"&({value.c})")
 
 	# Evaluate arguments left to right and end only this call's loans.
@@ -967,9 +994,11 @@ class FunctionEmitter:
 				continue
 			argument = next(arguments)
 			sites.append(argument.line)
-			# Do not lend caller storage to a formal that admits only the literal null.
-			if native is not None and index in native.null_only:
-				if identifier(argument) != "null":
+			# Literal null is admitted only where the bridge declares that representation.
+			literal_null = isinstance(argument, Atom) and not argument.quoted and argument.text == "null"
+			if native is not None and (index in native.null_only or literal_null and index in native.nullable):
+				# A null-only formal cannot borrow caller storage.
+				if not literal_null:
 					raise SourceError(argument.line)
 				values.append("NULL")
 				continue
@@ -979,7 +1008,7 @@ class FunctionEmitter:
 			elif isinstance(kind, SharedRef):
 				value = self.borrow_record(argument, kind)
 			elif isinstance(kind, NativePlaceRef):
-				value = self.borrow_native_place(argument, kind)
+				value = self.borrow_native_place(argument, kind, initializing=index in native.initializers)
 			else:
 				value = self.typed(argument, kind)
 			values.append(value.c)
@@ -1010,6 +1039,10 @@ class FunctionEmitter:
 		site = f"-1, {line}, {line}"
 		actuals = values.copy()
 		abi = [c_type(kind) for kind in parameters]
+		# Convert checked storage loans to their original C object addresses.
+		for index, kind in enumerate(parameters):
+			if isinstance(kind, NativePlaceRef) and isinstance(kind.kind, NativeStorage) and values[index] != "NULL":
+				actuals[index] = f"({abi[index]})wvrt_c_storage_data({values[index]})"
 		# Verify every byte view against its captured operands before entering C.
 		for buffer, size, count in callee.byte_extents:
 			mutable = parameters[buffer] == _MUT_BYTE_VIEW
@@ -1073,6 +1106,9 @@ class FunctionEmitter:
 				expression = (f"_Generic(&({release}), void (*)(void *): wvrt_snapshot_cstr_at_span, "
 					f"void (*)(char *): wvrt_snapshot_chars_at_span)({expression}, {release}, {site})")
 		result = self.call_result(callee.result, expression)
+		# Only a successful C initializer activates its native object's destructor.
+		for index in sorted(callee.initializers):
+			self.emit_line(f"wvrt_c_storage_finish_init({values[index]}, {result.c});")
 		# Copy back only supplied mutable strings, then release scratch while preserving errno.
 		if converted:
 			for position, (index, mutable, _, _) in enumerate(converted):
@@ -1267,6 +1303,19 @@ class FunctionEmitter:
 		# Function literals follow the same rules as module initializers.
 		if expr.tag in SCALAR_TYPES:
 			return read_scalar_literal(expr)
+
+		# Allocate inactive native storage using the provider's exact C layout.
+		if expr.tag == "native.alloc":
+			operand, = checked_form(expr, arity=1).operands
+			owner = self.records.get(identifier(operand))
+			# Only a declared storage owner can be allocated by the seed.
+			if not isinstance(owner, NativeType) or owner.storage_drop is None:
+				raise SourceError(operand.line)
+			native, drop = owner.c_name, owner.storage_drop
+			self.emit_line(f'_Static_assert(_Generic(&({drop}), __typeof__(({drop})(({native} *)0)) '
+				f'(*)({native} *): 1, default: 0), "Wove C storage destructor does not match {native}");')
+			return self.temporary(NativeStorage(owner),
+				f"wvrt_c_storage_new(sizeof({native}), _Alignof({native}), -1, {expr.line}, {expr.line})")
 
 		# Store embedded bytes in the translation unit rather than reading them at runtime.
 		if expr.tag == "embed":
@@ -2208,7 +2257,14 @@ class NativeDeclarations:
 			spelling, fields = read_native_type(node)
 			# A typedef takes its representation and pointer-owner marker from the bridge.
 			if fields is None:
-				kind = NativeType(spelling, any(pragma.tag == "c_owned" for pragma in native_pragmas(node)))
+				owner = next((pragma for pragma in native_pragmas(node) if pragma.tag == "c_owned"), None)
+				drop = None
+				# The fixed storage contract names both its destructor and its representation.
+				if owner is not None and len(owner.operands) == 2:
+					release, representation = owner.operands
+					if isinstance(representation, Atom) and not representation.quoted and representation.text == "storage":
+						drop = identifier(form(release, "drop", 1).operands[0])
+				kind = NativeType(spelling, owner is not None, drop)
 				self.types[identity] = kind
 				return kind
 			record = self.types[identity] = Record(spelling, {}, native=True)
@@ -2233,6 +2289,9 @@ class NativeDeclarations:
 		if name in SCALAR_TYPES:
 			return NativePlaceRef(name, writable)
 		kind = self.resolve_type(key, name)
+		# Caller-owned storage lends the address of its backing C object.
+		if isinstance(kind, NativeType) and kind.storage_drop is not None:
+			return NativePlaceRef(NativeStorage(kind), writable)
 		# A borrowed pointer handle already carries the pointer ABI in its declared type.
 		if isinstance(kind, NativeType) and (kind.owned or kind.c_name.endswith("*")):
 			if writable:
@@ -2284,6 +2343,8 @@ class NativeDeclarations:
 		arrays = {}
 		strings = set()
 		null_only = set()
+		nullable = set()
+		initializers = set()
 		snapshot = None
 		macro = False
 		variadic_start = None
@@ -2309,12 +2370,23 @@ class NativeDeclarations:
 					raise SourceError(pragma.line)
 				variadic_start = position
 				continue
-			# A nullable handle can also receive an ordinary borrowed value.
+			# A nullable native reference accepts either its ordinary loan or literal null.
 			if pragma.tag == "c_nullable":
 				names = tuple(map(identifier, pragma.operands))
-				# This slice handles the non-null operands of nullable handle formals.
-				if not names or any(not isinstance(parameters.get(name), NativeRef) for name in names):
+				# Only reference formals use this nullable representation in the seed.
+				if not names or any(not isinstance(parameters.get(name), (NativeRef, NativePlaceRef)) for name in names):
 					raise SourceError(pragma.line)
+				nullable.update(names)
+				continue
+			# An initializer can borrow inactive storage and make it active on success.
+			if pragma.tag == "c_init":
+				operand, = form(pragma, arity=1).operands
+				name = identifier(operand)
+				kind = parameters.get(name)
+				# Initialization requires a writable storage loan.
+				if not isinstance(kind, NativePlaceRef) or not kind.writable or not isinstance(kind.kind, NativeStorage):
+					raise SourceError(pragma.line)
+				initializers.add(name)
 				continue
 			# Resolve string and null contracts before lowering any arguments.
 			if pragma.tag in ("c_cstr", "c_null"):
@@ -2390,9 +2462,13 @@ class NativeDeclarations:
 				raise SourceError(payload.line)
 		else:
 			result = VOID if identifier(result_node) == VOID else self.scalar(key, result_node)
+		# An initializer's status is the exact i32 result used to activate storage.
+		if initializers and (result != I32 or initializers & nullable):
+			raise SourceError(node.line)
 		return NativeFunction(symbol, tuple(parameters.items()), result, tuple(extents.values()),
 			tuple(positions[name] for name in parameters if name in strings),
-			frozenset(positions[name] for name in null_only), snapshot, macro, variadic_start,
+			frozenset(positions[name] for name in null_only), frozenset(positions[name] for name in nullable),
+			frozenset(positions[name] for name in initializers), snapshot, macro, variadic_start,
 			{positions[name]: symbol for name, symbol in constants.items()}, tuple(arrays.values()))
 
 	# Bind scalar C values and borrowed handles to the actual header expression.

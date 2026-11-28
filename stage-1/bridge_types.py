@@ -32,6 +32,7 @@ C_WRITABLE_BYTES = f"{_C_BYTE_UNION} {{{_C_WRITABLE_MEMBERS}{_C_READONLY_MEMBERS
 class NativeType:
 	c_name: str
 	owned: bool = False
+	storage_drop: str | None = None
 
 
 @dataclass(frozen=True)
