@@ -15,7 +15,8 @@ extern int32_t fixture_storage;
 #elif defined(FIXTURE_NULL_ZERO)
 #define PROJECT_NULL 0
 #elif defined(FIXTURE_NULL_DEBUG_CONTEXT)
-#define PROJECT_NULL (__builtin_strstr(__FILE__, "/.wovec-cache/debug/") == (void *)0 ? 0 : 1)
+// The retained fixture calls on line 7. Debug staging adds one physical line.
+#define PROJECT_NULL (__LINE__ - 7)
 #elif defined(FIXTURE_NULL_CONTEXT)
 #define PROJECT_NULL __COUNTER__
 #elif defined(FIXTURE_NULL_NONZERO)
