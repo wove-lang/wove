@@ -28,4 +28,22 @@ extern void *fixture_allocate(unsigned long size) __attribute__((malloc));
 extern int fixture_future(void) __attribute__((availability(macos, introduced=12.0)));
 #endif
 
+// Change real attribute operands only while the numbered audit sources exist.
+#if BRIDGE_MODE == 7 || BRIDGE_MODE == 9
+extern int printf(const char *, ...) __attribute__((format(printf, 1, 2)));
+#if BRIDGE_MODE == 9 && __has_include("unit-0000000.c")
+extern int fixture_report(const char *, const char *, ...) __attribute__((format(printf, 2, 3)));
+#else
+extern int fixture_report(const char *, const char *, ...) __attribute__((format(printf, 1, 3)));
+#endif
+#endif
+
+#if BRIDGE_MODE == 8 || BRIDGE_MODE == 10
+#if BRIDGE_MODE == 10 && __has_include("unit-0000000.c")
+extern void *fixture_reopen(const char *, const char *, void *) __attribute__((nonnull(2, 3)));
+#else
+extern void *fixture_reopen(const char *, const char *, void *) __attribute__((nonnull(3)));
+#endif
+#endif
+
 #endif
