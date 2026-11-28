@@ -45,7 +45,8 @@ TOKEN = re.compile(
 )
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
-TAG = re.compile(":?" + WORD.pattern)
+QUALIFIED_PART = r"[A-Za-z_][A-Za-z0-9_-]*"
+TAG = re.compile(":?" + WORD.pattern + "|" + QUALIFIED_PART + ":" + QUALIFIED_PART)
 NUL_OR_ESCAPED_BACKSLASH = re.compile(r"\\\\|\\0")
 
 
