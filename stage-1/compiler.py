@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 
+from bridge_types import NativeType, c_bridges, declarations, read_native_type
 from syntax import IDENTIFIER, WORD, Atom, Form, Node, SourceError, form, identifier, parse
 from target import compiler_target
 
@@ -106,7 +107,7 @@ SHIFT_OPS = {"shl": "<<", "shr": ">>"}
 
 @dataclass(frozen=True)
 class RecordField:
-	kind: str
+	kind: str | NativeType | Record
 	c_name: str
 
 
@@ -115,12 +116,16 @@ class RecordField:
 class Record:
 	c_name: str
 	fields: dict[str, RecordField]
+	native: bool = False
+
+
+NamedType = Record | NativeType
 
 
 @dataclass(frozen=True)
 class BufferType:
 	access: str
-	element: str | Record | BufferType
+	element: str | NamedType | BufferType
 
 
 @dataclass(frozen=True)
@@ -129,7 +134,7 @@ class FixedArrayType:
 	count: int
 
 
-Type = str | Record | BufferType | FixedArrayType
+Type = str | NamedType | BufferType | FixedArrayType
 
 
 _BYTE_VIEW = BufferType(SHARED, U8)
@@ -170,16 +175,17 @@ class Module:
 	records: dict[str, Record] = field(default_factory=dict)
 	function_declarations: dict[str, Form] = field(default_factory=dict)
 	uses: list[Form] = field(default_factory=list)
-	type_bindings: dict[str, Record] = field(default_factory=dict)
+	type_bindings: dict[str, NamedType] = field(default_factory=dict)
 	functions: dict[str, Function] = field(default_factory=dict)
 	bindings: dict[str, Function] = field(default_factory=dict)
 	values: dict[str, ModuleValue] = field(default_factory=dict)
 	value_bindings: dict[str, ModuleValue] = field(default_factory=dict)
+	syntax: Form | None = None
 
 
 # Scalars and scalar-only records can be passed without a loan or transfer.
 def copyable(kind: Type) -> bool:
-	return isinstance(kind, (Record, FixedArrayType)) or kind in SCALAR_TYPES
+	return isinstance(kind, (Record, FixedArrayType, NativeType)) or kind in SCALAR_TYPES
 
 
 # Arrays and slices share descriptor layouts while values retain their native types.
@@ -190,7 +196,7 @@ def c_type(kind: Type) -> str:
 	# Inline arrays are passed by value through their generated C type.
 	if isinstance(kind, FixedArrayType):
 		return f"wv_seed_fixed_{kind.element}_{kind.count}"
-	return kind.c_name if isinstance(kind, Record) else C_TYPE[kind]
+	return kind.c_name if isinstance(kind, (Record, NativeType)) else C_TYPE[kind]
 
 
 # Normalize a suffixed integer atom to the equivalent typed form.
@@ -409,7 +415,7 @@ def record_definition(record: Record) -> list[str]:
 
 
 # Read a copyable input or a shared or mutable view of a supported element.
-def parameter_type(node: Node, records: dict[str, Record]) -> Type:
+def parameter_type(node: Node, records: dict[str, NamedType]) -> Type:
 	# Copyable types are written as bare symbols.
 	if isinstance(node, Atom) and not node.quoted:
 		kind = records.get(node.text, node.text)
@@ -440,7 +446,7 @@ def parameter_type(node: Node, records: dict[str, Record]) -> Type:
 
 # Read the signature before lowering calls, including forward calls.
 def read_function(
-	name: str, node: Form, index: int, records: dict[str, Record], *, entry_module: bool
+	name: str, node: Form, index: int, records: dict[str, NamedType], *, entry_module: bool
 ) -> Function:
 	fields = {}
 	# Keep each tagged field at its original line for validation and lowering.
@@ -755,7 +761,7 @@ class FunctionEmitter:
 		name, *fields = node.operands
 		record = self.records.get(identifier(name))
 		# Only a declared record has a usable member layout.
-		if record is None:
+		if not isinstance(record, Record):
 			raise SourceError(name.line)
 		initializers = {}
 		# Resolve each initializer to its C member before evaluating its value.
@@ -767,8 +773,8 @@ class FunctionEmitter:
 				raise SourceError(field_node.line)
 			value = self.typed(initializer.operands[0], field.kind)
 			initializers[initializer.tag] = f".{field.c_name} = {value.c}"
-		# Require a complete record without implicit defaults for source fields.
-		if len(initializers) != len(record.fields):
+		# A Wove record supplies every field. C records use C aggregate initialization.
+		if not record.native and len(initializers) != len(record.fields):
 			raise SourceError(node.line)
 		values = ", ".join(initializers.values()) or "0"
 		return self.temporary(record, f"({record.c_name}){{{values}}}")
@@ -804,7 +810,14 @@ class FunctionEmitter:
 		return self.temporary(kind, items)
 
 	# Use the signed runtime check only with values representable in int64_t.
-	def convert_integer(self, value: Value, kind: str, line: int) -> Value:
+	def convert_integer(self, value: Value, kind: str | NativeType, line: int) -> Value:
+		# Clang knows the exact native type width and signedness from the included header.
+		if isinstance(kind, NativeType) or isinstance(value.kind, NativeType):
+			result = self.temporary(kind, "0")
+			self.emit_line(f"if (__builtin_add_overflow({value.c}, 0, &{result.c})) {{")
+			self.emit_line(f"    wvrt_int_conversion_trap(-1, {line}, {line});")
+			self.emit_line("}")
+			return result
 		low, high = SCALAR_LIMITS[kind]
 		site = self.site(line)
 		# Every supported nonnegative seed integer fits the wider unsigned type.
@@ -879,13 +892,14 @@ class FunctionEmitter:
 				value = self.typed(operand, origin)
 			else:
 				target, operand = form(expr, arity=2).operands
-				kind = identifier(target)
+				name = identifier(target)
+				kind = self.records.get(name, name)
 				# Check the destination before evaluating the operand.
-				if kind not in SCALAR_LIMITS:
+				if kind not in SCALAR_LIMITS and not isinstance(kind, NativeType):
 					raise SourceError(node.line)
 				value = self.expression(operand)
-				# The generic spelling accepts any seed integer as its source.
-				if value.kind not in SCALAR_LIMITS:
+				# Native integer aliases keep their C spelling across the conversion.
+				if value.kind not in SCALAR_LIMITS and not isinstance(value.kind, NativeType):
 					raise SourceError(node.line)
 			# Retain the seed's existing direct widening lowering for this alias.
 			if expr.tag == "i32.from-u8":
@@ -1413,7 +1427,8 @@ def read_module(
 		# The root supplies the executable entry point even when a provider defines main.
 		if entry and "main" not in function_declarations:
 			raise SourceError(module.line)
-		return Module(filename, function_index, records, function_declarations, uses, records.copy(), values=values)
+		return Module(filename, function_index, records, function_declarations, uses, records.copy(),
+			values=values, syntax=module)
 
 
 # Resolve signatures in the file's complete type namespace before binding callers.
@@ -1488,6 +1503,99 @@ def read_header_include(node: Form, directory: Path) -> tuple[str, str]:
 	return f'"{key}"', f'"{spelling}"'
 
 
+# Index native type forms by the same header key used to emit the include.
+def native_type_index(modules: Iterator[tuple[str, Form]]):
+	index = {}
+	# Sources can extend the same header while retaining the original C spelling.
+	for filename, module in modules:
+		# Select only declared types and records, leaving signatures and other C pragmas opaque.
+		for bridge in c_bridges(module):
+			# A bridge with an invalid header cannot match an active include.
+			try:
+				key, _ = read_header_include(bridge.node, Path(filename).resolve().parent)
+			except SourceError:
+				continue
+			scope = (*bridge.enclosing, bridge.node)
+			# Keep selection deferred until the seed actually needs this name.
+			for declaration in declarations(bridge.node.operands[2:], scope):
+				node = declaration.node
+				# Other C bridge members cannot define a seed type.
+				if node.tag in ("type", "struct") and node.names:
+					name = node.names[0].text
+					index.setdefault((key, name), []).append((filename, declaration))
+	return index
+
+
+class NativeTypes:
+	# Share selected type identities across every use of the same bridge.
+	def __init__(self, index):
+		self.index = index
+		self.bound = {}
+
+	# Lower a selected type through its C declaration and the active target cfg.
+	def resolve(self, key: str, name: str) -> NamedType | None:
+		identity = key, name
+		# A native record can refer to a type already created while resolving its fields.
+		if identity in self.bound:
+			return self.bound[identity]
+		# A project declaration encountered after supplied providers can extend the view.
+		for filename, declaration in reversed(self.index.get(identity, ())):
+			with source_file(filename):
+				node = declaration.node
+				# Excluded definitions contribute neither spellings nor record fields.
+				if not all(metadata_enabled(part, selectable=True) for part in (*declaration.enclosing, node)):
+					continue
+				spelling, fields = read_native_type(node)
+				# A typedef has its own identity and takes its representation from the header.
+				if fields is None:
+					kind = self.bound[identity] = NativeType(spelling)
+					return kind
+				record = self.bound[identity] = Record(spelling, {}, native=True)
+				# Only scalar or native named fields are in the seed's record subset.
+				for field, operand in fields.items():
+					# Keep other field shapes opaque until the seed needs to lower them.
+					if not isinstance(operand, Atom) or operand.quoted:
+						continue
+					field_type = operand.text
+					kind = field_type if field_type in SCALAR_TYPES else self.resolve(key, field_type)
+					# An unsupported member has no seed field access.
+					if kind is not None:
+						record.fields[field] = RecordField(kind, field)
+				return record
+		self.bound[identity] = None
+		return None
+
+	# Bind only explicit type selections from an active header use.
+	def bind(self, module: Module, use: Form, key: str) -> None:
+		# Includes with absent or opaque selectors still pass through to C.
+		if len(use.operands) != 3:
+			return
+		only = use.operands[2]
+		# Other selectors stay opaque until the seed lowers their corresponding features.
+		if not isinstance(only, Form) or only.tag != "only":
+			return
+		# Reuse the ordinary type selector spelling and alias.
+		for item in only.operands:
+			# The C include can also supply functions, values or caller-only declarations.
+			if not isinstance(item, Form) or item.tag != "type" or len(item.operands) != 1:
+				continue
+			original = local = item.operands[0]
+			# Renames only affect the local type namespace.
+			if isinstance(original, Form) and original.tag == "as" and len(original.operands) == 2:
+				original, local = original.operands
+			# Leave unsupported selectors opaque.
+			if not isinstance(original, Atom) or not isinstance(local, Atom):
+				continue
+			kind = self.resolve(key, identifier(original))
+			# An include's unused declarations need not be modeled by the seed.
+			if kind is not None:
+				name = identifier(local)
+				# Preserve the ordinary local type namespace.
+				if name in C_TYPE or name in module.type_bindings:
+					raise SourceError(local.line)
+				module.type_bindings[name] = kind
+
+
 # Bind provider declarations directly so aliases retain the defining identity.
 def bind_use(only: Form, provider: Module, importer: Module) -> None:
 	# Each item selects a definition in its provider, including an immutable value.
@@ -1548,7 +1656,9 @@ def file_identity(path: Path) -> tuple[int, int]:
 
 
 # Visit active imports, collecting native includes and optional Make prerequisites.
-def load_modules(root: Module, *, imports: dict[str, None] | None = None) -> tuple[list[Module], list[str]]:
+def load_modules(
+	root: Module, *, imports: dict[str, None] | None = None, bridge_files: tuple[str, ...] = ()
+) -> tuple[list[Module], list[str]]:
 	# A file with no uses only needs signature preparation.
 	if not root.uses:
 		prepare_functions(root, entry=True)
@@ -1562,34 +1672,31 @@ def load_modules(root: Module, *, imports: dict[str, None] | None = None) -> tup
 	modules = {root_identity: root}
 	headers = {RUNTIME_INCLUDE: RUNTIME_INCLUDE}
 	active = {root_identity}
-	stack = [(root_identity, path, iter(root.uses), None)]
+	pending = {root_identity: []}
+	order = []
+	stack = [(root_identity, path, iter(root.uses))]
 	record_index = len(root.records)
 	function_index = len(root.function_declarations)
 	value_index = len(root.values)
 	absolute_paths = Path(root.filename).is_absolute()
 	# Keep active importers on the stack until their last use has been processed.
 	while stack:
-		identity, path, uses, incoming = stack[-1]
+		identity, path, uses = stack[-1]
 		importer = modules[identity]
 		use = next(uses, None)
-		# A file's signatures are ready when all of its imports have bound.
+		# Finish graph discovery in dependency order before resolving signatures.
 		if use is None:
-			prepare_functions(importer, entry=incoming is None)
+			order.append(identity)
 			active.remove(identity)
 			stack.pop()
-			# Bind the pending edge that brought this file into the graph.
-			if incoming is not None:
-				parent, only = incoming
-				# Invalid selections belong to the importer.
-				with source_file(parent.filename):
-					bind_use(only, importer, parent)
 			continue
 		# An include, edge, or invalid selection is diagnosed in this importer.
 		with source_file(importer.filename):
-			# An explicit C header contributes no Wove names or dependency edges.
+			# An active C header contributes an include and any selected native types.
 			if use_provider(use) == "c-header":
 				key, include = read_header_include(use, path.parent)
 				headers.setdefault(key, include)
+				pending[identity].append((use, key))
 				continue
 			requested, only = read_use(use)
 			candidate = path.parent / requested
@@ -1605,10 +1712,9 @@ def load_modules(root: Module, *, imports: dict[str, None] | None = None) -> tup
 			# An edge back into the current path is a cycle.
 			if target_identity in active:
 				raise SourceError(use.line)
-			provider = modules.get(target_identity)
-			# A provider reached again already has its complete signatures.
-			if provider is not None:
-				bind_use(only, provider, importer)
+			pending[identity].append((only, target_identity))
+			# A provider reached again needs no second discovery pass.
+			if target_identity in modules:
 				continue
 			filename = str(target) if absolute_paths else os.path.relpath(target)
 			source = read_provider(target, filename, use)
@@ -1618,14 +1724,47 @@ def load_modules(root: Module, *, imports: dict[str, None] | None = None) -> tup
 			function_index += len(provider.function_declarations)
 			value_index += len(provider.values)
 			active.add(target_identity)
-			stack.append((target_identity, target, iter(provider.uses), (importer, only)))
+			pending[target_identity] = []
+			stack.append((target_identity, target, iter(provider.uses)))
+
+	# Supply compiler inventory declarations before project declarations.
+	def type_sources() -> Iterator[tuple[str, Form]]:
+		# Inventory files contribute their C bridges only.
+		for filename in bridge_files:
+			with source_file(filename):
+				path = Path(filename)
+				# The same dependency inventory tracks any supplied bridge source.
+				if imports is not None:
+					track_file(imports, path, path.resolve(), absolute_paths)
+				yield filename, form(parse(path.read_text(encoding="utf-8")), "module")
+		# Project bridges come from the same discovered source graph as their users.
+		for module in modules.values():
+			# Excluded modules contribute no declarations.
+			if module.syntax is not None:
+				yield module.filename, module.syntax
+
+	native = NativeTypes(native_type_index(type_sources()))
+	# The imports of each Wove provider are ready before any importer binds it.
+	for identity in order:
+		module = modules[identity]
+		with source_file(module.filename):
+			# Resolve each use in its original source order.
+			for selection, provider in pending[identity]:
+				# C and Wove providers contribute names from separate declaration indexes.
+				if selection.tag == "use":
+					native.bind(module, selection, provider)
+				else:
+					bind_use(selection, modules[provider], module)
+			prepare_functions(module, entry=identity == root_identity)
 	return list(modules.values()), list(headers.values())
 
 
 # Emit a complete C translation unit after the source graph succeeds.
-def compile_source(source: str, filename: str, *, imports: dict[str, None] | None = None) -> str:
+def compile_source(
+	source: str, filename: str, *, imports: dict[str, None] | None = None, bridge_files: tuple[str, ...] = ()
+) -> str:
 	root = read_module(source, filename, 0, 0, 0, entry=True, imports=imports)
-	modules, headers = load_modules(root, imports=imports)
+	modules, headers = load_modules(root, imports=imports, bridge_files=bridge_files)
 	functions = [function for module in modules for function in module.functions.values()]
 	values = [value for module in modules for value in module.values.values()]
 	retained = (

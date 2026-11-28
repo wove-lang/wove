@@ -9,12 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from inputs import collect_inputs
+from inputs import bundled_provider_inputs, collect_inputs
 from make_deps import write_make_deps
 from syntax import SourceError
-
-
-BUNDLED_SOURCE = "stage-2/driver/bundled.wove"
 
 
 # Select the fixed POSIX record view and cfg branches for the compiler's build host.
@@ -61,8 +58,7 @@ def fixture_inputs(root, entry):
 	bundle = {}
 	# Pure Wove fixtures need no C bridge providers.
 	if needs_bundle:
-		bundle, inventory, _ = collect_inputs(root, [BUNDLED_SOURCE])
-		providers = [asset for asset in inventory if Path(asset).suffix == ".wove"]
+		bundle, providers = bundled_provider_inputs(root)
 		bundled_sources, bundled_assets, _ = collect_inputs(root, providers, allow_missing_imports=True)
 		sources.update(bundled_sources)
 		assets.update(bundled_assets)
