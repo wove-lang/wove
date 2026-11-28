@@ -66,4 +66,22 @@ static inline int32_t fixture_sys_nmln(void)
 }
 #endif
 
+
+/* Populate the whole GNU domain field through the original native layout. */
+static inline void fixture_seed_domain(struct utsname *value)
+{
+#if defined(__linux__) && defined(__USE_GNU)
+	for (size_t i = 0; i < sizeof(value->domainname); ++i)
+		value->domainname[i] = (char)('A' + i % 26);
+#else
+	(void)value;
+#endif
+}
+
+/* Compare the Wove projection against the bytes seeded by the C header view. */
+static inline bool fixture_domain_byte(int32_t index, uint8_t value)
+{
+	return value == (uint8_t)('A' + index % 26);
+}
+
 #endif
