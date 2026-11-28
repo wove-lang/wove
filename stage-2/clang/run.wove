@@ -20,9 +20,15 @@
 	(let replay_flags "-Wno-everything\u0000-E\u0000-P\u0000-dD\u0000--\u0000")
 	(let replay_ast_flags "-Wno-everything\u0000-Werror=unguarded-availability\u0000-Xclang\u0000-ast-dump=json\u0000-fsyntax-only\u0000--\u0000")
 
+	(let deployment_flags "-Wno-everything\u0000-Werror=unguarded-availability\u0000-fsyntax-only\u0000--\u0000")
+
 	(let trace_suffix ".stderr")
 	(let detached_trace "/trace")
-	(let native_flags "-Xclang\u0000-dependency-file\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-MT\u0000-Xclang\u0000wove-probe\u0000-MJ\u0000/dev/null\u0000-Xclang\u0000-dependency-dot\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-header-include-file\u0000-Xclang\u0000/dev/null\u0000-H\u0000-fshow-skipped-includes\u0000")
+	(let native_output_flags "-Xclang\u0000-dependency-file\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-MT\u0000-Xclang\u0000wove-probe\u0000-MJ\u0000/dev/null\u0000-Xclang\u0000-dependency-dot\u0000-Xclang\u0000/dev/null\u0000-Xclang\u0000-header-include-file\u0000-Xclang\u0000/dev/null\u0000")
+	(let include_trace_flags "-H\u0000-fshow-skipped-includes\u0000")
+	(let ordinary_probe 0u8)
+	(let private_probe 1u8)
+	(let traced_probe 2u8)
 
 	(fn clang_run_at
 		(:doc "Present the shared capture status in the Clang launcher result.")
@@ -32,14 +38,14 @@
 
 	(fn clang_arguments
 		(:doc "Pack the same ordered frontend arguments for bounded and measured captures.")
-		(params (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8)) (traced bool))
+		(params (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8)) (mode u8))
 		(returns (optional (owned-array u8)))
 		(body
-			(let-mut flag_width (array.len flags))
-			(if
-				(:doc "Native probes send expanded dependency outputs to sinks and report includes.")
-				traced
-				(then (set flag_width (i32.add flag_width (array.len native_flags)))))
+			(let restricted (u8.not-eq mode ordinary_probe))
+			(let traced (u8.eq mode traced_probe))
+			(let native_width (if restricted (then (array.len native_output_flags)) (else 0i32)))
+			(let trace_width (if traced (then (array.len include_trace_flags)) (else 0i32)))
+			(let flag_width (i32.add (array.len flags) (i32.add native_width trace_width)))
 			(let path_length (array.len path))
 			(let option_length (array.len options))
 			(let limit (i32.sub 2147483646i32 flag_width))
@@ -55,8 +61,13 @@
 			(let-mut options_end (call append_bytes (borrow-shared options) (borrow-mut arguments) 0i32))
 			(if
 				(:doc "Append the output restrictions after the caller's options and response-file references.")
+				restricted
+				(then (set options_end (call append_bytes (borrow-shared native_output_flags)
+					(borrow-mut arguments) options_end))))
+			(if
+				(:doc "Only a header comparison needs to capture the actual include tree.")
 				traced
-				(then (set options_end (call append_bytes (borrow-shared native_flags)
+				(then (set options_end (call append_bytes (borrow-shared include_trace_flags)
 					(borrow-mut arguments) options_end))))
 			(let flag_end (call append_bytes (borrow-shared flags) (borrow-mut arguments) options_end))
 			(let path_end (call append_bytes (borrow-shared path) (borrow-mut arguments) flag_end))
@@ -76,9 +87,20 @@
 				(:doc "Observe the same preprocessed lines used by the bounded numbered comparison.")
 				preprocess
 				(then (return (call clang_arguments (borrow-shared options) (borrow-shared replay_flags)
-					(borrow-shared path) (bool true)))))
+					(borrow-shared path) traced_probe))))
 			(return (call clang_arguments (borrow-shared options) (borrow-shared replay_ast_flags)
-				(borrow-shared path) (bool true)))))
+				(borrow-shared path) traced_probe))))
+
+	(fn deployment_arguments
+		(:doc "Check availability at real call sites with the effective frontend settings and no side outputs.")
+		(params (options (shared-array u8)) (path (shared-array u8))) (returns (optional (owned-array u8)))
+		(body
+			(if
+				(:doc "Require a complete argument block before appending the diagnostic flags.")
+				(bool.not (call probe_options_complete (borrow-shared options)))
+				(then (return (optional.none (owned-array u8)))))
+			(return (call clang_arguments (borrow-shared options) (borrow-shared deployment_flags)
+				(borrow-shared path) private_probe))))
 
 	(fn invoke_clang
 		(:doc "Forward complete frontend arguments before the required probe flags.")
@@ -86,8 +108,9 @@
 			(diagnostics i32) (output (mut-array u8)))
 		(returns ClangRun)
 		(body
+			(let mode (if (i32.lt -1i32 diagnostics) (then traced_probe) (else ordinary_probe)))
 			(let packed (call clang_arguments (borrow-shared options) (borrow-shared flags)
-				(borrow-shared path) (i32.lt -1i32 diagnostics)))
+				(borrow-shared path) mode))
 			(if (owner.is-null packed) (then (return (call clang_run_at 2u32 -1i32 0i32))))
 			(let arguments (move (optional.unwrap packed)))
 			(let capture (call capture_probe_to_stderr (borrow-shared program) (borrow-shared arguments)

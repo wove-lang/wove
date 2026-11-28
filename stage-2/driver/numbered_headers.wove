@@ -4,10 +4,10 @@
 	(:doc "Certify a checked include prefix in the private directory that will compile the numbered units.")
 
 	(use wove-file "../clang/run.wove" (only run_bounded_preprocessing))
-	(use wove-file "../clang/capture.wove" (only run_clang_replay_capture))
+	(use wove-file "../clang/capture.wove" (only run_clang_replay_capture check_replay_deployment))
 	(use wove-file "../clang/trace.wove" (only include_line trace_length))
 	(use wove-file "../clang/replay.wove" (only replay_directives_safe replay_declaration_mode))
-	(use wove-file "../clang/native_replay.wove" (only write_native_identities (value attributed_declaration)))
+	(use wove-file "../clang/native_replay.wove" (only write_native_identities (value plain_declaration)))
 	(use wove-file "../clang/macro_directives.wove" (only safe_macro_definitions))
 	(use wove-file "../clang/macro_replay.wove" (only append_macro_identities))
 	(use wove-file "../clang/variadic_replay.wove" (only append_variadic_identities))
@@ -304,6 +304,41 @@
 					(set unit (i32.inc unit))))
 			(return (bool true))))
 
+	(fn discard_numbered_sources
+		(:doc "Remove the exact private header and source files that were staged, even after a failed check.")
+		(params (serial_path (shared-array u8)) (count i32)) (returns bool)
+		(body
+			(let header (call join_file_path (borrow-shared serial_path) (borrow-shared common_name)))
+			(let-mut cleaned (i32.eqz (call unlink (borrow-shared header))))
+			(let-mut remaining count)
+			(while
+				(:doc "Release every staged source even if an earlier removal failed.")
+				(i32.gtz remaining)
+				(body
+					(set remaining (i32.dec remaining))
+					(let path (call numbered_source_path (borrow-shared serial_path) remaining))
+					(let removed (call unlink (borrow-shared path)))
+					(set cleaned (bool.and cleaned (i32.eqz removed)))))
+			(return cleaned)))
+
+	(fn check_numbered_deployment
+		(:doc "Check the real emitted uses while unused SDK declarations remain harmless.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8)) (count i32))
+		(returns bool)
+		(body
+			(let-mut trace (array.alloc u8 trace_capacity))
+			(for
+				(:doc "Each staged source may contain different calls into the checked headers.")
+				(let unit) (range 0i32 count)
+				(body
+					(let path (call numbered_source_path (borrow-shared serial_path) unit))
+					(if
+						(:doc "Use serial C and the original compiler flags if the private check fails.")
+						(bool.not (call check_replay_deployment (borrow-shared program) (borrow-shared options)
+							(borrow-shared path) (borrow-mut trace)))
+						(then (return (bool false))))))
+			(return (bool true))))
+
 	(fn replay_numbered_context
 		(:doc "Stage all numbered names together and remove only the files this audit created.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8)) (count i32)
@@ -327,15 +362,7 @@
 				(call matching_numbered_sources (borrow-shared program) (borrow-shared options)
 					(borrow-shared serial_path) count (borrow-shared serial) (borrow-shared trace) (borrow-mut identities)
 					boundary (borrow-shared shared) (borrow-shared native_identities) macro_count variadic_count)))
-			(let-mut cleaned (i32.eqz (call unlink (borrow-shared shared))))
-			(while
-				(:doc "Release every staged filename on either result even if an earlier removal failed.")
-				(i32.gtz created)
-				(body
-					(set created (i32.dec created))
-					(let path (call numbered_source_path (borrow-shared serial_path) created))
-					(let removed (call unlink (borrow-shared path)))
-					(set cleaned (bool.and cleaned (i32.eqz removed)))))
+			(let cleaned (call discard_numbered_sources (borrow-shared serial_path) created))
 			(return (bool.and matched cleaned))))
 
 	(fn find_name_marker
@@ -467,7 +494,7 @@
 		An uncertain audit leaves the serial path and its diagnostics available.`)
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8))
 			(count i32) (prefix (shared-array u8)) (guards (shared-array u8)) (names (shared-array u8))
-			(macros (shared-array u8))
+			(macros (shared-array u8)) (declaration (mut-array u8))
 			(implicit u8) (borrowed bool) (writable bool) (resolve_native bool) (fixed_calls bool)
 			(variadic_count i32)) (returns bool)
 		(body
@@ -502,7 +529,6 @@
 					(bool.not (call write_new_file (borrow-shared serial_path) (borrow-shared probe))))
 				(then (return (bool false))))
 			(let-mut identities (array.alloc FileStamp include_limit))
-			(let-mut declaration (array.alloc u8 1i32))
 			(let captured (call serial_snapshot (borrow-shared program) (borrow-shared options) (borrow-shared serial_path)
 				(borrow-shared (array.range baseline 0i32 base)) (borrow-mut trace)
 				(borrow-mut identities) (borrow-mut declaration) (borrow-shared macros) borrowed writable
@@ -519,7 +545,7 @@
 				(u8.eqz implicit)
 				(then (call safe_macro_definitions (borrow-shared source) (borrow-shared macros)))
 				(else 0i32)))
-			(let compare_native (bool.or resolve_native (u8.eq (array.load declaration 0i32) attributed_declaration)))
+			(let compare_native (bool.or resolve_native (u8.lt plain_declaration (array.load declaration 0i32))))
 			(let direct (bool.and (u8.eqz implicit) (bool.or compare_native (i32.gtz macro_count))))
 			(let-mut native (array.alloc u8 (if direct (then native_identity_capacity) (else 0i32))))
 			(let native_width (if

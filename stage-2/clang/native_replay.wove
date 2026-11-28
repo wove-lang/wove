@@ -22,6 +22,7 @@
 	(let plain_function_witness 0u8)
 	(let plain_declaration 1u8)
 	(let attributed_declaration 2u8)
+	(let availability_declaration 3u8)
 	(let fixed_function_witness 1u8)
 	(let variadic_function_witness 2u8)
 	(let borrowed_cstr_function_witness 3u8)
@@ -307,7 +308,7 @@
 			(return -1i32)))
 
 	(fn function_declaration_mode
-		(:doc "Classify a body-free declaration and require an identity comparison for ordinary nothrow declarations.")
+		(:doc "Classify a body-free declaration and record the proof needed by its ordinary attributes.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (function i32)
 			(mode u8) (scratch (mut-array u8))) (returns u8)
 		(body
@@ -321,21 +322,28 @@
 					(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) child
 						(borrow-shared clang_kind_key) (borrow-mut scratch)))
 					(let owner (u8.eq mode owner_function_witness))
-					(let availability (bool.and (bool.or (u8.eq mode fixed_function_witness)
-							(bool.or owner (bool.or (u8.eq mode variadic_function_witness)
-								(u8.eq mode typed_function_witness))))
-						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared availability_kind))))
-					(let owner_attribute (bool.and owner (bool.or
-						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared builtin_kind))
-						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared restrict_kind)))))
+					(let availability (call field_equals (borrow-shared ast) (borrow-shared nodes) kind
+						(borrow-shared availability_kind)))
+					(let restrict (call field_equals (borrow-shared ast) (borrow-shared nodes) kind
+						(borrow-shared restrict_kind)))
 					(let nothrow (call field_equals (borrow-shared ast) (borrow-shared nodes) kind
 						(borrow-shared nothrow_kind)))
+					(let ordinary_attribute (bool.and plain (bool.or availability (bool.or restrict nothrow))))
 					(if
-						(:doc "An ordinary nothrow prototype contributes its linked identity in every context.")
-						(bool.and plain nothrow)
-						(then (set declaration attributed_declaration)))
-					(let attribute (bool.or nothrow (bool.and (bool.not plain)
-						(bool.or (bool.or availability owner_attribute)
+						(:doc "Ordinary availability also needs a deployment check at the emitted uses.")
+						ordinary_attribute
+						(then
+							(if
+								(:doc "A later restrict or nothrow marker must preserve the deployment requirement.")
+								availability
+								(then (set declaration availability_declaration))
+								(else (if (u8.eq declaration plain_declaration) (then (set declaration attributed_declaration)))))))
+					(let witnessed_availability (bool.and availability (bool.or (u8.eq mode fixed_function_witness)
+						(bool.or owner (bool.or (u8.eq mode variadic_function_witness) (u8.eq mode typed_function_witness))))))
+					(let owner_attribute (bool.and owner (bool.or restrict
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared builtin_kind)))))
+					(let attribute (bool.or (bool.or nothrow ordinary_attribute) (bool.and (bool.not plain)
+						(bool.or (bool.or witnessed_availability owner_attribute)
 							(bool.or (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared asm_label_kind))
 								(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared nonnull_kind)))))))
 					(if
@@ -677,17 +685,17 @@
 			(return length)))
 
 	(fn append_attributed_declaration
-		(:doc "Compare ordinary nothrow declarations even when no selected call has an address witness.")
+		(:doc "Compare ordinary attributed declarations even when no selected call has an address witness.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
 			(output (mut-array u8)) (offset i32) (scratch (mut-array u8))) (returns i32)
 		(body
 			(if
-				(:doc "Only body-free, linked prototypes with ordinary nothrow metadata are admitted here.")
+				(:doc "Only body-free, linked prototypes with supported ordinary attributes are admitted here.")
 				(bool.not (bool.and
 					(call has_kind (borrow-shared ast) (borrow-shared nodes) row
 						(borrow-shared function_kind) (borrow-mut scratch))
-					(bool.and (u8.eq (call function_declaration_mode (borrow-shared ast) (borrow-shared nodes)
-							row plain_function_witness (borrow-mut scratch)) attributed_declaration)
+					(bool.and (u8.lt plain_declaration (call function_declaration_mode (borrow-shared ast) (borrow-shared nodes)
+							row plain_function_witness (borrow-mut scratch)))
 						(call is_linked_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))))
 				(then (return offset)))
 			(let name (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row

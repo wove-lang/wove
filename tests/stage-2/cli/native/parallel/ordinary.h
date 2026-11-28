@@ -16,8 +16,16 @@ typedef char source_filename[sizeof(__BASE_FILE__)];
 
 #if BRIDGE_MODE == 3
 extern int getpid(void) __attribute__((nothrow));
+#elif BRIDGE_MODE == 4
+extern int getpid(void) __attribute__((availability(macos, introduced=12.0)));
 #else
 extern int getpid(void);
+#endif
+
+#if BRIDGE_MODE == 5
+extern void *fixture_allocate(unsigned long size) __attribute__((malloc));
+#elif BRIDGE_MODE == 6
+extern int fixture_future(void) __attribute__((availability(macos, introduced=12.0)));
 #endif
 
 #endif
