@@ -495,6 +495,7 @@ represent all signed and unsigned integers of up to 64 bits exactly.
 | `(set (struct:get place field) value)` | Replace an exact field through a mutable Wove record local or reference, including along a nested field path. |
 | `(struct:new Type (field value) ...)` | Construct a record from typed field values in written order. |
 | `(struct:get value field)` | Read a field with its declared type. |
+| `record/header/size` | Read or name a nested field using a [field path](#field-paths). |
 | `(array:alloc T count)` | Allocate an owned buffer with an `i32` element count. The layout determines its initial slot state. |
 | `(move buffer)` | Transfer ownership of a local buffer or hand a present native owner to a consuming C call. |
 | `(owner:is-null file)` | Test whether a native owner holds a missing handle. |
@@ -668,6 +669,10 @@ A struct defines a nominal type. Copyable fields can hold scalars,
 fixed arrays, and other records. `struct:new` supplies each field once.
 Fields evaluate in the written order and must match their declared types.
 
+Use `record/header/size` to read the `size` field. If the record is
+writable, `(set record/header/size 42i32)` replaces the field.
+See [Field paths](#field-paths) for the equivalent `struct:get` forms.
+
 `(shared-ref Type)` and `(mut-ref Type)` form record parameter types.
 Use `borrow-shared` or `borrow-mut` on a named record place to lend it for a call.
 A `(mut-ref T)` parameter can also borrow a writable place of an exact
@@ -685,11 +690,11 @@ Borrow a field through its original place with `borrow-shared` or
 and an exclusive borrow requires a writable record place.
 
 A struct can own another struct as a field in a finite by-value layout.
-Ownership propagates through every enclosing struct. Borrow nested fields
-through their original places using a chain of `struct:get` expressions.
+Ownership propagates through every enclosing struct. A borrow such as
+`(borrow-shared grid/header/cells)` lends the original nested field.
 
 Move a whole local record with `(move grid)` or an owning field
-with `(move (struct:get grid cells))`. A move can take a nested
+with `(move grid/cells)`. A move can take a nested
 struct or a leaf array. Sibling fields stay available. Moving or borrowing
 an entire struct requires all its owning fields to be present.
 
