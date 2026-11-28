@@ -1260,6 +1260,23 @@ their usual capture-once semantics and source order. For a direct value
 result, Clang checks the type of the actual expansion before any
 assignment conversion.
 
+A `c_macro` formal of type `c-type-token` takes `(c-type Name)` at the
+call site, where `Name` resolves to a native record view. A following
+`c-member-token` formal takes `(c-member field)` and uses one direct field
+declared by that view.
+
+```wove
+(fn FIELD_OFFSET (:pragma (c_macro))
+    (params (record c-type-token) (member c-member-token))
+    (returns Size))
+
+(call FIELD_OFFSET (c-type NativeRecord) (c-member payload))
+```
+
+The macro receives the declared native type spelling and the field's C
+identifier without evaluating either operand. Clang validates the C
+designator and the exact type of a value returned by the expansion.
+
 | Directive | Contract |
 | --- | --- |
 | `(c_macro)` | Bind a C macro with an exact signature or value type. Use a void macro call as a statement. Wove evaluates its ordinary arguments once in source order before invoking the macro. Put `(:pragma (c_macro_discard))` on a `shared-ref` formal when the header uses that operand only as a discarded expression. Wove checks and captures the borrow, then emits a C cast to `void` for that operand. |
