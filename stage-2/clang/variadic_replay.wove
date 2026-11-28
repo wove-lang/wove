@@ -6,8 +6,8 @@
 	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_name_key)))
 	(use wove-file "./macro_replay.wove" (only prototype_probe_expression field_in))
 	(use wove-file "./native_replay.wove" (only append_field function_declaration_children has_kind peel_parens
-		referenced_function single_inner type_spelling witness_name
-		(value call_kind) (value cast_kind) (value cast_key) (value decay_cast) (value mangled_key)
+		referenced_function same_field single_inner type_spelling witness_name
+		(value call_kind) (value cast_kind) (value cast_key) (value decay_cast) (value id_key) (value mangled_key)
 		(value parameter_kind) (value reference_key) (value reference_kind) (value variadic_key)
 		(value variadic_function_witness)))
 	(use wove-file "../json/reader.wove" (only (type JsonNode)))
@@ -16,24 +16,75 @@
 
 	(let promoted_call_prefix "wove_native_promoted_call_")
 	(let promoted_argument_prefix "wove_native_variadic_arg_")
+	(let promoted_command_prefix "wove_native_variadic_command_")
 	(let conversions "\"LValueToRValue\"\u0000\"NoOp\"\u0000\"IntegralCast\"\u0000\"FloatingCast\"\u0000")
+	(let explicit_cast_kind "\"CStyleCastExpr\"")
+	(let enumeration_kind "\"EnumDecl\"")
+	(let enumerator_kind "\"EnumConstantDecl\"")
+	(let constant_expression_kind "\"ConstantExpr\"")
+	(let integer_literal_kind "\"IntegerLiteral\"")
+	(let constant_value_key "value")
+	(struct PromotedCallShape (fields (prefix i32) (index i32) (command i32)))
 
-	(fn observed_fixed_count
-		(:doc "Decode the exact fixed prefix length written from the checked native-formal boundary.")
-		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (name i32)) (returns i32)
+	(fn decimal_field_end
+		(:doc "Find the underscore or end that terminates one field of a witness name.")
+		(params (ast (shared-array u8)) (start i32) (end i32)) (returns i32)
 		(body
+			(let-mut cursor start)
+			(while
+				(:doc "The next field begins after this separator.")
+				(bool.and (i32.lt cursor end) (u8.not-eq (array.load ast cursor) 95u8))
+				(body (set cursor (i32.inc cursor))))
+			(return cursor)))
+
+	(fn read_index
+		(:doc "Decode one complete nonnegative i32 index from a witness name.")
+		(params (ast (shared-array u8)) (start i32) (end i32)) (returns i32)
+		(body
+			(let decoded (call read_decimal_digits (borrow-shared ast) start end 214748364u32 7u32))
+			(if (i32.ltz (struct.get decoded digits)) (then (return -1i32)))
+			(return (i32.from-u32 (struct.get decoded magnitude)))))
+
+	(fn observed_call_shape
+		(:doc "Recover the native prefix, graph index, and any hidden command's native position.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (name i32)) (returns PromotedCallShape)
+		(body
+			(let rejected (struct.new PromotedCallShape (prefix -1i32) (index -1i32) (command -1i32)))
 			(let token (array.load nodes name))
 			(let start (i32.add (i32.inc (struct.get token start)) (array.len promoted_call_prefix)))
 			(let end (i32.dec (struct.get token end)))
-			(let-mut cursor start)
-			(while
-				(:doc "The private witness name has the prefix count and graph row separated by an underscore.")
-				(bool.and (i32.lt cursor end) (u8.not-eq (array.load ast cursor) 95u8))
-				(body (set cursor (i32.inc cursor))))
-			(if (i32.ge (i32.inc cursor) end) (then (return -1i32)))
-			(let decoded (call read_decimal_digits (borrow-shared ast) start cursor 214748364u32 7u32))
-			(if (i32.ltz (struct.get decoded digits)) (then (return -1i32)))
-			(return (i32.from-u32 (struct.get decoded magnitude)))))
+			(let prefix_end (call decimal_field_end (borrow-shared ast) start end))
+			(if (i32.ge (i32.inc prefix_end) end) (then (return rejected)))
+			(let prefix (call read_index (borrow-shared ast) start prefix_end))
+			(let index_start (i32.inc prefix_end))
+			(let index_end (call decimal_field_end (borrow-shared ast) index_start end))
+			(let index (call read_index (borrow-shared ast) index_start index_end))
+			(if (bool.or (i32.not-gtz prefix) (i32.ltz index)) (then (return rejected)))
+			(let-mut command -1i32)
+			(if
+				(:doc "A third field must designate a command within the fixed prefix.")
+				(i32.lt index_end end)
+				(then
+					(set command (call read_index (borrow-shared ast) (i32.inc index_end) end))
+					(if (bool.or (i32.ltz command) (i32.ge command prefix)) (then (return rejected)))))
+			(return (struct.new PromotedCallShape (prefix prefix) (index index) (command command)))))
+
+	(fn observed_operand_index
+		(:doc "Read the numeric suffix of a captured formal or a folded command witness.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (name i32) (prefix (shared-array u8)))
+		(returns i32)
+		(body
+			(if (i32.ltz name) (then (return -1i32)))
+			(let token (array.load nodes name))
+			(let start (i32.inc (struct.get token start)))
+			(let digits (i32.add start (array.len prefix)))
+			(let end (i32.dec (struct.get token end)))
+			(if
+				(:doc "Require the generated prefix and a nonempty numeric suffix.")
+				(bool.or (i32.ge digits end) (bool.not (call same_bytes (borrow-shared ast) start digits
+					(borrow-shared prefix) 0i32 (array.len prefix))))
+				(then (return -1i32)))
+			(return (call read_index (borrow-shared ast) digits end))))
 
 	(fn variadic_target
 		(:doc "Resolve the call's direct variadic function and verify its fixed prototype boundary.")
@@ -112,23 +163,85 @@
 					(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) reference
 						(borrow-shared parameter_kind) (borrow-mut scratch))))
 				(then (return -1i32)))
-			(let token (array.load nodes name))
-			(let start (i32.inc (struct.get token start)))
-			(let digits (i32.add start (array.len promoted_argument_prefix)))
-			(let end (i32.dec (struct.get token end)))
-			(if
-				(:doc "Only a probe's own numbered arguments can appear in this result.")
-				(bool.or (i32.ge digits end) (bool.not (call same_bytes (borrow-shared ast) start digits
-					(borrow-shared promoted_argument_prefix) 0i32 (array.len promoted_argument_prefix))))
-				(then (return -1i32)))
-			(let decoded (call read_decimal_digits (borrow-shared ast) digits end 214748364u32 7u32))
 			(if
 				(:doc "Detect reordered or substituted operands in the typed call.")
-				(bool.or (i32.ltz (struct.get decoded digits)) (u32.not-eq (struct.get decoded magnitude) (u32.from-i32 ordinal)))
+				(i32.not-eq (call observed_operand_index (borrow-shared ast) (borrow-shared nodes) name
+					(borrow-shared promoted_argument_prefix)) ordinal)
 				(then (return -1i32)))
 			(set length (call append_field (borrow-shared ast) (borrow-shared nodes) name (borrow-mut output) length))
 			(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) row (bool true) (borrow-mut scratch)))
 			(return (call append_field (borrow-shared ast) (borrow-shared nodes) type (borrow-mut output) length))))
+
+	(fn command_operand
+		(:doc "Identify the integer token or enum constant actually used by a command cast.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (cast i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(if (bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) cast
+				(borrow-shared explicit_cast_kind) (borrow-mut scratch))) (then (return -1i32)))
+			(let operand (call peel_parens (borrow-shared ast) (borrow-shared nodes)
+				(call single_inner (borrow-shared ast) (borrow-shared nodes) cast (borrow-mut scratch))
+				(borrow-mut scratch)))
+			(if
+				(:doc "Check the actual expansion so a context-sensitive macro cannot supply another value when folded.")
+				(call has_kind (borrow-shared ast) (borrow-shared nodes) operand
+					(borrow-shared integer_literal_kind) (borrow-mut scratch))
+				(then (return (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) operand
+					(borrow-shared constant_value_key) (borrow-mut scratch)))))
+			(if (bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) operand
+				(borrow-shared reference_kind) (borrow-mut scratch))) (then (return -1i32)))
+			(let reference (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) operand
+				(borrow-shared reference_key) (borrow-mut scratch)))
+			(if
+				(:doc "A C enum constant has one value and one declaration within the replayed context.")
+				(call has_kind (borrow-shared ast) (borrow-shared nodes) reference
+					(borrow-shared enumerator_kind) (borrow-mut scratch))
+				(then (return (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) reference
+					(borrow-shared id_key) (borrow-mut scratch)))))
+			(return -1i32)))
+
+	(fn append_command_argument
+		(:doc "Compare the native argument's explicit type and the folded value of the same header expression.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (argument i32) (enumeration i32)
+			(index i32) (output (mut-array u8)) (offset i32) (scratch (mut-array u8))) (returns i32)
+		(body
+			(if
+				(:doc "The native fixed parameter must accept the explicit command type without another conversion.")
+				(bool.not (bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) argument
+						(borrow-shared explicit_cast_kind) (borrow-mut scratch))
+					(call has_kind (borrow-shared ast) (borrow-shared nodes) enumeration
+						(borrow-shared enumeration_kind) (borrow-mut scratch))))
+				(then (return -1i32)))
+			(let constant (call single_inner (borrow-shared ast) (borrow-shared nodes) enumeration (borrow-mut scratch)))
+			(let name (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) constant
+				(borrow-shared clang_name_key) (borrow-mut scratch)))
+			(let expression (call single_inner (borrow-shared ast) (borrow-shared nodes) constant (borrow-mut scratch)))
+			(if
+				(:doc "The following declaration must fold the command from this exact invocation witness.")
+				(bool.not (bool.and (i32.eq (call observed_operand_index (borrow-shared ast) (borrow-shared nodes) name
+						(borrow-shared promoted_command_prefix)) index)
+					(bool.and (call has_kind (borrow-shared ast) (borrow-shared nodes) constant
+							(borrow-shared enumerator_kind) (borrow-mut scratch))
+						(call has_kind (borrow-shared ast) (borrow-shared nodes) expression
+							(borrow-shared constant_expression_kind) (borrow-mut scratch)))))
+				(then (return -1i32)))
+			(let type (call type_spelling (borrow-shared ast) (borrow-shared nodes) argument (bool true) (borrow-mut scratch)))
+			(let folded_type (call type_spelling (borrow-shared ast) (borrow-shared nodes) expression (bool true) (borrow-mut scratch)))
+			(let actual (call command_operand (borrow-shared ast) (borrow-shared nodes) argument (borrow-mut scratch)))
+			(let folded (call command_operand (borrow-shared ast) (borrow-shared nodes)
+				(call single_inner (borrow-shared ast) (borrow-shared nodes) expression (borrow-mut scratch))
+				(borrow-mut scratch)))
+			(if
+				(:doc "Tie the folded value to the actual cast in the invocation before comparing contexts.")
+				(bool.not (bool.and (call same_field (borrow-shared ast) (borrow-shared nodes) type folded_type)
+					(call same_field (borrow-shared ast) (borrow-shared nodes) actual folded)))
+				(then (return -1i32)))
+			(let cast (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) argument
+				(borrow-shared cast_key) (borrow-mut scratch)))
+			(let value (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) expression
+				(borrow-shared constant_value_key) (borrow-mut scratch)))
+			(let typed (call append_field (borrow-shared ast) (borrow-shared nodes) type (borrow-mut output) offset))
+			(let converted (call append_field (borrow-shared ast) (borrow-shared nodes) cast (borrow-mut output) typed))
+			(return (call append_field (borrow-shared ast) (borrow-shared nodes) value (borrow-mut output) converted))))
 
 	(fn append_promoted_call
 		(:doc "Compare the actual native target, its prototype, and the typed argument list in source order.")
@@ -143,7 +256,9 @@
 				(bool.not (call has_kind (borrow-shared ast) (borrow-shared nodes) expression
 					(borrow-shared call_kind) (borrow-mut scratch)))
 				(then (return -1i32)))
-			(let fixed (call observed_fixed_count (borrow-shared ast) (borrow-shared nodes) name))
+			(let shape (call observed_call_shape (borrow-shared ast) (borrow-shared nodes) name))
+			(let fixed (struct.get shape prefix))
+			(let command (struct.get shape command))
 			(let callee (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) expression (borrow-mut scratch)))
 			(let target (call variadic_target (borrow-shared ast) (borrow-shared nodes) callee fixed (borrow-mut scratch)))
 			(if (bool.or (i32.ltz target) (i32.not-gtz fixed)) (then (return -1i32)))
@@ -161,8 +276,14 @@
 				(:doc "Serialize all fixed arguments and the promoted values at the named tail.")
 				(bool.and (i32.not-ltz argument) (i32.not-ltz length))
 				(body
-					(set length (call append_promoted_argument (borrow-shared ast) (borrow-shared nodes)
-						argument position (borrow-mut output) length (borrow-mut scratch)))
+					(if
+						(:doc "The implicit command is a folded constant. All other operands are captures.")
+						(i32.eq position command)
+						(then (set length (call append_command_argument (borrow-shared ast) (borrow-shared nodes)
+							argument (struct.get (array.load nodes row) next_sibling) (struct.get shape index)
+							(borrow-mut output) length (borrow-mut scratch))))
+						(else (set length (call append_promoted_argument (borrow-shared ast) (borrow-shared nodes)
+							argument position (borrow-mut output) length (borrow-mut scratch)))))
 					(set argument (struct.get (array.load nodes argument) next_sibling))
 					(set position (i32.inc position))))
 			(if (i32.not-lt fixed position) (then (return -1i32)))
