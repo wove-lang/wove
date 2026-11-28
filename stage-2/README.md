@@ -214,6 +214,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | `r` | Named struct or enum | Module fingerprint extended by the layout role, spelling, and any specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
 | `x` | Aggregate take helper | Concrete layout key extended by the take role | Type name for named layouts, empty for fixed arrays | Definitions and moves use the exact layout. |
 | `e` | Aggregate drop helper | Concrete layout key extended by the drop role | Type name for named layouts, empty for fixed arrays | Cleanup and runtime macro arguments use the exact layout. |
+| `u` | Inline occupancy validator | Concrete layout key extended by the check role | Type name for named layouts, empty for fixed arrays | Serial and numbered definitions use the same name as recursive and inline argument checks. |
 | `h` | Heap-owned aggregate slot | Concrete layout key extended by the heap slot role | Type name for named layouts, empty for fixed arrays | Allocation, access, and worker collection use the same slot type. |
 | `o` | Erased heap slot destructor | Concrete layout key extended by the slot destructor role | Type name for named layouts, empty for fixed arrays | The slot definition, allocation, replacement, and worker collection share the callback name. |
 | `v` | Fixed array typedef | Structural fingerprint of exact element type and extent | Empty | The common header and every user share the resolved layout and collision rank. |
@@ -247,7 +248,8 @@ their name explicitly to the C definition macro. Heap slots and their erased des
 separate roles with the same layout suffix and rank. Calls pass the erased
 destructor explicitly when they install it on an array or replace a slot.
 Fixed inline slots continue the structural array key with `i` and use the
-same rank and empty suffix. Occupancy checks use the corresponding type name.
+same rank and empty suffix. Inline occupancy validators use `u` with the
+checked layout's suffix and rank.
 Callable typedefs hash the result and each parameter as fixed-width words,
 ending with the reserved zero type code. Inferred references and explicit
 signatures share the same type key. Collisions rank by result, then by
