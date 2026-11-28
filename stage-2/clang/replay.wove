@@ -5,8 +5,8 @@
 
 	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals (value clang_kind_key)))
 	(use wove-file "./macro_directives.wove" (only declares_macro_probe))
-	(use wove-file "./native_replay.wove" (only function_declaration_mode is_linked_function mark_witnessed_declarations proved_lvalue_macro
-		(value plain_function_witness) (value plain_declaration)))
+	(use wove-file "./native_replay.wove" (only external_object ordinary_function_mode
+		mark_witnessed_declarations proved_lvalue_macro (value plain_declaration)))
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte))
 	(use wove-file "../json/reader.wove" (only json_parse (type JsonNode)))
 	(use wove-file "../text/bytes.wove" (only same_bytes))
@@ -17,13 +17,8 @@
 	(let record_kind "\"RecordDecl\"")
 	(let object_kind "\"VarDecl\"")
 	(let object_name_key "name")
-	(let thread_storage_key "tls")
-	(let initializer_key "init")
 	(let enum_kind "\"EnumDecl\"")
 	(let function_kind "\"FunctionDecl\"")
-	(let extern_value "\"extern\"")
-	(let storage_key "storageClass")
-	(let inline_key "inline")
 
 	(fn horizontal_space
 		(:doc "Recognize whitespace that cannot end a preprocessor line.")
@@ -78,21 +73,6 @@
 				(bool:and (i32:lt index end) (call horizontal_space (source.get index)))
 				(body (set index (i32:inc index))))
 			(return index)))
-
-	(fn external_object
-		(:doc "A plain extern declaration owns no storage, initializer, TLS, or attributes in this unit.")
-		(params (source (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)))
-		(returns bool)
-		(body
-			(let storage (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
-				(borrow-shared storage_key) (borrow-mut scratch)))
-			(let tls (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
-				(borrow-shared thread_storage_key) (borrow-mut scratch)))
-			(let init (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
-				(borrow-shared initializer_key) (borrow-mut scratch)))
-			(return (bool:and (bool:and (i32:ltz tls) (i32:ltz init))
-				(bool:and (call field_equals (borrow-shared source) (borrow-shared nodes) storage (borrow-shared extern_value))
-					(i32:ltz (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) row (borrow-mut scratch))))))))
 
 	(fn names_external_object
 		(:doc "Resolve one bare macro replacement to a definition-free external C object in the audited AST.")
@@ -239,26 +219,10 @@
 						(then plain_declaration)
 						(else 0u8)))))
 			(if
-				(:doc "Any remaining declaration must be an external function prototype.")
+				(:doc "Any remaining declaration must be an externally linked function.")
 				(bool:not (call field_equals (borrow-shared source) (borrow-shared nodes) kind (borrow-shared function_kind)))
 				(then (return 0u8)))
-			(let storage (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
-				(borrow-shared storage_key) (borrow-mut scratch)))
-			(let inline (call clang_field (borrow-shared source) 0i32 (borrow-shared nodes) row
-				(borrow-shared inline_key) (borrow-mut scratch)))
-			(if
-				(:doc "Inline and static functions can carry per-unit definitions or local linkage.")
-				(bool:or (i32:not-ltz inline) (bool:and (i32:not-ltz storage)
-					(bool:not (call field_equals (borrow-shared source) (borrow-shared nodes) storage (borrow-shared extern_value)))))
-				(then (return 0u8)))
-			(let mode (call function_declaration_mode (borrow-shared source) (borrow-shared nodes)
-				row plain_function_witness (borrow-mut scratch)))
-			(if
-				(:doc "An attributed external function must expose its link identity in the AST.")
-				(bool:and (u8:lt plain_declaration mode)
-					(bool:not (call is_linked_function (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch))))
-				(then (return 0u8)))
-			(return mode)))
+			(return (call ordinary_function_mode (borrow-shared source) (borrow-shared nodes) row (borrow-mut scratch)))))
 
 	(fn replay_declaration_mode
 		(:doc "Validate the complete AST and return the strongest required ordinary declaration proof.")
@@ -287,7 +251,7 @@
 			(let-mut row (call clang_inner (borrow-shared source) 0i32 (borrow-shared nodes) 0i32 (borrow-mut scratch)))
 			(let-mut result_mode plain_declaration)
 			(while
-				(:doc "Reject object definitions, assembly, function bodies, and unrecognized side effects.")
+				(:doc "Reject declarations outside the supported prototype and forwarding rules.")
 				(i32:not-ltz row)
 				(body
 					(let mode (if
