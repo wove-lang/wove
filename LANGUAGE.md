@@ -1270,6 +1270,16 @@ write `u8` byte representations in the original record. A native build checks
 the field's C element type and extent against the header and includes the
 Wove declaration span in a mismatch diagnostic.
 
+A native field can use `(:pragma (c_optional))` when the effective C
+header exposes its name in only some feature profiles. For example,
+`(label (:pragma (c_optional)) (array char 8))` describes the exact
+native field when selected. Reading, writing, initializing, or supplying
+that name as a C macro member token checks the declared type and any array
+extent. A bridge adapter that uses the field also triggers its check.
+Clang reports its original missing-member diagnostic if the selected
+header hides the name. A program using common fields still allocates and
+borrows the complete C record. Required fields keep their ordinary
+declaration checks.
 
 Attach native contracts to the relevant declaration with `:pragma`.
 
