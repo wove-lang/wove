@@ -32,6 +32,7 @@
 	(let ge_op "\">=\"")
 	(let eq_op "\"==\"")
 	(let ne_op "\"!=\"")
+	(let mask_op "\"&\"")
 	(let assignment_op "\"=\"")
 	(let deref_op "\"*\"")
 	(let inc_op "\"++\"")
@@ -39,7 +40,7 @@
 	(let inline_depth 64i32)
 
 	(fn comparison
-		(:doc "The binary subset only tests operand values.")
+		(:doc "Recognize the six binary comparisons.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (opcode i32))
 		(returns bool)
 		(body
@@ -89,16 +90,17 @@
 					(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared member_kind)))
 				(then (return 1i32)))
 			(if
-				(:doc "The binary subset allows comparisons and simple stores through checked pointers.")
+				(:doc "The binary subset allows comparisons, integer masks, and simple pointer stores.")
 				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared binary_kind))
 				(then
 					(let opcode (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
 						(borrow-shared opcode_key) (borrow-mut scratch)))
 					(if
-						(:doc "Clang already checks the store, and the tree proof compares its two ordered operands.")
+						(:doc "The tree proof compares both ordered operands of each admitted operation.")
 						(bool:or (call comparison (borrow-shared ast) (borrow-shared nodes) opcode)
-							(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) opcode (borrow-shared assignment_op))
-								(call pointer_store (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch))))
+							(bool:or (call field_equals (borrow-shared ast) (borrow-shared nodes) opcode (borrow-shared mask_op))
+								(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) opcode (borrow-shared assignment_op))
+									(call pointer_store (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))))
 						(then (return 2i32)))
 					(return -1i32)))
 			(if
@@ -164,8 +166,59 @@
 				(then (i32:gtz count))
 				(else (i32:eq arity count))))))
 
-	(fn conditional_expression
-		(:doc "Admit a returned conditional expression even when Clang preserves source parentheses around it.")
+	(fn expression_root
+		(:doc "Unwrap the parentheses of an already validated expression subtree.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns i32)
+		(body
+			(let-mut current row)
+			(while
+				(:doc "The checked expression shape gives every parenthesis exactly one operand.")
+				(call field_equals (borrow-shared ast) (borrow-shared nodes)
+					(call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) current
+						(borrow-shared clang_kind_key) (borrow-mut scratch)) (borrow-shared paren_kind))
+				(body (set current (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) current (borrow-mut scratch)))))
+			(return current)))
+
+	(fn mask_comparison
+		(:doc "Recognize a returned equality test of an integer mask against a literal.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(scratch (mut-array u8))) (returns bool)
+		(body
+			(let opcode (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared opcode_key) (borrow-mut scratch)))
+			(if
+				(:doc "The root is already a binary node in a validated expression tree.")
+				(bool:not (bool:or
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) opcode (borrow-shared eq_op))
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) opcode (borrow-shared ne_op))))
+				(then (return (bool false))))
+			(let left (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-mut scratch)))
+			(let right (call expression_root (borrow-shared ast) (borrow-shared nodes)
+				(struct:get (nodes.get left) next_sibling) (borrow-mut scratch)))
+			(let masked (call expression_root (borrow-shared ast) (borrow-shared nodes) left (borrow-mut scratch)))
+			(let masked_kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) masked
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(let mask_opcode (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) masked
+				(borrow-shared opcode_key) (borrow-mut scratch)))
+			(let target_kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) right
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(if
+				(:doc "Require the built-in bitwise AND and an integer literal comparison operand.")
+				(bool:not (bool:and
+					(call field_equals (borrow-shared ast) (borrow-shared nodes) masked_kind (borrow-shared binary_kind))
+					(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) mask_opcode (borrow-shared mask_op))
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) target_kind (borrow-shared integer_kind)))))
+				(then (return (bool false))))
+			(let value (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) masked (borrow-mut scratch)))
+			(let mask (call expression_root (borrow-shared ast) (borrow-shared nodes)
+				(struct:get (nodes.get value) next_sibling) (borrow-mut scratch)))
+			(let mask_kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) mask
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(return (call field_equals (borrow-shared ast) (borrow-shared nodes) mask_kind (borrow-shared integer_kind)))))
+
+	(fn checked_return_expression
+		(:doc "Admit a bounded conditional or literal mask comparison for the expression identity pass.")
 		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
 			(scratch (mut-array u8))) (returns bool)
 		(body
@@ -174,14 +227,11 @@
 				(bool:not (call expression_shape (borrow-shared ast) (borrow-shared nodes) row
 					inline_depth (borrow-mut scratch)))
 				(then (return (bool false))))
-			(let-mut current row)
-			(while
-				(:doc "The checked expression shape gives every parenthesis exactly one operand.")
-				(call field_equals (borrow-shared ast) (borrow-shared nodes)
-					(call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) current
-						(borrow-shared clang_kind_key) (borrow-mut scratch)) (borrow-shared paren_kind))
-				(body (set current (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) current (borrow-mut scratch)))))
-			(return (call field_equals (borrow-shared ast) (borrow-shared nodes)
-				(call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) current
-					(borrow-shared clang_kind_key) (borrow-mut scratch)) (borrow-shared conditional_kind)))))
+			(let root (call expression_root (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch)))
+			(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) root
+				(borrow-shared clang_kind_key) (borrow-mut scratch)))
+			(return (bool:or
+				(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared conditional_kind))
+				(bool:and (call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared binary_kind))
+					(call mask_comparison (borrow-shared ast) (borrow-shared nodes) root (borrow-mut scratch)))))))
 )
