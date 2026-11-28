@@ -209,6 +209,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | --- | --- | --- | --- | --- |
 | `f` | Function | Module fingerprint extended by the function role, name, and specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
 | `w` | Worker function adapter | Concrete function fingerprint extended by the adapter role | Defining function name | Within an emitted C program. Prototypes, definitions, and submissions use the same exact worker key. |
+| `z` | Erased worker drop wrapper | Concrete owning layout fingerprint extended by the wrapper role | Type name | The serial definition, numbered declaration and definition, and callback pointers share the same name. |
 | `c` | Native callback adapter | Concrete enclosing function fingerprint extended by the callback role and function-relative actual row | Empty | Within its emitted C unit. The definition and native call use the same checked argument. |
 | `r` | Named struct or enum | Module fingerprint extended by the layout role, spelling, and any specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
 | `x` | Aggregate take helper | Concrete layout key extended by the take role | Type name for named layouts, empty for fixed arrays | Definitions and moves use the exact layout. |
@@ -233,9 +234,11 @@ reuses the defining name and collision rank. The FNV-1a role step is reversible,
 so equal adapter spellings have the same collision group as their owners.
 Aggregate take and drop helpers continue the concrete layout key with their
 own role and use the same suffix and collision rank as the layout. A fixed
-array keeps its interned layout key and empty suffix. Worker drop callbacks,
-ownership slots, and occupancy helpers use the corresponding type name.
-The common header and every caller use the same helper spelling. Native
+array keeps its interned layout key and empty suffix. Erased worker drop
+wrappers continue the same layout key with `z` and pass their name explicitly
+to the C definition macro. Ownership slots and occupancy helpers use the
+corresponding type name. The common header and every caller use the same
+helper spelling. Native
 callback adapters keep separate keys per actual, including repeated calls to
 the same target. Exact owners and argument rows determine the slot for a
 genuine C spelling collision.

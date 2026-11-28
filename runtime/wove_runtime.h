@@ -569,13 +569,13 @@ typedef struct WvrtWorkerPool WvrtWorkerPermit;
 	wvrt_worker_join_all_records_at_span((queue), sizeof(slot), _Alignof(slot), offsetof(slot, wvrt_value), \
 		slot##_drop, (file), (start), (end))
 
-// Use the ordinary record destructor through the runtime's erased drop callback.
-#define WVRT_WORKER_DROP_CALLBACK(type) void wvrt_worker_drop_##type(void *value)
-#define WVRT_DECLARE_WORKER_DROP(type) WVRT_WORKER_DROP_CALLBACK(type);
-#define WVRT_DEFINE_LINKED_WORKER_DROP(type, drop) \
-	WVRT_WORKER_DROP_CALLBACK(type) { drop((type *)value); }
-#define WVRT_DEFINE_WORKER_DROP(type, drop) \
-	static inline __attribute__((unused)) WVRT_DEFINE_LINKED_WORKER_DROP(type, drop)
+// The emitter supplies the erased callback name for the boxed layout.
+#define WVRT_WORKER_DROP_CALLBACK(wrapper) void wrapper(void *value)
+#define WVRT_DECLARE_WORKER_DROP(wrapper) WVRT_WORKER_DROP_CALLBACK(wrapper);
+#define WVRT_DEFINE_LINKED_WORKER_DROP(wrapper, type, drop) \
+	WVRT_WORKER_DROP_CALLBACK(wrapper) { drop((type *)value); }
+#define WVRT_DEFINE_WORKER_DROP(wrapper, type, drop) \
+	static inline __attribute__((unused)) WVRT_DEFINE_LINKED_WORKER_DROP(wrapper, type, drop)
 
 // Evaluate the incoming value once and move it into the worker transport.
 #define WVRT_WORKER_PACK(type, value, drop, file, start, end) \
