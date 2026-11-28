@@ -137,7 +137,8 @@ def main(compiler, manifest):
 				subprocess.run([*clang, *words(command, values, groups)], cwd=root, check=True,
 					timeout=30, capture_output=True)
 			for phase in case["phases"]:
-				check_phase(phase, installed, clang, root, manifest.parent, values, groups)
+				if phase.get("platform", sys.platform) == sys.platform:
+					check_phase(phase, installed, clang, root, manifest.parent, values, groups)
 			print(case["name"])
 
 

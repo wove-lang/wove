@@ -14,7 +14,12 @@ int fixture_mkdir(const char *path, fixture_path_mode mode) __asm__("fixture_nat
     __attribute__((nothrow, nonnull(1)));
 #endif
 int fixture_unlink(const char *path) __attribute__((nothrow, nonnull(1)));
+#if defined(WOVE_FIXTURE_AVAILABILITY)
+int fixture_rename(const char *from, const char *to)
+    __attribute__((nothrow, nonnull(1), availability(macos, introduced=12.0)));
+#else
 int fixture_rename(const char *from, const char *to) __attribute__((nothrow, nonnull(1)));
+#endif
 int fixture_alternate_rename(const char *from, const char *to);
 
 #endif
