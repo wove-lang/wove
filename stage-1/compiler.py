@@ -1204,7 +1204,7 @@ class FunctionEmitter:
 		self.emit_line("}")
 		return result
 
-	# Evaluate one selected arm and keep its copyable value after the branch.
+	# Evaluate one selected arm and keep its result after the branch.
 	def conditional_value(self, node: Form) -> Value:
 		test, on_true, on_false = form(node, arity=3).operands
 		then_operand, = checked_form(on_true, "then", 1).operands
@@ -1216,8 +1216,8 @@ class FunctionEmitter:
 		self.emit_line(f"if ({condition.c}) {{")
 		self.scopes.append({})
 		first = self.expression(then_operand)
-		# The seed driver uses value conditionals with copyable results.
-		if not copyable(first.kind):
+		# The driver also selects between exact optional owned array results.
+		if not (copyable(first.kind) or isinstance(first.kind, OptionalOwner)):
 			raise SourceError(then_operand.line)
 		result = self.value_slot(first.kind)
 		self.emit_line(f"{result.c} = {first.c};")
@@ -1230,7 +1230,7 @@ class FunctionEmitter:
 		self.emit_line(f"{result.c} = {second.c};")
 		self.scopes.pop()
 		self.emit_line("}")
-		# Either arm can consume an outer owner while producing a copyable result.
+		# Either arm can consume an outer owner while producing its result.
 		self.moved |= then_moved
 		# The result type is known only after lowering the first arm.
 		self.lines.insert(declaration, f"{indent}{c_type(result.kind)} {result.c};")
