@@ -124,6 +124,11 @@ NamedType = Record | NativeType
 
 
 @dataclass(frozen=True)
+class SharedRef:
+	record: Record
+
+
+@dataclass(frozen=True)
 class BufferType:
 	access: str
 	element: str | NamedType | BufferType
@@ -140,7 +145,7 @@ class FixedArrayType:
 	count: int
 
 
-Type = str | NamedType | BufferType | OptionalOwner | FixedArrayType
+Type = str | NamedType | SharedRef | BufferType | OptionalOwner | FixedArrayType
 
 
 _BYTE_VIEW = BufferType(SHARED, U8)
@@ -209,6 +214,9 @@ def c_type(kind: Type) -> str:
 	# The descriptor depends on the access mode and carries a typed element count.
 	if isinstance(kind, BufferType):
 		return C_TYPE[kind.access]
+	# A shared record reference carries the address of the original value.
+	if isinstance(kind, SharedRef):
+		return f"const {c_type(kind.record)} *"
 	# A nullable owner uses the same pointer ABI as its payload.
 	if isinstance(kind, OptionalOwner):
 		return c_type(kind.payload)
@@ -431,6 +439,33 @@ def record_definition(record: Record) -> list[str]:
 	return ["typedef struct {", *(fields or ["    uint8_t wv_empty;"]), f"}} {record.c_name};", ""]
 
 
+# Release record fields in reverse layout order and skip values without owners.
+def drop_statements(kind: Type, expression: str) -> Iterator[str]:
+	# Inline record members keep their original descriptors.
+	if isinstance(kind, Record):
+		# Each member recursively drops any owned values still in its slot.
+		for member in reversed(kind.fields.values()):
+			yield from drop_statements(member.kind, f"{expression}.{member.c_name}")
+	# Moved or absent array owners carry a null descriptor.
+	elif owns(kind):
+		yield f"wvrt_array_drop({expression});"
+
+
+# Give an owning-record array one slot type and a destructor matching that type.
+def record_slot_definition(record: Record) -> list[str]:
+	name = record.c_name
+	slot = f"{name}_slot"
+	lines = [f"static inline void {name}_drop({name} *value) {{"]
+	lines.extend(f"    {statement}" for statement in drop_statements(record, "(*value)"))
+	lines.extend(["}", f"WVRT_DEFINE_OWNED_SLOT({name}, {slot}, {slot}_drop, {name}_drop)", ""])
+	return lines
+
+
+# Build a view from the named descriptor fields for calls and runtime macros.
+def array_view(fields: str, access: str) -> str:
+	return f"(({C_TYPE[access]}){{{fields}wvrt_items, {fields}wvrt_length, {fields}wvrt_element_size}})"
+
+
 # Resolve the owned element layouts needed by the compiler's seed source.
 def read_owned_element(node: Node, records: dict[str, NamedType]) -> str | Record | BufferType:
 	# The runtime has a recursive owner for one layer of byte rows.
@@ -469,10 +504,17 @@ def parameter_type(node: Node, records: dict[str, NamedType]) -> Type:
 	if isinstance(node, Form) and node.tag == "array":
 		return read_fixed_array_type(node)
 	view = checked_form(node, arity=1)
+	element_node, = view.operands
+	# A shared record parameter borrows the original Wove record.
+	if view.tag == "shared-ref":
+		record = records.get(identifier(element_node))
+		# This reference uses a Wove value layout rather than a bridge ABI.
+		if not isinstance(record, Record) or record.native:
+			raise SourceError(element_node.line)
+		return SharedRef(record)
 	# Slice parameters specify a read or write loan.
 	if view.tag not in (SHARED, MUT):
 		raise SourceError(node.line)
-	element_node, = view.operands
 	# Permit exactly one layer of shared byte rows through the host entry and its helpers.
 	if view.tag == SHARED and isinstance(element_node, Form) and element_node.tag == SHARED:
 		row, = checked_form(element_node, SHARED, 1).operands
@@ -568,7 +610,8 @@ def signature(function: Function) -> str:
 class FunctionEmitter:
 	# Initialize the function scope, C names, and ownership state.
 	def __init__(
-		self, function: Function, module: Module, fixed_arrays: set[FixedArrayType], imports: dict[str, None] | None
+		self, function: Function, module: Module, fixed_arrays: set[FixedArrayType],
+		owned_slots: set[Record], imports: dict[str, None] | None
 	):
 		self.function = function
 		self.functions = module.bindings
@@ -577,6 +620,7 @@ class FunctionEmitter:
 		self.filename = module.filename
 		self.source = c_string(module.filename)
 		self.fixed_arrays = fixed_arrays
+		self.owned_slots = owned_slots
 		self.imports = imports
 		self.lines = []
 		self.scopes = [{
@@ -701,7 +745,7 @@ class FunctionEmitter:
 				return self.temporary(kind, self.typed_element(fields, kind, index, target.line))
 			# A row in an owned array is loaned from its live pointer slot.
 			if rows.element == _OWNED_BYTE_ROW:
-				view = (f"(wvrt_slice){{{fields}wvrt_items, {fields}wvrt_length, {fields}wvrt_element_size}}")
+				view = array_view(fields, SHARED)
 				self.loans.append((binding, SHARED))
 				return self.temporary(kind,
 					f"wvrt_array_borrow_row_at_span({view}, {index.c}, -1, {target.line}, {target.line})")
@@ -756,6 +800,40 @@ class FunctionEmitter:
 		self.loans.append((binding, kind.access))
 		return self.temporary(kind, expression)
 
+	# Borrow a stable record place for the remaining arguments and the call.
+	def borrow_record(self, node: Node, kind: SharedRef) -> Value:
+		target, = checked_form(node, "borrow-shared", 1).operands
+		# An array element loan leaves the containing array as the owner.
+		if isinstance(target, Form) and target.tag == "array.load":
+			receiver, subscript = checked_form(target, "array.load", 2).operands
+			binding, rows, fields = self.array_access(receiver, target.line)
+			# The exact record identity determines the element layout.
+			if rows.element is not kind.record:
+				raise SourceError(target.line)
+			self.loans.append((binding, SHARED))
+			index = self.typed(subscript, I32)
+			# An owning record occupies a slot that may still be uninitialized.
+			if owns(kind.record):
+				self.owned_slots.add(kind.record)
+				slot = f"{kind.record.c_name}_slot"
+				view = array_view(fields, SHARED)
+				return self.temporary(kind,
+					f"wvrt_owned_array_borrow({slot}, {view}, {index.c}, -1, {target.line}, {target.line})")
+			element = self.typed_element(fields, kind.record, index, target.line)
+			return self.temporary(kind, f"&({element})")
+
+		binding, value = self.project(target, named=True)
+		# Taking the address of a record and reborrowing its existing address use the same loan.
+		if value.kind is kind.record:
+			expression = f"&({value.c})"
+		elif value.kind == kind:
+			expression = value.c
+		else:
+			raise SourceError(target.line)
+		self.check_access(binding, False, target.line)
+		self.loans.append((binding, SHARED))
+		return self.temporary(kind, expression)
+
 	# Evaluate arguments left to right and end only this call's loans.
 	def call(self, node: Form) -> Value:
 		# A call needs a named callee before its arguments.
@@ -779,7 +857,13 @@ class FunctionEmitter:
 		values = []
 		# Each argument may acquire a loan that constrains later arguments.
 		for argument, kind in zip(args, parameters):
-			value = self.borrow(argument, kind) if isinstance(kind, BufferType) else self.typed(argument, kind)
+			# A borrow preserves the original array or record storage.
+			if isinstance(kind, BufferType):
+				value = self.borrow(argument, kind)
+			elif isinstance(kind, SharedRef):
+				value = self.borrow_record(argument, kind)
+			else:
+				value = self.typed(argument, kind)
 			values.append(value.c)
 		expression = f"{callee.c_name}({', '.join(values)})"
 		# A void call is a statement and supplies no C value to a consumer.
@@ -841,6 +925,11 @@ class FunctionEmitter:
 			target, name = checked_form(node, "struct.get", 2).operands
 			binding, value = self.project(target, named=named)
 			record = value.kind
+			selection = "."
+			# A shared reference projects fields from the original record.
+			if isinstance(record, SharedRef):
+				record = record.record
+				selection = "->"
 			# A computed owning temporary must be placed in a binding before projection.
 			if not isinstance(record, Record) or (binding is None and owns(record)):
 				raise SourceError(target.line)
@@ -848,7 +937,7 @@ class FunctionEmitter:
 			# A projection keeps the member's exact declared type.
 			if member is None:
 				raise SourceError(name.line)
-			return binding, Value(member.kind, f"{value.c}.{member.c_name}")
+			return binding, Value(member.kind, f"{value.c}{selection}{member.c_name}")
 		# A borrow or store needs a stable place with a live binding.
 		if named or (isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text)):
 			binding = self.binding(node)
@@ -995,9 +1084,12 @@ class FunctionEmitter:
 			# Byte rows already have a runtime element destructor.
 			if element == _OWNED_BYTE_ROW:
 				return self.temporary(kind, f"wvrt_array_new_rows_at_span({size.c}, -1, {node.line}, {node.line})")
-			# Arrays containing owning records require a separate live-slot layout.
-			if owns(element):
-				raise SourceError(element_node.line)
+			# The runtime initializes empty record slots and drops the live ones at scope exit.
+			if isinstance(element, Record) and owns(element):
+				self.owned_slots.add(element)
+				slot = f"{element.c_name}_slot"
+				return self.temporary(kind,
+					f"wvrt_owned_array_new({slot}, {slot}_drop, {size.c}, -1, {node.line}, {node.line})")
 			native = c_type(element)
 			site = self.site(node.line)
 			return self.temporary(
@@ -1187,24 +1279,15 @@ class FunctionEmitter:
 		self.emit_line(f"{storage} = {empty};")
 		return result
 
-	# Drop the owned leaves of a value through their original runtime descriptors.
-	def drop_owned(self, kind: Type, expression: str) -> None:
-		# A record releases its fields in reverse layout order.
-		if isinstance(kind, Record):
-			# A moved record contains cleared owner slots on that path.
-			for member in reversed(kind.fields.values()):
-				self.drop_owned(member.kind, f"{expression}.{member.c_name}")
-		# The destructor accepts both an actual array owner and a null slot.
-		elif owns(kind):
-			self.emit_line(f"wvrt_array_drop({expression});")
-
 	# Release owned slots from the scopes being exited in reverse declaration order.
 	def cleanup(self, scopes: list[dict[str, Binding]]) -> None:
 		# Clean up inner scopes before outer ones.
 		for scope in reversed(scopes):
 			# An earlier declaration outlives a later one in the same scope.
 			for binding in reversed(scope.values()):
-				self.drop_owned(binding.value.kind, binding.value.c)
+				# Use the same cleanup as an owning record slot.
+				for statement in drop_statements(binding.value.kind, binding.value.c):
+					self.emit_line(statement)
 
 	# Evaluate the return value before releasing every scope the return leaves.
 	def emit_return(self, node: Form) -> None:
@@ -1321,12 +1404,10 @@ class FunctionEmitter:
 			target, subscript, operand = form(statement, arity=3).operands
 			binding, kind, fields = self.array_access(target, node.line, writable=True)
 			element = kind.element
-			# Owning records need an initialized-slot store before they can be array elements.
-			if owns(element) and element != _OWNED_BYTE_ROW:
-				raise SourceError(node.line)
+			owning_record = isinstance(element, Record) and owns(element)
 			checkpoint = len(self.loans)
-			# A writable owner or inline slot remains reserved through both operands.
-			if kind.access == OWNED or isinstance(binding.value.kind, FixedArrayType):
+			# An owning slot remains reserved through both operands.
+			if kind.access == OWNED or owning_record or isinstance(binding.value.kind, FixedArrayType):
 				self.loans.append((binding, MUT))
 			# Restore the enclosing loan prefix if either operand fails checking.
 			try:
@@ -1334,9 +1415,17 @@ class FunctionEmitter:
 				value = self.typed(operand, element)
 			finally:
 				del self.loans[checkpoint:]
+			# Storing an owning record transfers its fields and retires the previous slot.
+			if owning_record:
+				self.owned_slots.add(element)
+				slot = f"{element.c_name}_slot"
+				view = array_view(fields, MUT)
+				self.emit_line(
+					f"wvrt_owned_array_store({slot}, {slot}_drop, {view}, {index.c}, {value.c}, "
+					f"-1, {node.line}, {node.line});")
 			# A row store transfers the incoming allocation and drops any previous owner.
-			if element == _OWNED_BYTE_ROW:
-				view = (f"(wvrt_mut_slice){{{fields}wvrt_items, {fields}wvrt_length, {fields}wvrt_element_size}}")
+			elif element == _OWNED_BYTE_ROW:
+				view = array_view(fields, MUT)
 				self.emit_line(f"wvrt_array_store_row_at_span({view}, {index.c}, {value.c}, -1, {node.line}, {node.line});")
 			# The existing byte path checks the signed index.
 			elif element == U8:
@@ -1969,14 +2058,16 @@ def compile_source(
 		if isinstance(value.binding.value.kind, FixedArrayType))
 
 	bodies = []
-	# Lower bodies before the C preamble so local inline shapes are declared with the signature shapes.
+	owned_slots = set()
+	# Lower bodies before the C preamble so the used inline and owning slot layouts are known.
 	for module in modules:
 		# Runtime sites and embedded paths belong to the source that defines each function.
 		with source_file(module.filename):
 			# Emit provider bodies only once, regardless of their local aliases.
 			for function in module.functions.values():
 				references = retained if function.is_entry else ()
-				bodies.extend(FunctionEmitter(function, module, fixed_arrays, imports).emit(references))
+				emitter = FunctionEmitter(function, module, fixed_arrays, owned_slots, imports)
+				bodies.extend(emitter.emit(references))
 				# Reuse the same borrowed host argument vector as the native compiler.
 				if function.is_entry:
 					bodies.extend([f"WVRT_HOST_ENTRY({function.c_name})", ""])
@@ -1992,6 +2083,9 @@ def compile_source(
 	# Define nested layouts before emitting any functions that use them by value.
 	for record in records:
 		lines.extend(record_definition(record))
+		# An owning slot layout uses the complete record definition.
+		if record in owned_slots:
+			lines.extend(record_slot_definition(record))
 	# Emit each module binding once, ahead of every function body.
 	for value in values:
 		lines.extend(module_value_definition(value))

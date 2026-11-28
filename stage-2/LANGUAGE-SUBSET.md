@@ -85,11 +85,11 @@ drops its remaining owners when it exits. After an `if`, an owner must
 be available along every continuing path before it can be used. Each
 path back to a `while` condition must preserve owners live on entry.
 
-Use `(array.alloc T count)` for a local owned array with `u8` or a
-copyable record as its element type. Use `array.len`, `array.load`, and
-`array.store` with exact element types and `i32` indices. A writable
-receiver is required for stores. Transfer or return an owned array with
-`(move name)`.
+Use `(array.alloc T count)` for a local owned array with `u8`, `i32`,
+owned byte rows, or a Wove record as its element type. Use `array.len`,
+`array.load`, and `array.store` with exact element types and `i32` indices.
+A writable receiver is required for stores. Transfer or return an owned
+array with `(move name)`.
 
 A function can return `(optional (owned-array u8))`. Use
 `(array.try-alloc u8 length)` for fallible allocation,
@@ -111,6 +111,12 @@ The `i32` endpoints evaluate once in source order, and equal endpoints
 are valid. Call loans remain active through later arguments and the call.
 Shared reborrows permit reads through the parent. Exclusive reborrows
 suspend access through the parent until the call returns.
+
+A `(shared-ref Record)` parameter accepts a shared borrow of an existing
+record or array element. Its fields can be read or borrowed from the
+original storage. An array of owning records starts with empty slots.
+A store initializes or replaces a slot, dropping its previous value.
+Borrowing an empty slot traps.
 
 The [application entry signature](../LANGUAGE.md#program-entry) also applies
 to the compiler's `main`.
