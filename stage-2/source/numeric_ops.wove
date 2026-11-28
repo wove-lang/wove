@@ -4,6 +4,7 @@
 	(:doc `Read named numeric conversions and their byte or bit representations from an operation tag.`)
 
 	(use wove-file "./scan.wove" (only (type SourceNode)))
+	(use wove-file "./receiver_words.wove" (only receiver_separator (value receiver_call_head)))
 	(use wove-file "./types.wove" (only builtin_type_keyword numeric_prefix_width is_builtin_integer_value is_builtin_float is_16bit_integer is_64bit_integer is_128bit_integer is_256bit_integer
 		(value f16_type) (value f32_type) (value f64_type) (value u16_type)))
 	(use wove-file "./float_ops.wove" (only (value float_conversion) (value float_from_bits) (value float_to_bits)))
@@ -17,13 +18,13 @@
 	(let decode_big 111u32)
 	(let typed_integer_conversion 112u32)
 	(let exact_byte_view 52u32)
-	(let to_le_bytes ":to-le-bytes")
-	(let to_be_bytes ":to-be-bytes")
+	(let to_le_bytes "to-le-bytes")
+	(let to_be_bytes "to-be-bytes")
 	(let from_le_bytes ":from-le-bytes")
 	(let from_be_bytes ":from-be-bytes")
 	(let from_numeric ":from-")
 	(let from_bits ":from-bits")
-	(let to_bits ":to-bits")
+	(let to_bits "to-bits")
 
 	(fn integer_byte_width
 		(:doc `Return the logical byte width of a verified builtin integer type.`)
@@ -55,6 +56,62 @@
 		(returns bool)
 		(body (return (bool:or (u32:eq kind encode_big) (u32:eq kind decode_big)))))
 
+	(fn integer_encoding_operation
+		(:doc "Look up a complete endian encoder suffix.")
+		(params (source (shared-array u8)) (start i32) (end i32))
+		(returns u32)
+		(body
+			(if
+				(:doc "Little-endian encoding puts the low byte first.")
+				(call same_bytes (borrow-shared source) start end
+					(borrow-shared to_le_bytes) 0i32 to_le_bytes.len)
+				(then (return encode_little)))
+			(if
+				(:doc "Big-endian encoding reverses the order of the same fixed-width bytes.")
+				(call same_bytes (borrow-shared source) start end
+					(borrow-shared to_be_bytes) 0i32 to_be_bytes.len)
+				(then (return encode_big)))
+			(return 0u32)))
+
+	(fn receiver_may_encode_bytes
+		(:doc "Find a dotted endian encoder before its lexical receiver width is available.")
+		(params (source (shared-array u8)) (head SourceNode))
+		(returns bool)
+		(body
+			(if (u32:not-eq head/kind receiver_call_head) (then (return (bool false))))
+			(let dot (call receiver_separator (borrow-shared source) head/start head/end))
+			(return (bool:and (i32:not-ltz dot)
+				(u32:gtz (call integer_encoding_operation (borrow-shared source) (i32:inc dot) head/end))))))
+
+	(fn float_bit_word
+		(:doc "Find the unsigned storage word for a float with an exact bit-copy operation.")
+		(params (type u32)) (returns u32)
+		(body
+			(if (u32:eq type f16_type) (then (return u16_type)))
+			(if (u32:eq type f32_type) (then (return 11u32)))
+			(if (u32:eq type f64_type) (then (return 54u32)))
+			(return 0u32)))
+
+	(fn read_value_encoding
+		(:doc "Read an encoding whose source is the receiver's static type.")
+		(params (source (shared-array u8)) (start i32) (end i32) (type u32))
+		(returns NamedConversion)
+		(body
+			(if
+				(:doc "An integer encoder produces an array at the source word's width.")
+				(call is_builtin_integer_value type)
+				(then
+					(let kind (call integer_encoding_operation (borrow-shared source) start end))
+					(if (u32:gtz kind)
+						(then (return (struct:new NamedConversion (kind kind) (type type) (operand type)))))))
+			(let bits (call float_bit_word type))
+			(if
+				(:doc "A float bit copy preserves its exact storage representation.")
+				(bool:and (u32:gtz bits)
+					(call same_bytes (borrow-shared source) start end (borrow-shared to_bits) 0i32 to_bits.len))
+				(then (return (struct:new NamedConversion (kind float_to_bits) (type bits) (operand type)))))
+			(return (struct:new NamedConversion (kind 0u32) (type 0u32) (operand 0u32)))))
+
 	(fn read_named_conversion
 		(:doc `Match an exact numeric type prefix and one complete conversion suffix.`)
 		(params (source (shared-array u8)) (head SourceNode))
@@ -77,18 +134,8 @@
 				(bool:not (bool:or floating (call is_builtin_integer_value type)))
 				(then (return none)))
 			(let suffix (i32:add start width))
-			(if
-				(:doc "An encoder's source is the integer named at the head.")
-				(bool:and (bool:not floating)
-					(call same_bytes (borrow-shared source) suffix end
-						(borrow-shared to_le_bytes) 0i32 to_le_bytes.len))
-				(then (return (struct:new NamedConversion (kind encode_little) (type type) (operand type)))))
-			(if
-				(:doc "Big-endian encoders reverse the order of the same fixed-width bytes.")
-				(bool:and (bool:not floating)
-					(call same_bytes (borrow-shared source) suffix end
-						(borrow-shared to_be_bytes) 0i32 to_be_bytes.len))
-				(then (return (struct:new NamedConversion (kind encode_big) (type type) (operand type)))))
+			(let encoded (call read_value_encoding (borrow-shared source) (i32:inc suffix) end type))
+			(if (u32:gtz encoded/kind) (then (return encoded)))
 			(if
 				(:doc "A decoder accepts an exact shared byte view, or forms one from an explicit loan.")
 				(bool:and (bool:not floating)
@@ -101,24 +148,13 @@
 					(call same_bytes (borrow-shared source) suffix end
 						(borrow-shared from_be_bytes) 0i32 from_be_bytes.len))
 				(then (return (struct:new NamedConversion (kind decode_big) (type type) (operand exact_byte_view)))))
+			(let bits (call float_bit_word type))
 			(if
-				(:doc "Bit copies require a built-in integer with the exact floating storage width.")
-				(bool:or (u32:eq type f16_type)
-					(bool:or (u32:eq type f32_type) (u32:eq type f64_type)))
-				(then
-					(let-mut bits 54u32)
-					(if (u32:eq type f16_type) (then (set bits u16_type)))
-					(if (u32:eq type f32_type) (then (set bits 11u32)))
-					(if
-						(:doc "Reinterpret an unsigned word as a float.")
-						(call same_bytes (borrow-shared source) suffix end
-							(borrow-shared from_bits) 0i32 from_bits.len)
-						(then (return (struct:new NamedConversion (kind float_from_bits) (type type) (operand bits)))))
-					(if
-						(:doc "Read the float's unchanged representation into an unsigned word.")
-						(call same_bytes (borrow-shared source) suffix end
-							(borrow-shared to_bits) 0i32 to_bits.len)
-						(then (return (struct:new NamedConversion (kind float_to_bits) (type bits) (operand type)))))))
+				(:doc "Decoding a float's bits requires the unsigned word of the same storage width.")
+				(bool:and (u32:gtz bits)
+					(call same_bytes (borrow-shared source) suffix end
+						(borrow-shared from_bits) 0i32 from_bits.len))
+				(then (return (struct:new NamedConversion (kind float_from_bits) (type type) (operand bits)))))
 			(let operand (i32:add suffix from_numeric.len))
 			(if
 				(:doc "A typed numerical conversion requires the complete :from- prefix.")

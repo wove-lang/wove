@@ -100,7 +100,9 @@ their body and arm, respectively.
 Write `(receiver.operation args...)` to call an operation on a bare
 binding. The compiler looks up the binding in lexical scope, selects the
 operation namespace from its type, and inserts the binding as the first
-operand. Arrays use `array:`. Records use `struct:`.
+operand. Numeric and Boolean bindings use their exact type names, such as
+`u32:` or `bool:`. Other value families use their canonical namespaces, such
+as `array:`, `struct:`, `optional:`, and `worker:`.
 
 | Shorthand | Canonical form |
 | --- | --- |
@@ -109,11 +111,20 @@ operand. Arrays use `array:`. Records use `struct:`.
 | `(data.set index value)` | `(array:set data index value)` |
 | `(data.try-reserve count)` | `(array:try-reserve data count)` |
 | `(record.get field)` | `(struct:get record field)` |
+| `(width.gt 1u32)` | `(u32:gt width 1u32)` for `width` of type `u32` |
+| `index.dec` | `(u32:dec index)` for `index` of type `u32` |
+| `distance.neg` | `(f32:neg distance)` for `distance` of type `f32` |
+| `(ready.and predicate)` | `(bool:and ready predicate)` |
+| `pending.len` | `(worker:len pending)` for a worker queue |
 
 Array `.get` takes an index expression. Record `.get` takes a bare
-field name. Array length also has the bare property spelling
-`data.len`. Constructors and compound receivers use the canonical forms.
-Bounds, borrowing, moves, and writable-place checks apply in either spelling.
+field name. When the receiver is the only operand, write `index.dec` or
+`data.len` directly. Both the bare and parenthesized spellings use the
+binding as a value or place. Calls with additional operands use parentheses.
+Use canonical forms for constructors with a type operand,
+destination-qualified conversions such as `u32:from-i32`, and compound
+receivers. Both spellings apply the same type and ownership checks and
+preserve operand order and Boolean short-circuiting.
 
 ### Field paths
 
