@@ -85,8 +85,15 @@ def main():
 		installed = stage / compiler.name
 		shutil.copy2(compiler, installed)
 		# Hold each origin to the same C flags and shared native oracle.
-		for (origin, header), standard, (profile, flags) in product(cases, ("c11", "c17", "c23"), profiles):
+		for case, standard, (profile, flags) in product(cases, ("c11", "c17", "c23"), profiles):
+			origin, header, *variant = case
 			project = stage / f"{origin}-{standard}-{profile}"
+			# A separate fixture can provide C flags for an exact native control.
+			if variant:
+				source, extra_flags = variant
+				check_case(installed, clang, runtime, fixtures, project, header, standard,
+					[*flags, *json.loads(extra_flags)], source=source, execute=execute)
+				continue
 			check_case(installed, clang, runtime, fixtures, project, header, standard, flags, execute=execute)
 			# Project and bundled views exercise the same explicit platform and feature profiles.
 			for platform, selected_profile, source, diagnostic in field_cases:
