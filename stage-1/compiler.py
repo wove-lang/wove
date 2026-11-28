@@ -155,6 +155,12 @@ class NativeRef:
 
 
 @dataclass(frozen=True)
+class NativePlaceRef:
+	kind: str | NamedType
+	writable: bool
+
+
+@dataclass(frozen=True)
 class BufferType:
 	access: str
 	element: str | NamedType | BufferType
@@ -171,7 +177,7 @@ class FixedArrayType:
 	count: int
 
 
-Type = str | NamedType | SharedRef | NativeRef | BufferType | OptionalOwner | FixedArrayType
+Type = str | NamedType | SharedRef | NativeRef | NativePlaceRef | BufferType | OptionalOwner | FixedArrayType
 
 
 _BYTE_VIEW = BufferType(SHARED, U8)
@@ -190,6 +196,7 @@ class Value:
 class Binding:
 	value: Value
 	writable: bool = False
+	native: bool = False
 
 
 @dataclass
@@ -229,6 +236,7 @@ class NativeFunction:
 	c_strings: tuple[int, ...]
 	null_only: frozenset[int]
 	snapshot: NativeStringResult | None
+	macro: bool
 
 
 @dataclass(frozen=True)
@@ -270,6 +278,10 @@ def c_type(kind: Type) -> str:
 	# A borrowed C handle already has a pointer representation in the header.
 	if isinstance(kind, NativeRef):
 		return kind.owner.c_name
+	# A native object loan points at the exact caller-owned type.
+	if isinstance(kind, NativePlaceRef):
+		qualifier = "" if kind.writable else "const "
+		return f"{qualifier}{c_type(kind.kind)} *"
 	# A nullable owner uses the same pointer ABI as its payload.
 	if isinstance(kind, OptionalOwner):
 		return c_type(kind.payload)
@@ -905,6 +917,18 @@ class FunctionEmitter:
 		self.loans.append((binding, SHARED))
 		return self.temporary(kind, expression)
 
+	# Lend the original scalar or record place using the declared native pointer type.
+	def borrow_native_place(self, node: Node, kind: NativePlaceRef) -> Value:
+		tag = "borrow-mut" if kind.writable else "borrow-shared"
+		target, = checked_form(node, tag, 1).operands
+		binding, value = self.project(target, named=True)
+		# Only a live place of the exact type can satisfy this pointer argument.
+		if value.kind != kind.kind or (kind.writable and not binding.writable):
+			raise SourceError(target.line)
+		self.check_access(binding, kind.writable, target.line)
+		self.loans.append((binding, MUT if kind.writable else SHARED))
+		return self.temporary(kind, f"&({value.c})")
+
 	# Evaluate arguments left to right and end only this call's loans.
 	def call(self, node: Form) -> Value:
 		# A call needs a named callee before its arguments.
@@ -939,6 +963,8 @@ class FunctionEmitter:
 				value = self.borrow(argument, kind)
 			elif isinstance(kind, SharedRef):
 				value = self.borrow_record(argument, kind)
+			elif isinstance(kind, NativePlaceRef):
+				value = self.borrow_native_place(argument, kind)
 			else:
 				value = self.typed(argument, kind)
 			values.append(value.c)
@@ -961,6 +987,11 @@ class FunctionEmitter:
 	# Check bridge extents, prepare temporary strings, invoke, and release the scratch.
 	def native_call(self, callee: NativeFunction, parameters: tuple[Type, ...], args: list[Node],
 		values: list[str], line: int) -> Value:
+		# A function-like macro consumes captured scalar arguments without a function address.
+		if callee.macro:
+			for value in values:
+				self.emit_line(f"(void)({value});")
+			return self.call_result(callee.result, f"{callee.c_name}({', '.join(values)})")
 		site = f"-1, {line}, {line}"
 		actuals = values.copy()
 		abi = [c_type(kind) for kind in parameters]
@@ -1170,17 +1201,27 @@ class FunctionEmitter:
 			operand = f"({value.c} > UINT64_C({high}) ? INT64_C({high + 1}) : (int64_t){value.c})"
 		return self.temporary(kind, f"({C_TYPE[kind]})wvrt_int_convert({operand}, {low}, {high}, {site})")
 
+	# Ask Clang to check the original C object or macro's declared value type.
+	def check_native_value(self, value: Value) -> None:
+		kind = value.kind
+		# A shared native handle must use the pointer type declared by its header.
+		if isinstance(kind, NativeRef):
+			self.emit_line(f"WVRT_CHECK_C_POINTER_TYPEDEF({c_type(kind)});")
+			message = "Wove C borrowed value does not match its declared handle type"
+		else:
+			message = "Wove C value does not match its declared type"
+		self.emit_line(f'_Static_assert(_Generic(({value.c}), {c_type(kind)}: 1, default: 0), "{message}");')
+
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
 		# A bare name reads a scalar or record before the enclosing operation uses it.
 		if isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text):
 			binding = self.binding(node)
 			kind = binding.value.kind
-			# Capture the header's borrowed value before another argument can be evaluated.
-			if isinstance(kind, NativeRef):
-				self.emit_line(f"WVRT_CHECK_C_POINTER_TYPEDEF({c_type(kind)});")
-				self.emit_line(f'_Static_assert(_Generic(({binding.value.c}), {c_type(kind)}: 1, default: 0), '
-					'"Wove C borrowed value does not match its declared handle type");')
+			# Capture header values before another argument or call can change their native storage.
+			if binding.native or isinstance(kind, NativeRef):
+				self.check_access(binding, False, node.line)
+				self.check_native_value(binding.value)
 				return self.temporary(kind, binding.value.c)
 			# Array and slice places need an explicit operation.
 			if not copyable(kind):
@@ -1696,12 +1737,15 @@ class FunctionEmitter:
 				raise SourceError(target.line)
 			kind = binding.value.kind
 			replace_owner = isinstance(kind, BufferType) and kind.access == OWNED
-			copy_value = kind in SCALAR_TYPES or isinstance(kind, Record) and copyable(kind)
+			copy_value = kind in SCALAR_TYPES or isinstance(kind, Record) and copyable(kind) or binding.native
 			# Views and other owning shapes cannot be rebound by the seed.
 			if not binding.writable or not (copy_value or replace_owner):
 				raise SourceError(node.line)
 			self.check_access(binding, True, node.line)
 			value = self.typed(operand, kind)
+			# A native lvalue must retain its exact type on writes as well as reads.
+			if binding.native:
+				self.check_native_value(binding.value)
 			# The replacement can read or move the old owner before the slot is retired.
 			if replace_owner:
 				self.emit_line(f"wvrt_array_drop({binding.value.c});")
@@ -2075,7 +2119,8 @@ def read_header_include(node: Form, directory: Path) -> tuple[str, str]:
 # Index supported native declarations by the same header key used to emit the include.
 def native_declaration_index(modules: Iterator[tuple[str, Form]]):
 	index = {}
-	namespaces = {"type": "type", "struct": "type", "fn": "fn", "let": "value"}
+	namespaces = {"type": "type", "struct": "type", "fn": "fn",
+		"const": "value", "let": "value", "let-mut": "value"}
 	# Sources can extend the same header while retaining its original C spelling.
 	for filename, module in modules:
 		# Only declared bridge members can supply names to a native use.
@@ -2148,14 +2193,24 @@ class NativeDeclarations:
 					record.fields[field] = RecordField(kind, field)
 			return record
 
-	# Resolve a borrowed native pointer without creating a Wove owner or adding indirection.
-	def reference(self, key: str, node: Node) -> NativeRef:
-		owner, = checked_form(node, "shared-ref", 1).operands
-		kind = self.resolve_type(key, identifier(owner))
-		# A handle spelled as a C pointer or marked as an owned typedef has pointer ABI.
-		if not isinstance(kind, NativeType) or not (kind.owned or kind.c_name.endswith("*")):
-			raise SourceError(owner.line)
-		return NativeRef(kind)
+	# Distinguish direct borrowed handles from addresses of caller-owned places.
+	def reference(self, key: str, node: Form) -> NativeRef | NativePlaceRef:
+		operand, = checked_form(node, arity=1).operands
+		name = identifier(operand)
+		writable = node.tag == "mut-ref"
+		# Built-in scalar references use an ordinary typed pointer.
+		if name in SCALAR_TYPES:
+			return NativePlaceRef(name, writable)
+		kind = self.resolve_type(key, name)
+		# A borrowed pointer handle already carries the pointer ABI in its declared type.
+		if isinstance(kind, NativeType) and (kind.owned or kind.c_name.endswith("*")):
+			if writable:
+				raise SourceError(operand.line)
+			return NativeRef(kind)
+		# Native layouts and integer typedefs lend the address of the actual object.
+		if isinstance(kind, (Record, NativeType)):
+			return NativePlaceRef(kind, writable)
+		raise SourceError(operand.line)
 
 	# Resolve copyable scalar operands using their exact native typedef identity.
 	def scalar(self, key: str, node: Node) -> str | NativeType:
@@ -2176,7 +2231,7 @@ class NativeDeclarations:
 		# Keep named formal order and distinguish borrowed handles from byte descriptors.
 		for name, operand in operands.items():
 			# A C handle borrow passes the native value directly.
-			if isinstance(operand, Form) and operand.tag == "shared-ref":
+			if isinstance(operand, Form) and operand.tag in ("shared-ref", "mut-ref"):
 				kind = self.reference(key, operand)
 			# Byte descriptors need a checked extent or C-string adaptation.
 			elif isinstance(operand, Form) and operand.tag in (SHARED, MUT):
@@ -2193,10 +2248,16 @@ class NativeDeclarations:
 		strings = set()
 		null_only = set()
 		snapshot = None
+		macro = False
 		# Recover adaptation contracts using the names in the original signature.
 		for pragma in native_pragmas(node):
 			# Selection was applied before the declaration was resolved.
 			if pragma.tag == "cfg":
+				continue
+			# A macro uses its declared scalar inputs but contributes no addressable prototype.
+			if pragma.tag == "c_macro":
+				form(pragma, arity=0)
+				macro = True
 				continue
 			# A nullable handle can also receive an ordinary borrowed value.
 			if pragma.tag == "c_nullable":
@@ -2238,8 +2299,9 @@ class NativeDeclarations:
 			for name, kind in parameters.items()
 		):
 			raise SourceError(node.line)
-		# Only the admitted native bridge families participate in ordinary C calls.
-		if not (strings or snapshot or any(isinstance(kind, NativeRef) for kind in parameters.values())):
+		# Macros in this subset operate on scalar captures without per-call adapters.
+		if macro and (snapshot or any(isinstance(kind, (BufferType, NativeRef, NativePlaceRef))
+			for kind in parameters.values())):
 			raise SourceError(node.line)
 		# Copy and optionally release native strings using the runtime's nullable byte owner ABI.
 		if snapshot is not None:
@@ -2252,15 +2314,24 @@ class NativeDeclarations:
 			result = VOID if identifier(result_node) == VOID else self.scalar(key, result_node)
 		return NativeFunction(symbol, tuple(parameters.items()), result, tuple(extents.values()),
 			tuple(positions[name] for name in parameters if name in strings),
-			frozenset(positions[name] for name in null_only), snapshot)
+			frozenset(positions[name] for name in null_only), snapshot, macro)
 
-	# Resolve a borrowed C value through the actual header expression, including macro aliases.
+	# Bind scalar C values and borrowed handles to the actual header expression.
 	def value(self, key: str, node: Form) -> Binding:
-		operand, = form(node, "let", 1).operands
+		operand, = form(node, arity=1).operands
 		# Other value adaptations require their own seed support.
 		if any(pragma.tag != "cfg" for pragma in native_pragmas(node)):
 			raise SourceError(node.line)
-		return Binding(Value(self.reference(key, operand), identifier(node.names[0])))
+		writable = node.tag == "let-mut"
+		# An immutable handle can be copied without taking ownership of its pointee.
+		if isinstance(operand, Form) and operand.tag == "shared-ref":
+			kind = self.reference(key, operand)
+			# Caller-owned reference globals and writable handle slots have separate contracts.
+			if node.tag != "let" or not isinstance(kind, NativeRef):
+				raise SourceError(node.line)
+		else:
+			kind = self.scalar(key, operand)
+		return Binding(Value(kind, identifier(node.names[0])), writable=writable, native=True)
 
 	# Bind explicit selections without opening declarations outside the seed's current subset.
 	def bind(self, module: Module, use: Form, key: str) -> None:
@@ -2294,6 +2365,10 @@ class NativeDeclarations:
 				if original.quoted or not IDENTIFIER.fullmatch(original.text):
 					continue
 				selected = self.select(key, namespace, original.text)
+				# Like Wove imports, a bare selector prefers a function before falling back to a value.
+				if selected is None and namespace == "fn":
+					namespace = "value"
+					selected = self.select(key, namespace, original.text)
 				# A bare selection may belong to the header's opaque declaration set.
 				if selected is None:
 					continue

@@ -14,6 +14,17 @@ struct seed_stat {
 	seed_device_t st_dev;
 };
 
+static int32_t seed_error;
+#define SEED_OK 0
+#define SEED_DEVICE_OK(device) ((device) == 42)
+
+// Populate the original native record and publish a scalar error value.
+static inline int32_t seed_stat(int32_t device, struct seed_stat *info) {
+	info->st_dev = (seed_device_t)device;
+	seed_error = SEED_OK;
+	return 0;
+}
+
 typedef size_t seed_count_t;
 struct seed_stream {
 	int32_t sum;
