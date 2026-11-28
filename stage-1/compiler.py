@@ -239,7 +239,9 @@ class Function:
 
 @dataclass(frozen=True)
 class NativeStringResult:
-	release: str | None
+	release: str | None = None
+	field: str | None = None
+	extent: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1114,17 +1116,10 @@ class FunctionEmitter:
 		if callee.variadic_start is not None:
 			abi[callee.variadic_start:] = ["..."]
 		formals = ", ".join(abi) or "void"
-		result_types = (c_type(callee.result),)
 		# Verify every newly acquired native owner against its declared C destructor.
 		if isinstance(callee.result, NativePointerOwner):
 			owner = callee.result.owner
 			self.emit_line(f"WVRT_CHECK_C_POINTER_OWNER({owner.c_name}, {owner.pointer_drop});")
-		# A borrowed snapshot can copy const C storage. An allocating snapshot owns mutable text.
-		if callee.snapshot is not None:
-			result_types = ("char *", "const char *") if callee.snapshot.release is None else ("char *",)
-		prototypes = ", ".join(f"{kind} (*)({formals}): 1" for kind in result_types)
-		self.emit_line(f'_Static_assert(_Generic(&({callee.c_name}), {prototypes}, '
-			f'default: 0), "Wove C prototype does not match {callee.c_name}");')
 		# A single allocation keeps every checked input live until the C result is captured.
 		if converted:
 			scratch = self.value_slot(_BYTE_VIEW).c
@@ -1146,15 +1141,21 @@ class FunctionEmitter:
 			self.emit_line(f"char *const *{name} = wvrt_cstrs_prepare({values[index]}, -1, {arg_line}, {arg_line});")
 			actuals[index] = name
 		expression = f"{callee.c_name}({', '.join(actuals)})"
-		# Snapshot before dropping scratch because borrowed results can alias an argument.
-		if callee.snapshot is not None:
-			release = callee.snapshot.release
-			# Match the declared C release function without a cast or a hard-coded name.
-			if release is None:
-				expression = f"wvrt_snapshot_borrowed_cstr_at_span({expression}, {site})"
+		result_types = (c_type(callee.result),)
+		snapshot = callee.snapshot
+		# Snapshot return types depend on whether the header returns text or a record pointer.
+		if snapshot is not None:
+			# The C declaration owns the actual layout of the inspected record.
+			if snapshot.field is not None:
+				result_types = (f"__typeof__({expression})",)
 			else:
-				expression = (f"_Generic(&({release}), void (*)(void *): wvrt_snapshot_cstr_at_span, "
-					f"void (*)(char *): wvrt_snapshot_chars_at_span)({expression}, {release}, {site})")
+				result_types = ("char *", "const char *") if snapshot.release is None else ("char *",)
+		prototypes = ", ".join(f"{kind} (*)({formals}): 1" for kind in result_types)
+		self.emit_line(f'_Static_assert(_Generic(&({callee.c_name}), {prototypes}, '
+			f'default: 0), "Wove C prototype does not match {callee.c_name}");')
+		# Snapshot before dropping scratch because borrowed results can alias an argument.
+		if snapshot is not None:
+			expression = self.native_snapshot(snapshot, expression, site)
 		result = self.call_result(callee.result, expression)
 		# Only a successful C initializer activates its native object's destructor.
 		for index in sorted(callee.initializers):
@@ -1170,6 +1171,22 @@ class FunctionEmitter:
 		for index in callee.vectors:
 			self.emit_line(f"wvrt_cstrs_drop({actuals[index]});")
 		return result
+
+	# Copy native text using the runtime's checked field, borrowing, and release operations.
+	def native_snapshot(self, snapshot: NativeStringResult, expression: str, site: str) -> str:
+		# An extended record reports the live byte extent separately from the nominal array size.
+		if snapshot.extent is not None:
+			return (f"WVRT_SNAPSHOT_EXTENDED_CSTR_FIELD_AT_SPAN({expression}, "
+				f"{snapshot.field}, {snapshot.extent}, {site})")
+		# A fixed record field is checked against its original inline storage.
+		if snapshot.field is not None:
+			return f"WVRT_SNAPSHOT_CSTR_FIELD_AT_SPAN({expression}, {snapshot.field}, {site})"
+		release = snapshot.release
+		# Match the declared C release function without a cast or a hard-coded symbol.
+		if release is None:
+			return f"wvrt_snapshot_borrowed_cstr_at_span({expression}, {site})"
+		return (f"_Generic(&({release}), void (*)(void *): wvrt_snapshot_cstr_at_span, "
+			f"void (*)(char *): wvrt_snapshot_chars_at_span)({expression}, {release}, {site})")
 
 	# Keep right-hand evaluation inside its branch while checking it unconditionally.
 	def short_circuit(self, node: Form) -> Value:
@@ -2487,14 +2504,25 @@ class NativeDeclarations:
 				continue
 			# A text snapshot returns a nullable byte owner, optionally releasing the native text.
 			if pragma.tag == "c_snapshot":
-				if snapshot is not None or not 1 <= len(pragma.operands) <= 2:
+				# One C result carries one snapshot contract.
+				if snapshot is not None or not pragma.operands:
 					raise SourceError(pragma.line)
-				kind, *drop = pragma.operands
+				kind, *options = pragma.operands
 				# Other snapshot shapes have their own native result layouts.
 				if identifier(kind) != "cstr":
 					raise SourceError(pragma.line)
-				release = identifier(form(drop[0], "drop", 1).operands[0]) if drop else None
-				snapshot = NativeStringResult(release)
+				fields = {}
+				# Preserve the exact native field or release identifiers for the C checks.
+				for option in options:
+					field = form(option, arity=1)
+					# Unrecognized or repeated options have no seed representation.
+					if field.tag not in ("drop", "field", "extent") or field.tag in fields:
+						raise SourceError(field.line)
+					fields[field.tag] = identifier(field.operands[0])
+				# A record snapshot borrows its fields, and an extent must describe one of those fields.
+				if ("field" in fields and "drop" in fields) or ("extent" in fields and "field" not in fields):
+					raise SourceError(pragma.line)
+				snapshot = NativeStringResult(fields.get("drop"), fields.get("field"), fields.get("extent"))
 				continue
 			# Element extents use a captured integer or a checked literal count.
 			if pragma.tag == "c_array":

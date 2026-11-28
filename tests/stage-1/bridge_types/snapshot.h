@@ -5,6 +5,7 @@
 #ifndef WOVE_SEED_BRIDGE_SNAPSHOT_H
 #define WOVE_SEED_BRIDGE_SNAPSHOT_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,25 @@ static inline const char *fixture_suffix(const char *input) {
 static inline int32_t fixture_change(char *input) {
 	input[0] = 'z';
 	return 0;
+}
+
+struct fixture_entry {
+	uint16_t length;
+	char name[1];
+	char tail[4];
+};
+
+// Reuse a record whose live text extends beyond its nominal inline field.
+static inline struct fixture_entry *fixture_entry_at(int32_t variant) {
+	static struct fixture_entry object = {
+		offsetof(struct fixture_entry, name) + 5, {'a'}, {'b', 'c', 'd', '\0'}
+	};
+	// A null record has no field to inspect.
+	if (variant < 0) {
+		return NULL;
+	}
+	object.name[0] = variant == 0 ? 'a' : 'z';
+	return &object;
 }
 
 #endif
