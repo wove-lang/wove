@@ -214,6 +214,38 @@ static inline bool fixture_limit64_matches(FixtureLimitKind resource, rlim64_t c
 }
 #endif
 
+
+#if defined(RLIMIT_RSS) && defined(RLIMIT_MEMLOCK) && defined(RLIMIT_NPROC) && defined(RLIM_NLIMITS)
+_Static_assert(_Generic((RLIM_NLIMITS), int: 1, default: 0), "native signed int limit count");
+
+/* Compare the public selectors common to the two full headers and their native count. */
+static inline bool fixture_extended_limit_selectors(FixtureLimitKind rss, FixtureLimitKind memlock,
+	FixtureLimitKind nproc, int32_t count)
+{
+#if defined(__APPLE__)
+	const int expected_count = 9;
+#else
+	const int expected_count = 16;
+#endif
+	return rss == RLIMIT_RSS && memlock == RLIMIT_MEMLOCK && nproc == RLIMIT_NPROC
+		&& count == RLIM_NLIMITS && count == expected_count;
+}
+#endif
+
+#if defined(__GLIBC__)
+_Static_assert(_Generic((RLIMIT_NLIMITS), int: 1, default: 0), "native signed int glibc limit count");
+
+/* Compare all additional glibc selector values and its second count spelling. */
+static inline bool fixture_glibc_limit_selectors(FixtureLimitKind ofile, FixtureLimitKind locks,
+	FixtureLimitKind sigpending, FixtureLimitKind msgqueue, FixtureLimitKind nice_limit,
+	FixtureLimitKind rtprio, FixtureLimitKind rttime, int32_t count)
+{
+	return ofile == RLIMIT_OFILE && locks == RLIMIT_LOCKS && sigpending == RLIMIT_SIGPENDING
+		&& msgqueue == RLIMIT_MSGQUEUE && nice_limit == RLIMIT_NICE && rtprio == RLIMIT_RTPRIO
+		&& rttime == RLIMIT_RTTIME && count == RLIMIT_NLIMITS && count == RLIM_NLIMITS;
+}
+#endif
+
 #ifdef WOVE_TEST_PRIORITY_SENTINEL
 /* Produce both meanings of -1 through the same exact native prototype. */
 static inline int fixture_priority_sentinel(FixturePriorityWhich which, id_t id)
