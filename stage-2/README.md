@@ -181,122 +181,27 @@ their original nodes and metadata.
 The [C emitter](emit/c.wove) consumes a checked tree, its module result,
 and the selected declaration indices.
 
-[FNV-1a](hashing/fnv1a.wove) exposes the immutable 32-bit seed `fnv1a_seed`
-and updates it one raw byte at a time with `fnv1a_byte`. The declaration
-identity builder supplies the order and delimiters for its components.
+The [C name generator](emit/text.wove) writes `wg<role><id>_<name>`.
+IDs are unpadded [Base62](hashing/base62.wove) ordinals. Unnamed symbols end
+at the ordinal. `wg`, `wwg`, and longer prefixes reserve a namespace distinct
+from selected native declarations. Native bridge symbols, public exports,
+runtime symbols, and the ABI entry `main` use their declared spellings.
 
-[Base32hex](hashing/base32hex.wove) exposes the fixed width `base32hex32_width` and
-`encode_base32hex32`. The encoder writes all seven digits at the requested
-offset and returns true. An out-of-range output span returns false
-and preserves the destination.
+| Roles | Ordinal |
+| --- | --- |
+| Functions, export trampolines, worker adapters | Checked function table row |
+| Record, enum, fixed-array and callable layouts, ownership helpers and worker drops | Checked layout table row |
+| Aggregate fields and enum payloads | Layout row and checked member spelling within its C aggregate |
+| Parameters | Parameter index within the owning function |
+| Locals, captures, loop labels | Defining or capture row relative to the owning function |
+| Callback adapters, module storage, native string storage and read-only native typedefs | Defining or argument row within the packed graph |
+| C-string call scratch | Original file-local call row and scratch role suffix |
 
-The [C name generator](emit/text.wove) combines a resolved parent, a role,
-and the original name in `get_name`. The parent supplies the current checked
-word and any assigned collision slot. The word can be a declaration
-fingerprint or an ordinal in the role's scope. The checker retains the
-exact declaration and specialization keys. The default spelling is
-`wg<role><id><suffix>`, where `wg` stands for Wove-generated. The character
-after the prefix identifies the role. The ID uses seven lowercase
-Base32hex digits and starts with `0`, `1`, `2`, or `3` because IDs are 32 bits.
-A suffix uses the validated identifier bytes directly. Graph emission
-reserves a prefix against selected
-native function names, type spellings, and destructors before writing C. It uses the first available prefix from
-`wg`, `wwg`, `wwwg`, and so on, keeping the same roles, IDs, and suffixes.
-Declared native symbols, public exports, runtime symbols, and the ABI entry
-`main` keep their own spelling paths.
-
-| Tag | Role | ID | Suffix | Scope and agreement |
-| --- | --- | --- | --- | --- |
-| `f` | Function | Module fingerprint extended by the function role, name, and specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
-| `y` | Private export trampoline | Concrete function fingerprint extended by the trampoline role | Defining function name | The declaration and definition share the body's collision rank. The public assembler label is the declared C name. |
-| `w` | Worker function adapter | Concrete function fingerprint extended by the adapter role | Defining function name | Within an emitted C program. Prototypes, definitions, and submissions use the same exact worker key. |
-| `z` | Erased worker drop wrapper | Concrete owning layout fingerprint extended by the wrapper role | Type name | The serial definition, numbered declaration and definition, and callback pointers share the same name. |
-| `c` | Native callback adapter | Concrete enclosing function fingerprint extended by the callback role and function-relative actual row | Empty | Within its emitted C unit. The definition and native call use the same checked argument. |
-| `r` | Named struct or enum | Module fingerprint extended by the layout role, spelling, and any specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
-| `x` | Aggregate take helper | Concrete layout key extended by the take role | Type name for named layouts, empty for fixed arrays | Definitions and moves use the exact layout. |
-| `e` | Aggregate drop helper | Concrete layout key extended by the drop role | Type name for named layouts, empty for fixed arrays | Cleanup and runtime macro arguments use the exact layout. |
-| `u` | Inline occupancy validator | Concrete layout key extended by the check role | Type name for named layouts, empty for fixed arrays | Serial and numbered definitions use the same name as recursive and inline argument checks. |
-| `h` | Heap-owned aggregate slot | Concrete layout key extended by the heap slot role | Type name for named layouts, empty for fixed arrays | Allocation, access, and worker collection use the same slot type. |
-| `o` | Erased heap slot destructor | Concrete layout key extended by the slot destructor role | Type name for named layouts, empty for fixed arrays | The slot definition, allocation, replacement, and worker collection share the callback name. |
-| `v` | Fixed array typedef | Structural fingerprint of exact element type and extent | Empty | The common header and every user share the resolved layout and collision rank. |
-| `i` | Fixed-array inline occupancy slot | Structural fixed-array key extended by the slot role | Empty | The slot definition, inline elements, and zero-extent alignment use the same name. |
-| `k` | Function-pointer typedef | Exact result followed by the ordered parameter types and a terminator | Empty | The common header and every user share the signature and collision rank. |
-| `m` | Named record field | Concrete layout fingerprint extended by the member role and exact field spelling | Field name | Within its C struct. Definitions, designators, accesses, and cleanup use the same key. |
-| `m` | Enum payload member | Concrete enum fingerprint extended by the member role and exact variant spelling | Variant name | Within its C union. Tags retain their declaration ordinals. |
-| `m` | Empty-record placeholder | Zero | Empty | Within its C struct. |
-| `p` | Parameter | Concrete function fingerprint extended by the parameter role and spelling | Parameter name | Within its C definition. A body reference uses its checked formal. |
-| `l` | Local | Concrete function fingerprint extended by the local role, function-relative lexical scope, defining row, and spelling | Local name | Within its C function. Shadowed bindings retain distinct keys. |
-| `t` | Expression temporary | Concrete function fingerprint extended by the temporary role and function-relative capture row | Empty | Within its C function. The declaration and all uses share the checked capture row. |
-| `j` | Loop break label | Concrete function fingerprint extended by the label role and function-relative loop row | Empty | Within its C function. A break uses the checked row of its target loop. |
-| `q` | Read-only C type alias | Defining bridge file and header extended by the role and original declaration name | Native name | The lvalue contract and its qualified check share the cached key and collision rank. |
-| `d` | Module value or descriptor | Module fingerprint extended by the data role and spelling | Defining name | The common header, unique definition, and references use the same checked binding. |
-| `s` | Module backing bytes | Module fingerprint extended by the backing role and spelling | Defining name | Private to the C unit that defines the bytes. |
-| `a`, `b` | Private bridge string backing and descriptor | Defining bridge file and header extended by the descriptor role and original name. The backing role extends that descriptor key. | Native name | The definitions and all selected reads share the defining key and collision rank. |
-| `b` | C-string call storage | Call's original file-local tree row | `a` for descriptors, `b` for backing pointers | Within its C function. Setup, invocation, and cleanup use the same call row. |
-
-A worker adapter continues the checked function fingerprint with `w` and
-reuses the defining name and collision rank. The FNV-1a role step is reversible,
-so equal adapter spellings have the same collision group as their owners.
-Aggregate take and drop helpers continue the concrete layout key with their
-own role and use the same suffix and collision rank as the layout. A fixed
-array hashes its checked extent and exact element category, including owner
-layers, nested fixed layouts, and nominal specializations. A native integer
-leaf uses the defining file, bridge header, and original alias name. Equal
-types share an interned layout. Equal fingerprints for distinct shapes use
-collision ranks ordered by extent and the exact resolved element key.
-Erased worker drop wrappers continue the same layout key with `z` and pass
-their name explicitly to the C definition macro. Heap slots and their erased destructors use
-separate roles with the same layout suffix and rank. Calls pass the erased
-destructor explicitly when they install it on an array or replace a slot.
-Fixed inline slots continue the structural array key with `i` and use the
-same rank and empty suffix. Inline occupancy validators use `u` with the
-checked layout's suffix and rank.
-Callable typedefs hash the result and each parameter as fixed-width words,
-ending with the reserved zero type code. Inferred references and explicit
-signatures share the same type key. Collisions rank by result, then by
-parameter type in order, with shorter equal prefixes first.
-For a read-only C lvalue, the original bridge declaration supplies the key
-even when several imports use it under different names. Collisions rank by
-defining file and declaration position. The checks still address the original C lvalue.
-Native callback adapters keep separate keys per actual, including repeated
-calls to the same target. Exact owners and argument rows determine the slot
-for a genuine C spelling collision.
-
-Generated names use a hierarchy of 32-bit FNV-1a states. Seed a source graph's
-path key with the canonical file path and a zero delimiter. Resume that state
-with `m`, the declared module name, and a zero delimiter, and cache the result
-on the canonical tree. A pathless module starts its `m` step from the FNV-1a
-seed. A function resumes the module key with `f` and its original name and
-delimiter. Its checked specialization arguments, if any, extend that key in
-normalized form. A parameter resumes the concrete function key with `p`, its
-original name, and a zero delimiter. Its exact checked formal row determines
-each reference's name. A module binding resumes its defining module's key
-with `d` for the value or descriptor and `s` for backing bytes, then its
-original name and a zero delimiter. A reference through an import alias uses
-the original binding, and inserting another declaration leaves its
-fingerprint unchanged.
-
-A named struct or enum resumes its defining module's key with `r`, its
-original type name, and a zero delimiter. A concrete specialization extends
-the template key with its normalized arguments. Layout references and owner
-helpers share the resolved type. Collision handling compares the exact
-defining declaration and specialization arguments even when fingerprints
-match. A named field or enum payload resumes the concrete layout's
-fingerprint with `m`, the exact field or variant name, and a zero delimiter.
-C member names live in their own aggregate namespaces. The readable suffix
-distinguishes different fields or variants
-even when their fingerprints match.
-
-Different readable suffixes can share a fingerprint. When the complete
-generated spelling coincides, the role becomes uppercase and a second
-seven-digit Base32hex word follows the fingerprint. A binding and its backing bytes share this rank. The word ranks
-the declarations by their canonical paths, original definitions, and
-normalized specialization arguments. Renaming an import or reordering
-the graph file table preserves the assignments. Within one concrete C
-function, locals, temporaries, and loop labels use `L`, `T`, or `J` for
-collisions and rank the full defining rows. Role-specific collision ranks
-and fingerprints are prepared with the checked local names before either
-C output pass.
+The emitter assigns ordinals before measuring or partitioning the C output,
+so declarations and references agree in one or many translation units.
+`encode_base62_padded` also supports fixed-width unit and staging names.
+BLAKE2b digest text uses 43 Base62 digits. [FNV-1a](hashing/fnv1a.wove) is used
+for lookup fingerprints alongside exact declaration, layout, and specialization keys.
 
 The result gives the written count and a view-relative span. Successful
 emission spans the module. A failure preserves the destination bytes and

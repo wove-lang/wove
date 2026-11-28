@@ -9,9 +9,9 @@
 #include "blake2b.c"
 #undef main
 
-// The graph emitter names these fixture entry functions by module and declaration.
-#define check_raw wgf3bptekdcheck_raw
-#define check_fields wgf39vr8micheck_fields
+// The graph emitter names these fixture entry functions by the resolved declaration ordinal.
+#define check_raw wgf0_check_raw
+#define check_fields wgf1_check_fields
 
 // Decode one ASCII hex digit from a manifest field.
 static int digit(char byte) {

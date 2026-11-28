@@ -5,13 +5,13 @@
 
 #undef main
 
-int32_t wgF3tmg4el0000001parse(void);
-int32_t wgF3tmg4el0000002parse(void);
+int32_t right_parse(void);
+int32_t left_parse(void);
 int wove_collision_main(int argc, char **argv);
 
 // The original providers keep the same symbol assignments in either graph order.
 int main(int argc, char **argv) {
-	if (wgF3tmg4el0000001parse() != 23 || wgF3tmg4el0000002parse() != 19) {
+	if (right_parse() != 23 || left_parse() != 19) {
 		return 1;
 	}
 	return wove_collision_main(argc, argv);

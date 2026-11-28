@@ -35,8 +35,8 @@ SELF_HOST_TREE_INPUTS := $(COMPILER_INPUTS) $(sort $(shell find runtime -print))
 BUILD_CLANG := tools/run-build-clang.sh
 HASHING_FIXTURES := tests/stage-2/hashing
 HASHING_CASES := $(HASHING_FIXTURES)/cases.tsv
-HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base32hex base16)
-HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,fnv1a base32hex base16)
+HASHING_PROGRAMS := $(addprefix $(STAGE2)/hashing/,fnv1a base62 base16)
+HASHING_NATIVE_PROGRAMS := $(addprefix $(STAGE2)/hashing/native/,fnv1a base62 base16)
 BLAKE2B_FIXTURES := $(HASHING_FIXTURES)/blake2b
 BLAKE2B_PROBE := $(STAGE2)/hashing/blake2b
 JSON_FIXTURES := tests/stage-2/json
@@ -204,7 +204,7 @@ test-stage-2-hashing: $(HASHING_PROGRAMS) $(HASHING_NATIVE_PROGRAMS)
 	sh tests/stage-1/check.sh "$(PYTHON)" "$(STAGE2)/hashing" "$(HASHING_CASES)"
 	"$(STAGE2)/hashing/native/fnv1a"
 	"$(STAGE2)/hashing/native/base16"
-	"$(STAGE2)/hashing/native/base32hex"
+	"$(STAGE2)/hashing/native/base62"
 
 # Run the standalone JSON utilities with the same manifest runner as the seed.
 test-stage-2-json: $(JSON_PROGRAMS)

@@ -9,10 +9,10 @@
 #undef main
 
 int wove_emitted_main(int argc, char **argv);
-uint32_t wgf3tf7c8cadd(uint32_t, uint32_t);
-uint32_t wgf0jnqq73subtract(uint32_t, uint32_t);
-uint32_t wgf263a3faordered_add(wvrt_mut_slice);
-uint32_t wgf306l2vtordered_subtract(wvrt_mut_slice);
+uint32_t wgf0_add(uint32_t, uint32_t);
+uint32_t wgf1_subtract(uint32_t, uint32_t);
+uint32_t wgf3_ordered_add(wvrt_mut_slice);
+uint32_t wgf4_ordered_subtract(wvrt_mut_slice);
 
 // Report the full-width wrap results and count the effects of each operand.
 int main(int argc, char **argv) {
@@ -20,10 +20,10 @@ int main(int argc, char **argv) {
 	uint8_t sub_state = 0;
 	const wvrt_mut_slice addition = {&add_state, 1, sizeof add_state};
 	const wvrt_mut_slice subtraction = {&sub_state, 1, sizeof sub_state};
-	const uint32_t ordered_add = wgf263a3faordered_add(addition);
-	const uint32_t ordered_subtract = wgf306l2vtordered_subtract(subtraction);
+	const uint32_t ordered_add = wgf3_ordered_add(addition);
+	const uint32_t ordered_subtract = wgf4_ordered_subtract(subtraction);
 	return printf("%d %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 " %u %u\n",
-		wove_emitted_main(argc, argv), wgf3tf7c8cadd(UINT32_MAX, 1), wgf0jnqq73subtract(0, 1),
-		wgf3tf7c8cadd(INT32_MAX, 1), wgf0jnqq73subtract(UINT32_MAX, INT32_MAX),
+		wove_emitted_main(argc, argv), wgf0_add(UINT32_MAX, 1), wgf1_subtract(0, 1),
+		wgf0_add(INT32_MAX, 1), wgf1_subtract(UINT32_MAX, INT32_MAX),
 		ordered_add, ordered_subtract, (unsigned)add_state, (unsigned)sub_state) < 0;
 }

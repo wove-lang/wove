@@ -5,7 +5,7 @@
 #include "wove_runtime.h"
 
 // The graph emitter names this ordinary Wove function by its declaration identity.
-int32_t wgf33c2oiucheck_rows(wvrt_slice rows, int32_t argc);
+int32_t wgf4_check_rows(wvrt_slice rows, int32_t argc);
 
 // Supply the nested descriptors while using the existing executable entry ABI.
 int32_t probe_shared_byte_rows(int32_t argc) {
@@ -19,5 +19,5 @@ int32_t probe_shared_byte_rows(int32_t argc) {
 	const wvrt_slice view = argc >= 4
 		? (wvrt_slice){NULL, 0, sizeof(wvrt_slice)}
 		: (wvrt_slice){rows, sizeof(rows) / sizeof(rows[0]), sizeof(rows[0])};
-	return wgf33c2oiucheck_rows(view, argc);
+	return wgf4_check_rows(view, argc);
 }

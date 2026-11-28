@@ -10,7 +10,7 @@
 	(use wove-file "../source/types.wove" (only void_type (value f16_type) (value f32_type) (value f64_type) (value f80_type) (value f128_type)
 		(value i16_type) (value u16_type) (value i64_type) (value i128_type) (value u128_type) (value i256_type) (value u256_type)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "../hashing/base32hex.wove" (only (value base32hex32_width) encode_base32hex32))
+	(use wove-file "../hashing/base62.wove" (only base62_width write_base62_digits))
 	(use wove-file "../hashing/base16.wove" (only (value base16_alphabet)))
 	(use wove-file "./names.wove" (only (value function_role) (value record_role) (value member_role) (value parameter_role) (value local_role)
 		(value temporary_role) (value loop_label_role) (value callback_adapter_role) (value fixed_array_role) (value callable_role)
@@ -443,10 +443,6 @@
 		(:doc `The seed's representation of the generated C name role enum. Use the named role constructors.`)
 		(fields (tag u8)))
 
-	(struct CNameParent
-		(:doc "Carry the checked declaration fingerprint or scoped ordinal and its assigned collision slot.")
-		(fields (identity u32) (slot i32)))
-
 	(struct CNameSpelling
 		(:doc "Select the original name bytes and an optional single-byte suffix for call scratch names.")
 		(fields (start i32) (end i32) (trailing u8)))
@@ -548,24 +544,6 @@
 		(returns CNameRole)
 		(body (return (struct:new CNameRole (tag parameter_role)))))
 
-	(fn local_name_role
-		(:doc `Use l for a local in a concrete function.`)
-		(params)
-		(returns CNameRole)
-		(body (return (struct:new CNameRole (tag local_role)))))
-
-	(fn temporary_name_role
-		(:doc `Use t for a capture identified by its function-relative row.`)
-		(params)
-		(returns CNameRole)
-		(body (return (struct:new CNameRole (tag temporary_role)))))
-
-	(fn loop_label_name_role
-		(:doc `Use j for the break destination identified by its checked loop.`)
-		(params)
-		(returns CNameRole)
-		(body (return (struct:new CNameRole (tag loop_label_role)))))
-
 	(fn readonly_type_name_role
 		(:doc `Use q for the auxiliary typedef of a read-only native binding's type.`)
 		(params)
@@ -573,112 +551,76 @@
 		(body (return (struct:new CNameRole (tag readonly_type_role)))))
 
 	(fn native_name_prefix_slot
-		(:doc `Find the possible generated-name prefix used by a selected native spelling.
-
-		A slot counts the extra lowercase w bytes before wg. A spelling
-		outside that prefix and 32-bit Base32hex shape returns -1.`)
-		(params (source (shared-array u8)) (start i32) (end i32))
-		(returns i32)
+		(:doc "Reserve any selected native spelling with the generated prefix and room for a role and ordinal.")
+		(params (source (shared-array u8)) (start i32) (end i32)) (returns i32)
 		(body
 			(let-mut boundary start)
 			(while
-				(:doc "Find the end of the initial w run before testing for the generated marker.")
-				(bool:and (i32:lt boundary end)
-					(u8:eq (source.get boundary) 119u8))
+				(:doc "Count the initial w run before looking for the generated marker.")
+				(bool:and (i32:lt boundary end) (u8:eq (source.get boundary) 119u8))
 				(body (set boundary (i32:inc boundary))))
 			(if
-				(:doc "A generated name has a w run, a g, a role byte, and seven ID digits.")
+				(:doc "Every generated name has a w run followed by g, a role, and at least one digit.")
 				(bool:or (i32:eq boundary start)
-					(bool:or (i32:lt (i32:sub end boundary) 9i32)
-						(u8:not-eq (source.get boundary) 103u8)))
+					(bool:or (i32:lt (i32:sub end boundary) 3i32) (u8:not-eq (source.get boundary) 103u8)))
 				(then (return -1i32)))
-			(let first (i32:add boundary 2i32))
-			(if
-				(:doc "The first digit of a 32-bit Base32hex ID is 0 through 3.")
-				(bool:or (u8:lt (source.get first) 48u8)
-					(u8:lt 51u8 (source.get first)))
-				(then (return -1i32)))
-			(let-mut index (i32:inc first))
-			(let limit (i32:add first 7i32))
-			(while
-				(:doc "Only a spelling with the complete lowercase ID shape can occupy this prefix.")
-				(i32:lt index limit)
-				(body
-					(let byte (source.get index))
-					(if
-						(:doc "Base32hex permits decimal digits and lowercase a through v.")
-						(bool:not (bool:or (bool:and (u8:lt 47u8 byte) (u8:lt byte 58u8))
-							(bool:and (u8:lt 96u8 byte) (u8:lt byte 119u8))))
-						(then (return -1i32)))
-					(set index (i32:inc index))))
 			(return (i32:dec (i32:sub boundary start)))))
 
-	(fn write_name_digits
-		(:doc "Measure or write one complete seven-character Base32hex word.")
-		(params (output (mut-array u8)) (offset u32) (writing bool) (word u32)) (returns u32)
-		(body
-			(let digits_end (u32:add offset (u32:from-i32 base32hex32_width)))
-			(if
-				(:doc "Keep the measured length saturated if the fixed-width digits exceed a source view.")
-				(u32:lt c_output_limit digits_end)
-				(then (return c_output_limit)))
-			(if
-				(:doc "The writing pass uses the encoder after measurement has reserved space for all seven digits.")
-				writing
-				(then
-					(let encoded (call encode_base32hex32 word (borrow-mut output)
-						(i32:from-u32 offset)))
-					(if
-						(:doc "Propagate an invalid destination as a saturated count.")
-						(bool:not encoded)
-						(then (return c_output_limit)))))
-			(return digits_end)))
-
 	(fn get_name
-		(:doc `Generate the chosen prefix, role letter, seven lowercase Base32hex digits, and source suffix.
+		(:doc `Write a private C name as wg, a role letter, and an unpadded Base62 ordinal.
 
-		The parent supplies the resolved word and any assigned collision slot.
-		The selected graph prefix applies to every role. A positive slot uses
-		an uppercase role and a second fixed-width word in that same prefix.
-		The name selects exact source bytes and can add a scratch-storage suffix.`)
-		(params (parent CNameParent) (role CNameRole) (name CNameSpelling) (source (shared-array u8))
-			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
+		A source spelling or scratch suffix follows an underscore so its
+		first byte cannot be mistaken for part of the ordinal.`)
+		(params (ordinal u32) (role CNameRole) (name CNameSpelling) (source (shared-array u8))
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
 		(body
-			(let slot (parent.get slot))
 			(let-mut next offset)
 			(let-mut extra name_prefix)
 			(while
-				(:doc "Extend the same prefix in both passes before writing the usual wg marker.")
+				(:doc "Extend the prefix consistently in measuring and writing passes.")
 				(i32:gtz extra)
 				(body
 					(set next (call c_byte (borrow-mut output) next 119u8 writing))
 					(set extra (i32:dec extra))))
 			(set next (call c_text_fragment (borrow-mut output) next 5u32 writing))
-			(let-mut tag (role.get tag))
+			(set next (call c_byte (borrow-mut output) next (role.get tag) writing))
+			(let end (u32:add next (u32:from-i32 (call base62_width ordinal))))
 			(if
-				(:doc "The uppercase collision roles cannot match an ordinary generated name.")
-				(i32:gtz slot)
-				(then (set tag (u8:from-i32 (i32:sub (i32:from-u8 tag) 32i32)))))
-			(set next (call c_byte (borrow-mut output) next tag writing))
-			(set next (call write_name_digits (borrow-mut output) next writing (parent.get identity)))
+				(:doc "Saturate an ordinal that would exceed the maximum admitted output span.")
+				(u32:not-lt end c_output_limit)
+				(then (return c_output_limit)))
 			(if
-				(:doc "A collision group distinguishes its members after retaining their original fingerprint.")
-				(i32:gtz slot)
-				(then (set next (call write_name_digits (borrow-mut output) next
-					writing (u32:from-i32 slot)))))
-			(if
-				(:doc "Stop before walking the suffix when the complete digit prefix could not fit.")
-				(u32:eq next c_output_limit)
-				(then (return next)))
-			(let written (call c_span (borrow-shared source) (name.get start) (name.get end)
-				(borrow-mut output) next writing))
+				(:doc "The measured C unit reserves the full digit span before writing.")
+				writing
+				(then (call write_base62_digits ordinal (borrow-mut output) (i32:from-u32 next) (i32:from-u32 end))))
 			(let trailing (name.get trailing))
+			(set next end)
 			(if
-				(:doc "Distinguish descriptors from backing pointers in one C-string call's scope.")
+				(:doc "Only names with a human-readable or scratch suffix need a separator.")
+				(bool:or (i32:lt (name.get start) (name.get end)) (u8:not-eqz trailing))
+				(then (set next (call c_byte (borrow-mut output) next 95u8 writing))))
+			(set next (call c_span (borrow-shared source) (name.get start) (name.get end)
+				(borrow-mut output) next writing))
+			(if
+				(:doc "Distinguish the two scratch declarations belonging to one captured argument.")
 				(u8:not-eqz trailing)
-				(then (return (call c_byte (borrow-mut output) written trailing writing))))
-			(return written)))
+				(then (return (call c_byte (borrow-mut output) next trailing writing))))
+			(return next)))
+
+	(fn scoped_name_role
+		(:doc "Put synthetic rows outside the concrete body in a separate ordinal namespace.")
+		(params (tag u8) (ordinal i32)) (returns CNameRole)
+		(body
+			(if (i32:ltz ordinal)
+				(then (return (struct:new CNameRole (tag (u8:from-i32 (i32:sub (i32:from-u8 tag) 32i32)))))))
+			(return (struct:new CNameRole (tag tag)))))
+
+	(fn scoped_name_ordinal
+		(:doc "Use the checked function-relative ordinal or a unique fallback source row.")
+		(params (ordinal i32) (fallback i32)) (returns u32)
+		(body
+			(if (i32:ltz ordinal) (then (return (u32:from-i32 fallback))))
+			(return (u32:from-i32 ordinal))))
 
 	(fn write_local_place
 		(:doc `Write a direct local or the place reached through an iteration item pointer.`)
@@ -702,61 +644,50 @@
 			(return cursor)))
 
 	(fn write_local_name
-		(:doc `Write a checked binding from its cached key and defining spelling.`)
+		(:doc "Write the defining binding's ordinal and exact source spelling at each use.")
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (index i32) (tree_base i32)
-			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
 		(body
 			(let name (nodes.get index))
-			(let-mut slot (name.get local_name_slot))
-			(let-mut identity (name.get local_identity))
-			(if
-				(:doc "A compiler-only slot retains the original row spelling when it has no cached key.")
-				(i32:ltz slot)
-				(then
-					(set identity (u32:from-i32 (i32:sub index tree_base)))
-					(set slot 0i32)))
-			(return (call get_name
-				(struct:new CNameParent (identity identity) (slot slot))
-				(call local_name_role)
+			(let ordinal (name.get c_ordinal))
+			(return (call get_name (call scoped_name_ordinal ordinal (i32:sub index tree_base))
+				(call scoped_name_role local_role ordinal)
 				(struct:new CNameSpelling (start (name.get start)) (end (name.get end)) (trailing 0u8))
 				(borrow-shared source) (borrow-mut output) offset name_prefix writing))))
 
 	(let empty_name "")
 
 	(fn write_callback_adapter_name
-		(:doc "Write the cached file-scope adapter name at its definition and native use.")
+		(:doc "Name the file-scope adapter by its unique packed argument row.")
 		(params (nodes (shared-array SourceNode)) (index i32)
 			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
 		(body
-			(let name (nodes.get index))
-			(return (call get_name
-				(struct:new CNameParent (identity (name.get expression_identity)) (slot (name.get expression_slot)))
+			(return (call get_name (u32:from-i32 index)
 				(struct:new CNameRole (tag callback_adapter_role))
 				(struct:new CNameSpelling (start 0i32) (end 0i32) (trailing 0u8))
 				(borrow-shared empty_name) (borrow-mut output) offset name_prefix writing))))
 
 	(fn write_temporary_name
-		(:doc "Write the same cached capture name at its declaration and each use.")
+		(:doc "Use the capture anchor's ordinal within its containing function.")
 		(params (nodes (shared-array SourceNode)) (index i32)
-			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
 		(body
 			(let name (nodes.get index))
-			(return (call get_name
-				(struct:new CNameParent (identity (name.get expression_identity)) (slot (name.get expression_slot)))
-				(call temporary_name_role) (struct:new CNameSpelling (start 0i32) (end 0i32) (trailing 0u8))
+			(let ordinal (name.get c_ordinal))
+			(return (call get_name (call scoped_name_ordinal ordinal index)
+				(call scoped_name_role temporary_role ordinal)
+				(struct:new CNameSpelling (start 0i32) (end 0i32) (trailing 0u8))
 				(borrow-shared empty_name) (borrow-mut output) offset name_prefix writing))))
 
 	(fn write_loop_label
-		(:doc "Use the checked destination loop's cached label at the target and every break.")
+		(:doc "Use the destination loop's ordinal at the label and every break targeting it.")
 		(params (nodes (shared-array SourceNode)) (loop i32)
-			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
-		(returns u32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
 		(body
 			(let name (nodes.get loop))
-			(return (call get_name
-				(struct:new CNameParent (identity (name.get label_identity)) (slot (name.get label_slot)))
-				(call loop_label_name_role) (struct:new CNameSpelling (start 0i32) (end 0i32) (trailing 0u8))
+			(let ordinal (name.get c_ordinal))
+			(return (call get_name (call scoped_name_ordinal ordinal loop)
+				(call scoped_name_role loop_label_role ordinal)
+				(struct:new CNameSpelling (start 0i32) (end 0i32) (trailing 0u8))
 				(borrow-shared empty_name) (borrow-mut output) offset name_prefix writing))))
 )

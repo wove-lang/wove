@@ -905,10 +905,10 @@ static bool write_graph_parts(const UnitIndex *ends, int32_t count) {
 		if (count > 1 && part == 0) {
 			printf("unit program.h %" PRId32 "\n", end);
 		} else {
-			uint8_t name[14];
+			uint8_t name[21];
 			const int32_t ordinal = count > 1 ? part - 1 : part;
 			const int32_t length = write_unit_name(ordinal, (wvrt_mut_slice){name, sizeof(name), sizeof(uint8_t)});
-			if (length != sizeof(name)) { return false; }
+			if (length < 1 || length > (int32_t)sizeof(name)) { return false; }
 			printf("unit %.*s %" PRId32 "\n", (int)length, (const char *)name, end - start);
 		}
 		start = end;

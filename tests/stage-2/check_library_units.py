@@ -92,10 +92,9 @@ def build_numbered(parts, root, image_name, allowlist, command, darwin, layout):
 # Verify each trampoline has one spelling in both signatures and no declarations in other parts.
 def check_trampolines(serial, parts, layout):
 	role = layout["trampoline_role"].encode("ascii")
-	word = rb"[0-3][0-9a-v]{6}"
-	private = rb"w+g(?:" + role + word + rb"|" + role.upper() + word + word + rb")"
+	private = rb"w+g" + role + rb"[0-9A-Za-z]+_"
 	owner = layout["export_unit"]
-	# Public exports retain their source suffix even when the private prefix or rank changes.
+	# Public exports retain their source suffix even when the private prefix or ordinal changes.
 	for symbol in layout["exports"]:
 		declaration = re.compile(rb"\b(" + private + re.escape(symbol.encode("ascii")) + rb")\(")
 		serial_names = declaration.findall(serial)
