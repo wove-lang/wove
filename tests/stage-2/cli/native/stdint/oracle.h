@@ -41,6 +41,68 @@ FIXTURE_LIMIT(INT64_MIN, int64_t, (-9223372036854775807LL - 1));
 FIXTURE_LIMIT(INT64_MAX, int64_t, 9223372036854775807LL);
 FIXTURE_LIMIT(UINT64_MAX, uint64_t, 18446744073709551615ULL);
 
+FIXTURE_TYPE((int_least8_t)0, int8_t);
+FIXTURE_TYPE((uint_least8_t)0, uint8_t);
+FIXTURE_LIMIT(INT_LEAST8_MIN, int, INT8_MIN);
+FIXTURE_LIMIT(INT_LEAST8_MAX, int, INT8_MAX);
+FIXTURE_LIMIT(UINT_LEAST8_MAX, int, UINT8_MAX);
+
+FIXTURE_TYPE((int_least16_t)0, int16_t);
+FIXTURE_TYPE((uint_least16_t)0, uint16_t);
+FIXTURE_LIMIT(INT_LEAST16_MIN, int, INT16_MIN);
+FIXTURE_LIMIT(INT_LEAST16_MAX, int, INT16_MAX);
+FIXTURE_LIMIT(UINT_LEAST16_MAX, int, UINT16_MAX);
+
+FIXTURE_TYPE((int_least32_t)0, int32_t);
+FIXTURE_TYPE((uint_least32_t)0, uint32_t);
+FIXTURE_LIMIT(INT_LEAST32_MIN, int, INT32_MIN);
+FIXTURE_LIMIT(INT_LEAST32_MAX, int, INT32_MAX);
+FIXTURE_LIMIT(UINT_LEAST32_MAX, unsigned int, UINT32_MAX);
+
+FIXTURE_TYPE((int_least64_t)0, int64_t);
+FIXTURE_TYPE((uint_least64_t)0, uint64_t);
+FIXTURE_LIMIT(INT_LEAST64_MIN, int_least64_t, INT64_MIN);
+FIXTURE_LIMIT(INT_LEAST64_MAX, int_least64_t, INT64_MAX);
+FIXTURE_LIMIT(UINT_LEAST64_MAX, uint_least64_t, UINT64_MAX);
+
+FIXTURE_TYPE((int_fast8_t)0, int8_t);
+FIXTURE_TYPE((uint_fast8_t)0, uint8_t);
+FIXTURE_LIMIT(INT_FAST8_MIN, int, INT8_MIN);
+FIXTURE_LIMIT(INT_FAST8_MAX, int, INT8_MAX);
+FIXTURE_LIMIT(UINT_FAST8_MAX, int, UINT8_MAX);
+
+#if defined(__GLIBC__)
+FIXTURE_TYPE((int_fast16_t)0, int64_t);
+FIXTURE_TYPE((uint_fast16_t)0, uint64_t);
+FIXTURE_LIMIT(INT_FAST16_MIN, int_fast16_t, INT64_MIN);
+FIXTURE_LIMIT(INT_FAST16_MAX, int_fast16_t, INT64_MAX);
+FIXTURE_LIMIT(UINT_FAST16_MAX, uint_fast16_t, UINT64_MAX);
+
+FIXTURE_TYPE((int_fast32_t)0, int64_t);
+FIXTURE_TYPE((uint_fast32_t)0, uint64_t);
+FIXTURE_LIMIT(INT_FAST32_MIN, int_fast32_t, INT64_MIN);
+FIXTURE_LIMIT(INT_FAST32_MAX, int_fast32_t, INT64_MAX);
+FIXTURE_LIMIT(UINT_FAST32_MAX, uint_fast32_t, UINT64_MAX);
+#elif defined(__APPLE__)
+FIXTURE_TYPE((int_fast16_t)0, int16_t);
+FIXTURE_TYPE((uint_fast16_t)0, uint16_t);
+FIXTURE_LIMIT(INT_FAST16_MIN, int, INT16_MIN);
+FIXTURE_LIMIT(INT_FAST16_MAX, int, INT16_MAX);
+FIXTURE_LIMIT(UINT_FAST16_MAX, int, UINT16_MAX);
+
+FIXTURE_TYPE((int_fast32_t)0, int32_t);
+FIXTURE_TYPE((uint_fast32_t)0, uint32_t);
+FIXTURE_LIMIT(INT_FAST32_MIN, int, INT32_MIN);
+FIXTURE_LIMIT(INT_FAST32_MAX, int, INT32_MAX);
+FIXTURE_LIMIT(UINT_FAST32_MAX, unsigned int, UINT32_MAX);
+#endif
+
+FIXTURE_TYPE((int_fast64_t)0, int64_t);
+FIXTURE_TYPE((uint_fast64_t)0, uint64_t);
+FIXTURE_LIMIT(INT_FAST64_MIN, int_fast64_t, INT64_MIN);
+FIXTURE_LIMIT(INT_FAST64_MAX, int_fast64_t, INT64_MAX);
+FIXTURE_LIMIT(UINT_FAST64_MAX, uint_fast64_t, UINT64_MAX);
+
 #undef FIXTURE_LIMIT
 #undef FIXTURE_TYPE
 
@@ -62,6 +124,46 @@ static inline bool fixture_bounds32(int32_t minimum, int32_t maximum, uint32_t u
 // Check both signed endpoints and the unsigned maximum passed through the native typedefs.
 static inline bool fixture_bounds64(int64_t minimum, int64_t maximum, uint64_t unsigned_maximum) {
 	return minimum == INT64_MIN && maximum == INT64_MAX && unsigned_maximum == UINT64_MAX;
+}
+
+// Verify all three least-8 endpoints after passing through the native types.
+static inline bool fixture_least8(int_least8_t minimum, int_least8_t maximum, uint_least8_t unsigned_maximum) {
+	return minimum == INT_LEAST8_MIN && maximum == INT_LEAST8_MAX && unsigned_maximum == UINT_LEAST8_MAX;
+}
+
+// Verify all three least-16 endpoints after passing through the native types.
+static inline bool fixture_least16(int_least16_t minimum, int_least16_t maximum, uint_least16_t unsigned_maximum) {
+	return minimum == INT_LEAST16_MIN && maximum == INT_LEAST16_MAX && unsigned_maximum == UINT_LEAST16_MAX;
+}
+
+// Verify all three least-32 endpoints after passing through the native types.
+static inline bool fixture_least32(int_least32_t minimum, int_least32_t maximum, uint_least32_t unsigned_maximum) {
+	return minimum == INT_LEAST32_MIN && maximum == INT_LEAST32_MAX && unsigned_maximum == UINT_LEAST32_MAX;
+}
+
+// Verify all three least-64 endpoints after passing through the native types.
+static inline bool fixture_least64(int_least64_t minimum, int_least64_t maximum, uint_least64_t unsigned_maximum) {
+	return minimum == INT_LEAST64_MIN && maximum == INT_LEAST64_MAX && unsigned_maximum == UINT_LEAST64_MAX;
+}
+
+// Verify all three fast-8 endpoints after passing through the native types.
+static inline bool fixture_fast8(int_fast8_t minimum, int_fast8_t maximum, uint_fast8_t unsigned_maximum) {
+	return minimum == INT_FAST8_MIN && maximum == INT_FAST8_MAX && unsigned_maximum == UINT_FAST8_MAX;
+}
+
+// Verify all three fast-16 endpoints after passing through the native types.
+static inline bool fixture_fast16(int_fast16_t minimum, int_fast16_t maximum, uint_fast16_t unsigned_maximum) {
+	return minimum == INT_FAST16_MIN && maximum == INT_FAST16_MAX && unsigned_maximum == UINT_FAST16_MAX;
+}
+
+// Verify all three fast-32 endpoints after passing through the native types.
+static inline bool fixture_fast32(int_fast32_t minimum, int_fast32_t maximum, uint_fast32_t unsigned_maximum) {
+	return minimum == INT_FAST32_MIN && maximum == INT_FAST32_MAX && unsigned_maximum == UINT_FAST32_MAX;
+}
+
+// Verify all three fast-64 endpoints after passing through the native types.
+static inline bool fixture_fast64(int_fast64_t minimum, int_fast64_t maximum, uint_fast64_t unsigned_maximum) {
+	return minimum == INT_FAST64_MIN && maximum == INT_FAST64_MAX && unsigned_maximum == UINT_FAST64_MAX;
 }
 
 #endif

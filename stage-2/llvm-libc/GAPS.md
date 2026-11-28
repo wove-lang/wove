@@ -778,10 +778,11 @@ the rest of the native surface.
 | `strerror_r` | Darwin exposes the XSI `int (int, char *, size_t)` form in its available profiles. Glibc exposes that form or the GNU `char *(int, char *, size_t)` form under different flags. The GNU pointer may refer to the supplied buffer or to library storage. The two ABI and lifetime contracts remain separate follow-up work. |
 | Other scalar queries, locale-explicit comparisons, allocation, and destination-writing calls | Require per-member coverage in subsequent string slices. |
 
-## Bundled `<stdint.h>` exact-width integers
+## Bundled `<stdint.h>` integer families
 
-The first slice exposes `intN_t` and `uintN_t` for N = 8, 16, 32, and 64,
-along with their signed minimum and maximum and unsigned maximum.
+The provider exposes exact-width, least-width, and fast signed and unsigned
+typedefs for N = 8, 16, 32, and 64, along with their signed minimum and
+maximum and unsigned maximum.
 Clang confirmed the typedefs, integer constant expressions, and endpoint
 values under C11, C17, and C23 for arm64 and x86-64 on macOS SDK 27.2 and
 Debian glibc 2.41. The [LLVM libc stdint index](https://libc.llvm.org/headers/stdint.html)
@@ -792,7 +793,10 @@ lists the wider header surface.
 | `int8_t` and `uint8_t`, `int16_t` and `uint16_t` | Preserve the signed and unsigned C typedefs. All six limit expressions have the promoted type `int`. |
 | `int32_t` and `uint32_t` | The signed limits have type `int`. `UINT32_MAX` has type `unsigned int`. |
 | `int64_t` and `uint64_t` | The limit expressions use their corresponding typedef's native type. Darwin uses `long long` and `unsigned long long`. Glibc uses `long` and `unsigned long` on the audited targets. The shared bridge preserves each spelling through the exact-width typedef. |
-| Least-width, fast, pointer-width, maximum-width, and other limits | Audit their typedefs and expression types separately. |
+| `int_leastN_t` and `uint_leastN_t` | The audited SDKs use the same widths as their exact-width typedefs. Limits have the same types and values as the corresponding exact-width limits. |
+| `int_fast8_t`, `uint_fast8_t`, `int_fast64_t`, and `uint_fast64_t` | Both SDKs use widths 8 and 64. The fast-8 limits promote to `int`. The fast-64 limits preserve the signed and unsigned native typedefs. |
+| `int_fast16_t`, `uint_fast16_t`, `int_fast32_t`, and `uint_fast32_t` | Darwin uses 16 and 32 bits and the corresponding exact-width limit types. Glibc uses native 64-bit `long` and `unsigned long` in both families. The Linux branch declares the limits with the fast typedefs and preserves the full 64-bit endpoints. |
+| Pointer-width, maximum-width, and other limits | Audit their typedefs and expression types separately. |
 | `INTN_C` and `UINTN_C` | Cover the function-like constant forms and their promoted result types separately. |
 
 The installed fixture uses both the bundled and project-authored declarations.
