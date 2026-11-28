@@ -1109,6 +1109,7 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 	const bool private_helpers = strcmp(argv[1], "--emit-private-graph") == 0;
 	const bool grouped = strcmp(argv[1], "--emit-graph-units") == 0;
 	const bool emit = grouped || private_helpers || strcmp(argv[1], "--emit-graph") == 0;
+	const bool grow_scratch = emit && !grouped && argc > 3 && strncmp(argv[3], "auto:", 5) == 0;
 	const bool inspect = strcmp(argv[1], "--graph-callers") == 0;
 	const bool tests = strcmp(argv[1], "--graph-tests") == 0;
 	const bool expect_name = strcmp(argv[1], "--graph-expect") == 0;
@@ -1122,17 +1123,18 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 	int32_t output = 0;
 	int32_t query = -1;
 	int32_t unit_limit = 0;
-	// The fixture supplies graph scratch capacity and an independent result limit for each consumer.
+	// The seed can grow graph scratch. Fixtures can set fixed scratch and result limits.
 	if (argc < first_file + 3 || (argc - first_file) % 3 != 0 ||
-			!read_offset(argv[2], &entry) || !read_offset(argv[3], &capacity) ||
+			!read_offset(argv[2], &entry) || !read_offset(argv[3] + (grow_scratch ? 5 : 0), &capacity) ||
+			(grow_scratch && capacity == 0) ||
 			((emit || inspect || tests || expectations) && !read_offset(argv[grouped ? 4 : first_file - 1], &output)) ||
 			(grouped && (!read_offset(argv[5], &unit_limit) || unit_limit < 1 || unit_limit == INT32_MAX)) ||
 			((inspect || expect_name) && !read_offset(argv[4], &query)) ||
 			(expect_link && strcmp(argv[4], "issue") != 0 && strcmp(argv[4], "test") != 0)) {
 		fputs("usage: source_scan --graph ENTRY SCRATCH (IDENTITY PATH FILE)...\n"
-			"       source_scan --emit-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
+			"       source_scan --emit-graph ENTRY SCRATCH|auto:SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --emit-graph-units ENTRY SCRATCH CAPACITY UNITS [--verified-c-prefix PREFIX] (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
-			"       source_scan --emit-private-graph ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
+			"       source_scan --emit-private-graph ENTRY SCRATCH|auto:SCRATCH CAPACITY (IDENTITY PATH FILE)... [--asset PATH FILE]...\n"
 			"       source_scan --graph-callers ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n"
 			"       source_scan --graph-tests ENTRY SCRATCH CAPACITY (IDENTITY PATH FILE)...\n"
 			"       source_scan --graph-expect ENTRY SCRATCH FILE NAME CAPACITY (IDENTITY PATH FILE)...\n"
@@ -1165,14 +1167,24 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 	// Test discovery accepts spare module storage beyond the supplied file table.
 	const int32_t module_capacity = count + (tests ? 1 : 0);
 	wvrt_array *modules = wvrt_array_new(module_capacity, sizeof(GraphModule), _Alignof(GraphModule), site);
-	wvrt_array *bindings = wvrt_array_new(capacity, sizeof(GraphBinding), _Alignof(GraphBinding), site);
-	wvrt_array *uses = wvrt_array_new(capacity, sizeof(GraphUse), _Alignof(GraphUse), site);
-	wvrt_array *selectors = wvrt_array_new(capacity, sizeof(GraphSelector), _Alignof(GraphSelector), site);
-	const GraphResult result = resolve_graph_for_target(arena, supplied, entry, context,
-		(wvrt_mut_slice){modules->wvrt_items, module_capacity, sizeof(GraphModule)},
-		(wvrt_mut_slice){bindings->wvrt_items, capacity, sizeof(GraphBinding)},
-		(wvrt_mut_slice){uses->wvrt_items, capacity, sizeof(GraphUse)},
-		(wvrt_mut_slice){selectors->wvrt_items, capacity, sizeof(GraphSelector)});
+	wvrt_array *bindings;
+	GraphResult result;
+	// Retry only resolver shortages. The supplied bytes and output limit stay fixed.
+	for (;;) {
+		bindings = wvrt_array_new(capacity, sizeof(GraphBinding), _Alignof(GraphBinding), site);
+		wvrt_array *uses = wvrt_array_new(capacity, sizeof(GraphUse), _Alignof(GraphUse), site);
+		wvrt_array *selectors = wvrt_array_new(capacity, sizeof(GraphSelector), _Alignof(GraphSelector), site);
+		result = resolve_graph_for_target(arena, supplied, entry, context,
+			(wvrt_mut_slice){modules->wvrt_items, module_capacity, sizeof(GraphModule)},
+			(wvrt_mut_slice){bindings->wvrt_items, capacity, sizeof(GraphBinding)},
+			(wvrt_mut_slice){uses->wvrt_items, capacity, sizeof(GraphUse)},
+			(wvrt_mut_slice){selectors->wvrt_items, capacity, sizeof(GraphSelector)});
+		wvrt_array_drop(selectors);
+		wvrt_array_drop(uses);
+		if (!grow_scratch || result.wv_field_5 != 16 || capacity > INT32_MAX / 2) { break; }
+		wvrt_array_drop(bindings);
+		capacity *= 2;
+	}
 	int status = EXIT_FAILURE;
 	// Every consumer requires successful import selection and canonical binding resolution.
 	if (result.wv_field_5 != 0) {
@@ -1195,8 +1207,6 @@ static int graph_mode(int argc, char **argv, SelectionContext context) {
 		write_graph(bytes, files, count, modules->wvrt_items, bindings->wvrt_items, result);
 		status = EXIT_SUCCESS;
 	}
-	wvrt_array_drop(selectors);
-	wvrt_array_drop(uses);
 	wvrt_array_drop(bindings);
 	wvrt_array_drop(modules);
 	wvrt_array_drop(asset_storage);

@@ -32,7 +32,7 @@ def emit_native(probe, version, paths, assets, private_helpers=False, root=Path(
 	command = "--emit-private-graph" if private_helpers else "--emit-graph"
 	capacity = max(4194304, 4 * sum(Path(source).stat().st_size for _, _, source in files))
 	invocation = [probe, "--mode", "native", "--target", *(target or native_target()), command,
-		"0", "8192", str(capacity), *rows]
+		"0", "auto:8192", str(capacity), *rows]
 	# The version keeps its virtual path even when Make uses a separate build directory.
 	if version is not None:
 		invocation.extend(("--asset", "/build/version.txt", version))
