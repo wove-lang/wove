@@ -46,7 +46,7 @@ TOKEN = re.compile(
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 QUALIFIED_PART = r"[A-Za-z_][A-Za-z0-9_-]*"
-PATH_RECEIVER_HEAD = re.compile(rf"{IDENTIFIER.pattern}(?:/{IDENTIFIER.pattern})+\.{QUALIFIED_PART}")
+PATH_RECEIVER_HEAD = re.compile(rf"{IDENTIFIER.pattern}(?:/{IDENTIFIER.pattern})+(?:\.{QUALIFIED_PART})+")
 TAG = re.compile(":?" + WORD.pattern + "|" + QUALIFIED_PART + ":" + QUALIFIED_PART)
 NUL_OR_ESCAPED_BACKSLASH = re.compile(r"\\\\|\\0")
 

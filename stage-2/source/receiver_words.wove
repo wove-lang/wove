@@ -1,38 +1,102 @@
 (module source_receiver_words
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Recognize the lexical boundary between a bare receiver and an operation.")
+	(:doc "Recognize the field path and operation boundaries of a receiver word.")
 
 	(use wove-file "../c/identifiers.wove" (only is_c_identifier_start is_c_identifier_byte))
 	(use wove-file "./field_paths.wove" (only field_path_prefix))
 
 	(let receiver_call_head 121u32)
 
+	(let receiver_chain_head 123u32)
+
+	(fn is_receiver_head
+		(:doc "Identify either kind of compiler-only typed receiver head.")
+		(params (kind u32))
+		(returns bool)
+		(body (return (bool:or (kind.eq receiver_call_head) (kind.eq receiver_chain_head)))))
+
+	(fn receiver_head_kind
+		(:doc "Mark chains so diagnostics can name the particular operation that failed.")
+		(params (steps u32))
+		(returns u32)
+		(body
+			(if (steps.eq 1u32) (then (return receiver_call_head)))
+			(return receiver_chain_head)))
+
+	(struct ReceiverWord
+		(fields (first i32) (last i32) (steps u32) (fields u32)))
+
+	(fn invalid_receiver_word
+		(:doc "Leave incomplete or malformed receiver words unexpanded.")
+		(params)
+		(returns ReceiverWord)
+		(body
+			(return (struct:new ReceiverWord (first -1i32) (last -1i32)
+				(steps 0u32) (fields 0u32)))))
+
+	(fn scan_receiver_word
+		(:doc "Read an optional field path followed by a complete sequence of dot operations.")
+		(params (source (shared-array u8)) (start i32) (end i32))
+		(returns ReceiverWord)
+		(body
+			(let prefix (call field_path_prefix (borrow-shared source) start end))
+			(let first prefix/end)
+			(if
+				(:doc "A complete slash path needs no operation syntax.")
+				(first.eq end)
+				(then (return (struct:new ReceiverWord (first -1i32) (last -1i32)
+					(steps 0u32) (fields prefix/segments)))))
+			(if
+				(:doc "Only a nonempty binding or field path can introduce an operation.")
+				(first.eq start)
+				(then (return (call invalid_receiver_word))))
+			(let-mut cursor first)
+			(let-mut last first)
+			(let-mut steps 0u32)
+			(while
+				(:doc "Each complete suffix starts immediately after a dot.")
+				(cursor.lt end)
+				(body
+					(let suffix cursor.inc)
+					(if
+						(:doc "Reject an empty suffix and any byte that does not start its operation name.")
+						(bool:not (bool:and (suffix.lt end)
+							(bool:and (u8:eq (source.get cursor) 46u8)
+								(call is_c_identifier_start (source.get suffix)))))
+						(then (return (call invalid_receiver_word))))
+					(set last cursor)
+					(set steps steps.inc)
+					(set cursor suffix.inc)
+					(while
+						(:doc "Allow hyphens in the tail of each operation name.")
+						(cursor.lt end)
+						(body
+							(let byte (source.get cursor))
+							(if
+								(:doc "The next punctuation must open another valid operation.")
+								(bool:not (bool:or (call is_c_identifier_byte byte) (byte.eq 45u8)))
+								(then (break)))
+							(set cursor cursor.inc)))))
+			(return (struct:new ReceiverWord (first first) (last last)
+				(steps steps) (fields prefix/segments)))))
+
 	(fn receiver_separator
-		(:doc "Return the separator in a complete dotted receiver token.")
+		(:doc "Find the dot introducing the terminal operation of a complete receiver word.")
 		(params (source (shared-array u8)) (start i32) (end i32))
 		(returns i32)
 		(body
-			(let path (call field_path_prefix (borrow-shared source) start end))
-			(let separator path/end)
-			(if (separator.not-lt end) (then (return -1i32)))
-			(let suffix separator.inc)
-			(if
-				(:doc "A complete receiver and a dot must precede a nonempty operation name.")
-				(bool:not (bool:and (i32:lt start separator)
-					(bool:and (suffix.lt end)
-						(bool:and (u8:eq (source.get separator) 46u8)
-							(call is_c_identifier_start (source.get suffix))))))
-				(then (return -1i32)))
-			(let-mut cursor suffix.inc)
+			(let word (call scan_receiver_word (borrow-shared source) start end))
+			(return word/last)))
+
+	(fn preceding_receiver_separator
+		(:doc "Locate the previous dot in a receiver prefix that has already passed lexical checks.")
+		(params (source (shared-array u8)) (end i32))
+		(returns i32)
+		(body
+			(let-mut cursor end.dec)
 			(while
-				(:doc "Use the same operation-name grammar as a qualified head.")
-				(cursor.lt end)
-				(body
-					(let byte (source.get cursor))
-					(if
-						(:doc "A chain or slash path has no single operation suffix.")
-						(bool:not (bool:or (call is_c_identifier_byte byte) (byte.eq 45u8)))
-						(then (return -1i32)))
-					(set cursor cursor.inc)))
-			(return separator))))
+				(:doc "The validated prefix contains an earlier dot before the operation name.")
+				(u8:not-eq (source.get cursor) 46u8)
+				(body (set cursor cursor.dec)))
+			(return cursor))))

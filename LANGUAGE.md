@@ -122,9 +122,17 @@ field name. When the receiver is the only operand, write `index.dec` or
 `data.len` directly. Both the bare and parenthesized spellings use the
 binding as a value or place. Calls with additional operands use parentheses.
 Use canonical forms for constructors with a type operand,
-destination-qualified conversions such as `u32:from-i32`, and receivers
-computed by another operation. Both spellings apply the same type and ownership checks and
-preserve operand order and Boolean short-circuiting.
+and destination-qualified conversions such as `u32:from-i32`. Both
+spellings apply the same type and ownership checks and preserve operand
+order and Boolean short-circuiting.
+
+Chain dot operations to use each checked result as the next receiver.
+Every intermediate operation takes only its receiver. The terminal
+operation can take written operands when the chain is parenthesized.
+For example, `data.len.not-eqz` is `(i32:not-eqz (array:len data))` and
+`(data.len.gt 1i32)` is `(i32:gt (array:len data) 1i32)`. The compiler
+evaluates the receiver of each operation once, before any written
+operands.
 
 ### Field paths
 
@@ -137,14 +145,15 @@ mutability, borrow, and ownership checks apply as for nested `struct:get`.
 Use `(set record/header/size 42i32)` for a writable field. For a
 fixed-array field, `(array:len record/header/samples)` reads its length.
 
-A field path can supply the receiver of one dot operation. The compiler
-resolves each field first and uses the last field's type to select the
-operation namespace.
+A field path can supply the first receiver of a dot operation or a chain.
+The compiler resolves the path before selecting the first operation's
+namespace.
 
 | Shorthand | Canonical form |
 | --- | --- |
 | `record/header/samples.len` or `(record/header/samples.len)` | `(array:len (struct:get (struct:get record header) samples))` |
 | `(record/header/samples.get index)` | `(array:get (struct:get (struct:get record header) samples) index)` |
+| `record/header/samples.len.not-eqz` | `(i32:not-eqz (array:len record/header/samples))` |
 | `record/header/size.inc` | `(i32:inc (struct:get (struct:get record header) size))` for an `i32` field |
 
 A receiver path uses slash separators before the dot. Quoted import and

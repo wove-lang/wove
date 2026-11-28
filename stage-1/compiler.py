@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass, field, replace
 from itertools import repeat
 import os
@@ -751,6 +752,7 @@ class FunctionEmitter:
 		self.moved: set[Binding] = set()
 		self.loans: list[tuple[Binding, str]] = []
 		self.loops: list[LoopScope] = []
+		self.receiver_values: dict[int, Value] | None = None
 
 	# Indent generated statements at the current lexical scope.
 	def emit_line(self, line: str) -> None:
@@ -793,25 +795,25 @@ class FunctionEmitter:
 		if is_atom and node.quoted:
 			return node
 		spelling = node.text if is_atom else node.tag
-		name, separator, operation = spelling.partition(".")
+		name, *operations = spelling.split(".")
 		# Canonical forms and ordinary atoms need no projection.
-		if not separator and (not is_atom or "/" not in name):
+		if not operations and (not is_atom or "/" not in name):
 			return node
 		root, *fields = name.split("/")
 		# All receivers start at a bare binding and project only complete identifiers.
 		if not IDENTIFIER.fullmatch(root) or not all(IDENTIFIER.fullmatch(field) for field in fields):
 			return node
-		# Leave ordinary words, qualified heads, and multiple dot operations alone.
-		if separator and not RECEIVER_OPERATION.fullmatch(operation):
+		# Each dot introduces exactly one complete operation name.
+		if not all(RECEIVER_OPERATION.fullmatch(operation) for operation in operations):
 			return node
 
 		line = node.line if is_atom else node.tag_line
-		receiver: Node = ReceiverAtom(root, line) if separator else Atom(root, line)
+		receiver: Node = ReceiverAtom(root, line) if operations else Atom(root, line)
 		# Each segment projects a field of the preceding value or place.
 		for field in fields:
 			receiver = Form("struct:get", (receiver, Atom(field, line)), line, tag_line=line)
 		# A plain field path has no operation suffix.
-		if not separator:
+		if not operations:
 			return receiver
 
 		# A bare receiver atom has no written operands after its receiver.
@@ -823,6 +825,21 @@ class FunctionEmitter:
 			kind = value.kind
 		else:
 			kind = self.binding(receiver, read=True).value.kind
+		# Each prefix is checked as an ordinary unary expression in an isolated emitter.
+		if len(operations) > 1:
+			probe = self.receiver_probe()
+			# Actual lowering still sees the original nested forms and evaluates them once.
+			for operation in operations[:-1]:
+				tag = self.receiver_tag(kind, operation, line)
+				receiver = Form(tag, (receiver,), line, tag_line=line)
+				value = probe.expression(receiver)
+				probe.receiver_values[id(receiver)] = value
+				kind = value.kind
+		tag = self.receiver_tag(kind, operations[-1], line)
+		return replace(node, tag=tag, operands=(receiver, *node.operands))
+
+	# Select the qualified namespace owned by the receiver type.
+	def receiver_tag(self, kind: Type, operation: str, line: int) -> str:
 		# Once the family is known, the canonical handler checks the operation and its operands.
 		if isinstance(kind, (BufferType, FixedArrayType)):
 			family = "array"
@@ -835,8 +852,22 @@ class FunctionEmitter:
 		elif kind in SCALAR_TYPES and not operation.startswith("from-"):
 			family = kind
 		else:
-			raise SourceError(receiver.line)
-		return replace(node, tag=f"{family}:{operation}", operands=(receiver, *node.operands))
+			raise SourceError(line)
+		return f"{family}:{operation}"
+
+	# Check prefix types without publishing C, taking owners, or editing the live emitter.
+	def receiver_probe(self) -> FunctionEmitter:
+		probe = copy(self)
+		probe.lines = []
+		probe.scopes = [scope.copy() for scope in self.scopes]
+		probe.moved = self.moved.copy()
+		probe.loans = self.loans.copy()
+		probe.loops = self.loops.copy()
+		probe.fixed_arrays = set()
+		probe.owned_slots = set()
+		probe.imports = self.imports.copy() if self.imports is not None else None
+		probe.receiver_values = {}
+		return probe
 
 	# Require the exact result type at the operation that consumes it.
 	def typed(self, node: Node, kind: Type) -> Value:
@@ -1422,6 +1453,12 @@ class FunctionEmitter:
 
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
+		# A type-only probe reuses a checked unary prefix without lowering it again.
+		if self.receiver_values is not None:
+			value = self.receiver_values.get(id(node))
+			# Only the original prefix form has a cached probe result.
+			if value is not None:
+				return value
 		node = self.access_form(node)
 		# A bare name reads a scalar or record before the enclosing operation uses it.
 		if isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text):
