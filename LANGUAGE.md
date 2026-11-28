@@ -95,6 +95,26 @@ block can shadow an outer binding. Two declarations of the same name in
 one block are an error. Loop and match payload bindings are visible in
 their body and arm, respectively.
 
+### Receiver shorthand
+
+Write `(receiver.operation args...)` to call an operation on a bare
+binding. The compiler looks up the binding in lexical scope, selects the
+operation namespace from its type, and inserts the binding as the first
+operand. Arrays use `array:`. Records use `struct:`.
+
+| Shorthand | Canonical form |
+| --- | --- |
+| `data.len` | `(array:len data)` |
+| `(data.get index)` | `(array:get data index)` |
+| `(data.set index value)` | `(array:set data index value)` |
+| `(data.try-reserve count)` | `(array:try-reserve data count)` |
+| `(record.get field)` | `(struct:get record field)` |
+
+Array `.get` takes an index expression. Record `.get` takes a bare
+field name. Array length also has the bare property spelling
+`data.len`. Constructors and compound receivers use the canonical forms.
+Bounds, borrowing, moves, and writable-place checks apply in either spelling.
+
 ## Where forms go
 
 | Position | Rules and examples |

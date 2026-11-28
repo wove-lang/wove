@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import repeat
 import os
 from pathlib import Path
@@ -16,8 +16,16 @@ import re
 from bridge_types import (
 	C_READONLY_BYTES, C_WRITABLE_BYTES, NativeType, c_bridges, declarations, native_pragmas, read_native_function, read_native_type,
 )
-from syntax import IDENTIFIER, WORD, Atom, Form, Node, SourceError, form, identifier, parse
+from syntax import IDENTIFIER, QUALIFIED_PART, WORD, Atom, Form, Node, SourceError, form, identifier, parse
 from target import compiler_target
+
+
+RECEIVER_OPERATION = re.compile(QUALIFIED_PART)
+
+
+@dataclass(frozen=True)
+class ReceiverAtom(Atom):
+	"""An implicit value operand introduced by a receiver call."""
 
 
 I8 = "i8"
@@ -579,6 +587,9 @@ def array_view(fields: str, access: str) -> str:
 
 # Resolve the owned element layouts needed by the compiler's seed source.
 def read_owned_element(node: Node, records: dict[str, NamedType]) -> str | Record | BufferType:
+	# A receiver introduces a value even when its spelling matches a type.
+	if isinstance(node, ReceiverAtom):
+		raise SourceError(node.line)
 	# The runtime has a recursive owner for one layer of byte rows.
 	if isinstance(node, Form) and node.tag == OWNED:
 		child, = checked_form(node, OWNED, 1).operands
@@ -774,6 +785,30 @@ class FunctionEmitter:
 			raise SourceError(node.line)
 		return binding
 
+	# Forward a bare receiver to the canonical operations for its binding type.
+	def receiver_form(self, node: Node) -> Node:
+		spelling = node.text if isinstance(node, Atom) else node.tag
+		name, separator, operation = spelling.partition(".")
+		# Receiver names are bare identifiers and operations follow qualified-name syntax.
+		if not separator or not IDENTIFIER.fullmatch(name) or not RECEIVER_OPERATION.fullmatch(operation):
+			return node
+		# Length is the property spelling. Other bare atoms remain ordinary data.
+		if isinstance(node, Atom):
+			# Quoted text keeps its spelling even when it looks like a property.
+			if node.quoted or operation != "len":
+				return node
+			node = Form(spelling, (), node.line, tag_line=node.line)
+		receiver = ReceiverAtom(name, node.tag_line)
+		kind = self.binding(receiver, read=True).value.kind
+		# Once the family is known, the canonical handler checks the operation and its operands.
+		if isinstance(kind, (BufferType, FixedArrayType)):
+			family = "array"
+		elif isinstance(kind, (Record, SharedRef)):
+			family = "struct"
+		else:
+			raise SourceError(receiver.line)
+		return replace(node, tag=f"{family}:{operation}", operands=(receiver, *node.operands))
+
 	# Require the exact result type at the operation that consumes it.
 	def typed(self, node: Node, kind: Type) -> Value:
 		value = self.expression(node)
@@ -792,6 +827,7 @@ class FunctionEmitter:
 
 	# Resolve the binding and descriptor for a permitted array access.
 	def array_access(self, node: Node, line: int, writable: bool = False) -> tuple[Binding, BufferType, str]:
+		node = self.receiver_form(node)
 		# A selected byte row can serve directly as a read-only array receiver.
 		if isinstance(node, Form) and node.tag == "array:get" and not writable:
 			value = self.typed(node, _BYTE_VIEW)
@@ -843,6 +879,7 @@ class FunctionEmitter:
 		exclusive = kind is not None and kind.access == MUT
 		tag = "borrow-mut" if exclusive else "borrow-shared"
 		target, = checked_form(node, tag, 1).operands
+		target = self.receiver_form(target)
 		# A byte row can be borrowed directly from either kind of outer view.
 		if kind in (None, _BYTE_VIEW) and isinstance(target, Form) and target.tag == "array:get":
 			receiver, subscript = checked_form(target, "array:get", 2).operands
@@ -929,6 +966,7 @@ class FunctionEmitter:
 	# Borrow a stable record place for the remaining arguments and the call.
 	def borrow_record(self, node: Node, kind: SharedRef) -> Value:
 		target, = checked_form(node, "borrow-shared", 1).operands
+		target = self.receiver_form(target)
 		# An array element loan leaves the containing array as the owner.
 		if isinstance(target, Form) and target.tag == "array:get":
 			receiver, subscript = checked_form(target, "array:get", 2).operands
@@ -1242,6 +1280,9 @@ class FunctionEmitter:
 		if not node.operands:
 			raise SourceError(node.line)
 		name, *fields = node.operands
+		# The constructor cannot use an implicit value operand as a type.
+		if isinstance(name, ReceiverAtom):
+			raise SourceError(name.line)
 		record = self.records.get(identifier(name))
 		# Only a declared record has a usable member layout.
 		if not isinstance(record, Record):
@@ -1264,6 +1305,7 @@ class FunctionEmitter:
 
 	# Project a field without copying the owner and retain its root binding for loans.
 	def project(self, node: Node, *, named: bool = False) -> tuple[Binding | None, Value]:
+		node = self.receiver_form(node)
 		# Field paths keep the same root even through nested records.
 		if isinstance(node, Form) and node.tag == "struct:get":
 			target, name = checked_form(node, "struct:get", 2).operands
@@ -1351,6 +1393,7 @@ class FunctionEmitter:
 
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
+		node = self.receiver_form(node)
 		# A bare name reads a scalar or record before the enclosing operation uses it.
 		if isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text):
 			binding = self.binding(node, read=True)
@@ -1864,7 +1907,7 @@ class FunctionEmitter:
 
 	# Lower a statement and report whether execution can continue past it.
 	def statement(self, node: Node) -> bool:
-		statement = node = checked_form(node)
+		statement = node = checked_form(self.receiver_form(node))
 		# Branches emit and join their own lexical scopes.
 		if statement.tag == "if":
 			return self.conditional(statement)
