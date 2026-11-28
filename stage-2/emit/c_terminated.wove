@@ -1,0 +1,168 @@
+(module emit_c_terminated
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Emit call-scoped native array copies and project their end slots before releasing storage.")
+
+	(use wove-file "../c/arguments.wove" (only (value c_terminated_array_mode) (value c_terminated_array_offset_mode) c_null_argument_kind))
+	(use wove-file "../source/scan.wove" (only (type SourceNode)))
+	(use wove-file "../scalar/function_rows.wove" (only (type ScalarFunction) (type ScalarParameter)))
+	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
+	(use wove-file "../scalar/records.wove" (only slice_element_type (type ScalarRecord)))
+	(use wove-file "./records.wove" (only write_value_type))
+	(use wove-file "./runtime.wove" (only write_runtime_site))
+	(use wove-file "./text.wove" (only c_byte c_literal_text write_temporary_name))
+
+	(let prepare_terminated_arrays 0u8)
+	(let project_terminated_offsets 1u8)
+	(let release_terminated_arrays 2u8)
+
+	(let terminated_suffix "_terminated")
+	(let prepare_call "=WVRT_C_TERMINATED_ARRAY(")
+	(let offset_call "=wvrt_c_terminated_array_offset(")
+	(let drop_call "wvrt_cstr_drop((char*)")
+	(let null_end "=0;")
+	(let input_length ".wvrt_length,sizeof(*")
+	(let close_element ")")
+	(let close_statement ");")
+
+	(fn write_terminated_name
+		(:doc "Give each prepared array or end slot a unique name tied to its actual argument.")
+		(params (nodes (shared-array SourceNode)) (argument i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let name (call write_temporary_name (borrow-shared nodes) argument (borrow-mut output) offset name_prefix writing))
+			(return (call c_literal_text (borrow-shared terminated_suffix) (borrow-mut output) name writing))))
+
+	(fn close_terminated_call
+		(:doc "Keep a runtime failure at the original shared input expression.")
+		(params (nodes (shared-array SourceNode)) (caller ScalarFunction) (input i32)
+			(output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body
+			(let site (array.load nodes input))
+			(let base (struct.get caller source_base))
+			(let end (call write_runtime_site (borrow-mut output) offset (struct.get caller file)
+				(i32.sub (struct.get site start) base) (i32.sub (struct.get site end) base) writing))
+			(return (call c_literal_text (borrow-shared close_statement) (borrow-mut output) end writing))))
+
+	(fn write_terminated_pointer
+		(:doc "Declare a local pointer in the exact element type of the checked shared view.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(element u32) (argument i32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let type (call write_value_type (borrow-shared source) (borrow-shared nodes) (borrow-shared records)
+				element (borrow-mut output) offset name_prefix writing))
+			(let pointer (call c_byte (borrow-mut output) type 42u8 writing))
+			(return (call write_terminated_name (borrow-shared nodes) argument (borrow-mut output) pointer name_prefix writing))))
+
+	(fn write_terminated_copy
+		(:doc "Append a typed zero to a checked copy of the captured view.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(caller ScalarFunction) (element u32) (argument i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let name (call write_terminated_pointer (borrow-shared source) (borrow-shared nodes) (borrow-shared records)
+				element argument (borrow-mut output) offset name_prefix writing))
+			(let begin (call c_literal_text (borrow-shared prepare_call) (borrow-mut output) name writing))
+			(let type (call write_value_type (borrow-shared source) (borrow-shared nodes) (borrow-shared records)
+				element (borrow-mut output) begin name_prefix writing))
+			(let comma (call c_byte (borrow-mut output) type 44u8 writing))
+			(let view (call write_temporary_name (borrow-shared nodes) argument (borrow-mut output) comma name_prefix writing))
+			(return (call close_terminated_call (borrow-shared nodes) caller argument (borrow-mut output) view writing))))
+
+	(fn write_terminated_projection
+		(:doc "Convert the native end address to an element count while the prepared copy is live.")
+		(params (nodes (shared-array SourceNode)) (caller ScalarFunction) (input i32) (argument i32)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let start (call c_byte (borrow-mut output) offset 42u8 writing))
+			(let place (call write_temporary_name (borrow-shared nodes) argument (borrow-mut output) start name_prefix writing))
+			(let begin (call c_literal_text (borrow-shared offset_call) (borrow-mut output) place writing))
+			(let base (call write_terminated_name (borrow-shared nodes) input (borrow-mut output) begin name_prefix writing))
+			(let comma (call c_byte (borrow-mut output) base 44u8 writing))
+			(let end (call write_terminated_name (borrow-shared nodes) argument (borrow-mut output) comma name_prefix writing))
+			(let end_comma (call c_byte (borrow-mut output) end 44u8 writing))
+			(let view (call write_temporary_name (borrow-shared nodes) input (borrow-mut output) end_comma name_prefix writing))
+			(let size (call c_literal_text (borrow-shared input_length) (borrow-mut output) view writing))
+			(let typed (call write_terminated_name (borrow-shared nodes) input (borrow-mut output) size name_prefix writing))
+			(let width (call c_literal_text (borrow-shared close_element) (borrow-mut output) typed writing))
+			(return (call close_terminated_call (borrow-shared nodes) caller input (borrow-mut output) width writing))))
+
+	(fn terminated_input_argument
+		(:doc "Find the actual corresponding to an offset's validated input formal.")
+		(params (nodes (shared-array SourceNode)) (first i32) (position i32)) (returns i32)
+		(body
+			(let-mut argument first)
+			(let-mut index 0i32)
+			(while
+				(:doc "Fixed C-only operands have no actual in the Wove argument list.")
+				(i32.lt index position)
+				(body
+					(set argument (struct.get (array.load nodes argument) next_sibling))
+					(set index (i32.inc index))))
+			(return argument)))
+
+	(fn write_terminated_array_phase
+		(:doc "Prepare all copies and end slots, project the present slots, then release the copies.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(parameters (shared-array ScalarParameter)) (expressions (shared-array ScalarExpression))
+			(first i32) (caller ScalarFunction) (callee ScalarFunction) (phase u8)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool)) (returns u32)
+		(body
+			(let start (struct.get callee params))
+			(let limit (i32.add start (struct.get callee arity)))
+			(let-mut cursor offset)
+			(let-mut argument first)
+			(let-mut row start)
+			(while
+				(:doc "Each present offset owns a typed slot and each input owns one prepared copy.")
+				(i32.lt row limit)
+				(body
+					(let parameter (array.load parameters row))
+					(let mode (struct.get parameter c_mode))
+					(if
+						(:doc "Keep array storage live until every associated end slot has been checked.")
+						(u8.eq mode c_terminated_array_mode)
+						(then
+							(if
+								(:doc "The prepared pointer takes the declared native element type.")
+								(u8.eq phase prepare_terminated_arrays)
+								(then
+									(let element (call slice_element_type (borrow-shared records) (struct.get parameter type)))
+									(set cursor (call write_terminated_copy (borrow-shared source) (borrow-shared nodes)
+										(borrow-shared records) caller element argument
+										(borrow-mut output) cursor name_prefix writing))))
+							(if
+								(:doc "Free scratch only after all offsets have been projected.")
+								(u8.eq phase release_terminated_arrays)
+								(then
+									(let drop (call c_literal_text (borrow-shared drop_call) (borrow-mut output) cursor writing))
+									(let name (call write_terminated_name (borrow-shared nodes) argument
+										(borrow-mut output) drop name_prefix writing))
+									(set cursor (call c_literal_text (borrow-shared close_statement) (borrow-mut output) name writing))))))
+					(if
+						(:doc "An explicit null needs neither a local pointer slot nor a Wove copy-out.")
+						(bool.and (u8.eq mode c_terminated_array_offset_mode)
+							(u32.not-eq (struct.get (array.load expressions argument) kind) (call c_null_argument_kind)))
+						(then
+							(let position (struct.get parameter c_count))
+							(if
+								(:doc "Initialize a real native pointer slot so an unwritten end remains detectable.")
+								(u8.eq phase prepare_terminated_arrays)
+								(then
+									(let input (array.load parameters (i32.add start position)))
+									(let element (call slice_element_type (borrow-shared records) (struct.get input type)))
+									(let name (call write_terminated_pointer (borrow-shared source) (borrow-shared nodes)
+										(borrow-shared records) element argument (borrow-mut output) cursor name_prefix writing))
+									(set cursor (call c_literal_text (borrow-shared null_end) (borrow-mut output) name writing))))
+							(if
+								(:doc "The linked input's storage is still live when the end pointer is projected.")
+								(u8.eq phase project_terminated_offsets)
+								(then
+									(let input (call terminated_input_argument (borrow-shared nodes) first position))
+									(set cursor (call write_terminated_projection (borrow-shared nodes) caller input argument
+										(borrow-mut output) cursor name_prefix writing))))))
+					(set argument (struct.get (array.load nodes argument) next_sibling))
+					(set row (i32.inc row))))
+			(return cursor)))
+)

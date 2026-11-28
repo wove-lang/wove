@@ -162,6 +162,31 @@ typedef struct {
 	const char *wvrt_value;
 } wvrt_cstr_argument;
 
+// Copy a checked native-integer view into storage with one extra element.
+void *wvrt_c_terminated_array_copy(wvrt_slice wvrt_view, size_t wvrt_element_size, size_t wvrt_alignment,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+_Noreturn void wvrt_c_terminated_array_embedded_zero(void *wvrt_copy,
+	int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+int32_t wvrt_c_terminated_array_offset(const void *wvrt_input, const void *wvrt_end_pointer,
+	int32_t wvrt_length, size_t wvrt_element_size, int32_t wvrt_file, int32_t wvrt_start, int32_t wvrt_end);
+
+// Compare and write zero using the element's native integer type.
+#define WVRT_C_TERMINATED_ARRAY(type, view, file, start, end) \
+	__extension__ ({ \
+		const wvrt_slice wvrt_array_view = (view); \
+		type *wvrt_array_copy = wvrt_c_terminated_array_copy(wvrt_array_view, sizeof(type), _Alignof(type), \
+			(file), (start), (end)); \
+		/* An embedded zero would silently truncate the native argument. */ \
+		for (int32_t wvrt_i = 0; wvrt_i < wvrt_array_view.wvrt_length; ++wvrt_i) { \
+			/* Reject the entire prepared copy before entering C. */ \
+			if (wvrt_array_copy[wvrt_i] == 0) { \
+				wvrt_c_terminated_array_embedded_zero(wvrt_array_copy, (file), (start), (end)); \
+			} \
+		} \
+		wvrt_array_copy[wvrt_array_view.wvrt_length] = 0; \
+		wvrt_array_copy; \
+	})
+
 char *wvrt_cstr_prepare(wvrt_cstr_argument *wvrt_arguments, size_t wvrt_count);
 int32_t wvrt_cstr_offset(const wvrt_cstr_argument *wvrt_input, const char *wvrt_end);
 void wvrt_cstr_copy_back(wvrt_mut_slice wvrt_view, const char *wvrt_value);

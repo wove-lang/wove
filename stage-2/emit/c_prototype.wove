@@ -16,18 +16,18 @@
 	(use wove-file "../source/module.wove" (only form_parts))
 	(use wove-file "../source/c_formals.wove" (only is_c_fixed_formal c_fixed_formal_at))
 	(use wove-file "./c_formals.wove" (only write_fixed_c_type native_long_double_needs_prototype native_record_result_needs_prototype))
-	(use wove-file "../c/arguments.wove" (only (value c_static_string_mode) (value c_string_offset_mode) is_c_string_mode is_c_bytes_mode is_c_null_mode is_c_array_mode is_c_vector_mode
+	(use wove-file "../c/arguments.wove" (only (value c_static_string_mode) (value c_string_offset_mode) (value c_terminated_array_mode) (value c_terminated_array_offset_mode) is_c_string_mode is_c_bytes_mode is_c_null_mode is_c_array_mode is_c_vector_mode
 			is_c_storage_mode is_c_storage_shared_mode is_c_handle_init_mode (value c_void_pointer_mode) (value c_shared_handle_slot_mode)
 			(value c_marked_handle_out_mode) (value c_owner_marker_flag_mode) (value c_nullable_native_reference_mode)))
 	(use wove-file "../scalar/function_rows.wove" (only is_record_out_status is_record_input_hidden (type ScalarFunction) (type ScalarParameter)))
 	(use wove-file "./c_record_snapshots.wove" (only write_record_snapshot_native_type))
-	(use wove-file "../scalar/records.wove" (only is_optional_record_borrow optional_record_borrow_reference is_mutable_place_reference place_reference_target (type ScalarRecord)))
+	(use wove-file "../scalar/records.wove" (only is_optional_record_borrow optional_record_borrow_reference is_mutable_place_reference place_reference_target slice_element_type (type ScalarRecord)))
 	(use wove-file "./records.wove" (only write_value_type))
 	(use wove-file "./c_extents.wove" (only write_c_array_pointer_type))
 	(use wove-file "./c_vectors.wove" (only (value vector_type)))
 	(use wove-file "./c_storage.wove" (only write_storage_pointer_type))
 	(use wove-file "./c_arguments.wove" (only c_symbol_text))
-	(use wove-file "./c_formals.wove" (only native_nullable_needs_prototype native_static_strings native_sync_callbacks native_c_string_offsets))
+	(use wove-file "./c_formals.wove" (only native_nullable_needs_prototype native_static_strings native_sync_callbacks native_c_string_offsets native_terminated_arrays))
 	(use wove-file "./text.wove" (only c_byte c_literal_text))
 
 	(let check_open "_Static_assert(_Generic(&(")
@@ -48,6 +48,8 @@
 	(let static_string_check_open "):1,default:0),\"Wove C retained-string prototype does not match its declared signature at file ")
 	(let string_offset_check_open "):1,default:0),\"Wove C string offset prototype does not match its declared signature at file ")
 	(let string_offset_pointer "char**")
+	(let terminated_check_open "):1,default:0),\"Wove C terminated array prototype does not match its declared signature at file ")
+	(let pointer_pointer "**")
 	(let nullable_reference_check_open "):1,default:0),\"Wove C nullable-reference prototype does not match its declared signature at file ")
 	(let handle_check_bytes " bytes [")
 	(let handle_check_close ")\");\n")
@@ -85,7 +87,8 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 	(fn write_fixed_parameter_type
 		(:doc `Write the C argument type after applying a fixed formal's bridge contract.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
-			(param ScalarParameter) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+			(parameters (shared-array ScalarParameter)) (first i32) (param ScalarParameter)
+			(output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
 		(returns u32)
 		(body
 			(let mode (struct.get param c_mode))
@@ -94,6 +97,15 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 				(u8.eq mode c_string_offset_mode)
 				(then (return (call c_literal_text (borrow-shared string_offset_pointer)
 					(borrow-mut output) offset writing))))
+			(if
+				(:doc "An optional end slot uses the linked input's exact native element pointer type.")
+				(u8.eq mode c_terminated_array_offset_mode)
+				(then
+					(let input (array.load parameters (i32.add first (struct.get param c_count))))
+					(let element (call slice_element_type (borrow-shared records) (struct.get input type)))
+					(let end (call write_value_type (borrow-shared source) (borrow-shared nodes)
+						(borrow-shared records) element (borrow-mut output) offset name_prefix writing))
+					(return (call c_literal_text (borrow-shared pointer_pointer) (borrow-mut output) end writing))))
 			(if
 				(:doc "The callback adapter uses the checked native signature rather than the Wove receiver types.")
 				(call is_adapted_callback mode (struct.get param type))
@@ -136,7 +148,7 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 					(borrow-mut output) offset writing))))
 			(if
 				(:doc "A native array's fixed formal is its exact element pointer.")
-				(call is_c_array_mode mode)
+				(bool.or (call is_c_array_mode mode) (u8.eq mode c_terminated_array_mode))
 				(then (return (call write_c_array_pointer_type (borrow-shared source) (borrow-shared nodes)
 					(borrow-shared records) (struct.get param type)
 					(borrow-mut output) offset name_prefix writing))))
@@ -155,13 +167,24 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 				(then (return (call c_byte (borrow-mut output) end 42u8 writing))))
 			(return end)))
 
+	(fn write_prototype_site
+		(:doc "Complete a Clang prototype assertion with the Wove declaration's original source span.")
+		(params (site SourceNode) (function ScalarFunction) (output (mut-array u8)) (offset u32) (writing bool))
+		(returns u32)
+		(body
+			(let base (struct.get function source_base))
+			(let file (call write_c_number (borrow-mut output) offset (struct.get function file) writing))
+			(let bytes (call c_literal_text (borrow-shared handle_check_bytes) (borrow-mut output) file writing))
+			(let start (call write_c_number (borrow-mut output) bytes (i32.sub (struct.get site start) base) writing))
+			(let end (call write_site_number (borrow-mut output) start (i32.sub (struct.get site end) base) writing))
+			(return (call c_literal_text (borrow-shared handle_check_close) (borrow-mut output) end writing))))
+
 	(fn close_c_fixed_prototype
 		(:doc "Report a header signature mismatch with the defining Wove declaration's file and byte range.")
 		(params (site SourceNode) (function ScalarFunction) (long_double bool) (retained_strings bool) (callback bool) (nullable_reference bool) (record_result bool) (offsets bool)
 			(output (mut-array u8)) (offset u32) (writing bool))
 		(returns u32)
 		(body
-			(let base (struct.get function source_base))
 			(let-mut open offset)
 			(if
 				(:doc "Typed nullable references and callbacks require exact pointer qualification and type.")
@@ -230,16 +253,7 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 																				(borrow-mut output) offset writing)))
 																			(else (set open (call c_literal_text (borrow-shared owner_check_open)
 																				(borrow-mut output) offset writing))))))))))))))))))))))
-			(let file (call write_c_number (borrow-mut output) open
-				(struct.get function file) writing))
-			(let bytes (call c_literal_text (borrow-shared handle_check_bytes)
-				(borrow-mut output) file writing))
-			(let start (call write_c_number (borrow-mut output) bytes
-				(i32.sub (struct.get site start) base) writing))
-			(let end (call write_site_number (borrow-mut output) start
-				(i32.sub (struct.get site end) base) writing))
-			(return (call c_literal_text (borrow-shared handle_check_close)
-				(borrow-mut output) end writing))))
+			(return (call write_prototype_site site function (borrow-mut output) open writing))))
 
 	(let snapshot_result_open "__typeof__((")
 	(let snapshot_result_args ")(")
@@ -341,8 +355,8 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 													(borrow-mut output) cursor writing)))
 												(else
 													(set cursor (call write_fixed_parameter_type (borrow-shared source) (borrow-shared nodes)
-														(borrow-shared records) (array.load parameters parameter)
-														(borrow-mut output) cursor name_prefix writing))))))
+														(borrow-shared records) (borrow-shared parameters) (struct.get function params)
+														(array.load parameters parameter) (borrow-mut output) cursor name_prefix writing))))))
 									(set parameter (i32.inc parameter))))))
 					(set native_row (struct.get item next_sibling))))
 			(if
@@ -465,8 +479,15 @@ const volatile void*wvrt_p12;const volatile char*wvrt_p13;const volatile signed 
 			(if
 				(:doc "A nonvariadic contract checks the complete prototype without an ellipsis.")
 				(i32.eqz tail)
-				(then (return (call close_c_fixed_prototype (array.load nodes (struct.get function declaration))
-					function (call native_long_double_needs_prototype (borrow-shared records)
+				(then
+					(let site (array.load nodes (struct.get function declaration)))
+					(if
+						(:doc "Require the exact prototype for a call holding terminated native elements.")
+						(call native_terminated_arrays (borrow-shared parameters) function)
+						(then
+							(let open (call c_literal_text (borrow-shared terminated_check_open) (borrow-mut output) cursor writing))
+							(return (call write_prototype_site site function (borrow-mut output) open writing))))
+					(return (call close_c_fixed_prototype site function (call native_long_double_needs_prototype (borrow-shared records)
 						(borrow-shared parameters) function)
 					(call native_static_strings (borrow-shared parameters) function)
 					(call native_sync_callbacks (borrow-shared parameters) function) typed_nullable record_result
