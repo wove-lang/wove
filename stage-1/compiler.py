@@ -62,56 +62,56 @@ C_TYPE = {
 	MUT: "wvrt_mut_slice",
 }
 WRAPPING_OPS = {
-	"i32.add": (I32, "wvrt_i32_add_wrapping"),
-	"i32.sub": (I32, "wvrt_i32_sub_wrapping"),
-	"u32.add": (U32, "wvrt_u32_add_wrapping"),
-	"u32.sub": (U32, "wvrt_u32_sub_wrapping"),
+	"i32:add": (I32, "wvrt_i32_add_wrapping"),
+	"i32:sub": (I32, "wvrt_i32_sub_wrapping"),
+	"u32:add": (U32, "wvrt_u32_add_wrapping"),
+	"u32:sub": (U32, "wvrt_u32_sub_wrapping"),
 }
 STEP_OPS = {"inc": "add", "dec": "sub"}
 BINARY_OPS = {
-	"u8.eq": (U8, BOOL, "=="),
-	"u8.not-eq": (U8, BOOL, "!="),
-	"u8.lt": (U8, BOOL, "<"),
-	"u8.not-lt": (U8, BOOL, ">="),
-	"u16.eq": (U16, BOOL, "=="),
-	"i32.eq": (I32, BOOL, "=="),
-	"i32.not-eq": (I32, BOOL, "!="),
-	"i32.lt": (I32, BOOL, "<"),
-	"i32.not-lt": (I32, BOOL, ">="),
-	"i32.le": (I32, BOOL, "<="),
-	"i32.gt": (I32, BOOL, ">"),
-	"i32.ge": (I32, BOOL, ">="),
-	"i32.mul": (I32, I32, "*"),
-	"i32.div": (I32, I32, "/"),
-	"i32.rem": (I32, I32, "%"),
-	"i64.eq": (I64, BOOL, "=="),
-	"i64.lt": (I64, BOOL, "<"),
-	"i64.gt": (I64, BOOL, ">"),
-	"i64.add": (I64, I64, "+"),
-	"i64.sub": (I64, I64, "-"),
-	"i64.mul": (I64, I64, "*"),
-	"u32.eq": (U32, BOOL, "=="),
-	"u32.not-eq": (U32, BOOL, "!="),
-	"u32.lt": (U32, BOOL, "<"),
-	"u32.not-lt": (U32, BOOL, ">="),
-	"u32.gt": (U32, BOOL, ">"),
-	"u32.mul": (U32, U32, "*"),
-	"u32.div": (U32, U32, "/"),
-	"u32.rem": (U32, U32, "%"),
-	"u32.and": (U32, U32, "&"),
-	"u32.or": (U32, U32, "|"),
-	"u32.xor": (U32, U32, "^"),
-	"u64.eq": (U64, BOOL, "=="),
-	"u64.not-eq": (U64, BOOL, "!="),
-	"u64.lt": (U64, BOOL, "<"),
-	"u64.not-lt": (U64, BOOL, ">="),
-	"u64.gt": (U64, BOOL, ">"),
-	"u64.add": (U64, U64, "+"),
-	"u64.sub": (U64, U64, "-"),
-	"u64.mul": (U64, U64, "*"),
-	"u64.and": (U64, U64, "&"),
-	"u64.or": (U64, U64, "|"),
-	"u64.xor": (U64, U64, "^"),
+	"u8:eq": (U8, BOOL, "=="),
+	"u8:not-eq": (U8, BOOL, "!="),
+	"u8:lt": (U8, BOOL, "<"),
+	"u8:not-lt": (U8, BOOL, ">="),
+	"u16:eq": (U16, BOOL, "=="),
+	"i32:eq": (I32, BOOL, "=="),
+	"i32:not-eq": (I32, BOOL, "!="),
+	"i32:lt": (I32, BOOL, "<"),
+	"i32:not-lt": (I32, BOOL, ">="),
+	"i32:le": (I32, BOOL, "<="),
+	"i32:gt": (I32, BOOL, ">"),
+	"i32:ge": (I32, BOOL, ">="),
+	"i32:mul": (I32, I32, "*"),
+	"i32:div": (I32, I32, "/"),
+	"i32:rem": (I32, I32, "%"),
+	"i64:eq": (I64, BOOL, "=="),
+	"i64:lt": (I64, BOOL, "<"),
+	"i64:gt": (I64, BOOL, ">"),
+	"i64:add": (I64, I64, "+"),
+	"i64:sub": (I64, I64, "-"),
+	"i64:mul": (I64, I64, "*"),
+	"u32:eq": (U32, BOOL, "=="),
+	"u32:not-eq": (U32, BOOL, "!="),
+	"u32:lt": (U32, BOOL, "<"),
+	"u32:not-lt": (U32, BOOL, ">="),
+	"u32:gt": (U32, BOOL, ">"),
+	"u32:mul": (U32, U32, "*"),
+	"u32:div": (U32, U32, "/"),
+	"u32:rem": (U32, U32, "%"),
+	"u32:and": (U32, U32, "&"),
+	"u32:or": (U32, U32, "|"),
+	"u32:xor": (U32, U32, "^"),
+	"u64:eq": (U64, BOOL, "=="),
+	"u64:not-eq": (U64, BOOL, "!="),
+	"u64:lt": (U64, BOOL, "<"),
+	"u64:not-lt": (U64, BOOL, ">="),
+	"u64:gt": (U64, BOOL, ">"),
+	"u64:add": (U64, U64, "+"),
+	"u64:sub": (U64, U64, "-"),
+	"u64:mul": (U64, U64, "*"),
+	"u64:and": (U64, U64, "&"),
+	"u64:or": (U64, U64, "|"),
+	"u64:xor": (U64, U64, "^"),
 }
 ZERO_PREDICATES = {
 	"eqz": ("eq", False),
@@ -399,7 +399,7 @@ def fixed_array_initializer(node: Form) -> tuple[FixedArrayType, tuple[Node, ...
 		raise SourceError(node.line)
 	kind = read_fixed_array_type(node.operands[0])
 	elements = node.operands[1:]
-	expected = kind.count if node.tag == "array.new" else 1
+	expected = kind.count if node.tag == "array:new" else 1
 	# A repetition takes one value, whereas an explicit initializer lists every element.
 	if len(elements) != expected:
 		raise SourceError(node.line)
@@ -466,7 +466,7 @@ def read_module_value(
 		data = read_embed(literal, filename, imports)
 		return name, ModuleValue(Binding(Value(_BYTE_VIEW, c_name)), data)
 	# Static inline arrays carry their own element storage.
-	if literal.tag in ("array.new", "array.repeat"):
+	if literal.tag in ("array:new", "array:repeat"):
 		kind, elements = fixed_array_initializer(literal)
 		values = []
 		# Check each literal against the element type before constructing the C initializer.
@@ -476,7 +476,7 @@ def read_module_value(
 			if value.kind != kind.element:
 				raise SourceError(element.line)
 			values.append(value.c)
-		items = iter(values) if literal.tag == "array.new" else repeat(values[0], kind.count)
+		items = iter(values) if literal.tag == "array:new" else repeat(values[0], kind.count)
 		return name, ModuleValue(Binding(Value(kind, c_name)), fixed_array_braces(items))
 	value = read_scalar_literal(literal)
 	return name, ModuleValue(Binding(Value(value.kind, c_name)), value.c)
@@ -793,7 +793,7 @@ class FunctionEmitter:
 	# Resolve the binding and descriptor for a permitted array access.
 	def array_access(self, node: Node, line: int, writable: bool = False) -> tuple[Binding, BufferType, str]:
 		# A selected byte row can serve directly as a read-only array receiver.
-		if isinstance(node, Form) and node.tag == "array.load" and not writable:
+		if isinstance(node, Form) and node.tag == "array:load" and not writable:
 			value = self.typed(node, _BYTE_VIEW)
 			return Binding(value), _BYTE_VIEW, value.c + "."
 		binding, value = self.project(node, named=True)
@@ -844,8 +844,8 @@ class FunctionEmitter:
 		tag = "borrow-mut" if exclusive else "borrow-shared"
 		target, = checked_form(node, tag, 1).operands
 		# A byte row can be borrowed directly from either kind of outer view.
-		if kind in (None, _BYTE_VIEW) and isinstance(target, Form) and target.tag == "array.load":
-			receiver, subscript = checked_form(target, "array.load", 2).operands
+		if kind in (None, _BYTE_VIEW) and isinstance(target, Form) and target.tag == "array:load":
+			receiver, subscript = checked_form(target, "array:load", 2).operands
 			binding, rows, fields = self.array_access(receiver, target.line)
 			# Reserve the containing array before the subscript evaluates.
 			if rows.element not in (_BYTE_VIEW, _OWNED_BYTE_ROW):
@@ -861,7 +861,7 @@ class FunctionEmitter:
 		source = target
 		range_bounds = None
 		# A range projects a half-open part of the named source.
-		if isinstance(target, Form) and target.tag == "array.range":
+		if isinstance(target, Form) and target.tag == "array:range":
 			# Direct call ranges use the seed's byte-slice ABI.
 			if kind is not None and kind.element != U8:
 				raise SourceError(node.line)
@@ -930,8 +930,8 @@ class FunctionEmitter:
 	def borrow_record(self, node: Node, kind: SharedRef) -> Value:
 		target, = checked_form(node, "borrow-shared", 1).operands
 		# An array element loan leaves the containing array as the owner.
-		if isinstance(target, Form) and target.tag == "array.load":
-			receiver, subscript = checked_form(target, "array.load", 2).operands
+		if isinstance(target, Form) and target.tag == "array:load":
+			receiver, subscript = checked_form(target, "array:load", 2).operands
 			binding, rows, fields = self.array_access(receiver, target.line)
 			# The exact record identity determines the element layout.
 			if rows.element is not kind.record:
@@ -1193,7 +1193,7 @@ class FunctionEmitter:
 		left, right = form(node, arity=2).operands
 		first = self.typed(left, BOOL)
 		result = self.temporary(BOOL, first.c)
-		test = result.c if node.tag == "bool.and" else f"!{result.c}"
+		test = result.c if node.tag == "bool:and" else f"!{result.c}"
 		# The left result survives when the right operand is skipped.
 		self.emit_line(f"if ({test}) {{")
 		# Boolean operands cannot move enclosing owners, so only C temporaries need a scope.
@@ -1265,8 +1265,8 @@ class FunctionEmitter:
 	# Project a field without copying the owner and retain its root binding for loans.
 	def project(self, node: Node, *, named: bool = False) -> tuple[Binding | None, Value]:
 		# Field paths keep the same root even through nested records.
-		if isinstance(node, Form) and node.tag == "struct.get":
-			target, name = checked_form(node, "struct.get", 2).operands
+		if isinstance(node, Form) and node.tag == "struct:get":
+			target, name = checked_form(node, "struct:get", 2).operands
 			binding, value = self.project(target, named=named)
 			record = value.kind
 			selection = "."
@@ -1304,7 +1304,7 @@ class FunctionEmitter:
 		kind, elements = fixed_array_initializer(node)
 		self.fixed_arrays.add(kind)
 		# A repeat evaluates its operand once, even when the result is empty.
-		if node.tag == "array.repeat":
+		if node.tag == "array:repeat":
 			element = self.typed(elements[0], kind.element)
 			value = self.temporary(kind, "{0}")
 			index = self.value_slot(I32)
@@ -1380,7 +1380,7 @@ class FunctionEmitter:
 			return read_scalar_literal(expr)
 
 		# Allocate inactive native storage using the provider's exact C layout.
-		if expr.tag == "native.alloc":
+		if expr.tag == "native:alloc":
 			operand, = checked_form(expr, arity=1).operands
 			owner = self.records.get(identifier(operand))
 			# Only a declared storage owner can be allocated by the seed.
@@ -1402,11 +1402,11 @@ class FunctionEmitter:
 			return value
 
 		# Fixed-size constructors do not allocate a runtime-owned array.
-		if expr.tag in ("array.new", "array.repeat"):
+		if expr.tag in ("array:new", "array:repeat"):
 			return self.initialize_fixed_array(expr)
 
 		# Binary boolean expressions guard every operation in the right operand.
-		if expr.tag in ("bool.and", "bool.or"):
+		if expr.tag in ("bool:and", "bool:or"):
 			return self.short_circuit(expr)
 
 		# An expression branch writes one result without evaluating the other arm.
@@ -1414,22 +1414,22 @@ class FunctionEmitter:
 			return self.conditional_value(expr)
 
 		# Negation requires a boolean and keeps its type.
-		if expr.tag == "bool.not":
+		if expr.tag == "bool:not":
 			operand, = form(expr, arity=1).operands
 			value = self.typed(operand, BOOL)
 			return self.temporary(BOOL, f"!{value.c}")
 
 		# Discard promoted bits above the exact width of the complemented word.
-		if expr.tag in ("u32.not", "u64.not"):
+		if expr.tag in ("u32:not", "u64:not"):
 			operand, = form(expr, arity=1).operands
-			kind = expr.tag.split(".")[0]
+			kind = expr.tag.split(":")[0]
 			value = self.typed(operand, kind)
 			return self.temporary(kind, f"({C_TYPE[kind]})~(uint64_t){value.c}")
 
 		# Match the complete typed alias using only the seed's current integer types.
-		destination, separator, origin = expr.tag.partition(".from-")
+		destination, separator, origin = expr.tag.partition(":from-")
 		typed_conversion = bool(separator and destination in SCALAR_LIMITS and origin in SCALAR_LIMITS)
-		if expr.tag == "int.convert" or typed_conversion:
+		if expr.tag == "int:convert" or typed_conversion:
 			# Both spellings evaluate the same single operand and use the same range limits.
 			if typed_conversion:
 				operand, = form(expr, arity=1).operands
@@ -1447,19 +1447,19 @@ class FunctionEmitter:
 				if value.kind not in SCALAR_LIMITS and not isinstance(value.kind, NativeType):
 					raise SourceError(node.line)
 			# Retain the seed's existing direct widening lowering for this alias.
-			if expr.tag == "i32.from-u8":
+			if expr.tag == "i32:from-u8":
 				return self.temporary(I32, f"(int32_t){value.c}")
 			return self.convert_integer(value, kind, node.line)
 
 		# A record construction produces a new value of its declared type.
-		if expr.tag == "struct.new":
+		if expr.tag == "struct:new":
 			return self.make_record(expr)
 
 		# A member access copies a non-owning value.
-		if expr.tag == "struct.get":
+		if expr.tag == "struct:get":
 			return self.record_field(expr)
 		# Allocate one runtime array with the source location for traps.
-		if expr.tag == "array.alloc":
+		if expr.tag == "array:alloc":
 			element_node, length = form(expr, arity=2).operands
 			element = read_owned_element(element_node, self.records)
 			size = self.typed(length, I32)
@@ -1480,7 +1480,7 @@ class FunctionEmitter:
 			)
 
 		# A fallible allocation uses the native layout of a copyable element.
-		if expr.tag == "array.try-alloc":
+		if expr.tag == "array:try-alloc":
 			element_node, length = form(expr, arity=2).operands
 			element = read_owned_element(element_node, self.records)
 			# Owning elements require an initialized-slot allocator.
@@ -1492,12 +1492,12 @@ class FunctionEmitter:
 			return self.temporary(kind, f"wvrt_array_try_new({size.c}, sizeof({native}), _Alignof({native}))")
 
 		# An absent optional is a movable slot with a null pointer.
-		if expr.tag == "optional.none":
+		if expr.tag == "optional:none":
 			payload, = form(expr, arity=1).operands
 			return self.temporary(read_optional_owner(payload, self.records), "NULL")
 
 		# Wrap a fresh or transferred owned array without another allocation.
-		if expr.tag == "optional.some":
+		if expr.tag == "optional:some":
 			operand, = form(expr, arity=1).operands
 			value = self.expression(operand)
 			# A slice or an already optional value cannot supply this payload.
@@ -1506,7 +1506,7 @@ class FunctionEmitter:
 			return Value(OptionalOwner(value.kind), value.c)
 
 		# Inspect absence without consuming or borrowing the payload.
-		if expr.tag == "owner.is-null":
+		if expr.tag == "owner:is-null":
 			operand, = form(expr, arity=1).operands
 			binding = self.binding(operand)
 			# Optional arrays and native pointer owners can represent absence.
@@ -1520,13 +1520,13 @@ class FunctionEmitter:
 			return self.move_owner(expr)
 
 		# Read the element count of the live owner or received view.
-		if expr.tag == "array.len":
+		if expr.tag == "array:len":
 			target, = form(expr, arity=1).operands
 			_, _, fields = self.array_access(target, node.line)
 			return self.temporary(I32, f"{fields}wvrt_length")
 
 		# Copy an element through either descriptor after checking its index.
-		if expr.tag == "array.load":
+		if expr.tag == "array:load":
 			target, subscript = form(expr, arity=2).operands
 			_, kind, fields = self.array_access(target, node.line)
 			element = kind.element
@@ -1542,7 +1542,7 @@ class FunctionEmitter:
 				f"{index.c}, {self.site(node.line)})"
 			)
 
-		prefix, _, predicate = expr.tag.partition(".")
+		prefix, _, predicate = expr.tag.partition(":")
 		# Decode the exact number of bytes using the runtime's endian-independent path.
 		if prefix in BYTE_DECODER_WIDTHS and predicate in ("from-le-bytes", "from-be-bytes"):
 			operand, = form(expr, arity=1).operands
@@ -1555,7 +1555,7 @@ class FunctionEmitter:
 				f"{data.c}, {width}, {endian}, -1, {node.line}, {node.line})")
 
 		step = STEP_OPS.get(predicate)
-		wrapping = WRAPPING_OPS.get(f"{prefix}.{step}" if step is not None else expr.tag)
+		wrapping = WRAPPING_OPS.get(f"{prefix}:{step}" if step is not None else expr.tag)
 		# Evaluate exact-type operands in order before performing wrapping arithmetic.
 		if wrapping is not None:
 			kind, helper = wrapping
@@ -1570,7 +1570,7 @@ class FunctionEmitter:
 			return self.temporary(kind, f"{helper}({first.c}, {second.c})")
 
 		# The driver increments an unsigned 64-bit counter with wrapping arithmetic.
-		if expr.tag == "u64.inc":
+		if expr.tag == "u64:inc":
 			operand, = form(expr, arity=1).operands
 			value = self.typed(operand, U64)
 			return self.temporary(U64, f"{value.c} + UINT64_C(1)")
@@ -1579,7 +1579,7 @@ class FunctionEmitter:
 		# Reuse the same typed operators when a zero operand is implicit.
 		if zero_comparison is not None:
 			comparison, reverse = zero_comparison
-			operation = BINARY_OPS.get(f"{prefix}.{comparison}")
+			operation = BINARY_OPS.get(f"{prefix}:{comparison}")
 			# A unary alias cannot introduce a type the binary seed does not support.
 			if operation is not None:
 				kind, result, operator = operation
@@ -1600,10 +1600,10 @@ class FunctionEmitter:
 			first = self.typed(left, kind)
 			second = self.typed(right, kind)
 			# Keep the full unsigned product before reducing it to the low word.
-			if expr.tag == "u32.mul":
+			if expr.tag == "u32:mul":
 				return self.temporary(U32, f"(uint32_t)((uint64_t){first.c} * {second.c})")
 			# Multiply as unsigned bits so signed overflow has Wove wrapping semantics.
-			if expr.tag == "i32.mul":
+			if expr.tag == "i32:mul":
 				product = f"(uint32_t)((uint64_t)(uint32_t){first.c} * (uint32_t){second.c})"
 				return self.temporary(I32, f"wvrt_i32_from_wrapped_bits({product})")
 			# Signed 64-bit arithmetic also wraps through its unsigned representation.
@@ -1611,13 +1611,13 @@ class FunctionEmitter:
 				bits = f"(uint64_t){first.c} {operator} (uint64_t){second.c}"
 				return self.temporary(I64, f"wvrt_i64_from_wrapped_bits({bits})")
 			# Guard both division operations at the original seed source location.
-			if expr.tag in ("u32.div", "u32.rem"):
+			if expr.tag in ("u32:div", "u32:rem"):
 				remainder = "true" if operator == "%" else "false"
 				return self.temporary(
 					result, f"wvrt_u32_divide({first.c}, {second.c}, {remainder}, {self.site(node.line)})"
 				)
 			# The runtime handles signed quotient and remainder edge cases.
-			if expr.tag in ("i32.div", "i32.rem"):
+			if expr.tag in ("i32:div", "i32:rem"):
 				remainder = "true" if operator == "%" else "false"
 				return self.temporary(I32,
 					f"wvrt_i32_divide_at_span({first.c}, {second.c}, {remainder}, -1, {node.line}, {node.line})")
@@ -1640,7 +1640,7 @@ class FunctionEmitter:
 			)
 
 		# BLAKE2b rotates an unsigned word using the existing runtime operation.
-		if expr.tag == "u64.rotr":
+		if expr.tag == "u64:rotr":
 			left, right = form(expr, arity=2).operands
 			word = self.typed(left, U64)
 			count = self.typed(right, I32)
@@ -1657,10 +1657,10 @@ class FunctionEmitter:
 	# Transfer an owner once and leave its source slot empty on the continuing path.
 	def move_owner(self, node: Form) -> Value:
 		target, = form(node, arity=1).operands
-		unwrap = target if isinstance(target, Form) and target.tag == "optional.unwrap" else None
+		unwrap = target if isinstance(target, Form) and target.tag == "optional:unwrap" else None
 		# An unwrap exposes the payload of a named optional owner.
 		if unwrap is not None:
-			target, = checked_form(unwrap, "optional.unwrap", 1).operands
+			target, = checked_form(unwrap, "optional:unwrap", 1).operands
 		binding = self.binding(target)
 		kind = binding.value.kind
 		# Only an owning value can be transferred.
@@ -1914,7 +1914,7 @@ class FunctionEmitter:
 			return False
 
 		# Append a captured byte owner to the mutable array of rows.
-		if statement.tag == "array.push":
+		if statement.tag == "array:push":
 			target, operand = form(statement, arity=2).operands
 			binding = self.binding(target)
 			# The bootstrap driver grows only named arrays of owned byte rows.
@@ -1932,7 +1932,7 @@ class FunctionEmitter:
 			return True
 
 		# Store directly into the backing storage of a mutable owner or view.
-		if statement.tag == "array.store":
+		if statement.tag == "array:store":
 			target, subscript, operand = form(statement, arity=3).operands
 			binding, kind, fields = self.array_access(target, node.line, writable=True)
 			element = kind.element

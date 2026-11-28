@@ -40,6 +40,9 @@ payloads stay opaque to the seed.
 
 ## Values and operators
 
+Spell qualified operations as `family:operation`, for example `i32:add`
+and `array:len`. Metadata tags begin with a colon.
+
 Use `bool`, `i8`, `u8`, `i32`, `u32`, and `u64`. Integer literals take decimal or
 hexadecimal digits, with either a suffix (`0xc2u8`) or a type head
 (`(u8 0xC2)`). For a signed negative hexadecimal literal, put the minus
@@ -51,9 +54,9 @@ before the prefix (`-0x80i8`). Write bytes as typed integers.
 | Division and remainder | `div` and `rem` on `i32` and `u32`. Both trap on a zero divisor. |
 | Comparisons | `eq`, `lt`, `eqz`, `ltz`, and `gtz` and their `not-` forms on `u8`, `i32`, `u32`, and `u64`. `gt` on `u64`. |
 | Bitwise operations | `and`, `or`, `xor`, and `not` on `u32` and `u64`. |
-| Shifts and rotation | `shl` and `shr` on `u32` and `u64`, and `u64.rotr`. Counts are `i32` and less than the bit width. |
-| Checked conversions | `(int.convert T value)` and `(T.from-S value)` between the five integer types |
-| Boolean logic | `bool.and`, `bool.or`, and `bool.not` |
+| Shifts and rotation | `shl` and `shr` on `u32` and `u64`, and `u64:rotr`. Counts are `i32` and less than the bit width. |
+| Checked conversions | `(int:convert T value)` and `(T:from-S value)` between the five integer types |
+| Boolean logic | `bool:and`, `bool:or`, and `bool:not` |
 
 An immutable module `let` takes a scalar literal, a quoted byte string,
 an `embed`, or a fixed scalar array of literals. Read it by its bare
@@ -66,13 +69,13 @@ compile time as a static `(shared-array u8)`. Relative paths start at the
 module containing the embed.
 
 A named `struct` has scalar fields or nested Wove records, including
-records selected through imports. Use `struct.new` to supply every field
-exactly once and `struct.get` to read fields. Copyable records keep their
+records selected through imports. Use `struct:new` to supply every field
+exactly once and `struct:get` to read fields. Copyable records keep their
 defining identity, including through import aliases.
 
 Records can own byte arrays, `i32` arrays, and arrays of owned byte rows.
 Initialize an owning field with a fresh or moved value. Use a field
-projection such as `(borrow-shared (struct.get job arguments))` to lend
+projection such as `(borrow-shared (struct:get job arguments))` to lend
 its storage. Move the containing record to transfer its fields. Scope
 cleanup drops each remaining owned field.
 
@@ -85,34 +88,34 @@ drops its remaining owners when it exits. After an `if`, an owner must
 be available along every continuing path before it can be used. Each
 path back to a `while` condition must preserve owners live on entry.
 
-Use `(array.alloc T count)` for a local owned array with `u8`, `i32`,
-owned byte rows, or a Wove record as its element type. Use `array.len`,
-`array.load`, and `array.store` with exact element types and `i32` indices.
+Use `(array:alloc T count)` for a local owned array with `u8`, `i32`,
+owned byte rows, or a Wove record as its element type. Use `array:len`,
+`array:load`, and `array:store` with exact element types and `i32` indices.
 A writable receiver is required for stores. Transfer or return an owned
 array with `(move name)`.
 
 A function can return `(optional (owned-array T))` for a supported array
-element type. Use `(array.try-alloc T length)` for fallible allocation of
-copyable elements, `(optional.none (owned-array T))` for absence, or
-`(optional.some value)` to wrap a fresh or moved array. Check a named
-optional with `owner.is-null`. Use `(move (optional.unwrap name))` to
+element type. Use `(array:try-alloc T length)` for fallible allocation of
+copyable elements, `(optional:none (owned-array T))` for absence, or
+`(optional:some value)` to wrap a fresh or moved array. Check a named
+optional with `owner:is-null`. Use `(move (optional:unwrap name))` to
 check presence and transfer the exact payload type. An optional that still
 owns a payload drops it at scope exit.
 
-Use `(array.new (array T N) item ...)` to initialize a fixed scalar array
-with exactly `N` items, or `(array.repeat (array T N) item)` to evaluate
+Use `(array:new (array T N) item ...)` to initialize a fixed scalar array
+with exactly `N` items, or `(array:repeat (array T N) item)` to evaluate
 an item once and fill the array with it. Fixed scalar arrays support
 the same length, load, and store operations and can also be passed by value.
 
 Pass `(shared-array T)` and `(mut-array T)` parameters using
 `borrow-shared` and `borrow-mut` on an owner, received view, or fixed array. For a
-checked byte subrange, borrow `(array.range name start end)`.
+checked byte subrange, borrow `(array:range name start end)`.
 The `i32` endpoints evaluate once in source order, and equal endpoints
 are valid. Call loans remain active through later arguments and the call.
 Shared reborrows permit reads through the parent. Exclusive reborrows
 suspend access through the parent until the call returns.
 
-Use `(let view (borrow-shared (array.range source start end)))` to keep a
+Use `(let view (borrow-shared (array:range source start end)))` to keep a
 shared range of an owner or received view for the enclosing block. The
 bound view keeps the original element type. Its loan permits reads and
 shared reborrows and prevents writes or moves through the source until
@@ -147,6 +150,6 @@ filename and keeps the first include spelling.
 An explicit `(type Name)` selection from a C bridge binds a typedef or record
 to the C spelling in its `c-type` field. A selected C record can be passed
 by value, initialized as a C aggregate, and read through scalar fields or
-native named fields from the same bridge. `int.convert` uses Clang's native type to check the
+native named fields from the same bridge. `int:convert` uses Clang's native type to check the
 range of a conversion involving a C integer typedef. C bridge functions,
 values, and other foreign providers stay opaque to the Python seed.
