@@ -130,16 +130,22 @@ class BufferType:
 
 
 @dataclass(frozen=True)
+class OptionalOwner:
+	payload: BufferType
+
+
+@dataclass(frozen=True)
 class FixedArrayType:
 	element: str
 	count: int
 
 
-Type = str | NamedType | BufferType | FixedArrayType
+Type = str | NamedType | BufferType | OptionalOwner | FixedArrayType
 
 
 _BYTE_VIEW = BufferType(SHARED, U8)
 _OWNED_BYTE_ROW = BufferType(OWNED, U8)
+_OPTIONAL_BYTE_OWNER = OptionalOwner(_OWNED_BYTE_ROW)
 _HOST_ARGV = BufferType(SHARED, _BYTE_VIEW)
 
 
@@ -190,7 +196,7 @@ def owns(kind: Type) -> bool:
 	# By-value records release their owned fields recursively.
 	if isinstance(kind, Record):
 		return any(owns(field.kind) for field in kind.fields.values())
-	return isinstance(kind, BufferType) and kind.access == OWNED
+	return isinstance(kind, OptionalOwner) or (isinstance(kind, BufferType) and kind.access == OWNED)
 
 
 # Scalars and records without owners can be read by value.
@@ -203,6 +209,9 @@ def c_type(kind: Type) -> str:
 	# The descriptor depends on the access mode and carries a typed element count.
 	if isinstance(kind, BufferType):
 		return C_TYPE[kind.access]
+	# A nullable owner uses the same pointer ABI as its payload.
+	if isinstance(kind, OptionalOwner):
+		return c_type(kind.payload)
 	# Inline arrays are passed by value through their generated C type.
 	if isinstance(kind, FixedArrayType):
 		return f"wv_seed_fixed_{kind.element}_{kind.count}"
@@ -439,6 +448,15 @@ def read_owned_element(node: Node, records: dict[str, NamedType]) -> str | Recor
 	raise SourceError(node.line)
 
 
+# Read the byte-array payload of the seed's supported optional owner.
+def read_optional_byte_owner(payload: Node) -> OptionalOwner:
+	element, = checked_form(payload, OWNED, 1).operands
+	# Only byte array optionals are needed for the initial seed path.
+	if identifier(element) != U8:
+		raise SourceError(element.line)
+	return _OPTIONAL_BYTE_OWNER
+
+
 # Read a value input or a shared or mutable view of a supported element.
 def parameter_type(node: Node, records: dict[str, NamedType]) -> Type:
 	# Copyable types are written as bare symbols.
@@ -502,6 +520,10 @@ def read_function(
 	if isinstance(result_node, Form) and result_node.tag == OWNED:
 		element_node, = checked_form(result_node, OWNED, 1).operands
 		result = BufferType(OWNED, read_owned_element(element_node, records))
+	# Optional byte owners have the same return ABI with a nullable pointer.
+	elif isinstance(result_node, Form) and result_node.tag == "optional":
+		payload, = checked_form(result_node, "optional", 1).operands
+		result = read_optional_byte_owner(payload)
 	# Scalar results copy by value. Void has no return operand.
 	else:
 		result_name = identifier(result_node)
@@ -982,20 +1004,40 @@ class FunctionEmitter:
 				kind, f"wvrt_array_new({size.c}, sizeof({native}), _Alignof({native}), {site})"
 			)
 
-		# Transfer ownership and clear the original slot before its scope exits.
+		# A fallible byte allocation keeps its nullable result in an owning slot.
+		if expr.tag == "array.try-alloc":
+			element, length = form(expr, arity=2).operands
+			# Other optional element shapes are outside the seed subset.
+			if identifier(element) != U8:
+				raise SourceError(element.line)
+			size = self.typed(length, I32)
+			return self.temporary(_OPTIONAL_BYTE_OWNER,
+				f"wvrt_array_try_new({size.c}, sizeof(uint8_t), _Alignof(uint8_t))")
+
+		# An absent optional is a movable slot with a null pointer.
+		if expr.tag == "optional.none":
+			payload, = form(expr, arity=1).operands
+			return self.temporary(read_optional_byte_owner(payload), "NULL")
+
+		# Wrap a fresh or transferred byte array without another allocation.
+		if expr.tag == "optional.some":
+			operand, = form(expr, arity=1).operands
+			value = self.typed(operand, _OWNED_BYTE_ROW)
+			return Value(_OPTIONAL_BYTE_OWNER, value.c)
+
+		# Inspect absence without consuming or borrowing the payload.
+		if expr.tag == "owner.is-null":
+			operand, = form(expr, arity=1).operands
+			binding = self.binding(operand)
+			# Ordinary owned arrays are always present.
+			if binding.value.kind != _OPTIONAL_BYTE_OWNER:
+				raise SourceError(operand.line)
+			self.check_access(binding, False, node.line)
+			return self.temporary(BOOL, f"{binding.value.c} == NULL")
+
+		# Move a whole owner or explicitly unwrap and move its present payload.
 		if expr.tag == "move":
-			target, = form(expr, arity=1).operands
-			binding = self.binding(target)
-			kind = binding.value.kind
-			# Only a value with owned storage needs an explicit transfer.
-			if not owns(kind):
-				raise SourceError(node.line)
-			self.check_access(binding, True, node.line)
-			result = self.temporary(kind, binding.value.c)
-			self.moved.add(binding)
-			empty = f"({c_type(kind)}){{0}}" if isinstance(kind, Record) else "NULL"
-			self.emit_line(f"{binding.value.c} = {empty};")
-			return result
+			return self.move_owner(expr)
 
 		# Read the element count of the live owner or received view.
 		if expr.tag == "array.len":
@@ -1117,16 +1159,44 @@ class FunctionEmitter:
 
 		raise SourceError(node.line)
 
+	# Transfer an owner once and leave its source slot empty on the continuing path.
+	def move_owner(self, node: Form) -> Value:
+		target, = form(node, arity=1).operands
+		unwrap = target if isinstance(target, Form) and target.tag == "optional.unwrap" else None
+		# An unwrap exposes the payload of a named optional owner.
+		if unwrap is not None:
+			target, = checked_form(unwrap, "optional.unwrap", 1).operands
+		binding = self.binding(target)
+		kind = binding.value.kind
+		# Only an owning value can be transferred.
+		if not owns(kind):
+			raise SourceError(node.line)
+		self.check_access(binding, True, node.line)
+		storage = binding.value.c
+		expression = storage
+		# Check presence before clearing the original slot.
+		if unwrap is not None:
+			# The unwrap accepts only the supported nullable byte owner.
+			if not isinstance(kind, OptionalOwner):
+				raise SourceError(unwrap.line)
+			kind = kind.payload
+			expression = f"wvrt_require_array_at_span({storage}, -1, {unwrap.line}, {unwrap.line})"
+		result = self.temporary(kind, expression)
+		self.moved.add(binding)
+		empty = f"({c_type(kind)}){{0}}" if isinstance(kind, Record) else "NULL"
+		self.emit_line(f"{storage} = {empty};")
+		return result
+
 	# Drop the owned leaves of a value through their original runtime descriptors.
 	def drop_owned(self, kind: Type, expression: str) -> None:
-		# An array's registered destructor accounts for any row slots it owns.
-		if isinstance(kind, BufferType) and kind.access == OWNED:
-			self.emit_line(f"wvrt_array_drop({expression});")
 		# A record releases its fields in reverse layout order.
-		elif isinstance(kind, Record):
+		if isinstance(kind, Record):
 			# A moved record contains cleared owner slots on that path.
 			for member in reversed(kind.fields.values()):
 				self.drop_owned(member.kind, f"{expression}.{member.c_name}")
+		# The destructor accepts both an actual array owner and a null slot.
+		elif owns(kind):
+			self.emit_line(f"wvrt_array_drop({expression});")
 
 	# Release owned slots from the scopes being exited in reverse declaration order.
 	def cleanup(self, scopes: list[dict[str, Binding]]) -> None:
