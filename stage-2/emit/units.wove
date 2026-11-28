@@ -4,7 +4,7 @@
 	(:doc "Partition and emit an already checked graph as numbered C units.")
 
 	(use wove-file "../hashing/base32hex.wove" (only encode_base32hex32))
-	(use wove-file "../c/arguments.wove" (only (value c_storage_init_always_mode) c_checked_string_mode c_handle_mut_mode
+	(use wove-file "../c/arguments.wove" (only (value c_storage_init_always_mode) c_checked_string_mode c_consume_mode c_handle_mut_mode
 		(value c_nullable_native_reference_mode) (value c_nullable_storage_shared_mode)
 		is_c_array_mode is_c_bytes_mode is_c_null_mode is_c_storage_mode
 		is_c_value_mode is_c_vector_mode (value c_open_variadic_tail)))
@@ -22,6 +22,7 @@
 	(use wove-file "../scalar/trees.wove" (only (type ScalarTree)))
 	(use wove-file "../source/graph.wove" (only includes_c_header (type GraphBinding)))
 	(use wove-file "../source/c_formals.wove" (only c_fixed_formal_at is_c_fixed_formal))
+	(use wove-file "../source/c_names.wove" (only native_symbol_start native_symbol_end))
 	(use wove-file "../source/module.wove" (only form_parts))
 	(use wove-file "../scalar/tests.wove" (only (type DiscoveredTest)))
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
@@ -32,10 +33,11 @@
 	(use wove-file "../source/types.wove" (only is_builtin_integer is_builtin_scalar void_type))
 	(use wove-file "./headers.wove" (only append_includes (type CInclude) (type Includes)))
 	(use wove-file "./library.wove" (only write_library_abi))
-	(use wove-file "./owners.wove" (only is_numbered_pointer_owner is_numbered_storage_owner))
+	(use wove-file "./owners.wove" (only is_numbered_pointer_owner is_numbered_storage_owner native_owner_contract))
 	(use wove-file "./text.wove" (only c_literal_text))
 	(use wove-file "./workers.wove" (only write_worker_adapters (value declared_worker_adapters) (value linked_worker_adapters)))
 	(use wove-file "./tests.wove" (only write_test_entry))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
 
 	(struct UnitIndex (fields (value i32)))
 
@@ -412,6 +414,32 @@
 			(return (bool.and (u8.eq (struct.get parameter c_mode) c_nullable_storage_shared_mode)
 				(call is_numbered_storage_owner (borrow-shared source) (borrow-shared nodes) (struct.get parameter type))))))
 
+	(fn numbered_pointer_owner_consume
+		(:doc "Pass one native pointer owner to its declared destructor and preserve the direct scalar result.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode))
+			(function ScalarFunction) (parameters (shared-array ScalarParameter))) (returns bool)
+		(body
+			(if
+				(:doc "The declaration must be fixed and leave both the captured pointer and returned status unchanged.")
+				(bool.or (bool.or (i32.not-eq (struct.get function arity) 1i32)
+						(bool.not (call direct_scalar_abi (struct.get function result))))
+					(bool.or (bool.or (struct.get function c_storage) (i32.not-eqz (struct.get function c_extents)))
+						(bool.or (i32.not-eqz (struct.get function c_variadic))
+							(bool.or (call has_c_other_arguments function (bool false)) (call is_record_input function)))))
+				(then (return (bool false))))
+			(let formal (array.load parameters (struct.get function params)))
+			(let type (struct.get formal type))
+			(if
+				(:doc "Only the checked move of an ordinary native pointer owner uses this proof.")
+				(bool.not (bool.and (u8.eq (struct.get formal c_mode) (call c_consume_mode))
+					(call is_numbered_pointer_owner (borrow-shared source) (borrow-shared nodes) type)))
+				(then (return (bool false))))
+			(let owner (call native_owner_contract (borrow-shared source) (borrow-shared nodes) type))
+			(let drop (array.load nodes (struct.get owner drop)))
+			(let symbol (array.load nodes (struct.get function name)))
+			(return (call same_bytes (borrow-shared source) (call native_symbol_start symbol) (call native_symbol_end symbol)
+				(borrow-shared source) (struct.get drop start) (struct.get drop end)))))
+
 	(fn numbered_nullable_integer_call
 		(:doc "Admit a single nullable writable native integer place among direct scalar formals.")
 		(params (function ScalarFunction) (parameters (shared-array ScalarParameter))
@@ -678,9 +706,11 @@
 				(call numbered_nullable_integer_call function (borrow-shared parameters) (borrow-shared records))
 				(then (return (bool true))))
 			(if
-				(:doc "A nullable pointer result requires the exact native owner and destructor proofs.")
-				(call numbered_fixed_pointer_owner_call (borrow-shared source) (borrow-shared nodes) function
-					(borrow-shared parameters))
+				(:doc "Constructing or explicitly closing a pointer owner requires the exact native owner and destructor proofs.")
+				(bool.or (call numbered_fixed_pointer_owner_call (borrow-shared source) (borrow-shared nodes) function
+						(borrow-shared parameters))
+					(call numbered_pointer_owner_consume (borrow-shared source) (borrow-shared nodes) function
+						(borrow-shared parameters)))
 				(then (return (bool true))))
 			(let result (struct.get function result))
 			(if
@@ -763,8 +793,10 @@
 									(bool.or (bool.or (struct.get function c_macro) (i32.gtz (struct.get function c_variadic)))
 										(bool.or (i32.gtz (struct.get function c_nulls))
 											(bool.or (call numbered_adapted_fixed_call function (borrow-shared parameters) (borrow-shared records))
-												(call numbered_fixed_pointer_owner_call (borrow-shared source) (borrow-shared nodes) function
-													(borrow-shared parameters)))))))
+												(bool.or (call numbered_fixed_pointer_owner_call (borrow-shared source) (borrow-shared nodes)
+														function (borrow-shared parameters))
+													(call numbered_pointer_owner_consume (borrow-shared source) (borrow-shared nodes)
+														function (borrow-shared parameters))))))))
 								(then (set mode numbered_preamble_replay)))))
 					(set index (i32.inc index))))
 			(return mode)))
