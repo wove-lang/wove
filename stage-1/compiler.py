@@ -1407,13 +1407,22 @@ class FunctionEmitter:
 		# Assignment replaces the value in the named mutable slot.
 		if statement.tag == "set":
 			target, operand = form(statement, arity=2).operands
-			binding = self.binding(target)
+			binding = self.find_binding(identifier(target))
+			# A moved owner still has a slot that an assignment can refill.
+			if binding is None:
+				raise SourceError(target.line)
 			kind = binding.value.kind
-			# Scalar and copyable record assignment require no ownership transfer.
-			if not binding.writable or not (kind in SCALAR_TYPES or isinstance(kind, Record) and copyable(kind)):
+			replace_owner = isinstance(kind, BufferType) and kind.access == OWNED
+			copy_value = kind in SCALAR_TYPES or isinstance(kind, Record) and copyable(kind)
+			# Views and other owning shapes cannot be rebound by the seed.
+			if not binding.writable or not (copy_value or replace_owner):
 				raise SourceError(node.line)
 			self.check_access(binding, True, node.line)
 			value = self.typed(operand, kind)
+			# The replacement can read or move the old owner before the slot is retired.
+			if replace_owner:
+				self.emit_line(f"wvrt_array_drop({binding.value.c});")
+				self.moved.discard(binding)
 			self.emit_line(f"{binding.value.c} = {value.c};")
 			return True
 
