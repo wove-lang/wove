@@ -1124,6 +1124,18 @@ include subtree. It recognizes file-scope `struct` and `union` tags,
 including tags defined inside a record, and follows record typedefs across
 redeclarations. An unavailable definition is reported at the type selector.
 
+A read-only bridge declaration such as
+`(let LIMIT (:pragma (c_macro_lossless)) i64)` reads an object-like C
+integer macro whose native type may vary with the build flags. Clang
+checks that the entire native type range fits the declared built-in Wove
+integer, even when the expansion is a constant with a smaller value.
+Supported sources include C's standard integer types, compatible
+typedefs and enums, native `__int128`, and C23 `_BitInt(256)` when
+available. Each Wove read evaluates the expansion once and converts it
+to the declared type. The type check itself never evaluates the macro.
+Use `c_optional` with this marker to treat an unavailable definition as
+an optional expression macro.
+
 An object-like C string macro can supply an immutable byte view. Declare
 `(const _PATH_GROUP (:pragma (c_optional)) (shared-array u8))` in the
 `<grp.h>` bridge and select it with `(value _PATH_GROUP)` or a renamed

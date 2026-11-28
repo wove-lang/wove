@@ -1,7 +1,7 @@
 (module native_c_availability
 	(:copyright "Copyright (c) 2026 wove contributors")
 	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
-	(:doc "Check selected optional C declarations before native graph emission.")
+	(:doc "Check selected C declarations that need a header probe before native graph emission.")
 
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "./paths.wove" (only directory_width))
@@ -26,6 +26,7 @@
 	(let function_kind "FunctionDecl")
 	(let optional_record_unavailable 91u32)
 	(let optional_typedef_unavailable 92u32)
+	(let lossless_macro_unavailable 93u32)
 	(let enum_kind "EnumDecl")
 	(let quote_option "-iquote")
 
@@ -193,8 +194,14 @@
 					(set width (i32.add width width))))
 			(return 74u32)))
 
+	(fn needs_availability
+		(:doc "Query optional members and require an object-like definition for lossless macros.")
+		(params (binding GraphBinding))
+		(returns bool)
+		(body (return (bool.or (struct.get binding optional) (struct.get binding value_lossless)))))
+
 	(fn remember_macros
-		(:doc "Resolve each optional macro by its C spelling against the final macro definitions.")
+		(:doc "Resolve each selected macro that needs availability checking by its C spelling against the final macro definitions.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(first i32) (present bool) (capture (shared-array u8)) (results (mut-array u8)))
 		(returns void)
@@ -202,13 +209,13 @@
 			(let header (array.load bindings first))
 			(let-mut row first)
 			(while
-				(:doc "Optional integer, expression, and string macros from this header share one capture.")
+				(:doc "Integer, expression, and string macros from this header share one capture.")
 				(i32.lt row (array.len bindings))
 				(body
 					(let candidate (array.load bindings row))
 					(if
 						(:doc "Keep function observations in their own capture.")
-						(bool.and (struct.get candidate optional)
+						(bool.and (call needs_availability candidate)
 							(bool.and (u32.eq (struct.get candidate namespace) 2u32)
 								(call same_header header candidate)))
 						(then
@@ -223,6 +230,10 @@
 								(:doc "The expression macro diagnostic covers scalar expressions and string literals.")
 								(struct.get candidate value_macro)
 								(then (set status 77u8)))
+							(if
+								(:doc "A required lossless macro has a distinct diagnostic if the header does not provide it.")
+								(bool.and (struct.get candidate value_lossless) (bool.not (struct.get candidate optional)))
+								(then (set status (u8.from-u32 lossless_macro_unavailable))))
 							(if
 								(:doc "A matching definition is usable when the requested header exists.")
 								(bool.and present (i32.lt -1i32 (struct.get value start)))
@@ -469,7 +480,7 @@
 		(body (return (u32.from-u8 (array.load results row)))))
 
 	(fn verify_bindings
-		(:doc "Probe each selected header lazily and report the first failed optional selection in original order.")
+		(:doc "Probe each selected header lazily and report the first failed selection in original order.")
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(first i32) (canonical (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8)))
 		(returns Availability)
@@ -483,8 +494,8 @@
 				(body
 					(let binding (array.load bindings row))
 					(if
-						(:doc "Only a selected member with c_optional triggers a query.")
-						(struct.get binding optional)
+						(:doc "Only a selected member with an availability contract triggers a query.")
+						(call needs_availability binding)
 						(then
 							(let-mut status (call cached_status (borrow-shared results) row))
 							(if
@@ -511,12 +522,13 @@
 			(return (struct.new Availability (error 0u32) (file -1i32) (start 0i32) (end 0i32)))))
 
 	(fn check_optional_c_members
-		(:doc "Leave graphs without selected optional members on their filesystem-only path.")
+		(:doc "Leave graphs without availability contracts on their filesystem-only path.")
 		(:expect (tests "stage-2/cli/native/cases.tsv" "stage-2/cli/native/bin.tsv"
 				"stage-2/cli/native/optional-macros.tsv" "stage-2/cli/native/optional-typedefs/cases.tsv"
-				"stage-2/cli/native/string-macros/cases.tsv" "stage-2/cli/native/macro-modes.tsv")
+				"stage-2/cli/native/string-macros/cases.tsv" "stage-2/cli/native/macro-modes.tsv"
+				"stage-2/cli/native/lossless-macros/cases.tsv")
 			(issues "gh:wove-lang/wove:212" "gh:wove-lang/wove:539" "gh:wove-lang/wove:577" "gh:wove-lang/wove:638"
-				"gh:wove-lang/wove:639"))
+				"gh:wove-lang/wove:639" "gh:wove-lang/wove:677"))
 		(params (arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(canonical (shared-array u8)) (options (shared-array u8)) (directory (shared-array u8)))
 		(returns Availability)
@@ -527,8 +539,8 @@
 				(i32.lt row (array.len bindings))
 				(body
 					(if
-						(:doc "Once one optional selection is found, verify the rest of the published prefix in order.")
-						(struct.get (array.load bindings row) optional)
+						(:doc "Once a selection requires availability checking, verify the rest of the published prefix in order.")
+						(call needs_availability (array.load bindings row))
 						(then (return (call verify_bindings (borrow-shared arena) (borrow-shared files)
 							(borrow-shared bindings) row (borrow-shared canonical)
 							(borrow-shared options) (borrow-shared directory)))))

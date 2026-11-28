@@ -4,9 +4,9 @@
 	(:doc `Emit live C header expressions and check their declared type and access through the included header.`)
 
 	(use wove-file "../source/scan.wove" (only (type SourceNode)))
-	(use wove-file "../source/types.wove" (only is_builtin_integer))
+	(use wove-file "../source/types.wove" (only is_builtin_integer is_signed_integer_value))
 	(use wove-file "../scalar/flow.wove" (only is_c_value_binding (type ScalarStatement)
-		(value c_constant_binding) (value c_readonly_binding) (value c_writable_binding) (value c_macro_binding)))
+		(value c_constant_binding) (value c_readonly_binding) (value c_writable_binding) (value c_macro_binding) (value c_lossless_macro_binding)))
 	(use wove-file "../scalar/native_owner_types.wove" (only is_native_owner))
 	(use wove-file "../scalar/owners.wove" (only optional_byte_owner_type))
 	(use wove-file "../scalar/loans.wove" (only (type ScalarExpression)))
@@ -259,6 +259,77 @@
 			(return (call c_literal_text (borrow-shared storage_close)
 				(borrow-mut output) cursor writing))))
 
+	(let lossless_prelude `#define WVRT_C_MACRO_SIGNED(T,N,S) ((S) && sizeof(T) <= (N))
+#define WVRT_C_MACRO_UNSIGNED(T,N,S) (sizeof(T) <= (N) - (S))
+#define WVRT_C_MACRO_CHAR(N,S) ((char)-1 < (char)0 ? WVRT_C_MACRO_SIGNED(char,N,S) : WVRT_C_MACRO_UNSIGNED(char,N,S))
+#ifdef __SIZEOF_INT128__
+#define WVRT_C_MACRO_INT128(N,S) , __int128: WVRT_C_MACRO_SIGNED(__int128,N,S), unsigned __int128: WVRT_C_MACRO_UNSIGNED(unsigned __int128,N,S)
+#else
+#define WVRT_C_MACRO_INT128(N,S)
+#endif
+#if defined(__BITINT_MAXWIDTH__) && __BITINT_MAXWIDTH__ >= 256 && __STDC_VERSION__ >= 202311L
+#define WVRT_C_MACRO_INT256(N,S) , _BitInt(256): WVRT_C_MACRO_SIGNED(_BitInt(256),N,S), unsigned _BitInt(256): WVRT_C_MACRO_UNSIGNED(unsigned _BitInt(256),N,S)
+#else
+#define WVRT_C_MACRO_INT256(N,S)
+#endif
+#define WVRT_C_MACRO_FITS(V,N,S) _Generic((V), \
+  _Bool: 1, char: WVRT_C_MACRO_CHAR(N,S), \
+  signed char: WVRT_C_MACRO_SIGNED(signed char,N,S), unsigned char: WVRT_C_MACRO_UNSIGNED(unsigned char,N,S), \
+  short: WVRT_C_MACRO_SIGNED(short,N,S), unsigned short: WVRT_C_MACRO_UNSIGNED(unsigned short,N,S), \
+  int: WVRT_C_MACRO_SIGNED(int,N,S), unsigned int: WVRT_C_MACRO_UNSIGNED(unsigned int,N,S), \
+  long: WVRT_C_MACRO_SIGNED(long,N,S), unsigned long: WVRT_C_MACRO_UNSIGNED(unsigned long,N,S), \
+  long long: WVRT_C_MACRO_SIGNED(long long,N,S), unsigned long long: WVRT_C_MACRO_UNSIGNED(unsigned long long,N,S) \
+  WVRT_C_MACRO_INT128(N,S) WVRT_C_MACRO_INT256(N,S), default: 0)
+`)
+	(let lossless_guard "#ifdef ")
+	(let lossless_assert "\n__extension__ _Static_assert(WVRT_C_MACRO_FITS(")
+	(let lossless_size ",sizeof(")
+	(let lossless_signed "),1")
+	(let lossless_unsigned "),0")
+	(let lossless_end "),\"Wove C integer macro range does not fit its declared type\");\n#else\n#error \"Wove requires an object-like C integer macro\"\n#endif\n")
+
+	(fn write_lossless_macro_prelude
+		(:doc "Share a C range test across selected macros. On supported Clang ABIs, these integer types have whole-byte widths without padding. An unsigned source needs an extra destination bit if the destination is signed.")
+		(params (output (mut-array u8)) (offset u32) (writing bool)) (returns u32)
+		(body (return (call c_literal_text (borrow-shared lossless_prelude)
+			(borrow-mut output) offset writing))))
+
+	(fn write_lossless_macro_check
+		(:doc "Check the entire native integer range in an unevaluated C expression.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(name SourceNode) (type u32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let-mut cursor (call c_literal_text (borrow-shared lossless_guard)
+				(borrow-mut output) offset writing))
+			(set cursor (call c_span (borrow-shared source) (struct.get name start) (struct.get name end)
+				(borrow-mut output) cursor writing))
+			(set cursor (call c_literal_text (borrow-shared lossless_assert) (borrow-mut output) cursor writing))
+			(set cursor (call write_c_value_name (borrow-shared source) name (borrow-mut output) cursor writing))
+			(set cursor (call c_literal_text (borrow-shared lossless_size) (borrow-mut output) cursor writing))
+			(set cursor (call write_value_type (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) type (borrow-mut output) cursor name_prefix writing))
+			(if
+				(:doc "The destination signedness determines the available magnitude bits.")
+				(call is_signed_integer_value type)
+				(then (set cursor (call c_literal_text (borrow-shared lossless_signed) (borrow-mut output) cursor writing)))
+				(else (set cursor (call c_literal_text (borrow-shared lossless_unsigned) (borrow-mut output) cursor writing))))
+			(return (call c_literal_text (borrow-shared lossless_end) (borrow-mut output) cursor writing))))
+
+	(fn write_lossless_macro_value
+		(:doc "Convert one evaluation of the original macro to the exact Wove type.")
+		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
+			(name SourceNode) (type u32) (output (mut-array u8)) (offset u32) (name_prefix i32) (writing bool))
+		(returns u32)
+		(body
+			(let open (call c_byte (borrow-mut output) offset 40u8 writing))
+			(let cast (call c_byte (borrow-mut output) open 40u8 writing))
+			(let spelled (call write_value_type (borrow-shared source) (borrow-shared nodes)
+				(borrow-shared records) type (borrow-mut output) cast name_prefix writing))
+			(let after_cast (call c_byte (borrow-mut output) spelled 41u8 writing))
+			(let value (call write_c_value_name (borrow-shared source) name (borrow-mut output) after_cast writing))
+			(return (call c_byte (borrow-mut output) value 41u8 writing))))
+
 	(fn write_c_value_contract
 		(:doc `Emit a contract once per defining row. All aliases share the original native object or macro.`)
 		(params (source (shared-array u8)) (nodes (shared-array SourceNode)) (records (shared-array ScalarRecord))
@@ -288,6 +359,12 @@
 				(u32.eq kind c_constant_binding)
 				(then (return (call write_constant_check (borrow-shared source) (borrow-shared nodes)
 					(borrow-shared records) (array.load nodes name) type -1i32
+					(borrow-mut output) offset name_prefix writing))))
+			(if
+				(:doc "A lossless macro permits a range-preserving conversion of its native type.")
+				(u32.eq kind c_lossless_macro_binding)
+				(then (return (call write_lossless_macro_check (borrow-shared source) (borrow-shared nodes)
+					(borrow-shared records) (array.load nodes name) type
 					(borrow-mut output) offset name_prefix writing))))
 			(if
 				(:doc "A read-only macro needs an expression type check because its expansion may be an rvalue.")

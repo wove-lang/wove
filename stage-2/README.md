@@ -362,6 +362,7 @@ storage require a complete record from the selected header.
 | 77 | Optional C expression macro unavailable |
 | 91 | Optional C record unavailable or incomplete |
 | 92 | Optional C scalar typedef unavailable |
+| 93 | Required lossless C integer macro unavailable |
 
 The native `query_clang_header` API in `clang/query.wove` accepts a Clang
 executable, NUL-terminated target and include arguments, the header spelling,
