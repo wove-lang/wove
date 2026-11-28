@@ -1157,6 +1157,13 @@ or an inline constructor of its exact defining type, including a type from
 a bridge-local C header import. Values are evaluated once in source order.
 C zero-initializes the omitted native members. Pass `shared-ref` or
 `mut-ref` arguments with an explicit borrow.
+A fixed C function can return a plain native record by value. Write
+`(returns RecordName)` for its declared native record and bind the call to
+a local value. Use `struct.get` to read the fields of that value. Clang
+checks that the native record is complete and that the header’s function
+prototype and declared record fields have the exact types. The result uses
+the native aggregate ABI without introducing a borrow or a destructor.
+
 Bridge `const` exposes an integer constant, `let` reads a C value, and
 `let-mut` also accepts a `set` on the imported C lvalue.
 
