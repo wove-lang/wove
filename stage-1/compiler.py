@@ -869,10 +869,10 @@ class FunctionEmitter:
 			range_bounds = (start, end)
 		binding, origin = self.project(source, named=True)
 		origin_kind = origin.kind
-		# A local range retains the element type of its backing descriptor.
+		# A local borrow retains the element type of its backing descriptor.
 		if kind is None:
-			# Inline arrays first need a view of their full storage.
-			if range_bounds is None or not isinstance(origin_kind, BufferType):
+			# Infer the local view only from a typed array descriptor.
+			if not isinstance(origin_kind, BufferType):
 				raise SourceError(node.line)
 			kind = BufferType(SHARED, origin_kind.element)
 		# The loan and its source must agree on the exact element type.
