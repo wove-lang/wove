@@ -1,0 +1,200 @@
+(module clang_replay_dependencies
+	(:copyright "Copyright (c) 2026 wove contributors")
+	(:license "SPDX-License-Identifier: MIT OR Apache-2.0")
+	(:doc "Prove that an otherwise unverified function declaration has no use in an emitted C unit.")
+
+	(use wove-file "./fields.wove" (only clang_field clang_inner field_equals field_in
+		(value clang_kind_key) (value clang_name_key)))
+	(use wove-file "./native_replay.wove" (only has_kind
+		(value function_kind) (value storage_key) (value extern_storage) (value inline_key)
+		(value true_value) (value compound_kind) (value gnu_inline_kind)))
+	(use wove-file "../c/identifiers.wove" (only is_c_identifier))
+	(use wove-file "../json/lex.wove" (only json_scan_string json_skip_trivia))
+	(use wove-file "../json/reader.wove" (only json_parse (type JsonNode)))
+	(use wove-file "../json/workspace.wove" (only allocate_json_workspace))
+	(use wove-file "../text/bytes.wove" (only same_bytes))
+	(use wove-file "../text/copy.wove" (only append_bytes))
+
+	(let inert_children "\"ParmVarDecl\"\u0000\"BuiltinAttr\"\u0000\"ReturnsTwiceAttr\"\u0000\"NoThrowAttr\"\u0000\"NonNullAttr\"\u0000")
+	(let used_key "isUsed")
+	(let referenced_key "isReferenced")
+	(let dependency_names_capacity 256i32)
+
+	(fn can_defer_function
+		(:doc "Only external prototypes and GNU extern-inline definitions can be inert until used.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32) (scratch (mut-array u8)))
+		(returns bool)
+		(body
+			(let storage (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared storage_key) (borrow-mut scratch)))
+			(let external (call field_equals (borrow-shared ast) (borrow-shared nodes) storage (borrow-shared extern_storage)))
+			(if (storage.not-ltz.and external.not) (then (return (bool false))))
+			(let-mut body_seen (bool false))
+			(let-mut gnu (bool false))
+			(let-mut child (call clang_inner (borrow-shared ast) 0i32 (borrow-shared nodes) row (borrow-mut scratch)))
+			(while
+				(:doc "Attributes that can emit or change linkage cannot be deferred, even for an unused function.")
+				child.not-ltz
+				(body
+					(let kind (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) child
+						(borrow-shared clang_kind_key) (borrow-mut scratch)))
+					(if
+						(:doc "An arbitrary body is inert only with explicit GNU extern-inline linkage.")
+						(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared compound_kind))
+						(then (set body_seen (bool true)))
+						(else
+							(if
+								(:doc "The GNU attribute determines linkage independently of the selected C mode.")
+								(call field_equals (borrow-shared ast) (borrow-shared nodes) kind (borrow-shared gnu_inline_kind))
+								(then (set gnu (bool true)))
+								(else
+									(if
+										(:doc "Only known declaration metadata can be ignored until use.")
+										(bool:not (call field_in (borrow-shared ast) (borrow-shared nodes) kind
+											(borrow-shared inert_children)))
+										(then (return (bool false))))))))
+					(set child (struct:get (nodes.get child) next_sibling))))
+			(let inline (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared inline_key) (borrow-mut scratch)))
+			(if
+				(:doc "The GNU linkage must be explicit on the definition.")
+				body_seen
+				(then (return (external.and (gnu.and (call field_equals (borrow-shared ast) (borrow-shared nodes)
+					inline (borrow-shared true_value)))))))
+			(return inline.ltz)))
+
+	(fn dependency_name_end
+		(:doc "Find a complete name in the zero-terminated list of deferred declarations.")
+		(params (names (shared-array u8)) (start i32)) (returns i32)
+		(body
+			(let-mut end start)
+			(while
+				(:doc "The unused, zero-filled tail marks the end of the list.")
+				(end.lt names.len)
+				(body
+					(if (u8:eqz (names.get end)) (then (return end)))
+					(set end end.inc)))
+			(return end)))
+
+	(fn defer_native_function
+		(:doc "Record one exact external name, treating all of its redeclarations as one dependency.")
+		(params (ast (shared-array u8)) (nodes (shared-array JsonNode)) (row i32)
+			(names (mut-array u8)) (scratch (mut-array u8))) (returns bool)
+		(body
+			(if
+				(:doc "Non-functions and even unused definitions with observable linkage retain the whole-header rejection.")
+				(bool:not (bool:and (call has_kind (borrow-shared ast) (borrow-shared nodes) row
+							(borrow-shared function_kind) (borrow-mut scratch))
+						(call can_defer_function (borrow-shared ast) (borrow-shared nodes) row (borrow-mut scratch))))
+				(then (return (bool false))))
+			(let field (call clang_field (borrow-shared ast) 0i32 (borrow-shared nodes) row
+				(borrow-shared clang_name_key) (borrow-mut scratch)))
+			(if field.ltz (then (return (bool false))))
+			(let span (nodes.get field))
+			(let start span/start.inc)
+			(let end span/end.dec)
+			(if
+				(:doc "Only a portable spelling can be passed as an exact declaration query.")
+				(bool:not (call is_c_identifier (borrow-shared ast) start end))
+				(then (return (bool false))))
+			(let-mut cursor 0i32)
+			(while
+				(:doc "Keep the query list deduplicated and reserve both terminators before appending.")
+				(cursor.lt names.len)
+				(body
+					(let next (call dependency_name_end (borrow-shared names) cursor))
+					(if
+						(:doc "The first empty name is the insertion point.")
+						(next.eq cursor)
+						(then
+							(if (i32:le (names.len.sub cursor) (i32:inc (end.sub start))) (then (return (bool false))))
+							(let written (call append_bytes (borrow-shared (ast.range start end)) (borrow-mut names) cursor))
+							(return written.not-ltz)))
+					(if
+						(:doc "Earlier declarations of this same function already request the audit.")
+						(call same_bytes (borrow-shared ast) start end (borrow-shared names) cursor next)
+						(then (return (bool true))))
+					(set cursor next.inc)))
+			(return (bool false))))
+
+	(fn declaration_json_end
+		(:doc "Find the end of one root in Clang's concatenated filtered JSON output.")
+		(params (ast (shared-array u8)) (start i32)) (returns i32)
+		(body
+			(if (u8:not-eq (ast.get start) 123u8) (then (return -1i32)))
+			(let-mut cursor start.inc)
+			(let-mut depth 1i32)
+			(while
+				(:doc "Count object delimiters outside quoted strings. The JSON reader verifies each complete root.")
+				(cursor.lt ast.len)
+				(body
+					(let byte (ast.get cursor))
+					(if
+						(:doc "Braces inside a string are data only.")
+						(byte.eq 34u8)
+						(then
+							(let token (call json_scan_string (borrow-shared ast) cursor))
+							(if token/error.gtz (then (return -1i32)))
+							(set cursor token/end)
+							(continue)))
+					(set cursor cursor.inc)
+					(if (byte.eq 123u8) (then (set depth depth.inc)))
+					(if
+						(:doc "The first close at depth zero ends this declaration.")
+						(byte.eq 125u8)
+						(then
+							(set depth depth.dec)
+							(if depth.eqz (then (return cursor)))))))
+			(return -1i32)))
+
+	(fn unused_native_function
+		(:doc "Check every exact declaration in a filtered AST, including uses in header and runtime bodies.")
+		(params (ast (shared-array u8)) (name (shared-array u8))) (returns bool)
+		(body
+			(if ast.len.eqz (then (return (bool false))))
+			(let-mut scratch (array:alloc u8 24i32))
+			(let-mut found (bool false))
+			(let-mut cursor 0i32)
+			(while
+				(:doc "Clang filters by substring, so parse each matching root and compare the exact spelling.")
+				(cursor.lt ast.len)
+				(body
+					(let trivia (call json_skip_trivia (borrow-shared ast) cursor))
+					(if trivia/error.gtz (then (return (bool false))))
+					(let start trivia/end)
+					(if (start.eq ast.len) (then (break)))
+					(let end (call declaration_json_end (borrow-shared ast) start))
+					(if end.ltz (then (return (bool false))))
+					(set cursor end)
+					(let root (borrow-shared (ast.range start end)))
+					(let workspace (call allocate_json_workspace (borrow-shared root)))
+					(if workspace.is-null (then (return (bool false))))
+					(let-mut nodes (move workspace.unwrap))
+					(let parsed (call json_parse (borrow-shared root) (borrow-mut nodes)))
+					(if parsed/error.gtz (then (return (bool false))))
+					(if
+						(:doc "Other declaration kinds cannot resolve the audited C function.")
+						(bool:not (call has_kind (borrow-shared root) (borrow-shared nodes) 0i32
+							(borrow-shared function_kind) (borrow-mut scratch)))
+						(then (continue)))
+					(let field (call clang_field (borrow-shared root) 0i32 (borrow-shared nodes) 0i32
+						(borrow-shared clang_name_key) (borrow-mut scratch)))
+					(if field.ltz (then (return (bool false))))
+					(let span (nodes.get field))
+					(if
+						(:doc "Ignore unrelated substring matches in the same tool output.")
+						(bool:not (call same_bytes (borrow-shared root) span/start.inc span/end.dec
+							(borrow-shared name) 0i32 name.len))
+						(then (continue)))
+					(let used (call clang_field (borrow-shared root) 0i32 (borrow-shared nodes) 0i32
+						(borrow-shared used_key) (borrow-mut scratch)))
+					(let referenced (call clang_field (borrow-shared root) 0i32 (borrow-shared nodes) 0i32
+						(borrow-shared referenced_key) (borrow-mut scratch)))
+					(if
+						(:doc "Any reference defeats absence, even in a header helper that may not execute.")
+						(bool:or (used.not-ltz.or referenced.not-ltz)
+							(bool:not (call can_defer_function (borrow-shared root) (borrow-shared nodes) 0i32 (borrow-mut scratch))))
+						(then (return (bool false))))
+					(set found (bool true))))
+			(return found)))
+)

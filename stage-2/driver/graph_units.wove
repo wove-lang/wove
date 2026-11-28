@@ -16,7 +16,8 @@
 	(use wove-file "./diagnostics.wove" (only report_argv (value publish_failure)))
 	(use wove-file "./macro_probes.wove" (only write_macro_probes))
 	(use wove-file "./variadic_probes.wove" (only write_variadic_probes))
-	(use wove-file "./numbered_headers.wove" (only certify_numbered_includes check_numbered_uses discard_numbered_sources
+	(use wove-file "../clang/dependencies.wove" (only (value dependency_names_capacity)))
+	(use wove-file "./numbered_headers.wove" (only certify_numbered_includes check_serial_dependencies check_numbered_uses discard_numbered_sources
 		(value names_begin) (value names_end)
 		(value implicit_runtime) (value implicit_stdint)))
 	(use wove-file "./output.wove" (only stage_native_unit))
@@ -421,7 +422,7 @@
 
 	(fn stage_checked_units
 		(:doc "Return the negative unit count on success or use the canonical stage when splitting is unavailable.")
-		(params (staged (shared-array u8)) (probe_options (shared-array u8)) (partition i32) (target_index i32) (human bool)
+		(params (staged (shared-array u8)) (probe_options (shared-array u8)) (serial (shared-array u8)) (partition i32) (target_index i32) (human bool)
 			(arena (shared-array u8)) (files (shared-array SuppliedFile)) (bindings (shared-array GraphBinding))
 			(trees (shared-array ScalarTree)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord)) (statements (shared-array ScalarStatement))
@@ -456,6 +457,7 @@
 			(if (width.gt 2147483647u32) (then (return 0i32)))
 			(let-mut prefix (array:alloc u8 (i32:from-u32 width)))
 			(let-mut declaration (array:alloc u8 1i32))
+			(let-mut deferred (array:alloc u8 dependency_names_capacity))
 			(if
 				(:doc "Certify the exact ordered prefix only when the checked graph selected C headers.")
 				width.gtz
@@ -569,10 +571,23 @@
 						(options.len.eqz.or
 							(bool:not (call certify_numbered_includes (borrow-shared program) (borrow-shared options)
 								(borrow-shared staged) count (borrow-shared prefix) (borrow-shared guards) (borrow-shared names)
-								(borrow-shared typed) (borrow-mut declaration)
+								(borrow-shared typed) (borrow-mut declaration) (borrow-mut deferred)
 								implicit borrowed writable (writable.or (owners/any.or native_calls))
 								(owners/pointer.or call_witnesses/fixed) variadic_count)))
 						(then (return 0i32)))))
+			(let pending (u8:gtz (deferred.get 0i32)))
+			(if
+				(:doc "Prove absence in the real serial context before staging any numbered file.")
+				pending
+				(then
+					(let program (call clang_program))
+					(let checked (call check_serial_dependencies (borrow-shared program) (borrow-shared probe_options)
+						(borrow-shared staged) (borrow-shared serial) (borrow-shared deferred)))
+					(if
+						(:doc "A failed private write or removal prevents further staging.")
+						checked.ltz
+						(then (return (call report_argv 65u32 target_index (borrow-shared publish_failure) human))))
+					(if checked.eqz (then (return 0i32)))))
 			(let-mut ends (array:alloc UnitIndex count.inc))
 			(let measured (call write_partitioned_graph (borrow-shared arena) (borrow-shared files) (borrow-shared bindings)
 				(borrow-shared trees) (borrow-shared nodes) (borrow-shared functions) (borrow-shared parameters)
@@ -596,9 +611,11 @@
 						(borrow-shared ends) count)))
 				(then (return (call report_argv 65u32 target_index (borrow-shared publish_failure) human))))
 			(let replay (declaration.get 0i32))
+			(let deployment (replay.not-lt availability_declaration))
+			(let pending_width (if pending (then deferred.len) (else 0i32)))
 			(if
-				(:doc "Availability and replayed static helpers also require a check of the actual emitted uses.")
-				(replay.not-lt availability_declaration)
+				(:doc "Check availability, static helpers, and deferred declarations in the actual emitted units.")
+				(deployment.or pending)
 				(then
 					(let program (call clang_program))
 					(let options (call numbered_probe_arguments (borrow-shared probe_options) (borrow-shared staged)
@@ -607,7 +624,8 @@
 						(:doc "Discard only the numbered files before falling back to the unchanged serial build.")
 						(options.len.eqz.or
 							(bool:not (call check_numbered_uses (borrow-shared program) (borrow-shared options)
-								(borrow-shared staged) count (replay.eq static_inline_declaration))))
+								(borrow-shared staged) count deployment (replay.eq static_inline_declaration)
+								(borrow-shared (deferred.range 0i32 pending_width)))))
 						(then
 							(if
 								(:doc "An incomplete private cleanup is an ordinary staging failure.")
