@@ -4,6 +4,7 @@
 	(:doc "Certify a checked include prefix in the private directory that will compile the numbered units.")
 
 	(use wove-file "../clang/run.wove" (only run_clang_replay))
+	(use wove-file "../clang/preprocess.wove" (only run_clang_preprocessing))
 	(use wove-file "../clang/trace.wove" (only include_line trace_length))
 	(use wove-file "../clang/replay.wove" (only replay_directives_safe replay_declarations_safe))
 	(use wove-file "../clang/native_replay.wove" (only write_native_identities))
@@ -91,37 +92,39 @@
 	(fn staged_empty_baseline
 		(:doc "Observe the compiler's built-in and configured preface using the exact serial filename.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
-			(output (mut-array u8)) (trace (mut-array u8))) (returns i32)
+			(trace (mut-array u8))) (returns (optional (owned-array u8)))
 		(body
 			(let empty (array.alloc u8 0i32))
-			(if (bool.not (call write_new_file (borrow-shared path) (borrow-shared empty))) (then (return -1i32)))
-			(let result (call run_clang_replay (borrow-shared program) (borrow-shared options)
-				(borrow-shared path) (bool true) (borrow-mut output) (borrow-mut trace)))
-			(let removed (call unlink (borrow-shared path)))
 			(if
-				(:doc "Use only a complete private probe and release its staged path before the serial capture.")
-				(bool.or (i32.not-eqz removed) (u32.not-eqz (struct.get result error)))
-				(then (return -1i32)))
-			(return (call baseline_end (borrow-shared output) (struct.get result length)))))
+				(:doc "Only remove the staged name when this baseline created it.")
+				(bool.not (call write_new_file (borrow-shared path) (borrow-shared empty)))
+				(then (return (optional.none (owned-array u8)))))
+			(let result (call run_clang_preprocessing (borrow-shared program) (borrow-shared options)
+				(borrow-shared path) (borrow-mut trace)))
+			(if
+				(:doc "The serial capture can reuse the staged filename only after its baseline is removed.")
+				(i32.not-eqz (call unlink (borrow-shared path)))
+				(then (return (optional.none (owned-array u8)))))
+			(return (move result))))
 
 	(fn serial_snapshot
 		(:doc "Check the serial prefix's preprocessing and declarations together before comparing numbered paths.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (path (shared-array u8))
-			(baseline (shared-array u8)) (preprocessed (mut-array u8)) (trace (mut-array u8))
-			(identities (mut-array FileStamp)) (macros (shared-array u8))
-			(borrowed bool) (writable bool) (fixed_calls bool) (variadic_calls bool)) (returns i32)
+			(baseline (shared-array u8)) (trace (mut-array u8)) (identities (mut-array FileStamp))
+			(macros (shared-array u8)) (borrowed bool) (writable bool) (fixed_calls bool) (variadic_calls bool))
+		(returns (optional (owned-array u8)))
 		(body
-			(let pp (call run_clang_replay (borrow-shared program) (borrow-shared options)
-				(borrow-shared path) (bool true) (borrow-mut preprocessed) (borrow-mut trace)))
+			(let captured (call run_clang_preprocessing (borrow-shared program) (borrow-shared options)
+				(borrow-shared path) (borrow-mut trace)))
+			(if (owner.is-null captured) (then (return (move captured))))
+			(let output (move (optional.unwrap captured)))
 			(let base (array.len baseline))
-			(let length (struct.get pp length))
 			(if
 				(:doc "The selected includes must replay the observed compiler preface.")
-				(bool.or (bool.or (u32.not-eqz (struct.get pp error)) (i32.not-lt base length))
+				(bool.or (i32.not-lt base (array.len output))
 					(bool.not (call same_bytes (borrow-shared baseline) 0i32 base
-						(borrow-shared preprocessed) 0i32 base)))
-				(then (return -1i32)))
-			(let text (borrow-shared (array.range preprocessed 0i32 length)))
+						(borrow-shared output) 0i32 base)))
+				(then (return (optional.none (owned-array u8)))))
 			(if
 				(:doc "Ordinary replay can reject unfamiliar directives before paying for the AST query.")
 				(bool.not (bool.or borrowed writable))
@@ -129,13 +132,13 @@
 					(let no_ast (array.alloc JsonNode 0i32))
 					(if
 						(:doc "An ordinary plan certifies only the original inert directive grammar.")
-						(bool.not (call replay_directives_safe (borrow-shared text) base
+						(bool.not (call replay_directives_safe (borrow-shared output) base
 							(borrow-shared baseline) (borrow-shared no_ast) (bool false) (bool false) (borrow-shared macros)))
-						(then (return -1i32)))))
+						(then (return (optional.none (owned-array u8)))))))
 			(if
 				(:doc "The trace must identify every header before the JSON AST pass.")
 				(bool.not (call include_identities (borrow-shared trace) (borrow-mut identities) (bool false)))
-				(then (return -1i32)))
+				(then (return (optional.none (owned-array u8)))))
 			(let-mut ast (array.alloc u8 capture_capacity))
 			(let-mut ast_trace (array.alloc u8 trace_capacity))
 			(let declarations (call run_clang_replay (borrow-shared program) (borrow-shared options)
@@ -146,20 +149,20 @@
 					(bool.or (bool.not (call same_bytes (borrow-shared trace) 0i32 (call trace_length (borrow-shared trace))
 							(borrow-shared ast_trace) 0i32 (call trace_length (borrow-shared ast_trace))))
 						(bool.not (call include_identities (borrow-shared ast_trace) (borrow-mut identities) (bool true)))))
-				(then (return -1i32)))
+				(then (return (optional.none (owned-array u8)))))
 			(let-mut statements (array.alloc JsonNode statement_capacity))
 			(let declarations_bytes (borrow-shared (array.range ast 0i32 (struct.get declarations length))))
 			(if
 				(:doc "Header-local state and function definitions require the serial C unit.")
 				(bool.not (call replay_declarations_safe (borrow-shared declarations_bytes)
 					(borrow-mut statements) borrowed writable fixed_calls variadic_calls))
-				(then (return -1i32)))
+				(then (return (optional.none (owned-array u8)))))
 			(if
 				(:doc "A borrowed object's new macro may only name an externally declared live slot.")
-				(bool.and (bool.or borrowed writable) (bool.not (call replay_directives_safe (borrow-shared text) base
+				(bool.and (bool.or borrowed writable) (bool.not (call replay_directives_safe (borrow-shared output) base
 					(borrow-shared declarations_bytes) (borrow-shared statements) borrowed writable (borrow-shared macros))))
-				(then (return -1i32)))
-			(return length)))
+				(then (return (optional.none (owned-array u8)))))
+			(return (optional.some (move output)))))
 
 	(fn nested_include_trace_matches
 		(:doc "Compare the same header rows and file identities around the one extra generated header.")
@@ -255,7 +258,9 @@
 			(boundary i32) (shared (shared-array u8)) (native_identities (shared-array u8))
 			(macro_count i32) (variadic_count i32)) (returns bool)
 		(body
-			(let-mut output (array.alloc u8 capture_capacity))
+			(let allocated (array.try-alloc u8 (array.len serial)))
+			(if (owner.is-null allocated) (then (return (bool false))))
+			(let-mut output (move (optional.unwrap allocated)))
 			(let-mut trace (array.alloc u8 trace_capacity))
 			(let-mut native (array.alloc u8 (array.len native_identities)))
 			(let-mut unit 0i32)
@@ -385,7 +390,7 @@
 		(:doc "Replay the actual implicit header at serial and numbered include depth.")
 		(params (program (shared-array u8)) (options (shared-array u8)) (serial_path (shared-array u8)) (count i32)
 			(prefix (shared-array u8)) (names (shared-array u8)) (explicit_trace (shared-array u8))
-			(directive (shared-array u8)) (macros (shared-array u8)) (output (mut-array u8)) (trace (mut-array u8))
+			(directive (shared-array u8)) (macros (shared-array u8)) (trace (mut-array u8))
 			(identities (mut-array FileStamp)) (resolve_native bool) (variadic_count i32))
 		(returns bool)
 		(body
@@ -396,15 +401,19 @@
 				(bool.or (i32.eqz (array.len serial))
 					(bool.not (call write_new_file (borrow-shared serial_path) (borrow-shared serial))))
 				(then (return (bool false))))
-			(let result (call run_clang_replay (borrow-shared program) (borrow-shared options)
-				(borrow-shared serial_path) (bool true) (borrow-mut output) (borrow-mut trace)))
-			(let identified (bool.and (u32.eqz (struct.get result error))
-				(call include_identities (borrow-shared trace) (borrow-mut identities) (bool false))))
+			(let captured (call run_clang_preprocessing (borrow-shared program) (borrow-shared options)
+				(borrow-shared serial_path) (borrow-mut trace)))
+			(if
+				(:doc "A failed capture owns no output, but the staged serial source still needs removal.")
+				(owner.is-null captured)
+				(then
+					(let removed (call unlink (borrow-shared serial_path)))
+					(return (bool false))))
+			(let output (move (optional.unwrap captured)))
 			(let macro_count (if
 				(:doc "The effective serial prefix must still contain only substitutable macro definitions.")
-				identified
-				(then (call safe_macro_definitions (borrow-shared (array.range output 0i32 (struct.get result length)))
-					(borrow-shared macros)))
+				(call include_identities (borrow-shared trace) (borrow-mut identities) (bool false))
+				(then (call safe_macro_definitions (borrow-shared output) (borrow-shared macros)))
 				(else -1i32)))
 			(let native_query (bool.or resolve_native (i32.gtz macro_count)))
 			(let-mut native (array.alloc u8 (if native_query (then capture_capacity) (else 0i32))))
@@ -425,17 +434,16 @@
 						(bool.not (call same_bytes (borrow-shared explicit_trace) 0i32 boundary
 							(borrow-shared trace) 0i32 boundary)))))
 				(then (return (bool false))))
-			(let text (borrow-shared (array.range output 0i32 (struct.get result length))))
 			(if
 				(:doc "The implicit headers must preserve the checked native operands.")
-				(bool.and (i32.gtz (array.len names)) (bool.not (call native_names_preserved (borrow-shared text))))
+				(bool.and (i32.gtz (array.len names)) (bool.not (call native_names_preserved (borrow-shared output))))
 				(then (return (bool false))))
 			(let numbered (call implicit_replay_source (borrow-shared prefix) (borrow-shared names)
 				(borrow-shared common_directive) (borrow-shared macros)))
 			(if (i32.eqz (array.len numbered)) (then (return (bool false))))
 			(return (call replay_numbered_context (borrow-shared program) (borrow-shared options)
 				(borrow-shared serial_path) count (borrow-shared numbered) (borrow-shared directive)
-				(borrow-shared text) (borrow-shared trace) (borrow-mut identities) boundary
+				(borrow-shared output) (borrow-shared trace) (borrow-mut identities) boundary
 				(borrow-shared (array.range native 0i32 width)) macro_count variadic_count))))
 
 	(fn certify_numbered_includes
@@ -473,30 +481,38 @@
 			(let witnessed (call append_bytes (borrow-shared names) (borrow-mut probe) next))
 			(let typed (call append_bytes (borrow-shared (array.range macros 0i32 flat_macros)) (borrow-mut probe) witnessed))
 			(let end (call append_bytes (borrow-shared counter_probe) (borrow-mut probe) typed))
-			(let-mut baseline (array.alloc u8 capture_capacity))
 			(let-mut trace (array.alloc u8 trace_capacity))
-			(let base (call staged_empty_baseline (borrow-shared program) (borrow-shared options)
-				(borrow-shared serial_path) (borrow-mut baseline) (borrow-mut trace)))
+			(let baseline_capture (call staged_empty_baseline (borrow-shared program) (borrow-shared options)
+				(borrow-shared serial_path) (borrow-mut trace)))
+			(if (owner.is-null baseline_capture) (then (return (bool false))))
+			(let baseline (move (optional.unwrap baseline_capture)))
+			(let base (call baseline_end (borrow-shared baseline) (array.len baseline)))
 			(if
 				(:doc "Do not overwrite an existing serial file or classify a failed compiler invocation.")
 				(bool.or (i32.not-lt 0i32 base)
 					(bool.not (call write_new_file (borrow-shared serial_path) (borrow-shared probe))))
 				(then (return (bool false))))
-			(let-mut source (array.alloc u8 capture_capacity))
 			(let-mut identities (array.alloc FileStamp include_limit))
-			(let width (call serial_snapshot (borrow-shared program) (borrow-shared options) (borrow-shared serial_path)
-				(borrow-shared (array.range baseline 0i32 base)) (borrow-mut source) (borrow-mut trace)
+			(let captured (call serial_snapshot (borrow-shared program) (borrow-shared options) (borrow-shared serial_path)
+				(borrow-shared (array.range baseline 0i32 base)) (borrow-mut trace)
 				(borrow-mut identities) (borrow-shared macros) borrowed writable fixed_calls (i32.gtz variadic_count)))
+			(if
+				(:doc "Remove the temporary serial prefix even when preprocessing or certification failed.")
+				(owner.is-null captured)
+				(then
+					(let removed (call unlink (borrow-shared serial_path)))
+					(return (bool false))))
+			(let source (move (optional.unwrap captured)))
 			(let macro_count (if
 				(:doc "Check definitions in the exact translation unit when its preamble is already complete.")
-				(bool.and (i32.not-ltz width) (u8.eqz implicit))
-				(then (call safe_macro_definitions (borrow-shared (array.range source 0i32 width)) (borrow-shared macros)))
+				(u8.eqz implicit)
+				(then (call safe_macro_definitions (borrow-shared source) (borrow-shared macros)))
 				(else 0i32)))
 			(let direct (bool.and (u8.eqz implicit) (bool.or resolve_native (i32.gtz macro_count))))
 			(let-mut native (array.alloc u8 (if direct (then capture_capacity) (else 0i32))))
 			(let native_width (if
 				(:doc "Without an implicit include, the audited serial prefix is the actual identity context.")
-				(bool.and direct (bool.and (i32.not-ltz width) (i32.not-ltz macro_count)))
+				(bool.and direct (i32.not-ltz macro_count))
 				(then (call read_native_identities (borrow-shared program) (borrow-shared options)
 					(borrow-shared serial_path) (borrow-shared trace) (borrow-mut identities)
 					-1i32 (borrow-shared serial_path) macro_count variadic_count (borrow-mut native)))
@@ -504,7 +520,7 @@
 			(let removed (call unlink (borrow-shared serial_path)))
 			(if
 				(:doc "A failed audit or missing required identity leaves the original serial path available.")
-				(bool.or (bool.or (bool.or (i32.ltz width) (i32.ltz macro_count)) (i32.not-eqz removed))
+				(bool.or (bool.or (i32.ltz macro_count) (i32.not-eqz removed))
 					(bool.and direct (i32.not-gtz native_width)))
 				(then (return (bool false))))
 			(if
@@ -518,15 +534,15 @@
 						(then (return (call certify_implicit_context (borrow-shared program) (borrow-shared options)
 							(borrow-shared serial_path) count (borrow-shared (array.range probe 0i32 next))
 							(borrow-shared names) (borrow-shared trace) (borrow-shared stdint_directive)
-							(borrow-shared macros) (borrow-mut source) (borrow-mut implicit_trace) (borrow-mut identities)
+							(borrow-shared macros) (borrow-mut implicit_trace) (borrow-mut identities)
 							resolve_native variadic_count))))
 					(return (call certify_implicit_context (borrow-shared program) (borrow-shared options)
 						(borrow-shared serial_path) count (borrow-shared (array.range probe 0i32 next))
 						(borrow-shared names) (borrow-shared trace) (borrow-shared runtime_directive)
-						(borrow-shared macros) (borrow-mut source) (borrow-mut implicit_trace) (borrow-mut identities)
+						(borrow-shared macros) (borrow-mut implicit_trace) (borrow-mut identities)
 						resolve_native variadic_count))))
 			(return (call replay_numbered_context (borrow-shared program) (borrow-shared options)
 				(borrow-shared serial_path) count (borrow-shared probe) (borrow-shared common_probe)
-				(borrow-shared (array.range source 0i32 width)) (borrow-shared trace) (borrow-mut identities) -1i32
+				(borrow-shared source) (borrow-shared trace) (borrow-mut identities) -1i32
 				(borrow-shared (array.range native 0i32 native_width)) macro_count variadic_count))))
 )

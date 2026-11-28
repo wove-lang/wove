@@ -30,13 +30,11 @@
 		(returns ClangRun)
 		(body (return (struct.new ClangRun (error error) (status status) (length length)))))
 
-	(fn invoke_clang
-		(:doc "Forward complete frontend arguments before the required probe flags.")
-		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8))
-			(diagnostics i32) (output (mut-array u8)))
-		(returns ClangRun)
+	(fn clang_arguments
+		(:doc "Pack the same ordered frontend arguments for bounded and measured captures.")
+		(params (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8)) (traced bool))
+		(returns (optional (owned-array u8)))
 		(body
-			(let traced (i32.lt -1i32 diagnostics))
 			(let-mut flag_width (array.len flags))
 			(if
 				(:doc "Native probes send expanded dependency outputs to sinks and report includes.")
@@ -49,9 +47,11 @@
 				(:doc "Check the packed argv length before adding any component or its final terminator.")
 				(bool.or (i32.lt limit path_length)
 					(i32.lt (i32.sub limit path_length) option_length))
-				(then (return (call clang_run_at 2u32 -1i32 0i32))))
+				(then (return (optional.none (owned-array u8)))))
 			(let end (i32.add (i32.add flag_width path_length) option_length))
-			(let-mut arguments (array.alloc u8 (i32.inc end)))
+			(let allocated (array.try-alloc u8 (i32.inc end)))
+			(if (owner.is-null allocated) (then (return (move allocated))))
+			(let-mut arguments (move (optional.unwrap allocated)))
 			(let-mut options_end (call append_bytes (borrow-shared options) (borrow-mut arguments) 0i32))
 			(if
 				(:doc "Append the output restrictions after the caller's options and response-file references.")
@@ -61,6 +61,30 @@
 			(let flag_end (call append_bytes (borrow-shared flags) (borrow-mut arguments) options_end))
 			(let path_end (call append_bytes (borrow-shared path) (borrow-mut arguments) flag_end))
 			(array.store arguments path_end 0u8)
+			(return (optional.some (move arguments)))))
+
+	(fn preprocessing_arguments
+		(:doc "Request the exact replay preprocessor and include trace for an already staged source.")
+		(params (options (shared-array u8)) (path (shared-array u8)))
+		(returns (optional (owned-array u8)))
+		(body
+			(if
+				(:doc "Require an argument separator before appending the preprocessor's final flags.")
+				(bool.not (call probe_options_complete (borrow-shared options)))
+				(then (return (optional.none (owned-array u8)))))
+			(return (call clang_arguments (borrow-shared options) (borrow-shared replay_flags)
+				(borrow-shared path) (bool true)))))
+
+	(fn invoke_clang
+		(:doc "Forward complete frontend arguments before the required probe flags.")
+		(params (program (shared-array u8)) (options (shared-array u8)) (flags (shared-array u8)) (path (shared-array u8))
+			(diagnostics i32) (output (mut-array u8)))
+		(returns ClangRun)
+		(body
+			(let packed (call clang_arguments (borrow-shared options) (borrow-shared flags)
+				(borrow-shared path) (i32.lt -1i32 diagnostics)))
+			(if (owner.is-null packed) (then (return (call clang_run_at 2u32 -1i32 0i32))))
+			(let arguments (move (optional.unwrap packed)))
 			(let capture (call capture_probe_to_stderr (borrow-shared program) (borrow-shared arguments)
 				diagnostics (borrow-mut output)))
 			(return (call clang_run_at (struct.get capture error)

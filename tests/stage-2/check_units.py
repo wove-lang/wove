@@ -29,16 +29,67 @@ def stage_headers(case, root):
 
 
 # Use the same source directory and frontend options for certification and compilation.
-def certify_context(certifier, case, root, prefix, count):
+def certify_context(certifier, case, root, prefix, count, env=None):
 	compiler, *options = native_command(case, root)
 	if case.get("certify_without_clang"):
 		compiler = str(root / "absent-clang")
 	paths = set(root.rglob("*"))
 	result = subprocess.run([certifier, compiler, root / "main.c", str(count), prefix.decode(), *options],
-		capture_output=True, timeout=30)
+		capture_output=True, timeout=30, env=env)
 	assert (result.returncode, result.stdout, result.stderr) in {(0, b"", b""), (1, b"", b"")}, (case["name"], result)
 	assert set(root.rglob("*")) == paths, (case["name"], paths)
 	return result.returncode == 0
+
+
+# Measure the fixture with the real frontend and its effective preprocessing flags.
+def preprocessed_width(command, path, source, env):
+	path.write_bytes(source)
+	try:
+		result = subprocess.run([*command, path], check=True, capture_output=True, timeout=30, env=env)
+		return len(result.stdout)
+	finally:
+		path.unlink()
+
+
+# Resolve the test byte extents against each compiler's actual builtin preprocessing output.
+def check_preprocessing_extent(certifier, probe, case):
+	prefix = b"".join(f"#include {operand}\n".encode() for operand in case["includes"])
+	source = Path(case["calibration"]).read_bytes()
+	fill = case["fill"].encode()
+	serial_marker, numbered_marker = (marker.encode() for marker in case["markers"])
+	assert len(fill) == 1, case["name"]
+	with TemporaryDirectory(prefix="unit-preprocessing-", dir=Path(probe).parent) as temporary:
+		root = Path(temporary).resolve()
+		stage_headers(case, root)
+		stage = root / "main.c"
+		header = root / case["header"]
+		template = header.read_bytes()
+		assert serial_marker in template and numbered_marker in template, case["name"]
+		captures = root / "captures"
+		captures.mkdir()
+		env = {**os.environ, "TMPDIR": str(captures)}
+		flags = [*native_command(case, root), "-Wno-everything", "-E", "-P", "-dD", "--"]
+		header.write_bytes(template.replace(serial_marker, b"").replace(numbered_marker, b""))
+		minimum = preprocessed_width(flags, stage, source, env)
+		# Preserve any toolchain cache created by the first real frontend invocation.
+		initial = set(captures.iterdir())
+		# Each scenario supplies the measured serial width, numbered variation, and expected result.
+		for scenario in case["scenarios"]:
+			width = scenario["bytes"]
+			length = width - minimum
+			tail = scenario.get("numbered_tail", "").encode()
+			numbered_length = length + scenario.get("numbered_delta", 0)
+			assert length >= 0 and numbered_length >= len(tail), (case["name"], scenario)
+			header.write_bytes(template.replace(serial_marker, fill * length)
+				.replace(numbered_marker, fill * (numbered_length - len(tail)) + tail))
+			actual = preprocessed_width(flags, stage, source, env)
+			assert actual == width, (case["name"], width, actual)
+			variant = case | scenario
+			temporary_root = root / scenario.get("temporary_root", captures.name)
+			observed = certify_context(certifier, variant, root, prefix, case["count"],
+				{**env, "TMPDIR": str(temporary_root)})
+			assert observed == scenario["eligible"], (case["name"], scenario)
+		assert set(captures.iterdir()) == initial
 
 
 # Observe eligibility even for cases that will use only the serial layout.
@@ -215,6 +266,8 @@ def main():
 	probe, manifest, certifier = sys.argv[1:]
 	contents = Path(manifest).read_text(encoding="utf-8").splitlines()
 	settings = json.loads("\n".join(line for line in contents if not line.startswith("//")))
+	for case in settings.get("preprocessing_audits", []):
+		check_preprocessing_extent(certifier, probe, case)
 	# Each graph supplies its own file rows, output partition and native expectations.
 	for case in settings["cases"]:
 		check_case(certifier, probe, case)
