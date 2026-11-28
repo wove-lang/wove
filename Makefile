@@ -517,6 +517,9 @@ $(STAGE1)/%.c: $(OWNERSHIP_TESTS)/%.wove $(SEED)
 
 # The seed reports Wove imports. Keep the project C include inputs explicit.
 $(STAGE1)/bridge_types/use.c: $(OWNERSHIP_TESTS)/bridge_types/local.h
+$(STAGE1)/bridge_types/snapshot.c: $(OWNERSHIP_TESTS)/bridge_types/snapshot.h
+$(STAGE1)/bridge_types/storage.c: $(OWNERSHIP_TESTS)/bridge_types/storage.h
+$(STAGE1)/bridge_types/vectors.c: $(OWNERSHIP_TESTS)/bridge_types/vectors.h
 C_HEADER_PROJECT_HEADERS := $(addprefix $(OWNERSHIP_TESTS)/imports/c_headers/,project.h link lookup.h tree/lookup.h tree/leaf/value.h)
 $(STAGE1)/imports.c_headers.c: $(C_HEADER_PROJECT_HEADERS)
 

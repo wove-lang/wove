@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import re
 
-from bridge_types import NativeType, c_bridges, declarations, read_native_type
+from bridge_types import (
+	C_READONLY_BYTES, C_WRITABLE_BYTES, NativeType, c_bridges, declarations, native_pragmas, read_native_function, read_native_type,
+)
 from syntax import IDENTIFIER, WORD, Atom, Form, Node, SourceError, form, identifier, parse
 from target import compiler_target
 
@@ -148,6 +150,28 @@ class SharedRef:
 
 
 @dataclass(frozen=True)
+class NativeRef:
+	owner: NativeType
+	writable: bool = False
+
+
+@dataclass(frozen=True)
+class NativePointerOwner:
+	owner: NativeType
+
+
+@dataclass(frozen=True)
+class NativeStorage:
+	owner: NativeType
+
+
+@dataclass(frozen=True)
+class NativePlaceRef:
+	kind: str | NamedType | NativeStorage
+	writable: bool
+
+
+@dataclass(frozen=True)
 class BufferType:
 	access: str
 	element: str | NamedType | BufferType
@@ -164,11 +188,15 @@ class FixedArrayType:
 	count: int
 
 
-Type = str | NamedType | SharedRef | BufferType | OptionalOwner | FixedArrayType
+Type = (str | NamedType | SharedRef | NativeRef | NativePointerOwner | NativeStorage | NativePlaceRef |
+	BufferType | OptionalOwner | FixedArrayType)
 
 
 _BYTE_VIEW = BufferType(SHARED, U8)
+_MUT_BYTE_VIEW = BufferType(MUT, U8)
 _OWNED_BYTE_ROW = BufferType(OWNED, U8)
+_C_STRING_ROWS = BufferType(SHARED, _OWNED_BYTE_ROW)
+_OWNED_STRING_ROWS = BufferType(OWNED, _OWNED_BYTE_ROW)
 _HOST_ARGV = BufferType(SHARED, _BYTE_VIEW)
 
 
@@ -182,6 +210,8 @@ class Value:
 class Binding:
 	value: Value
 	writable: bool = False
+	native: bool = False
+	snapshot_vector: bool = False
 
 
 @dataclass
@@ -208,6 +238,31 @@ class Function:
 
 
 @dataclass(frozen=True)
+class NativeStringResult:
+	release: str | None = None
+	field: str | None = None
+	extent: str | None = None
+
+
+@dataclass(frozen=True)
+class NativeFunction:
+	c_name: str
+	params: tuple[tuple[str, Type], ...]
+	result: Type
+	byte_extents: tuple[tuple[int, int | None, int], ...]
+	c_strings: tuple[int, ...]
+	null_only: frozenset[int]
+	nullable: frozenset[int]
+	initializers: frozenset[int]
+	snapshot: NativeStringResult | None
+	macro: bool
+	variadic_start: int | None
+	constants: dict[int, str]
+	array_extents: tuple[tuple[int, int | str], ...]
+	vectors: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class Module:
 	filename: str
 	function_index: int
@@ -216,9 +271,9 @@ class Module:
 	uses: list[Form] = field(default_factory=list)
 	type_bindings: dict[str, NamedType] = field(default_factory=dict)
 	functions: dict[str, Function] = field(default_factory=dict)
-	bindings: dict[str, Function] = field(default_factory=dict)
+	bindings: dict[str, Function | NativeFunction] = field(default_factory=dict)
 	values: dict[str, ModuleValue] = field(default_factory=dict)
-	value_bindings: dict[str, ModuleValue] = field(default_factory=dict)
+	value_bindings: dict[str, Binding] = field(default_factory=dict)
 	syntax: Form | None = None
 
 
@@ -227,7 +282,7 @@ def owns(kind: Type) -> bool:
 	# By-value records release their owned fields recursively.
 	if isinstance(kind, Record):
 		return any(owns(field.kind) for field in kind.fields.values())
-	return isinstance(kind, OptionalOwner) or (isinstance(kind, BufferType) and kind.access == OWNED)
+	return isinstance(kind, (OptionalOwner, NativePointerOwner, NativeStorage)) or (isinstance(kind, BufferType) and kind.access == OWNED)
 
 
 # Scalars and records without owners can be read by value.
@@ -243,6 +298,20 @@ def c_type(kind: Type) -> str:
 	# A shared record reference carries the address of the original value.
 	if isinstance(kind, SharedRef):
 		return f"const {c_type(kind.record)} *"
+	# Owned and borrowed handles share the exact pointer representation from their definition.
+	if isinstance(kind, (NativePointerOwner, NativeRef)):
+		return kind.owner.c_name
+	# A C storage owner keeps the C object and its activation state together.
+	if isinstance(kind, NativeStorage):
+		return "wvrt_c_storage *"
+	# A native object loan points at the exact caller-owned type.
+	if isinstance(kind, NativePlaceRef):
+		# Qualify the whole underlying object, including when its native type is a pointer typedef.
+		if isinstance(kind.kind, NativeStorage):
+			native = kind.kind.owner.c_name
+			return f"{native} *" if kind.writable else f"const __typeof__({native}) *"
+		qualifier = "" if kind.writable else "const "
+		return f"{qualifier}{c_type(kind.kind)} *"
 	# A nullable owner uses the same pointer ABI as its payload.
 	if isinstance(kind, OptionalOwner):
 		return c_type(kind.payload)
@@ -475,6 +544,19 @@ def drop_statements(kind: Type, expression: str) -> Iterator[str]:
 		# Each member recursively drops any owned values still in its slot.
 		for member in reversed(kind.fields.values()):
 			yield from drop_statements(member.kind, f"{expression}.{member.c_name}")
+	# An absent or already moved pointer has no native destructor to call.
+	elif isinstance(kind, NativePointerOwner):
+		yield f"if ({expression} != NULL) {{"
+		yield f"    (void){kind.owner.pointer_drop}({expression});"
+		yield "}"
+	# Destroy only an initialized native object, then release its backing storage.
+	elif isinstance(kind, NativeStorage):
+		native = kind.owner.c_name
+		drop = kind.owner.storage_drop
+		yield f"if (wvrt_c_storage_active({expression})) {{"
+		yield f"    (void){drop}(({native} *)wvrt_c_storage_data({expression}));"
+		yield "}"
+		yield f"wvrt_c_storage_free({expression});"
 	# Moved or absent array owners carry a null descriptor.
 	elif owns(kind):
 		yield f"wvrt_array_drop({expression});"
@@ -682,14 +764,13 @@ class FunctionEmitter:
 			# A moved binding still shadows an outer declaration.
 			if binding is not None:
 				return binding
-		declaration = self.values.get(symbol)
-		return declaration.binding if declaration is not None else None
+		return self.values.get(symbol)
 
 	# Resolve the nearest live binding at the written operand.
-	def binding(self, node: Node) -> Binding:
+	def binding(self, node: Node, *, read: bool = False) -> Binding:
 		binding = self.find_binding(identifier(node))
-		# A move on any incoming path makes this place unavailable.
-		if binding is None or binding in self.moved:
+		# A vector snapshot is a fresh owner on each read and cannot be used as a named place.
+		if binding is None or binding in self.moved or (binding.snapshot_vector and not read):
 			raise SourceError(node.line)
 		return binding
 
@@ -879,6 +960,39 @@ class FunctionEmitter:
 		self.loans.append((binding, SHARED))
 		return self.temporary(kind, expression)
 
+	# Lend a checked non-null pointer without transferring its native destructor.
+	def borrow_native_handle(self, node: Node, kind: NativeRef) -> Value:
+		tag = "borrow-mut" if kind.writable else "borrow-shared"
+		target, = checked_form(node, tag, 1).operands
+		binding, value = self.project(target, named=True)
+		# Only an owner of this exact handle type can supply its borrowed representation.
+		if value.kind != NativePointerOwner(kind.owner) or (kind.writable and not binding.writable):
+			raise SourceError(target.line)
+		self.check_access(binding, kind.writable, target.line)
+		self.loans.append((binding, MUT if kind.writable else SHARED))
+		return self.require_native_handle(kind, value.c, target.line)
+
+	# Reject absence before passing a live handle to a C consumer.
+	def require_native_handle(self, kind: NativeRef | NativePointerOwner, value: str, line: int) -> Value:
+		return self.temporary(kind, f"({c_type(kind)})wvrt_require_borrow_at_span({value}, -1, {line}, {line})")
+
+	# Lend the original scalar or record place using the declared native pointer type.
+	def borrow_native_place(self, node: Node, kind: NativePlaceRef, *, initializing: bool = False) -> Value:
+		tag = "borrow-mut" if kind.writable else "borrow-shared"
+		target, = checked_form(node, tag, 1).operands
+		binding, value = self.project(target, named=True)
+		# Only a live place of the exact type can satisfy this pointer argument.
+		if value.kind != kind.kind or (kind.writable and not binding.writable):
+			raise SourceError(target.line)
+		self.check_access(binding, kind.writable, target.line)
+		self.loans.append((binding, MUT if kind.writable else SHARED))
+		# A storage loan keeps the owner available for its checked address and possible activation.
+		if isinstance(kind.kind, NativeStorage):
+			mode = "true" if initializing else "false"
+			self.emit_line(f"wvrt_c_storage_access({value.c}, {mode}, -1, {target.line}, {target.line});")
+			return Value(kind, value.c)
+		return self.temporary(kind, f"&({value.c})")
+
 	# Evaluate arguments left to right and end only this call's loans.
 	def call(self, node: Form) -> Value:
 		# A call needs a named callee before its arguments.
@@ -890,36 +1004,189 @@ class FunctionEmitter:
 		if self.find_binding(symbol) is not None:
 			raise SourceError(name.line)
 		callee = self.functions.get(symbol)
-		# Calls resolve only ordinary Wove bindings.
-		if callee is None or callee.is_entry:
+		# Neither an unavailable selection nor the host entry can be called.
+		if callee is None or (isinstance(callee, Function) and callee.is_entry):
 			raise SourceError(node.line)
 		parameters = tuple(kind for _, kind in callee.params)
-		return_type = callee.result
-		# Resolve the exact signature before evaluating any argument.
-		if len(args) != len(parameters):
+		native = callee if isinstance(callee, NativeFunction) else None
+		constants = native.constants if native is not None else {}
+		# Hidden header constants occupy a C formal without consuming a Wove operand.
+		if len(args) != len(parameters) - len(constants):
 			raise SourceError(node.line)
 		checkpoint = len(self.loans)
 		values = []
+		sites = []
+		arguments = iter(args)
 		# Each argument may acquire a loan that constrains later arguments.
-		for argument, kind in zip(args, parameters):
+		for index, kind in enumerate(parameters):
+			# Let Clang type-check header constants using the original declaration.
+			if index in constants:
+				value = Value(kind, constants[index])
+				self.check_native_value(value)
+				values.append(value.c)
+				sites.append(node.line)
+				continue
+			argument = next(arguments)
+			sites.append(argument.line)
+			# Literal null is admitted only where the bridge declares that representation.
+			literal_null = isinstance(argument, Atom) and not argument.quoted and argument.text == "null"
+			if native is not None and (index in native.null_only or literal_null and index in native.nullable):
+				# A null-only formal cannot borrow caller storage.
+				if not literal_null:
+					raise SourceError(argument.line)
+				values.append("NULL")
+				continue
 			# A borrow preserves the original array or record storage.
 			if isinstance(kind, BufferType):
 				value = self.borrow(argument, kind)
 			elif isinstance(kind, SharedRef):
 				value = self.borrow_record(argument, kind)
+			elif isinstance(kind, NativePlaceRef):
+				value = self.borrow_native_place(argument, kind, initializing=index in native.initializers)
+			elif isinstance(kind, NativeRef) and isinstance(argument, Form):
+				value = self.borrow_native_handle(argument, kind)
 			else:
 				value = self.typed(argument, kind)
+				# A consumed owner must be present before the native call can take responsibility for it.
+				if isinstance(kind, NativePointerOwner):
+					value = self.require_native_handle(kind, value.c, argument.line)
 			values.append(value.c)
-		expression = f"{callee.c_name}({', '.join(values)})"
-		# A void call is a statement and supplies no C value to a consumer.
-		if return_type == VOID:
-			self.emit_line(f"{expression};")
-			result = Value(VOID, "")
-		# Value-returning calls capture their result before the next operation.
+		# Apply C adaptations only after evaluating the original source arguments.
+		if native is not None:
+			result = self.native_call(native, parameters, sites, values, node.line)
 		else:
-			result = self.temporary(return_type, expression)
+			result = self.call_result(callee.result, f"{callee.c_name}({', '.join(values)})")
 		del self.loans[checkpoint:]
 		return result
+
+	# Materialize a call result before emitting its cleanup or following statement.
+	def call_result(self, kind: Type, expression: str) -> Value:
+		# A void call is a statement and supplies no C value to a consumer.
+		if kind == VOID:
+			self.emit_line(f"{expression};")
+			return Value(VOID, "")
+		return self.temporary(kind, expression)
+
+	# Check bridge extents, prepare temporary strings, invoke, and release the scratch.
+	def native_call(self, callee: NativeFunction, parameters: tuple[Type, ...], sites: list[int],
+		values: list[str], line: int) -> Value:
+		# A function-like macro consumes captured scalar arguments without a function address.
+		if callee.macro:
+			for value in values:
+				self.emit_line(f"(void)({value});")
+			return self.call_result(callee.result, f"{callee.c_name}({', '.join(values)})")
+		site = f"-1, {line}, {line}"
+		actuals = values.copy()
+		abi = [c_type(kind) for kind in parameters]
+		# Convert checked storage loans to their original C object addresses.
+		for index, kind in enumerate(parameters):
+			if isinstance(kind, NativePlaceRef) and isinstance(kind.kind, NativeStorage) and values[index] != "NULL":
+				actuals[index] = f"({abi[index]})wvrt_c_storage_data({values[index]})"
+		# Verify every byte view against its captured operands before entering C.
+		for buffer, size, count in callee.byte_extents:
+			mutable = parameters[buffer] == _MUT_BYTE_VIEW
+			view = f"wvrt_share_mut_slice({values[buffer]})" if mutable else values[buffer]
+			width = "1" if size is None else values[size]
+			self.emit_line(f"wvrt_check_c_bytes_native({view}, {width}, {values[count]}, {site});")
+			actuals[buffer] = f"{values[buffer]}.wvrt_items"
+			abi[buffer] = C_WRITABLE_BYTES if mutable else C_READONLY_BYTES
+		# A native array uses the element type declared by its checked view.
+		for buffer, count in callee.array_extents:
+			kind = parameters[buffer]
+			mutable = kind.access == MUT
+			view = f"wvrt_share_mut_slice({values[buffer]})" if mutable else values[buffer]
+			length = values[count] if isinstance(count, int) else count
+			element = c_type(kind.element)
+			self.emit_line(f"wvrt_check_c_array_native({view}, sizeof({element}), {length}, {site});")
+			actuals[buffer] = f"{values[buffer]}.wvrt_items"
+			abi[buffer] = f"{element} *" if mutable else f"const {element} *"
+		converted = []
+		# Every converted string uses a byte view and its own source location.
+		for index in callee.c_strings:
+			mutable = parameters[index] == _MUT_BYTE_VIEW
+			abi[index] = "char *" if mutable else "const char *"
+			# A null-only string formal needs no descriptor or temporary backing storage.
+			if index not in callee.null_only:
+				view = f"wvrt_share_mut_slice({values[index]})" if mutable else values[index]
+				converted.append((index, mutable, view, sites[index]))
+		# Detached row tables use the same C vector type as the original prototype.
+		for index in callee.vectors:
+			abi[index] = "char *const *"
+		# Clang checks the fixed prefix and applies its native variadic promotions to the actual tail.
+		if callee.variadic_start is not None:
+			abi[callee.variadic_start:] = ["..."]
+		formals = ", ".join(abi) or "void"
+		# Verify every newly acquired native owner against its declared C destructor.
+		if isinstance(callee.result, NativePointerOwner):
+			owner = callee.result.owner
+			self.emit_line(f"WVRT_CHECK_C_POINTER_OWNER({owner.c_name}, {owner.pointer_drop});")
+		# A single allocation keeps every checked input live until the C result is captured.
+		if converted:
+			scratch = self.value_slot(_BYTE_VIEW).c
+			descriptors = f"{scratch}_arguments"
+			self.emit_line(f"wvrt_cstr_argument {descriptors}[] = {{")
+			# The runtime checks each original view for embedded NUL before calling C.
+			for index, mutable, view, arg_line in converted:
+				self.emit_line(f"    {{{view}, true, -1, {arg_line}, {arg_line}, NULL}},")
+			self.emit_line("};")
+			self.emit_line(f"char *{scratch} = wvrt_cstr_prepare({descriptors}, {len(converted)});")
+			# Materialize the exact const or writable C argument type from the captured descriptor.
+			for position, (index, mutable, _, _) in enumerate(converted):
+				cast = "(char *)" if mutable else ""
+				actuals[index] = f"{cast}{descriptors}[{position}].wvrt_value"
+		# Each vector keeps its own detached table and terminated copies until the call completes.
+		for index in callee.vectors:
+			name = self.value_slot(_C_STRING_ROWS).c
+			arg_line = sites[index]
+			self.emit_line(f"char *const *{name} = wvrt_cstrs_prepare({values[index]}, -1, {arg_line}, {arg_line});")
+			actuals[index] = name
+		expression = f"{callee.c_name}({', '.join(actuals)})"
+		result_types = (c_type(callee.result),)
+		snapshot = callee.snapshot
+		# Snapshot return types depend on whether the header returns text or a record pointer.
+		if snapshot is not None:
+			# The C declaration owns the actual layout of the inspected record.
+			if snapshot.field is not None:
+				result_types = (f"__typeof__({expression})",)
+			else:
+				result_types = ("char *", "const char *") if snapshot.release is None else ("char *",)
+		prototypes = ", ".join(f"{kind} (*)({formals}): 1" for kind in result_types)
+		self.emit_line(f'_Static_assert(_Generic(&({callee.c_name}), {prototypes}, '
+			f'default: 0), "Wove C prototype does not match {callee.c_name}");')
+		# Snapshot before dropping scratch because borrowed results can alias an argument.
+		if snapshot is not None:
+			expression = self.native_snapshot(snapshot, expression, site)
+		result = self.call_result(callee.result, expression)
+		# Only a successful C initializer activates its native object's destructor.
+		for index in sorted(callee.initializers):
+			self.emit_line(f"wvrt_c_storage_finish_init({values[index]}, {result.c});")
+		# Copy back only supplied mutable strings, then release scratch while preserving errno.
+		if converted:
+			for position, (index, mutable, _, _) in enumerate(converted):
+				# Immutable byte views never receive scratch writes.
+				if mutable:
+					self.emit_line(f"wvrt_cstr_copy_back({values[index]}, {descriptors}[{position}].wvrt_value);")
+			self.emit_line(f"wvrt_cstr_drop({scratch});")
+		# Drop each detached vector without changing the native call's error state.
+		for index in callee.vectors:
+			self.emit_line(f"wvrt_cstrs_drop({actuals[index]});")
+		return result
+
+	# Copy native text using the runtime's checked field, borrowing, and release operations.
+	def native_snapshot(self, snapshot: NativeStringResult, expression: str, site: str) -> str:
+		# An extended record reports the live byte extent separately from the nominal array size.
+		if snapshot.extent is not None:
+			return (f"WVRT_SNAPSHOT_EXTENDED_CSTR_FIELD_AT_SPAN({expression}, "
+				f"{snapshot.field}, {snapshot.extent}, {site})")
+		# A fixed record field is checked against its original inline storage.
+		if snapshot.field is not None:
+			return f"WVRT_SNAPSHOT_CSTR_FIELD_AT_SPAN({expression}, {snapshot.field}, {site})"
+		release = snapshot.release
+		# Match the declared C release function without a cast or a hard-coded symbol.
+		if release is None:
+			return f"wvrt_snapshot_borrowed_cstr_at_span({expression}, {site})"
+		return (f"_Generic(&({release}), void (*)(void *): wvrt_snapshot_cstr_at_span, "
+			f"void (*)(char *): wvrt_snapshot_chars_at_span)({expression}, {release}, {site})")
 
 	# Keep right-hand evaluation inside its branch while checking it unconditionally.
 	def short_circuit(self, node: Form) -> Value:
@@ -1071,13 +1338,35 @@ class FunctionEmitter:
 			operand = f"({value.c} > UINT64_C({high}) ? INT64_C({high + 1}) : (int64_t){value.c})"
 		return self.temporary(kind, f"({C_TYPE[kind]})wvrt_int_convert({operand}, {low}, {high}, {site})")
 
+	# Ask Clang to check the original C object or macro's declared value type.
+	def check_native_value(self, value: Value) -> None:
+		kind = value.kind
+		# A shared native handle must use the pointer type declared by its header.
+		if isinstance(kind, NativeRef):
+			self.emit_line(f"WVRT_CHECK_C_POINTER_TYPEDEF({c_type(kind)});")
+			message = "Wove C borrowed value does not match its declared handle type"
+		else:
+			message = "Wove C value does not match its declared type"
+		self.emit_line(f'_Static_assert(_Generic(({value.c}), {c_type(kind)}: 1, default: 0), "{message}");')
+
 	# Translate one operation, preserving ownership of every array value.
 	def expression(self, node: Node) -> Value:
 		# A bare name reads a scalar or record before the enclosing operation uses it.
 		if isinstance(node, Atom) and not node.quoted and IDENTIFIER.fullmatch(node.text):
-			binding = self.binding(node)
+			binding = self.binding(node, read=True)
+			kind = binding.value.kind
+			# Snapshot the current C-owned rows without taking ownership of the original table.
+			if binding.snapshot_vector:
+				symbol = binding.value.c
+				self.emit_line(f"extern char **{symbol};")
+				return self.temporary(kind, f"wvrt_snapshot_cstrs_at_span({symbol}, -1, {node.line}, {node.line})")
+			# Capture header values before another argument or call can change their native storage.
+			if binding.native or isinstance(kind, NativeRef):
+				self.check_access(binding, False, node.line)
+				self.check_native_value(binding.value)
+				return self.temporary(kind, binding.value.c)
 			# Array and slice places need an explicit operation.
-			if not copyable(binding.value.kind):
+			if not copyable(kind):
 				raise SourceError(node.line)
 			self.check_access(binding, False, node.line)
 			# Capture the value now even if a later statement writes to its slot.
@@ -1089,6 +1378,19 @@ class FunctionEmitter:
 		# Function literals follow the same rules as module initializers.
 		if expr.tag in SCALAR_TYPES:
 			return read_scalar_literal(expr)
+
+		# Allocate inactive native storage using the provider's exact C layout.
+		if expr.tag == "native.alloc":
+			operand, = checked_form(expr, arity=1).operands
+			owner = self.records.get(identifier(operand))
+			# Only a declared storage owner can be allocated by the seed.
+			if not isinstance(owner, NativeType) or owner.storage_drop is None:
+				raise SourceError(operand.line)
+			native, drop = owner.c_name, owner.storage_drop
+			self.emit_line(f'_Static_assert(_Generic(&({drop}), __typeof__(({drop})(({native} *)0)) '
+				f'(*)({native} *): 1, default: 0), "Wove C storage destructor does not match {native}");')
+			return self.temporary(NativeStorage(owner),
+				f"wvrt_c_storage_new(sizeof({native}), _Alignof({native}), -1, {expr.line}, {expr.line})")
 
 		# Store embedded bytes in the translation unit rather than reading them at runtime.
 		if expr.tag == "embed":
@@ -1207,8 +1509,8 @@ class FunctionEmitter:
 		if expr.tag == "owner.is-null":
 			operand, = form(expr, arity=1).operands
 			binding = self.binding(operand)
-			# Ordinary owned arrays are always present.
-			if not isinstance(binding.value.kind, OptionalOwner):
+			# Optional arrays and native pointer owners can represent absence.
+			if not isinstance(binding.value.kind, (OptionalOwner, NativePointerOwner)):
 				raise SourceError(operand.line)
 			self.check_access(binding, False, node.line)
 			return self.temporary(BOOL, f"{binding.value.c} == NULL")
@@ -1590,12 +1892,15 @@ class FunctionEmitter:
 				raise SourceError(target.line)
 			kind = binding.value.kind
 			replace_owner = isinstance(kind, BufferType) and kind.access == OWNED
-			copy_value = kind in SCALAR_TYPES or isinstance(kind, Record) and copyable(kind)
+			copy_value = kind in SCALAR_TYPES or isinstance(kind, Record) and copyable(kind) or binding.native
 			# Views and other owning shapes cannot be rebound by the seed.
 			if not binding.writable or not (copy_value or replace_owner):
 				raise SourceError(node.line)
 			self.check_access(binding, True, node.line)
 			value = self.typed(operand, kind)
+			# A native lvalue must retain its exact type on writes as well as reads.
+			if binding.native:
+				self.check_native_value(binding.value)
 			# The replacement can read or move the old owner before the slot is retired.
 			if replace_owner:
 				self.emit_line(f"wvrt_array_drop({binding.value.c});")
@@ -1902,7 +2207,7 @@ def prepare_functions(module: Module, *, entry: bool) -> None:
 		for index, (name, node) in enumerate(module.function_declarations.items(), module.function_index):
 			module.functions[name] = read_function(name, node, index, module.type_bindings, entry_module=entry)
 	module.bindings.update(module.functions)
-	module.value_bindings.update(module.values)
+	module.value_bindings.update((name, declaration.binding) for name, declaration in module.values.items())
 
 
 # Decode the seed's local-file provider and its explicit selection list.
@@ -1966,12 +2271,14 @@ def read_header_include(node: Form, directory: Path) -> tuple[str, str]:
 	return f'"{key}"', f'"{spelling}"'
 
 
-# Index native type forms by the same header key used to emit the include.
-def native_type_index(modules: Iterator[tuple[str, Form]]):
+# Index supported native declarations by the same header key used to emit the include.
+def native_declaration_index(modules: Iterator[tuple[str, Form]]):
 	index = {}
-	# Sources can extend the same header while retaining the original C spelling.
+	namespaces = {"type": "type", "struct": "type", "fn": "fn",
+		"const": "value", "let": "value", "let-mut": "value"}
+	# Sources can extend the same header while retaining its original C spelling.
 	for filename, module in modules:
-		# Select only declared types and records, leaving signatures and other C pragmas opaque.
+		# Only declared bridge members can supply names to a native use.
 		for bridge in c_bridges(module):
 			# A bridge with an invalid header cannot match an active include.
 			try:
@@ -1982,53 +2289,343 @@ def native_type_index(modules: Iterator[tuple[str, Form]]):
 			# Keep selection deferred until the seed actually needs this name.
 			for declaration in declarations(bridge.node.operands[2:], scope):
 				node = declaration.node
-				# Other C bridge members cannot define a seed type.
-				if node.tag in ("type", "struct") and node.names:
-					name = node.names[0].text
-					index.setdefault((key, name), []).append((filename, declaration))
+				namespace = namespaces.get(node.tag)
+				# Other C members cannot provide seed bindings in this subset.
+				if namespace is not None and node.names:
+					identity = (key, namespace, node.names[0].text)
+					index.setdefault(identity, []).append((filename, declaration))
 	return index
 
 
-class NativeTypes:
+class NativeDeclarations:
 	# Share selected type identities across every use of the same bridge.
 	def __init__(self, index):
 		self.index = index
-		self.bound = {}
+		self.types = {}
 
-	# Lower a selected type through its C declaration and the active target cfg.
-	def resolve(self, key: str, name: str) -> NamedType | None:
-		identity = key, name
-		# A native record can refer to a type already created while resolving its fields.
-		if identity in self.bound:
-			return self.bound[identity]
+	# Resolve a selected declaration under its own active module, group, and target cfg.
+	def select(self, key: str, namespace: str, name: str) -> tuple[str, Form] | None:
 		# A project declaration encountered after supplied providers can extend the view.
-		for filename, declaration in reversed(self.index.get(identity, ())):
+		for filename, declaration in reversed(self.index.get((key, namespace, name), ())):
+			# Selection errors belong to the provider's source.
 			with source_file(filename):
 				node = declaration.node
-				# Excluded definitions contribute neither spellings nor record fields.
-				if not all(metadata_enabled(part, selectable=True) for part in (*declaration.enclosing, node)):
-					continue
-				spelling, fields = read_native_type(node)
-				# A typedef has its own identity and takes its representation from the header.
-				if fields is None:
-					kind = self.bound[identity] = NativeType(spelling)
-					return kind
-				record = self.bound[identity] = Record(spelling, {}, native=True)
-				# Only scalar or native named fields are in the seed's record subset.
-				for field, operand in fields.items():
-					# Keep other field shapes opaque until the seed needs to lower them.
-					if not isinstance(operand, Atom) or operand.quoted:
-						continue
-					field_type = operand.text
-					kind = field_type if field_type in SCALAR_TYPES else self.resolve(key, field_type)
-					# An unsupported member has no seed field access.
-					if kind is not None:
-						record.fields[field] = RecordField(kind, field)
-				return record
-		self.bound[identity] = None
+				# Excluded definitions contribute no seed binding.
+				if all(metadata_enabled(part, selectable=True) for part in (*declaration.enclosing, node)):
+					return filename, node
 		return None
 
-	# Bind only explicit type selections from an active header use.
+	# Lower a selected type through its C declaration and the active target cfg.
+	def resolve_type(self, key: str, name: str) -> NamedType | None:
+		identity = key, name
+		# A native record can refer to a type already created while resolving its fields.
+		if identity in self.types:
+			return self.types[identity]
+		selected = self.select(key, "type", name)
+		# Save misses too, since several functions can use a typedef from one header.
+		if selected is None:
+			self.types[identity] = None
+			return None
+		filename, node = selected
+		# Type and record fields are checked in the defining provider.
+		with source_file(filename):
+			spelling, fields = read_native_type(node)
+			# A typedef takes its representation and pointer-owner marker from the bridge.
+			if fields is None:
+				owner = next((pragma for pragma in native_pragmas(node) if pragma.tag == "c_owned"), None)
+				storage_drop = None
+				pointer_drop = None
+				# The simple owner forms name the native destructor, with an explicit marker for storage.
+				if owner is not None and len(owner.operands) in (1, 2):
+					release, *representation = owner.operands
+					drop = identifier(form(release, "drop", 1).operands[0])
+					# An implicit representation denotes a native pointer owner.
+					if not representation:
+						pointer_drop = drop
+					elif (isinstance(representation[0], Atom) and not representation[0].quoted
+						and representation[0].text == "storage"):
+						storage_drop = drop
+				kind = NativeType(spelling, owner is not None, storage_drop=storage_drop, pointer_drop=pointer_drop)
+				self.types[identity] = kind
+				return kind
+			record = self.types[identity] = Record(spelling, {}, native=True)
+			# Only scalar or native named fields are in the seed's record subset.
+			for field, operand in fields.items():
+				# Keep other field shapes opaque until the seed needs to lower them.
+				if not isinstance(operand, Atom) or operand.quoted:
+					continue
+				field_type = operand.text
+				kind = field_type if field_type in SCALAR_TYPES else self.resolve_type(key, field_type)
+				# An unsupported member has no seed field access.
+				if kind is not None:
+					record.fields[field] = RecordField(kind, field)
+			return record
+
+	# Distinguish direct borrowed handles from addresses of caller-owned places.
+	def reference(self, key: str, node: Form) -> NativeRef | NativePlaceRef:
+		operand, = checked_form(node, arity=1).operands
+		name = identifier(operand)
+		writable = node.tag == "mut-ref"
+		# Built-in scalar references use an ordinary typed pointer.
+		if name in SCALAR_TYPES:
+			return NativePlaceRef(name, writable)
+		kind = self.resolve_type(key, name)
+		# Caller-owned storage lends the address of its backing C object.
+		if isinstance(kind, NativeType) and kind.storage_drop is not None:
+			return NativePlaceRef(NativeStorage(kind), writable)
+		# A borrowed pointer handle already carries the pointer ABI in its declared type.
+		if isinstance(kind, NativeType) and (kind.pointer_drop is not None or kind.c_name.endswith("*")):
+			return NativeRef(kind, writable)
+		# Native layouts and integer typedefs lend the address of the actual object.
+		if isinstance(kind, (Record, NativeType)):
+			return NativePlaceRef(kind, writable)
+		raise SourceError(operand.line)
+
+	# Resolve copyable scalar operands using their exact native typedef identity.
+	def scalar(self, key: str, node: Node) -> str | NativeType:
+		name = identifier(node)
+		# Built-in scalars keep the ordinary seed representation.
+		if name in SCALAR_TYPES:
+			return name
+		kind = self.resolve_type(key, name)
+		# Owning and pointer values require a separate bridge contract.
+		if isinstance(kind, NativeType) and not kind.owned and not kind.c_name.endswith("*"):
+			return kind
+		raise SourceError(node.line)
+
+	# A bare native pointer owner is transferred into or out of a C call.
+	def call_value_type(self, key: str, node: Node) -> Type:
+		name = identifier(node)
+		# Built-in scalar operands do not resolve through the foreign provider index.
+		if name in SCALAR_TYPES:
+			return name
+		kind = self.resolve_type(key, name)
+		# Ordinary scalar forms continue through the same exact type resolver.
+		if isinstance(kind, NativeType) and kind.pointer_drop is not None:
+			return NativePointerOwner(kind)
+		return self.scalar(key, node)
+
+	# Resolve the C signature and adapt only the contracts admitted by the seed.
+	def function(self, key: str, node: Form) -> NativeFunction:
+		symbol, operands, constants, result_node = read_native_function(node)
+		parameters = {}
+		# Keep named formal order and distinguish borrowed handles from byte descriptors.
+		for name, operand in operands.items():
+			# A C handle borrow passes the native value directly.
+			if isinstance(operand, Form) and operand.tag in ("shared-ref", "mut-ref"):
+				kind = self.reference(key, operand)
+			# Byte descriptors need a checked extent or C-string adaptation.
+			elif isinstance(operand, Form) and operand.tag in (SHARED, MUT):
+				element, = checked_form(operand, operand.tag, 1).operands
+				# Only the declared detached vector shape accepts an owned byte row.
+				if operand.tag == SHARED and isinstance(element, Form):
+					if read_owned_element(element, {}) != _OWNED_BYTE_ROW:
+						raise SourceError(element.line)
+					kind = _C_STRING_ROWS
+				else:
+					element_kind = identifier(element)
+					# Native byte and descriptor views keep their original element types.
+					if element_kind not in (U8, I32):
+						raise SourceError(element.line)
+					kind = BufferType(operand.tag, element_kind)
+			else:
+				kind = self.call_value_type(key, operand)
+			parameters[name] = kind
+		positions = {name: index for index, name in enumerate(parameters)}
+		# A hidden constant carries an integer rather than a loan or aggregate.
+		if any(parameters[name] not in SCALAR_LIMITS and not isinstance(parameters[name], NativeType)
+			for name in constants):
+			raise SourceError(node.line)
+		extents = {}
+		arrays = {}
+		strings = set()
+		vectors = set()
+		null_only = set()
+		nullable = set()
+		initializers = set()
+		snapshot = None
+		macro = False
+		variadic_start = None
+		# Recover adaptation contracts using the names in the original signature.
+		for pragma in native_pragmas(node):
+			# Selection was applied before the declaration was resolved.
+			if pragma.tag == "cfg":
+				continue
+			# A macro uses its declared scalar inputs but contributes no addressable prototype.
+			if pragma.tag == "c_macro":
+				form(pragma, arity=0)
+				macro = True
+				continue
+			# A named variadic tail keeps fixed arity and names its first promoted argument.
+			if pragma.tag == "c_variadic":
+				first, = form(pragma, arity=1).operands
+				position = positions.get(identifier(first))
+				# C requires a fixed prefix, and this slice admits scalar tail operands.
+				if variadic_start is not None or not position or any(
+					kind not in SCALAR_TYPES and not isinstance(kind, NativeType)
+					for kind in tuple(parameters.values())[position:]
+				):
+					raise SourceError(pragma.line)
+				variadic_start = position
+				continue
+			# A nullable native reference accepts either its ordinary loan or literal null.
+			if pragma.tag == "c_nullable":
+				names = tuple(map(identifier, pragma.operands))
+				# Only reference formals use this nullable representation in the seed.
+				if not names or any(not isinstance(parameters.get(name), (NativeRef, NativePlaceRef)) for name in names):
+					raise SourceError(pragma.line)
+				nullable.update(names)
+				continue
+			# An initializer can borrow inactive storage and make it active on success.
+			if pragma.tag == "c_init":
+				operand, = form(pragma, arity=1).operands
+				name = identifier(operand)
+				kind = parameters.get(name)
+				# Initialization requires a writable storage loan.
+				if not isinstance(kind, NativePlaceRef) or not kind.writable or not isinstance(kind.kind, NativeStorage):
+					raise SourceError(pragma.line)
+				initializers.add(name)
+				continue
+			# Resolve string and null contracts before lowering any arguments.
+			if pragma.tag in ("c_cstr", "c_null"):
+				names = tuple(map(identifier, pragma.operands))
+				# Both contracts describe byte parameters in this subset.
+				if not names or any(parameters.get(name) not in (_BYTE_VIEW, _MUT_BYTE_VIEW) for name in names):
+					raise SourceError(pragma.line)
+				(strings if pragma.tag == "c_cstr" else null_only).update(names)
+				continue
+			# Vector operands detach call-scoped C strings from a shared row view.
+			if pragma.tag == "c_cstrs":
+				names = tuple(map(identifier, pragma.operands))
+				# The original array owns one byte buffer for each row.
+				if not names or any(parameters.get(name) != _C_STRING_ROWS for name in names):
+					raise SourceError(pragma.line)
+				vectors.update(names)
+				continue
+			# A text snapshot returns a nullable byte owner, optionally releasing the native text.
+			if pragma.tag == "c_snapshot":
+				# One C result carries one snapshot contract.
+				if snapshot is not None or not pragma.operands:
+					raise SourceError(pragma.line)
+				kind, *options = pragma.operands
+				# Other snapshot shapes have their own native result layouts.
+				if identifier(kind) != "cstr":
+					raise SourceError(pragma.line)
+				fields = {}
+				# Preserve the exact native field or release identifiers for the C checks.
+				for option in options:
+					field = form(option, arity=1)
+					# Unrecognized or repeated options have no seed representation.
+					if field.tag not in ("drop", "field", "extent") or field.tag in fields:
+						raise SourceError(field.line)
+					fields[field.tag] = identifier(field.operands[0])
+				# A record snapshot borrows its fields, and an extent must describe one of those fields.
+				if ("field" in fields and "drop" in fields) or ("extent" in fields and "field" not in fields):
+					raise SourceError(pragma.line)
+				snapshot = NativeStringResult(fields.get("drop"), fields.get("field"), fields.get("extent"))
+				continue
+			# Element extents use a captured integer or a checked literal count.
+			if pragma.tag == "c_array":
+				buffer, count = form(pragma, arity=2).operands
+				name = identifier(buffer)
+				# A typed array contract needs a unique non-vector view.
+				view = parameters.get(name)
+				if not isinstance(view, BufferType) or view == _C_STRING_ROWS or name in arrays:
+					raise SourceError(pragma.line)
+				# A small decimal literal can be emitted directly as an element count.
+				if isinstance(count, Atom) and not count.quoted and re.fullmatch(r"[0-9]{1,10}", count.text):
+					width = int(count.text)
+					if width > SCALAR_LIMITS[I32][1]:
+						raise SourceError(count.line)
+					length = str(width)
+				else:
+					count_name = identifier(count)
+					count_kind = parameters.get(count_name)
+					if count_kind not in SCALAR_LIMITS and not isinstance(count_kind, NativeType):
+						raise SourceError(count.line)
+					length = positions[count_name]
+				arrays[name] = (positions[name], length)
+				continue
+			# Byte extents use either one count or a size and count product.
+			if pragma.tag != "c_bytes" or len(pragma.operands) not in (2, 3):
+				raise SourceError(pragma.line)
+			buffer, *factors, count = map(identifier, pragma.operands)
+			# The guarded view and all factors retain their exact captured types.
+			if parameters.get(buffer) not in (_BYTE_VIEW, _MUT_BYTE_VIEW) or buffer in extents or any(
+				parameters.get(name) not in SCALAR_LIMITS and not isinstance(parameters.get(name), NativeType)
+				for name in (*factors, count)
+			):
+				raise SourceError(pragma.line)
+			size = positions[factors[0]] if factors else None
+			extents[buffer] = (positions[buffer], size, positions[count])
+		# A view has exactly one supported representation. Null-only operands still have a string ABI.
+		adapted = [*strings, *extents, *arrays, *vectors]
+		if not null_only <= strings or len(adapted) != len(set(adapted)) or any(
+			isinstance(kind, BufferType) and name not in adapted for name, kind in parameters.items()
+		):
+			raise SourceError(node.line)
+		# Hidden constants supply the fixed native call prefix, before any named variadic operand.
+		if variadic_start is not None and any(positions[name] >= variadic_start for name in constants):
+			raise SourceError(node.line)
+		# Macros in this subset operate on scalar captures without per-call adapters.
+		if macro and (snapshot or variadic_start is not None or any(isinstance(kind, (BufferType, NativeRef, NativePlaceRef, NativePointerOwner))
+			for kind in parameters.values())):
+			raise SourceError(node.line)
+		# Copy and optionally release native strings using the runtime's nullable byte owner ABI.
+		if snapshot is not None:
+			payload, = checked_form(result_node, "optional", 1).operands
+			result = read_optional_owner(payload, {})
+			# Only byte payloads can own the copied text.
+			if result.payload != _OWNED_BYTE_ROW:
+				raise SourceError(payload.line)
+		else:
+			result = VOID if identifier(result_node) == VOID else self.call_value_type(key, result_node)
+		# Macro evaluation cannot synthesize a native owner from an unchecked result.
+		if macro and isinstance(result, NativePointerOwner):
+			raise SourceError(node.line)
+		# An initializer's status is the exact i32 result used to activate storage.
+		if initializers and (result != I32 or initializers & nullable):
+			raise SourceError(node.line)
+		return NativeFunction(
+			c_name=symbol, params=tuple(parameters.items()), result=result,
+			byte_extents=tuple(extents.values()),
+			c_strings=tuple(positions[name] for name in parameters if name in strings),
+			null_only=frozenset(positions[name] for name in null_only),
+			nullable=frozenset(positions[name] for name in nullable),
+			initializers=frozenset(positions[name] for name in initializers),
+			snapshot=snapshot, macro=macro, variadic_start=variadic_start,
+			constants={positions[name]: symbol for name, symbol in constants.items()},
+			array_extents=tuple(arrays.values()),
+			vectors=tuple(positions[name] for name in parameters if name in vectors),
+		)
+
+
+	# Bind scalar C values and borrowed handles to the actual header expression.
+	def value(self, key: str, node: Form) -> Binding:
+		operand, = form(node, arity=1).operands
+		adaptations = tuple(pragma for pragma in native_pragmas(node) if pragma.tag != "cfg")
+		# Vector globals are immutable expressions that produce fresh byte-row owners.
+		if adaptations:
+			if len(adaptations) != 1 or node.tag != "let":
+				raise SourceError(node.line)
+			mode, = form(adaptations[0], "c_snapshot", 1).operands
+			element, = checked_form(operand, OWNED, 1).operands
+			# A borrowed table is not writable through its snapshot binding.
+			if identifier(mode) != "cstrs" or read_owned_element(element, {}) != _OWNED_BYTE_ROW:
+				raise SourceError(node.line)
+			return Binding(Value(_OWNED_STRING_ROWS, identifier(node.names[0])), native=True, snapshot_vector=True)
+		writable = node.tag == "let-mut"
+		# An immutable handle can be copied without taking ownership of its pointee.
+		if isinstance(operand, Form) and operand.tag == "shared-ref":
+			kind = self.reference(key, operand)
+			# Caller-owned reference globals and writable handle slots have separate contracts.
+			if node.tag != "let" or not isinstance(kind, NativeRef):
+				raise SourceError(node.line)
+		else:
+			kind = self.scalar(key, operand)
+		return Binding(Value(kind, identifier(node.names[0])), writable=writable, native=True)
+
+	# Bind explicit selections without opening declarations outside the seed's current subset.
 	def bind(self, module: Module, use: Form, key: str) -> None:
 		# Includes with absent or opaque selectors still pass through to C.
 		if len(use.operands) != 3:
@@ -2037,26 +2634,51 @@ class NativeTypes:
 		# Other selectors stay opaque until the seed lowers their corresponding features.
 		if not isinstance(only, Form) or only.tag != "only":
 			return
-		# Reuse the ordinary type selector spelling and alias.
+		# Reuse the ordinary namespace and alias spelling.
 		for item in only.operands:
-			# The C include can also supply functions, values or caller-only declarations.
-			if not isinstance(item, Form) or item.tag != "type" or len(item.operands) != 1:
-				continue
-			original = local = item.operands[0]
-			# Renames only affect the local type namespace.
-			if isinstance(original, Form) and original.tag == "as" and len(original.operands) == 2:
-				original, local = original.operands
+			namespace = "fn"
+			# Explicit type and value selectors wrap a name or rename.
+			if isinstance(item, Form) and item.tag in ("type", "value") and len(item.operands) == 1:
+				namespace = item.tag
+				item, = item.operands
+			original = local = item
+			# Renames only affect the importing module's spelling.
+			if isinstance(item, Form) and item.tag == "as" and len(item.operands) == 2:
+				original, local = item.operands
 			# Leave unsupported selectors opaque.
 			if not isinstance(original, Atom) or not isinstance(local, Atom):
 				continue
-			kind = self.resolve(key, identifier(original))
+			# Explicit type selections already participate in normal Wove signatures.
+			if namespace == "type":
+				target = self.resolve_type(key, identifier(original))
+				bindings, reserved = module.type_bindings, C_TYPE
+			else:
+				# An opaque include selector does not contribute a function or value binding.
+				if original.quoted or not IDENTIFIER.fullmatch(original.text):
+					continue
+				selected = self.select(key, namespace, original.text)
+				# Like Wove imports, a bare selector prefers a function before falling back to a value.
+				if selected is None and namespace == "fn":
+					namespace = "value"
+					selected = self.select(key, namespace, original.text)
+				# A bare selection may belong to the header's opaque declaration set.
+				if selected is None:
+					continue
+				_, node = selected
+				# Keep other C declaration forms opaque until the seed supports their ABI.
+				try:
+					target = self.function(key, node) if namespace == "fn" else self.value(key, node)
+				except SourceError:
+					continue
+				bindings, reserved = (module.bindings, module.function_declarations) if namespace == "fn" else (
+					module.value_bindings, module.values)
 			# An include's unused declarations need not be modeled by the seed.
-			if kind is not None:
+			if target is not None:
 				name = identifier(local)
-				# Preserve the ordinary local type namespace.
-				if name in C_TYPE or name in module.type_bindings:
+				# Keep the selected native and Wove names in the same local namespace.
+				if name in reserved or name in bindings:
 					raise SourceError(local.line)
-				module.type_bindings[name] = kind
+				bindings[name] = target
 
 
 # Bind provider declarations directly so aliases retain the defining identity.
@@ -2086,7 +2708,8 @@ def bind_use(only: Form, provider: Module, importer: Module) -> None:
 			reserved = importer.function_declarations
 		# Value bindings share the selected declaration's existing storage.
 		else:
-			target = provider.values.get(spelling)
+			declaration = provider.values.get(spelling)
+			target = declaration.binding if declaration is not None else None
 			bindings = importer.value_bindings
 			reserved = importer.values
 		# Only declarations defined in the provider can be selected.
@@ -2191,7 +2814,7 @@ def load_modules(
 			stack.append((target_identity, target, iter(provider.uses)))
 
 	# Supply compiler inventory declarations before project declarations.
-	def type_sources() -> Iterator[tuple[str, Form]]:
+	def declaration_sources() -> Iterator[tuple[str, Form]]:
 		# Inventory files contribute their C bridges only.
 		for filename in bridge_files:
 			with source_file(filename):
@@ -2206,7 +2829,7 @@ def load_modules(
 			if module.syntax is not None:
 				yield module.filename, module.syntax
 
-	native = NativeTypes(native_type_index(type_sources()))
+	native = NativeDeclarations(native_declaration_index(declaration_sources()))
 	# The imports of each Wove provider are ready before any importer binds it.
 	for identity in order:
 		module = modules[identity]
