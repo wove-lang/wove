@@ -209,6 +209,7 @@ Declared native symbols, public exports, runtime symbols, and the ABI entry
 | --- | --- | --- | --- | --- |
 | `f` | Function | Module fingerprint extended by the function role, name, and specialization arguments | Function name | Graph-wide. Prototypes, definitions, and references use the same resolved function row. |
 | `w` | Worker function adapter | Concrete function fingerprint extended by the adapter role | Defining function name | Within an emitted C program. Prototypes, definitions, and submissions use the same exact worker key. |
+| `c` | Native callback adapter | Concrete enclosing function fingerprint extended by the callback role and function-relative actual row | Empty | Within its emitted C unit. The definition and native call use the same checked argument. |
 | `r` | Named struct or enum | Module fingerprint extended by the layout role, spelling, and any specialization arguments | Type name | Graph-wide. The common header and every user share the resolved layout. |
 | `v` | Fixed array typedef | Interned layout row for the exact element and extent | Empty | The common header and every user share the layout table. |
 | `k` | Function-pointer typedef | Interned structural signature row | Empty | The common header and every user share the signature table. |
@@ -230,9 +231,10 @@ reuses the defining name and collision rank. The FNV-1a role step is reversible,
 so equal adapter spellings have the same collision group as their owners.
 Worker drop callbacks and ownership take, drop, slot, and occupancy helpers
 use the corresponding type name. Where the common header exposes a helper,
-its definition and uses share that owner's name. A native callback adapter
-uses a separate private prefix and the checked argument row within its
-emitted C unit.
+its definition and uses share that owner's name. Native callback adapters
+keep separate keys per actual, including repeated calls to the same target.
+Exact owners and argument rows determine the slot for a genuine C spelling
+collision.
 
 Generated names use a hierarchy of 32-bit FNV-1a states. Seed a source graph's
 path key with the canonical file path and a zero delimiter. Resume that state
