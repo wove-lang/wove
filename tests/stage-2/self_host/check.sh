@@ -7,6 +7,7 @@ set -eu
 make=$1
 work=$(mktemp -d "$2/self-host-check.XXXXXX")
 version=$(cat "$3")
+source_root=$(pwd -P)
 trap 'rm -rf -- "$work"' 0
 trap 'exit 1' HUP INT TERM
 
@@ -16,9 +17,6 @@ cp -R Makefile stage-1 stage-2 runtime tools wovec.jsonc "$project/"
 # Make reads the seed manifest while loading targets, including for an all build.
 mkdir -p "$project/tests/stage-1"
 cp tests/stage-1/cases.tsv "$project/tests/stage-1/"
-# The seed uses the existing Wove emitter entry and its C interface.
-mkdir -p "$project/tests/stage-2"
-cp tests/stage-2/source_scan.wove tests/stage-2/source_scan.probe.c "$project/tests/stage-2/"
 # Keep the native fixture entry beside the archived test inputs.
 numbered_entry=tests/stage-2/numbered_units/bridges/check.wove
 mkdir -p "$project/$(dirname "$numbered_entry")"
@@ -74,6 +72,9 @@ check_unchanged() {
 
 cd "$project"
 build all "$numbered"
+test ! -e "$output/stage-2/source_scan"
+# Supply the test-only probe for the later scanner and native fixture checks.
+cp "$source_root/tests/stage-2/source_scan.wove" "$source_root/tests/stage-2/source_scan.probe.c" tests/stage-2/
 check_snapshot
 save_products
 build all "$numbered"

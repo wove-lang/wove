@@ -412,15 +412,14 @@ originated.
 ## Bootstrap build and compiler fixtures
 
 `make` builds `build/wovec` from [the compiler root](wovec.wove). The Python
-seed emits the bootstrap entry for `build/stage-1/wovec`. That compiler
-opens the checked-in entry and follows its active imports and embeds to
-build `build/stage-2/wovec`. The second compiler runs its native `bin`
-command on the same entry to build the final compiler. Each generation
-compiles and links one C translation unit with Clang.
+seed lowers that entry and its imports directly to C for `build/stage-1/wovec`.
+That compiler runs its native `bin` command on the same entry to build
+`build/stage-2/wovec`, which repeats the process for the final compiler.
+Each generation compiles and links one C translation unit with Clang.
 
-The native generations read the same copy of the source tree and runtime
+All three generations read the same copy of the source tree and runtime
 under `BUILD_DIR/self-host-source`. Its local `build/version.txt` supplies
-the exact same bytes to both compilers, including with a custom
+the same bytes to each compiler, including with a custom
 `BUILD_DIR` or version override. `make self-host` compares their retained
 C with C re-emitted by the final compiler and builds and runs a smoke
 program using that compiler.

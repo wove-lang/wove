@@ -20,7 +20,7 @@ def bundled_provider_inputs(root):
 
 
 # Follow the repository's declared imports and embeds in first-encounter order.
-def collect_inputs(root, entries, *, embedded_providers=False, allow_missing_imports=False):
+def collect_inputs(root, entries, *, allow_missing_imports=False):
 	sources = {}
 	assets = {}
 	needs_bundle = False
@@ -78,11 +78,4 @@ def collect_inputs(root, entries, *, embedded_providers=False, allow_missing_imp
 	# Keep the designated root first in each supplied graph.
 	for entry in entries:
 		visit(entry, entry=True)
-	# The fixed compiler embeds its C providers as both bytes and declarations.
-	if embedded_providers:
-		# Ordinary embeds remain assets regardless of their filename suffix.
-		for path in tuple(assets):
-			# Only the compiler's embedded Wove modules supply declarations.
-			if Path(path).suffix == ".wove":
-				visit(path)
 	return sources, assets, needs_bundle
