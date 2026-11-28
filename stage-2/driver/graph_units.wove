@@ -4,14 +4,14 @@
 	(:doc "Stage a checked graph as a common header and ordered numbered C bodies.")
 
 	(use wove-file "../c/arguments.wove" (only is_c_storage_mode))
-	(use wove-file "./array_probes.wove" (only write_literal_array_probes))
+	(use wove-file "./prototype_probes.wove" (only checked_replay_prototype write_prototype_probes))
 	(use wove-file "./bin/staged.wove" (only numbered_probe_arguments))
 	(use wove-file "./bin/units.wove" (only staged_unit_path (value program_header)))
 	(use wove-file "./clang.wove" (only clang_program))
 	(use wove-file "../clang/native_replay.wove" (only (value lvalue_witness_prefix)
 		(value storage_type_witness_prefix) (value release_witness_prefix) (value call_witness_prefix)
 		(value fixed_call_witness_prefix) (value borrowed_cstr_witness_prefix) (value mutable_cstr_witness_prefix)
-		(value literal_array_witness_prefix) (value variadic_call_witness_prefix)))
+		(value typed_call_witness_prefix) (value variadic_call_witness_prefix)))
 	(use wove-file "./diagnostics.wove" (only report_argv (value publish_failure)))
 	(use wove-file "./macro_probes.wove" (only write_macro_probes))
 	(use wove-file "./variadic_probes.wove" (only write_variadic_probes))
@@ -31,7 +31,7 @@
 	(use wove-file "../emit/graph.wove" (only write_partitioned_graph (type GraphPlan)))
 	(use wove-file "../emit/headers.wove" (only include_capacity prepare_includes write_includes (type CInclude)))
 	(use wove-file "../emit/units.wove" (only plan_unit_assignments numbered_program_preamble
-		checked_mutable_cstr_parameter numbered_adapted_fixed_call numbered_literal_array_call
+		checked_mutable_cstr_parameter numbered_adapted_fixed_call
 		numbered_named_variadic_call numbered_storage_binding
 		(value numbered_preamble_replay) (type UnitIndex)))
 	(use wove-file "../scalar/flow.wove" (only (type ScalarStatement)))
@@ -118,7 +118,7 @@
 	(let storage_witness "typedef __typeof__((")
 	(let storage_pointer "*)0) ")
 	(let function_guard "\n#error native replay requires a direct C function\n#endif\n")
-	(struct NativeCallWitnesses (fields (width u32) (fixed bool) (variadics i32) (arrays bool)))
+	(struct NativeCallWitnesses (fields (width u32) (fixed bool) (variadics i32) (prototypes bool)))
 
 	(fn write_function_witness
 		(:doc "Observe the direct function that the generated C call will use, including its native prototype.")
@@ -144,7 +144,7 @@
 			(let-mut width offset)
 			(let-mut fixed_calls (bool false))
 			(let-mut variadic_calls 0i32)
-			(let-mut array_calls (bool false))
+			(let-mut typed_calls (bool false))
 			(for
 				(:doc "The eligibility pass has already checked the exact argument and snapshot contracts.")
 				(let index) (range 0i32 (call checked_function_count (borrow-shared functions)))
@@ -170,15 +170,16 @@
 							(set fixed_calls (bool true))
 							(continue)))
 					(if
-						(:doc "The fixed array call checks its actual signature in addition to its resolved declaration.")
-						(call numbered_literal_array_call function (borrow-shared parameters) (borrow-shared records))
+						(:doc "The exact prototype and the resolved declaration are checked independently.")
+						(call checked_replay_prototype (borrow-shared arena) (borrow-shared nodes) function
+							(borrow-shared parameters) (borrow-shared records))
 						(then
 							(let symbol (array.load nodes (struct.get function name)))
 							(set width (call write_function_witness (borrow-shared arena) symbol
-								(borrow-shared literal_array_witness_prefix) (struct.get function declaration)
+								(borrow-shared typed_call_witness_prefix) (struct.get function declaration)
 								(borrow-mut output) width writing))
 							(set fixed_calls (bool true))
-							(set array_calls (bool true))
+							(set typed_calls (bool true))
 							(continue)))
 					(let fixed (call numbered_adapted_fixed_call function (borrow-shared parameters) (borrow-shared records)))
 					(let variadic (i32.gtz (struct.get (call numbered_named_variadic_call (borrow-shared arena)
@@ -211,13 +212,13 @@
 									(array.load nodes drop) (borrow-shared release_witness_prefix)
 									declaration (borrow-mut output) width writing))))))))
 			(return (struct.new NativeCallWitnesses (width width) (fixed fixed_calls) (variadics variadic_calls)
-				(arrays array_calls)))))
+				(prototypes typed_calls)))))
 
 	(fn write_typed_call_witnesses
 		(:doc "Build the call probes that use checked C types after the implicit header.")
 		(params (arena (shared-array u8)) (nodes (shared-array SourceNode)) (functions (shared-array ScalarFunction))
 			(parameters (shared-array ScalarParameter)) (records (shared-array ScalarRecord))
-			(variadics i32) (arrays bool) (output (mut-array u8)) (writing bool)) (returns u32)
+			(variadics i32) (prototypes bool) (output (mut-array u8)) (writing bool)) (returns u32)
 		(body
 			(let-mut width (call write_macro_probes (borrow-shared arena) (borrow-shared nodes)
 				(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
@@ -232,10 +233,10 @@
 					(if (u32.lt next width) (then (return 4294967295u32)))
 					(set width next)))
 			(if
-				(:doc "Use the same complete native array prototype after the compiler's types are declared.")
-				arrays
+				(:doc "Compare complete native prototypes after the implicit compiler types are declared.")
+				prototypes
 				(then
-					(let next (call write_literal_array_probes (borrow-shared arena) (borrow-shared nodes)
+					(let next (call write_prototype_probes (borrow-shared arena) (borrow-shared nodes)
 						(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
 						(borrow-mut output) width writing))
 					(if (u32.lt next width) (then (return 4294967295u32)))
@@ -434,7 +435,7 @@
 							(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
 							(borrow-mut empty) 0u32 (bool false)))
 						(else (struct.new NativeCallWitnesses (width 0u32) (fixed (bool false)) (variadics 0i32)
-							(arrays (bool false))))))
+							(prototypes (bool false))))))
 					(let native_calls (u32.gtz (struct.get call_witnesses width)))
 					(if
 						(:doc "Measure any checked operands whose original expansions must match between units.")
@@ -478,10 +479,10 @@
 					(let-mut names (array.alloc u8 (i32.from-u32 names_width)))
 					(let-mut guards (array.alloc u8 (i32.from-u32 guard_width)))
 					(let variadic_count (struct.get call_witnesses variadics))
-					(let array_calls (struct.get call_witnesses arrays))
+					(let typed_calls (struct.get call_witnesses prototypes))
 					(let typed_width (call write_typed_call_witnesses (borrow-shared arena) (borrow-shared nodes)
 						(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
-						variadic_count array_calls (borrow-mut empty) (bool false)))
+						variadic_count typed_calls (borrow-mut empty) (bool false)))
 					(if
 						(:doc "The combined typed witness fragment must fit its measured buffer.")
 						(u32.gt typed_width 2147483647u32)
@@ -493,7 +494,7 @@
 						(then
 							(let written (call write_typed_call_witnesses (borrow-shared arena) (borrow-shared nodes)
 								(borrow-shared functions) (borrow-shared parameters) (borrow-shared records)
-								variadic_count array_calls (borrow-mut typed) (bool true)))
+								variadic_count typed_calls (borrow-mut typed) (bool true)))
 							(if (u32.not-eq written typed_width) (then (return 0i32)))))
 					(if
 						(:doc "Materialize the measured prelude without changing the emitted include prefix.")
