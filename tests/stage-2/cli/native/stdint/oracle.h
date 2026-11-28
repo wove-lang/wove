@@ -115,6 +115,34 @@ FIXTURE_LIMIT(INTMAX_MIN, intmax_t, (-9223372036854775807L - 1));
 FIXTURE_LIMIT(INTMAX_MAX, intmax_t, 9223372036854775807L);
 FIXTURE_LIMIT(UINTMAX_MAX, uintmax_t, 18446744073709551615UL);
 
+FIXTURE_LIMIT(PTRDIFF_MIN, long, (-9223372036854775807L - 1));
+FIXTURE_LIMIT(PTRDIFF_MAX, long, 9223372036854775807L);
+FIXTURE_LIMIT(SIZE_MAX, unsigned long, 18446744073709551615UL);
+FIXTURE_LIMIT(SIG_ATOMIC_MIN, int, (-2147483647 - 1));
+FIXTURE_LIMIT(SIG_ATOMIC_MAX, int, 2147483647);
+
+// The glibc arm64 wide character limits have unsigned int type.
+#if defined(__linux__) && defined(__aarch64__)
+typedef unsigned int fixture_wchar_limit_t;
+FIXTURE_LIMIT(WCHAR_MIN, fixture_wchar_limit_t, 0U);
+FIXTURE_LIMIT(WCHAR_MAX, fixture_wchar_limit_t, 4294967295U);
+#else
+typedef int fixture_wchar_limit_t;
+FIXTURE_LIMIT(WCHAR_MIN, fixture_wchar_limit_t, (-2147483647 - 1));
+FIXTURE_LIMIT(WCHAR_MAX, fixture_wchar_limit_t, 2147483647);
+#endif
+
+// The glibc wide integer limits have unsigned int type on both targets.
+#if defined(__linux__)
+typedef unsigned int fixture_wint_limit_t;
+FIXTURE_LIMIT(WINT_MIN, fixture_wint_limit_t, 0U);
+FIXTURE_LIMIT(WINT_MAX, fixture_wint_limit_t, 4294967295U);
+#else
+typedef int fixture_wint_limit_t;
+FIXTURE_LIMIT(WINT_MIN, fixture_wint_limit_t, (-2147483647 - 1));
+FIXTURE_LIMIT(WINT_MAX, fixture_wint_limit_t, 2147483647);
+#endif
+
 #undef FIXTURE_LIMIT
 #undef FIXTURE_TYPE
 
@@ -186,6 +214,23 @@ static inline bool fixture_pointer_limits(intptr_t minimum, intptr_t maximum, ui
 // Compare the maximum-width endpoints passed through the native maximum-width typedefs.
 static inline bool fixture_maximum_limits(intmax_t minimum, intmax_t maximum, uintmax_t unsigned_maximum) {
 	return minimum == INTMAX_MIN && maximum == INTMAX_MAX && unsigned_maximum == UINTMAX_MAX;
+}
+
+// Compare the endpoints received with the native long, unsigned long and int argument types.
+static inline bool fixture_traditional_limits(long pointer_minimum, long pointer_maximum,
+		unsigned long size_maximum, int signal_minimum, int signal_maximum) {
+	return pointer_minimum == PTRDIFF_MIN && pointer_maximum == PTRDIFF_MAX &&
+		size_maximum == SIZE_MAX && signal_minimum == SIG_ATOMIC_MIN && signal_maximum == SIG_ATOMIC_MAX;
+}
+
+// Compare the wide character endpoints through the target's signed or unsigned C type.
+static inline bool fixture_wchar_limits(fixture_wchar_limit_t minimum, fixture_wchar_limit_t maximum) {
+	return minimum == WCHAR_MIN && maximum == WCHAR_MAX;
+}
+
+// Compare the wide integer endpoints through the target's signed or unsigned C type.
+static inline bool fixture_wint_limits(fixture_wint_limit_t minimum, fixture_wint_limit_t maximum) {
+	return minimum == WINT_MIN && maximum == WINT_MAX;
 }
 
 #endif

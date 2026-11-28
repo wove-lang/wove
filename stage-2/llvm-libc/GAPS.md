@@ -799,12 +799,15 @@ lists the wider header surface.
 | `int_fast16_t`, `uint_fast16_t`, `int_fast32_t`, and `uint_fast32_t` | Darwin uses 16 and 32 bits and the corresponding exact-width limit types. Glibc uses native 64-bit `long` and `unsigned long` in both families. The Linux branch declares the limits with the fast typedefs and preserves the full 64-bit endpoints. |
 | `intptr_t` and `uintptr_t` | The typedefs and their three limit expressions use native `long` and `unsigned long` across the audited SDKs. The fixture checks all three 64-bit endpoints through the pointer-width types. |
 | `intmax_t` and `uintmax_t` | The matching limits also use native `long` and `unsigned long`. The bridge and fixture keep the maximum-width types distinct from the pointer-width family. |
-| Other traditional limits and C23 width macros | Audit their expression types and availability separately. |
+| `PTRDIFF_MIN`, `PTRDIFF_MAX`, `SIZE_MAX`, `SIG_ATOMIC_MIN`, and `SIG_ATOMIC_MAX` | The differences use native `long`, the size limit uses `unsigned long`, and the signal atomic limits use `int`. The C header exposes the expressions without a separate header dependency. |
+| `WCHAR_MIN` and `WCHAR_MAX` | The expressions are `unsigned int` on arm64 glibc and `int` on x86-64 glibc and both Darwin targets. The fixture checks the zero or negative minimum and the matching maximum. |
+| `WINT_MIN` and `WINT_MAX` | Both glibc targets expose `unsigned int`. Both Darwin targets expose `int`. The fixture verifies the exact native type and the full range. |
+| C23 width macros | Cover their integer values and SDK availability separately. |
 | `INTN_C`, `UINTN_C`, `INTMAX_C`, and `UINTMAX_C` | The function-like constructors need a checked operand passed as an unsuffixed C integer token to support suffix pasting. [Compiler prerequisite #718](https://github.com/wove-lang/wove/issues/718) |
 
 The installed fixture uses both the bundled and project-authored declarations.
 It passes every boundary value through a parameter of the corresponding
-native typedef. A C oracle checks the header's expression types and compares
+native type. A C oracle checks the header's expression types and compares
 the values.
 
 ## Bundled math coverage
